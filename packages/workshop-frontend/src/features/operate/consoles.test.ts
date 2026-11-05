@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { MAX_CONSOLE_WIDGETS, type BoundViewEntry, type ConsoleWidgetEntry, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
-import { consoleContentForSave } from './consoles'
+import { SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api'
+import { consoleContentForSave, consoleRefusalMessage } from './consoles'
 
 const BASE = { title: 'Operations', fullChat: 'default' as const, views: [{ id: 'v1', type: 'screen' as const, title: 'Board', screen: 's1' }] }
 const board = (n: number): HostBoardEntry => ({ kind: 'host-board', id: `hb${n}`, label: `Board ${n}`,
@@ -42,5 +43,14 @@ describe('consoleContentForSave', () => {
       .toThrow(`at most ${MAX_CONSOLE_WIDGETS} widgets, host boards and bound views`)
     expect(() => consoleContentForSave(BASE, [board(1)], [board(2)], { saved: [view(1)], edited: undefined }))
       .toThrow('board-1 is not the name of one of this console\'s host boards')
+  })
+})
+
+describe('consoleRefusalMessage', () => {
+  it("shows the kernel's own refusal for a flow or for shared configuration, otherwise the fallback", () => {
+    expect(consoleRefusalMessage(new Error('Console flow "f" names a screen no view shows.'), 'fallback'))
+      .toBe('Console flow "f" names a screen no view shows.')
+    expect(consoleRefusalMessage(new Error(SHARED_CONFIGURATION_REFUSED), 'fallback')).toBe(SHARED_CONFIGURATION_REFUSED)
+    expect(consoleRefusalMessage(new Error('internal detail'), 'fallback')).toBe('fallback')
   })
 })

@@ -51,9 +51,13 @@ const type = (input: HTMLInputElement, value: string) => act(() => {
 })
 
 describe('OperatePublishReview', () => {
-  it('returns to Build when nothing has been published, inventing nothing', () => {
+  it('names the Build control that makes the first blueprint, and returns to Build', () => {
     render({ candidate: null })
-    expect(container.textContent).toContain('No version of this workspace has been published yet')
+    expect(container.textContent).toContain('This workspace has no blueprint yet')
+    // Build has no control called Publish: the message names the one that exists.
+    expect(container.textContent).toContain('open Blueprints')
+    expect(container.textContent).toContain('choose Create blueprint')
+    expect(container.textContent).not.toContain('Publish it from Build')
     expect(button('Install version 2')).toBeUndefined()
     act(() => button('Back to Build')!.click())
     expect(handlers.onBackToBuild).toHaveBeenCalledOnce()

@@ -1,0 +1,265 @@
+// Workflow definitions (workflow-definition-store.ts) over the production overseer storage on a
+// mock: saving keeps a revision for its owner and publishes nothing, another person never sees an
+// unpublished one, a trigger pins a revision by reference and stays on it, and a firing runs and
+// records exactly that revision or is refused. The Overseer gates (build to save and pin, publish to
+// publish, both through the shared-configuration authority in a shared workspace) are covered at
+// the end through the real interface classes.
+import { describe, expect, it } from "vitest";
+import {
+  MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKSPACE_WORKFLOW_DEFINITIONS,
+} from "@gadgets/workshop-shared/workflow-definition";
+import { makeOverseerStorage } from "../src/overseer.js";
+import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
+import { openFakeOverseer } from "./fixtures.js";
+import { makeMockStorage } from "./mock-storage.js";
+
+const ADA = { type: "user" as const, id: "ada-profile", name: "Ada" };
+const BEN = { type: "user" as const, id: "ben-profile", name: "Ben" };
+const GADGET = 3;
+const OTHER_GADGET = 4;
+const commit = (n: number) => n.toString(16).padStart(40, "0");
+
+/** One workspace: its store, and the gadget heads its code is at. */
+function workspace() {
+  let durable = makeMockStorage();
+  let store = new WorkspaceWorkflowDefinitionStore(durable, makeOverseerStorage(durable));
+  let heads = new Map<number, string>([[GADGET, commit(1)], [OTHER_GADGET, commit(100)]]);
+  let headOf = (id: number) => heads.get(id);
+  return { store, heads, headOf };
+}
+
+const everyoneBuilds = () => true;
+
+describe("saving a workflow definition", () => {
+  it("keeps a revision of the gadget's current code for its owner, and publishes nothing", () => {
+    let { store, headOf } = workspace();
+    let saved = store.save(ADA, { title: " Intake ", gadgetId: GADGET }, headOf);
+    expect(saved).toMatchObject({
+      title: "Intake", owner: ADA, published: null,
+      revisions: [{ revision: 1, source: { kind: "gadget", gadgetId: GADGET, commitId: commit(1) } }],
+    });
+    expect(store.list(ADA.id).map(d => d.id)).toEqual([saved.id]);
+  });
+
+  it("is visible only to its owner until published, and then only at the published revision", () => {
+    let { store, heads, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    expect(store.list(BEN.id)).toEqual([]);
+    expect(store.get(BEN.id, saved.id)).toBeNull();
+    expect(() => store.deliveries(BEN.id, saved.id)).toThrow("Workflow definition not found.");
+
+    store.publish(ADA, saved.id, 1);
+    heads.set(GADGET, commit(2));
+    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
+    expect(store.get(ADA.id, saved.id)?.revisions.map(r => r.revision)).toEqual([1, 2]);
+    // Ben sees the published revision only, never Ada's newer draft.
+    expect(store.get(BEN.id, saved.id)?.revisions.map(r => r.revision)).toEqual([1]);
+  });
+
+  it("adds a revision only when the code changed; saving again with the same commit renames", () => {
+    let { store, heads, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    let renamed = store.save(ADA, { id: saved.id, title: "Intake v1", gadgetId: GADGET }, headOf);
+    expect(renamed.revisions).toHaveLength(1);
+    expect(renamed.title).toBe("Intake v1");
+    heads.set(GADGET, commit(2));
+    expect(store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf).revisions)
+      .toHaveLength(2);
+  });
+
+  it("refuses another person's definition at save and publish as if it didn't exist", () => {
+    let { store, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    expect(() => store.save(BEN, { id: saved.id, title: "Mine now", gadgetId: GADGET }, headOf))
+      .toThrow("Workflow definition not found.");
+    expect(() => store.publish(BEN, saved.id, 1)).toThrow("Workflow definition not found.");
+    store.publish(ADA, saved.id, 1);
+    // Published doesn't make it Ben's to change.
+    expect(() => store.publish(BEN, saved.id, 1)).toThrow("Workflow definition not found.");
+    expect(store.get(ADA.id, saved.id)?.title).toBe("Intake");
+  });
+
+  it("doesn't exist in another workspace", () => {
+    let a = workspace();
+    let b = workspace();
+    let saved = a.store.save(ADA, { title: "Intake", gadgetId: GADGET }, a.headOf);
+    a.store.publish(ADA, saved.id, 1);
+    expect(b.store.get(ADA.id, saved.id)).toBeNull();
+    expect(() => b.store.publish(ADA, saved.id, 1)).toThrow("Workflow definition not found.");
+  });
+
+  it("refuses a gadget with no committed code, a bad title, and past the limits", () => {
+    let { store, heads, headOf } = workspace();
+    expect(() => store.save(ADA, { title: "Pending", gadgetId: 99 }, headOf)).toThrow("committed code");
+    expect(() => store.save(ADA, { title: " ", gadgetId: GADGET }, headOf)).toThrow(TypeError);
+    for (let i = 0; i < MAX_WORKSPACE_WORKFLOW_DEFINITIONS; i++) {
+      store.save(ADA, { title: `Definition ${i}`, gadgetId: GADGET }, headOf);
+    }
+    expect(() => store.save(BEN, { title: "One more", gadgetId: GADGET }, headOf))
+      .toThrow("Workspace workflow definition limit reached.");
+
+    let fresh = workspace();
+    let saved = fresh.store.save(ADA, { title: "Busy", gadgetId: GADGET }, fresh.headOf);
+    for (let n = 2; n <= MAX_WORKFLOW_DEFINITION_REVISIONS; n++) {
+      fresh.heads.set(GADGET, commit(n));
+      fresh.store.save(ADA, { id: saved.id, title: "Busy", gadgetId: GADGET }, fresh.headOf);
+    }
+    fresh.heads.set(GADGET, commit(999));
+    expect(() => fresh.store.save(ADA, { id: saved.id, title: "Busy", gadgetId: GADGET }, fresh.headOf))
+      .toThrow("revision limit");
+    void heads;
+  });
+});
+
+describe("triggers and runs", () => {
+  it("lets two triggers reference one definition revision, storing a reference, not a copy", () => {
+    let { store, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    store.pinTrigger(ADA.id, 12, GADGET, { definitionId: saved.id, revision: 1 });
+    expect(store.pinOf(11)).toEqual({ definitionId: saved.id, revision: 1 });
+    expect(store.pinOf(12)).toEqual({ definitionId: saved.id, revision: 1 });
+    expect(store.list(ADA.id)).toHaveLength(1);
+  });
+
+  it("records the revision and commit each firing ran", () => {
+    let { store, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    store.pinTrigger(ADA.id, 12, GADGET, { definitionId: saved.id, revision: 1 });
+    expect(store.fire(11, GADGET, headOf, everyoneBuilds))
+      .toMatchObject({ hookId: 11, definitionId: saved.id, revision: 1, commitId: commit(1) });
+    store.fire(12, GADGET, headOf, everyoneBuilds);
+    expect(store.deliveries(ADA.id, saved.id).map(d => [d.hookId, d.revision])).toEqual([[11, 1], [12, 1]]);
+  });
+
+  it("stays on its pinned revision when the definition is republished; moving it is explicit", () => {
+    let { store, heads, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(BEN.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    heads.set(GADGET, commit(2));
+    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
+    store.publish(ADA, saved.id, 2);
+    expect(store.pinOf(11)).toEqual({ definitionId: saved.id, revision: 1 });
+    // The code is now revision 2's, so revision 1 refuses to fire rather than run other code.
+    expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("changed since revision 1");
+    store.pinTrigger(BEN.id, 11, GADGET, { definitionId: saved.id, revision: 2 });
+    expect(store.fire(11, GADGET, headOf, everyoneBuilds)).toMatchObject({ revision: 2, commitId: commit(2) });
+  });
+
+  it("refuses a firing whose gadget's code is no longer the pinned revision's", () => {
+    let { store, heads, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    heads.set(GADGET, commit(7));
+    expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("Save it, then move the trigger.");
+    expect(store.deliveries(ADA.id, saved.id)).toEqual([]);
+  });
+
+  it("refuses an unpublished pin once its owner can't build, and keeps a published one running", () => {
+    let { store, headOf } = workspace();
+    let draft = store.save(ADA, { title: "Draft", gadgetId: GADGET }, headOf);
+    let live = store.save(ADA, { title: "Live", gadgetId: GADGET }, headOf);
+    store.publish(ADA, live.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: draft.id, revision: 1 });
+    store.pinTrigger(ADA.id, 12, GADGET, { definitionId: live.id, revision: 1 });
+    let adaGone = (profileId: string) => profileId !== ADA.id;
+    expect(() => store.fire(11, GADGET, headOf, adaGone)).toThrow("owner can no longer build here");
+    expect(store.fire(12, GADGET, headOf, adaGone)).toMatchObject({ definitionId: live.id });
+  });
+
+  it("refuses to pin another person's unpublished revision, or one for another gadget", () => {
+    let { store, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    expect(() => store.pinTrigger(BEN.id, 11, GADGET, { definitionId: saved.id, revision: 1 }))
+      .toThrow("Workflow definition not found.");
+    expect(() => store.pinTrigger(ADA.id, 11, OTHER_GADGET, { definitionId: saved.id, revision: 1 }))
+      .toThrow("another gadget");
+    expect(() => store.pinTrigger(ADA.id, 11, null, { definitionId: saved.id, revision: 1 }))
+      .toThrow("another gadget");
+    expect(() => store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 9 }))
+      .toThrow("Workflow definition not found.");
+    expect(store.pinOf(11)).toBeNull();
+  });
+
+  it("leaves an unpinned trigger as it was, and clears a pin with null", () => {
+    let { store, headOf } = workspace();
+    expect(store.fire(11, GADGET, headOf, everyoneBuilds)).toBeNull();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    store.pinTrigger(ADA.id, 11, GADGET, null);
+    expect(store.fire(11, GADGET, headOf, everyoneBuilds)).toBeNull();
+  });
+});
+
+describe("through the Overseer", () => {
+  const REFUSED = "You don't have permission to share or publish configuration other people use.";
+  const GATED = { SHARED_CONFIGURATION_GATEKEEPER: "inferops" };
+
+  async function session(opts: { role: "build" | "use"; answers?: { build: boolean; publish: boolean };
+                                 shared?: boolean }) {
+    let durable = makeMockStorage();
+    let storage = makeOverseerStorage(durable);
+    let store = new WorkspaceWorkflowDefinitionStore(durable, storage);
+    let opened = false;
+    let overseer = await openFakeOverseer({}, {
+      role: opts.role,
+      impl: {
+        env: opts.answers ? GATED : {},
+        isSharedConfiguration: async () => opts.shared ?? true,
+        workflowDefinitionStore: () => store,
+        getGadgetHead: (id: number) => (id === GADGET ? commit(1) : undefined),
+        defaultGadgetId: GADGET,
+        storage: Object.assign(storage, {
+          containsRestrictedData: { get: () => false },
+          title: { get: () => "Test Workspace" },
+          operateSession: { get: () => false },
+          boundHooks: { get: (id: number) => (id === 11 ? { id: 11, gadgetId: GADGET } : undefined) },
+        }),
+        users: {
+          idFromString: (id: string) => id,
+          get: () => ({
+            whoami: async () => ADA,
+            recordSharedGadgetOpen: async () => {},
+            holdsSharedConfiguration: async (action: "build" | "publish") =>
+              !opened && action === "build" ? true : (opts.answers?.[action] ?? true),
+          }),
+        },
+      },
+    });
+    opened = true;
+    return { overseer, store };
+  }
+
+  it("saves and publishes as two acts for someone the deployment lets build and publish", async () => {
+    let { overseer } = await session({ role: "build", answers: { build: true, publish: true } });
+    let saved = await overseer.saveWorkflowDefinition({ title: "Intake", gadgetId: GADGET });
+    expect(saved.published).toBeNull();
+    expect((await overseer.publishWorkflowDefinition(saved.id, 1)).published?.revision).toBe(1);
+  });
+
+  it("refuses saving, pinning and publishing in a shared workspace without the authority", async () => {
+    let builder = await session({ role: "build", answers: { build: true, publish: false } });
+    let saved = await builder.overseer.saveWorkflowDefinition({ title: "Intake", gadgetId: GADGET });
+    await expect(builder.overseer.publishWorkflowDefinition(saved.id, 1)).rejects.toThrow(REFUSED);
+    let demoted = await session({ role: "build", answers: { build: false, publish: false } });
+    await expect(demoted.overseer.saveWorkflowDefinition({ title: "Intake", gadgetId: GADGET }))
+      .rejects.toThrow(REFUSED);
+    await expect(demoted.overseer.pinTriggerDefinition(11, null)).rejects.toThrow(REFUSED);
+  });
+
+  it("gives a use session published definitions only, and nothing to change", async () => {
+    let { overseer, store } = await session({ role: "use" });
+    let headOf = (id: number) => (id === GADGET ? commit(1) : undefined);
+    let draft = store.save(BEN, { title: "Draft", gadgetId: GADGET }, headOf);
+    let live = store.save(BEN, { title: "Live", gadgetId: GADGET }, headOf);
+    store.publish(BEN, live.id, 1);
+    expect((await overseer.listWorkflowDefinitions()).map(d => d.id)).toEqual([live.id]);
+    void draft;
+    await expect(overseer.saveWorkflowDefinition({ title: "Mine", gadgetId: GADGET })).rejects.toThrow();
+    await expect(overseer.exportWorkspaceRecords()).rejects.toThrow();
+    await expect(overseer.publishWorkflowDefinition(live.id, 1)).rejects.toThrow();
+    await expect(overseer.pinTriggerDefinition(11, null)).rejects.toThrow();
+  });
+});

@@ -2,7 +2,8 @@ import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 
 /**
  * Form state of the project-board picker. The URL it builds is
- * `inferops://<tenant>.<workspace>/project/board/<projectKey>`.
+ * `inferops://<tenant>.<workspace>/project/board/<projectKey>`. The account picker uses `tenant`
+ * only, for `inferops://<tenant>/account`.
  */
 export type InferOpsProjectConfiguratorValues = {
   /** The tenant (organization) slug: the URL's first label. Labels the address; authorizes nothing. */

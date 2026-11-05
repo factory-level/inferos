@@ -3,7 +3,7 @@ import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import { useActionEntries } from '../../useActions'
 import { BoardMetrics, type BoardMetricsSnapshot } from './boardMetrics'
-import { BoardData, LOADING_BOARD, boardRequestKey, type BoardRequest, type BoardState, type ProposalResult } from './boardData'
+import { BoardData, LOADING_BOARD, boardRequestKey, type ActivityResult, type BoardRequest, type BoardState, type ProposalResult } from './boardData'
 import type { IssueChanges, NewIssue, Revision } from '@inferos/gatekeeper-inferops/src/types'
 
 // One adapter per scope, the Overseer stub being the user's capability on the workspace. A new
@@ -92,6 +92,8 @@ export const useBoardData = (overseer: RpcStub<Overseer>, request: BoardRequest,
   move: (issueId: string, toStateId: string, expectedRevision: Revision) => Promise<ProposalResult>
   create: (issue: NewIssue) => Promise<ProposalResult>
   update: (issueId: string, changes: IssueChanges, expectedRevision: Revision) => Promise<ProposalResult>
+  /** One issue's activity, read with the person's own access; nothing is proposed. */
+  activity: (issueId: string) => Promise<ActivityResult>
 } => {
   const key = boardRequestKey(request)
   // Held for the component's life as well as per subscription, so a request change does not
@@ -116,5 +118,6 @@ export const useBoardData = (overseer: RpcStub<Overseer>, request: BoardRequest,
     move: (issueId, toStateId, expectedRevision) => data()?.move(request, issueId, toStateId, expectedRevision) ?? Promise.resolve(NOT_LOADED),
     create: issue => data()?.create(request, issue) ?? Promise.resolve(NOT_LOADED),
     update: (issueId, changes, expectedRevision) => data()?.update(request, issueId, changes, expectedRevision) ?? Promise.resolve(NOT_LOADED),
+    activity: issueId => data()?.activity(request, issueId) ?? Promise.resolve(NOT_LOADED),
   }
 }

@@ -196,6 +196,14 @@ export type FakePerson = {
   canDelegate: boolean;
   /** The person's InferMind knowledge permission: `write` (the default), `read` or `none`. */
   knowledge: "write" | "read" | "none";
+  /** The workspaces in which the person holds `configuration:publish` (an Admin's grant); none by default. */
+  publishesConfiguration: Set<WorkspaceSlug>;
+};
+
+/** One widget definition InferOps holds (`widget.publish`), keyed by workspace, Blueprint id and version. */
+export type FakeWidgetDefinition = {
+  workspace: WorkspaceSlug; sourceId: string; sourceVersion: number; title: string; purpose: string;
+  visibility: string; publishedBy: string;
 };
 
 /** One Wiki section write InferOps committed. */
@@ -263,6 +271,10 @@ export class InferOpsFake {
   readonly logouts: string[] = [];
   /** Every Wiki section write committed, in order. */
   readonly sectionWrites: FakeSectionWrite[] = [];
+  /** The widget definitions InferOps holds, by `<workspace>/<sourceId>/<sourceVersion>`. */
+  readonly widgetDefinitions = new Map<string, FakeWidgetDefinition>();
+  /** Answer the next N widget index writes with a 503, before changing anything. */
+  failNextWidgetWrites = 0;
 
   /** Answer the next N InferOps API calls with a 503, before doing anything. */
   failNextRequests = 0;
@@ -333,7 +345,7 @@ export class InferOpsFake {
     if (this.#people.has(label)) throw new Error(`Person ${label} already exists`);
     const person: FakePerson = {
       userId: `user-${label}`, email: `${label}@acme.test`, workspaces: new Set(workspaces),
-      canDelegate: false, knowledge: "write",
+      canDelegate: false, knowledge: "write", publishesConfiguration: new Set(),
     };
     this.#people.set(label, person);
     return person;
@@ -342,6 +354,11 @@ export class InferOpsFake {
   /** Give the person InferOps' `issue:delegate`, so they may dispatch and cancel runs. */
   grantDelegate(person: FakePerson): void {
     person.canDelegate = true;
+  }
+
+  /** Give the person InferOps' `configuration:publish` in `workspace`, as an Admin grant would. */
+  grantPublishConfiguration(person: FakePerson, workspace: WorkspaceSlug): void {
+    person.publishesConfiguration.add(workspace);
   }
 
   /** Set the person's InferMind knowledge permission. */
@@ -639,6 +656,15 @@ export class InferOpsFake {
     if (!slug || !person.workspaces.has(slug)) {
       return failure(403, "FORBIDDEN", "not a member of this workspace");
     }
+    if (url.pathname === "/auth/permissions" && method === "GET") {
+      // `auth.permissions` in the X-Workspace-Id workspace: only the shared configuration permissions
+      // are modelled, both held by an Admin's grant (`grantPublishConfiguration`).
+      const asked = (url.searchParams.get("permissions") ?? "").split(",").filter(Boolean);
+      return json({ decisions: asked.map(permission => ({ permission,
+        allowed: (permission === "configuration:publish" || permission === "configuration:build") &&
+          person.publishesConfiguration.has(slug) })) });
+    }
+    if (url.pathname.startsWith("/knowledge/widget-definitions")) return this.#widgetIndex(url, method, request, record, slug, person);
     if (url.pathname.startsWith("/knowledge/")) return this.#knowledge(url, method, request, record, slug, person);
     if (url.pathname === "/object/types" && method === "GET") {
       return json({ types: Object.values(TABLES).filter(t => t.workspace === slug).map(tableType) });
@@ -867,6 +893,41 @@ export class InferOpsFake {
       return table ? json({ widget, type: tableType(table), record: tableRecord(table) }) : notFound;
     }
     return notFound;
+  }
+
+  /**
+   * `widget.publish` (PUT) and `widget.withdraw` (DELETE) in workspace `slug`, under the person's
+   * own `configuration:publish` there, in any product's workspace, as InferOps binds them (FAC-11).
+   */
+  async #widgetIndex(url: URL, method: string, request: Request, record: FakeRequest,
+                     slug: WorkspaceSlug, person: FakePerson): Promise<Response> {
+    if (!person.publishesConfiguration.has(slug)) {
+      return failure(403, "FORBIDDEN", "Missing permission: configuration:publish");
+    }
+    if (this.failNextWidgetWrites > 0) {
+      this.failNextWidgetWrites--;
+      return failure(503, "UNAVAILABLE", "upstream down");
+    }
+    if (method === "PUT" && url.pathname === "/knowledge/widget-definitions") {
+      const body = await request.json() as Record<string, unknown>;
+      const { source, sourceId, sourceVersion, title, purpose, visibility } = body;
+      if (source !== "inferos.blueprint" || typeof sourceId !== "string" || typeof sourceVersion !== "number" ||
+          typeof title !== "string" || typeof purpose !== "string" || (visibility !== "company" && visibility !== "workspace")) {
+        return failure(400, "VALIDATION", "Invalid widget definition");
+      }
+      const definition: FakeWidgetDefinition = {
+        workspace: slug, sourceId, sourceVersion, title, purpose, visibility, publishedBy: record.person!,
+      };
+      this.widgetDefinitions.set(`${slug}/${sourceId}/${sourceVersion}`, definition);
+      return json({ id: randomUUID(), source, sourceId, sourceVersion, digest: null, title, purpose, visibility,
+        publishedAt: "2026-11-04T00:00:00.000Z" });
+    }
+    const withdraw = /^\/knowledge\/widget-definitions\/([^/]+)\/(\d+)$/.exec(url.pathname);
+    if (method === "DELETE" && withdraw) {
+      const key = `${slug}/${decodeURIComponent(withdraw[1]!)}/${withdraw[2]}`;
+      return json({ withdrawn: this.widgetDefinitions.delete(key) });
+    }
+    return failure(404, "NOT_FOUND", "no route");
   }
 
   /** InferOps' knowledge routes, for one request already authorized into workspace `slug`. */

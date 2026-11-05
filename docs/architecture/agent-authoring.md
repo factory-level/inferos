@@ -5,14 +5,18 @@ covers:
   - packages/workshop-shared/src/api.ts
   - packages/workshop-shared/src/agent-artifact.ts
   - packages/workshop-backend/src/agent-spawner-binding.d.ts
+  - packages/workshop-backend/src/overseer.ts
   - packages/workshop-backend/src/blueprint-archive.ts
   - packages/workshop-backend/src/artifact-store.ts
   - packages/workshop-backend/src/artifact-publisher.ts
   - packages/workshop-backend/src/artifact-publisher-binding.d.ts
   - packages/gatekeeper-scheduler
+  - packages/workshop-frontend/src/gatekeeper-modal/AgentSettingsModal.tsx
   - packages/gatekeeper-context/src/agent-skill.ts
+  - packages/bundled-blueprints/src/authoring-compiler.ts
+  - packages/bundled-blueprints/__tests__/authoring-compiler.test.ts
   - docs/blueprints.md
-updated: 2026-11-02
+updated: 2026-11-05
 ---
 
 # Reusable native agent authoring
@@ -34,7 +38,21 @@ Current state after the revision-storage slice of [#16](https://github.com/facto
 | `packages/workshop-backend/src/blueprint-archive.ts` | `.gadget` archive format v1 encode and decode. |
 | `packages/gatekeeper-scheduler` | Persistent workspace callbacks. |
 | `packages/gatekeeper-context/src/agent-skill.ts` | Context Library skills advertised to agents. |
+| `packages/bundled-blueprints/src/authoring-compiler.ts` | Node-only compiler for future authored React/Refine widgets; deterministic artifacts and build-time input refusals. |
 | `docs/blueprints.md` | Portable code and binding requirements. |
+
+### Authored widget compiler (FAC-8, slice 1b)
+
+`compileAuthoredWidget()` accepts an in-memory TSX/CSS file map and bundles it with a server-owned
+React/Refine dependency set. It rejects external CSS references, unsupported source and import
+forms, and forces Refine telemetry off in the emitted artifact. Source checks for browser and
+network globals provide author feedback only; they are not a security boundary. The focused
+real-browser proof in `packages/workshop-frontend/src/GadgetUI.request-probes.test.ts` covers
+specific outbound request APIs from the production frame; it does not establish a general egress
+guarantee. Compilation caps source size, file size and file count, and stops an esbuild build after 10 seconds. The build-input hash includes the
+full transitive package/snapshot closure for the pinned dependencies in `pnpm-lock.yaml`, including
+peer-specific snapshots. The compile core remains runner-agnostic; it does not add an editor-time
+runner or runtime egress boundary.
 
 ### Native operations available today
 
@@ -75,6 +93,35 @@ Read-only reference: `/libs/backend/registry` and `apps/cli/src/user.ts` in fact
 
 InferOS already provides native Gadgets, Blueprint import/export, bindings and callable agents. `spawnCallable` persists an enqueue, and completion uses callbacks rather than synchronous task completion. Scheduler callbacks are persistent but not exactly-once. Blueprint export does not contain live SQLite state, history or credentials. Blueprint code versions are retained in R2 under `<blueprintId>/<version>`, so earlier versions stay readable. `.gadget` v1 is a 24-byte prefix (magic, format version `1`, metadata length, content length), then JSON `BlueprintMetadata`, then the content bytes. It carries no digest, and the reader refuses any other format version.
 
+### Agent spawner scope
+
+`Overseer.bindWorkpiece()` validates an agent spawner's complete nested `config.env` against the gadget and its currently visible bindings. `Overseer.openGatekeeperSession()` returns a caller-bound spawner session; every `spawn()` and `spawnCallable()` rechecks the current bindings. Spawner sessions require a gadget caller or a spawned agent with recorded gadget lineage; direct user and ordinary chat sessions have no such scope and are refused. Spawned chats retain the originating gadget ID. Before each gadget or gatekeeper call, their frozen seed bindings are intersected with that gadget's live bindings, so unbinding or rebinding a resource revokes an existing child's access. Recursive spawner envs use the same scope check. Legacy spawned chats have no recorded parent gadget ID, so they fail closed at their next gadget or gatekeeper call and must be re-spawned to restore access. `packages/workshop-backend/__tests__/git-binding.test.ts` covers bind-time refusal, legacy callers, missing scope, nested spawners, and revocation after unbind/rebind.
+
+### Configured agents (FAC-90)
+
+An agent spawner is the workspace's configured agent. Its `AgentSpawnerConfig` is stored in the Overseer's `gatekeepers` collection as the record's `creationSpec`, and it is read back with `GatekeeperClient.getCreationSpec()`. A workspace can hold many.
+
+- **What it records:** a name, a model (from the creator's account, or none), optional `instructions` (at most 8,000 characters, the deployment-instructions limit), and `env`, the bindings its agents can reach.
+- **Behaviour and capability are separate operations, both needing `build`** (FAC-44's `requireSharedConfiguration`, as creating one does):
+  - `Overseer.updateAgentSpawner(id, expected, behaviour)` changes the name, model or instructions. It refuses an `env` key, or any other key, so an edit can't carry a capability change.
+  - `Overseer.setAgentSpawnerEnv(id, expected, env)` is the only way to change `env`, validated as at creation.
+- **Only the creator** may change the model, the instructions or `env`: spawned agents run on the creator's account, act with the creator's authority, and reach their bindings with it, and the instructions decide what that authority is used for. Another `build` holder may change only the name, and the creator stays the same. `Overseer.getAgentSpawner(id)` returns the configuration and whether the caller created it. Who last changed an agent isn't recorded yet.
+- **No self-spawning:** `setAgentSpawnerEnv` refuses an `env` that names the agent itself, or another agent whose `env` reaches it through further agents. Before `env` became editable it was fixed at creation, when the agent's own id didn't exist and every agent it named was older, so stored configurations hold no such cycle and no spawn-depth cap is added. A gadget an agent can reach may still bind agents of its own: that is the gadget's code choosing to spawn, as before.
+- **Create** refuses any key that isn't an `AgentSpawnerConfig` field, and a blank name.
+- **Stale edits:** both take the configuration the editor read (`expected`) and refuse if it has changed since. The change is applied to the configuration read at the write, after any await.
+- **How a change takes effect:** the spawner's stub is rebuilt from the new configuration, keeping its creator, as the storage migration rebuilds it, and the running facet restarts onto it.
+  - New spawns get the change. Agents already spawned keep the configuration they started with.
+  - A widened `env` restarts the "use" sessions it reaches through a binding gadget, as binding does. Whether `env` stays within each calling gadget's bindings is still checked on every call (above).
+- **In the prompt:** a spawned agent's instructions are added to its system prompt as configured behaviour that grants nothing (`formatAgentInstructions`), with any `</agent_instructions>` in the text escaped so it can't end the frame early. The bindings listed after them are all it can reach.
+- **In the UI:** a gadget's Connections tab shows an "Agent settings" button on each permanent binding to an agent. It finds them by asking each vendorless binding for its creation spec.
+  - `AgentSettingsModal` reopens the saved configuration through `getAgentSpawner`. Name, model and instructions save together through `updateAgentSpawner`, and only the fields that changed are sent.
+  - Capabilities sit in their own section with their own save (`setAgentSpawnerEnv`). It is offered the gadget and its bindings, never the agent itself or an agent that reaches it (`agentsReaching`).
+  - Someone who didn't create the agent sees its model, instructions and capabilities read-only, with the reason, and can change only its name.
+  - "Start from another agent" copies another of the gadget's agents' selection into the rows (`rowsFromOtherAgent`) for review. It saves nothing by itself. Named, shared capability bundles are not built.
+  - Server refusals, such as a stale edit or a creator-only change, are shown in the server's words.
+  - Creating an agent (`GatekeeperModal`) also takes instructions.
+- **Tests:** `packages/workshop-backend/__tests__/agent-spawner-config.test.ts` covers reopening, behaviour edits leaving `env` alone, a refused capability change inside an edit, creator-only capability, model and instruction changes, refused self-reference and cycles, stale edits, bounds, and the call-time scope check after an `env` change. `packages/workshop-frontend/src/gatekeeper-modal/AgentSettingsModal.test.tsx` covers the modal.
+
 ### Artifact revisions
 
 - A draft is a permanent gadget's committed code. `#artifactDraft` in the Overseer reads the gadget's head commit (`assertPublishableCommit`, the Blueprint check), its files (`GitStore.readCommitFiles`) and its binding metadata (`collectBindingMetadata`, the Blueprint path), and `WorkspaceArtifactStore.draft()` builds the `ArtifactManifest`. Each file is hashed as the UTF-8 bytes of its committed text, the only form gadget files take. Binding requirements keep only `type`, `gatekeeperName` and `typeUrlPattern`. Pins must arrive sorted and unique; any other order throws rather than being sorted.
@@ -101,7 +148,7 @@ Model and gatekeeper bindings are installed in the destination workspace. Schedu
 
 Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/architecture/agent-operations.md`](https://github.com/factory-level/inferops/tree/develop/docs/human/architecture/agent-operations.md).
 
-- Agents are created from a Gadget, a model and resource bindings in the spawner form, not configured by a Company Admin from gatekeeper capability bundles with assigned authority (I08).
+- Agents are created from a Gadget, a model and resource bindings in the spawner form. Since FAC-90 they also carry instructions and can be reopened and edited, with capability changes kept to their own step (above). There are still no named, reusable capability bundles, and no assigned authority for system workflows (I08): an agent's authority is its creator's.
 - No personal Dot: the OpenDots integration (identity and persistence isolation, gatekeeper capabilities, UI dispatch and approval callbacks, Intelligence hosting) is unstarted (I11).
 - `spawn` and `spawnCallable` acknowledge a queued task; actual run progress and results to configured destinations are not tracked (I09).
 

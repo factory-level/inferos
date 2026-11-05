@@ -54,7 +54,7 @@ export const ConsoleWidgetView = ({ workspaceId, source, revision, target, onClo
     : !overseer || !screen || !widget || !ready ? <p role="status" className="p-5 text-sm text-kumo-subtle">Opening widget…</p>
     : widget.kind === 'inferos.gadget'
       ? <CanvasGadgetWidget scrollRoot={scrollRoot} widget={{ ...widget, size: 'full' }} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer.stub}
-        offeredBy={source === 'published' ? { consoleId: target.consoleId, revision } : undefined} />
+        offeredBy={source === 'published' ? { consoleId: target.consoleId, revision, workspaceId } : undefined} />
       // Wiki is operated read-only, as on session screens (no `editable`).
       : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget scrollRoot={scrollRoot} widget={widget} overseer={overseer.stub} />
       : <CanvasBoardWidget widget={widget} overseer={overseer.stub} presentation="full" />

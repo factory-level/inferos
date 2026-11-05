@@ -82,18 +82,42 @@ const allDenied = (calls: object) =>
 type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" |
     "subscribeToWorkpieces" | "getGadget" | "listActions" | "subscribeToActions" |
     "subscribeToConsoleLogs" | "listConsoles" | "listCanvases" | "getCanvas" | "getConsole" |
-    "getConsoleScreen" | "getConsoleWidget";
+    "getConsoleScreen" | "getConsolePage" | "getConsoleWidget" |
+    // An app a published console places, at the commit it published (FAC-89 part 2, operate-console-apps.test.ts).
+    "getConsoleApp" |
+    // A published widget's frozen local states, checked as getConsoleWidget is (FAC-86, widget-state.test.ts).
+    "getConsoleWidgetStates" |
+    // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
+    "listWorkflowDefinitions" |
+    // A use collaborator listed on a trigger's control may run it, and sees only those controls
+    // (workflow-invocation.test.ts covers both, and that nothing else opens to them).
+    "listTriggerControls" | "invokeTrigger";
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {
+  exportWorkspaceRecords: ws => ws.exportWorkspaceRecords(),
   createCanvas: ws => ws.createCanvas({ title: "View", sections: [] }),
   editCanvas: ws => ws.editCanvas("view", "0", [{ type: "rename", title: "New" }]),
   deleteCanvas: ws => ws.deleteCanvas("view", "0"),
+  // The nested page is the builder's (FAC-83): a non-builder can neither read nor edit it.
+  getCanvasPage: ws => ws.getCanvasPage("view"),
+  editCanvasPage: ws => ws.editCanvasPage("view", "0", [{ type: "renamePage", title: "New" }]),
   listFlows: ws => ws.listFlows(),
   createFlow: ws => ws.createFlow({ title: "Flow", steps: ["view"] }),
   replaceFlow: ws => ws.replaceFlow("flow", "0", { title: "Flow", steps: ["view"] }),
   deleteFlow: ws => ws.deleteFlow("flow", "0"),
+  saveWorkflowDefinition: ws => ws.saveWorkflowDefinition({ title: "Workflow", gadgetId: 1 }),
+  publishWorkflowDefinition: ws => ws.publishWorkflowDefinition("definition", 1),
+  pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
+  getTriggerDefinition: ws => ws.getTriggerDefinition(1),
+  listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
+  setTriggerControl: ws => ws.setTriggerControl(1, null),
   createConsole: ws => ws.createConsole({ title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
+  listConsoleWidgetCandidates: ws => ws.listConsoleWidgetCandidates(),
+  // The widget index is read and written by a builder's own publication only (FAC-11).
+  getConsoleWidgetIndex: ws => ws.getConsoleWidgetIndex("console"),
+  listConsoleWidgetIndexWorkspaces: ws => ws.listConsoleWidgetIndexWorkspaces(),
+  setConsoleWidgetIndexTarget: ws => ws.setConsoleWidgetIndexTarget("console", null),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   deleteConsole: ws => ws.deleteConsole("console", "0"),
   publishConsole: ws => ws.publishConsole("console", "0"),
@@ -127,6 +151,11 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   newAiModelGatekeeper: ws => ws.newAiModelGatekeeper("model"),
   newAgentSpawnerGatekeeper: ws =>
     ws.newAgentSpawnerGatekeeper({ displayName: "Spawner", modelId: null, env: {} }),
+  updateAgentSpawner: ws =>
+    ws.updateAgentSpawner(1, { displayName: "Spawner", modelId: null, env: {} }, { instructions: "x" }),
+  getAgentSpawner: ws => ws.getAgentSpawner(1),
+  setAgentSpawnerEnv: ws =>
+    ws.setAgentSpawnerEnv(1, { displayName: "Spawner", modelId: null, env: {} }, {}),
   approveAction: ws => ws.approveAction(0),
   operateApproval: ws => ws.operateApproval({actionId: 0, threadId: "hidden", runId: "hidden"}),
   rejectAction: ws => ws.rejectAction(0),

@@ -103,6 +103,11 @@ declare global {
       // on to avoid locking everyone out).
       DISABLE_PASSWORD_AUTH?: string;
 
+      // Gatekeeper vendor id (e.g. "inferops") that decides who may edit and publish shared
+      // configuration: a workspace with collaborators or share links. Unset = Build is decided by
+      // the sharing roles alone. See getSharedConfigurationGatekeeper in auth/config.ts.
+      SHARED_CONFIGURATION_GATEKEEPER?: string;
+
       // Publication (publication.ts): "true" lets widgets, or apps and workflows, be published
       // after an admin approves. Off by default; turning one off suspends its publications.
       PUBLISH_CLOUDFLAREOS_WIDGET?: string;

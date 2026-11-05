@@ -231,6 +231,9 @@ const manifest = scaffold ? {
   output: {id: entry.name, noun: title, plural: `${title}s`, icon: "appWindow"},
   author,
   revision: 1,
+  // A widget or workflow exported from its workspace stays one; an app needs no kind.
+  ...(incoming.metadata.kind === "widget" || incoming.metadata.kind === "workflow"
+      ? {kind: incoming.metadata.kind} : {}),
   created: String(incoming.metadata.created),
   version: Number(incoming.metadata.version),
   lastUpdated: String(incoming.metadata.lastUpdated),

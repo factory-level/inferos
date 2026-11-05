@@ -1,8 +1,9 @@
 import { useRef, useState, type ReactElement } from 'react'
 import { Button, Dialog, Input, InputArea, Select } from '@cloudflare/kumo'
 import type { Issue, IssueChanges, NewIssue, Priority, Run, State } from '@inferos/gatekeeper-inferops/src/types'
-import type { ProposalResult } from './boardData'
+import type { ActivityResult, ProposalResult } from './boardData'
 import { KanbanCodingForm, type CodingControl } from './KanbanCodingForm'
+import { KanbanIssueDetails } from './KanbanIssueDetails'
 import { PRIORITY_LABELS, changedFields, proposalErrorText, type IssueFields } from './kanbanBoard'
 
 const PRIORITIES: readonly Priority[] = ['none', 'urgent', 'high', 'medium', 'low']
@@ -15,8 +16,13 @@ type FormMode =
   | { kind: 'create'; state: State; onCreate: (issue: NewIssue) => Promise<ProposalResult> }
   | { kind: 'edit'; issue: Issue; onUpdate: (changes: IssueChanges) => Promise<ProposalResult> }
 
-/** `code`: the issue's coding run and a dispatch to the coding runner, through the project's coding-dispatch connection. */
-type Mode = FormMode | { kind: 'code'; issue: Issue; run: Run | undefined; coding: CodingControl }
+/**
+ * `code`: the issue's coding run and a dispatch to the coding runner, through the project's coding-dispatch connection.
+ * `details`: the issue read-only, with its activity (see `KanbanIssueDetails`).
+ */
+type Mode = FormMode
+  | { kind: 'code'; issue: Issue; run: Run | undefined; coding: CodingControl }
+  | { kind: 'details'; issue: Issue; state: State; states: readonly State[]; onActivity: () => Promise<ActivityResult> }
 
 /**
  * Whether the dialog is open, held by its owner (the operate session's shown issue) rather than the
@@ -55,7 +61,9 @@ export const KanbanIssueDialog = ({ trigger, control, onOpenChange, ...mode }: K
       {/* Mounted only while open, so every opening starts from the issue as the board shows it. */}
       {mode.kind === 'code'
         ? <KanbanCodingForm issue={mode.issue} run={mode.run} coding={mode.coding} />
-        : <IssueForm mode={mode} onDone={() => setOpen(false)} />}
+        : mode.kind === 'details'
+          ? <KanbanIssueDetails issue={mode.issue} state={mode.state} states={mode.states} onActivity={mode.onActivity} />
+          : <IssueForm mode={mode} onDone={() => setOpen(false)} />}
     </Dialog>
   </Dialog.Root>
 }

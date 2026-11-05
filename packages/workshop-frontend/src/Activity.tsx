@@ -1,3 +1,4 @@
+import { actionOutcome } from '@gadgets/workshop-shared/action-outcome'
 import { attemptNotice, canApproveAgain } from './actionAttempt'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Switch, useKumoToastManager } from '@cloudflare/kumo'
@@ -102,22 +103,19 @@ function activityStatus(
       ? { label: 'Enabled', dotClass: 'bg-kumo-success', textClass: 'text-kumo-subtle' }
       : { label: 'Disabled', dotClass: 'bg-kumo-inactive', textClass: 'text-kumo-subtle' }
   }
-  if (record.state === 'pending') {
-    // An earlier apply may have reached the provider: never shown as a fresh, untouched request.
-    return record.lastAttempt?.outcome === 'unknown'
-      ? { label: 'Outcome unknown', dotClass: 'bg-kumo-warning', textClass: 'text-kumo-warning' }
-      : { label: 'Pending', dotClass: 'bg-kumo-brand', textClass: 'text-kumo-strong' }
-  }
-  if (record.state === 'rejected') {
-    // A denial does not undo an attempt that may already have applied.
-    return record.lastAttempt?.outcome === 'unknown'
+  // One vocabulary (actionOutcome): only an applied action reads as Applied; a queued one waits and
+  // one whose apply is in flight is applying, never done.
+  switch (actionOutcome(record)) {
+    case 'waiting': return { label: 'Waiting for approval', dotClass: 'bg-kumo-brand', textClass: 'text-kumo-strong' }
+    case 'running': return { label: 'Applying, not done yet', dotClass: 'bg-kumo-brand', textClass: 'text-kumo-strong' }
+    case 'succeeded': return { label: 'Applied', dotClass: 'bg-kumo-success', textClass: 'text-kumo-subtle' }
+    case 'failed': return { label: 'Failed', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
+    case 'rejected': return { label: 'Denied', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
+    // An earlier apply may have reached the provider, and a denial does not undo it.
+    case 'unknown': return record.state === 'rejected'
       ? { label: 'Denied, may have applied', dotClass: 'bg-kumo-warning', textClass: 'text-kumo-warning' }
-      : { label: 'Denied', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
+      : { label: 'Outcome unknown', dotClass: 'bg-kumo-warning', textClass: 'text-kumo-warning' }
   }
-  if (record.state === 'failed') {
-    return { label: 'Failed', dotClass: 'bg-kumo-danger', textClass: 'text-kumo-danger' }
-  }
-  return { label: 'Approved', dotClass: 'bg-kumo-success', textClass: 'text-kumo-subtle' }
 }
 
 function TypeIcon({ record, className }: { record: ActionLogEntry; className?: string }) {
@@ -807,6 +805,13 @@ function HistoryRow({
             <p className={`m-0 mt-2 whitespace-pre-wrap text-[12.5px] leading-[18px] ${notice.tone === 'warning' ? 'text-kumo-warning' : 'text-kumo-danger'}`}>
               {notice.text}
             </p>
+          )}
+          {record.type === 'action' && record.result && (
+            <dl aria-label="What the provider reported" className="m-0 mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-kumo-subtle">
+              {Object.entries(record.result).map(([key, value]) => (
+                <div key={key} className="flex gap-1"><dt className="text-kumo-inactive">{key}:</dt><dd className="m-0 break-all">{String(value)}</dd></div>
+              ))}
+            </dl>
           )}
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px] text-kumo-inactive">
             <span>{formatFullDate(at)}</span>

@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./authoring-compiler": "./src/authoring-compiler.ts",
     "./libraries/*/client": "./libraries/*/client.ts",
     "./libraries/*/server": "./libraries/*/server.ts"
   },
@@ -20,9 +21,13 @@
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",
     "@gadgets/scripts": "workspace:*",
+    "@refinedev/core": "5.0.12",
+    "@tanstack/react-query": "5.105.3",
     "@types/node": "^26.1.0",
     "esbuild": "^0.28.2",
     "jsdom": "^26.1.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "typescript": "catalog:",
     "typescript6": "catalog:",
     "vitest": "catalog:"

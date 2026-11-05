@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import type { Board, Issue, IssueChanges, NewIssue } from '@inferos/gatekeeper-inferops/src/types'
+import type { Board, Issue, IssueActivity, IssueChanges, NewIssue } from '@inferos/gatekeeper-inferops/src/types'
 import { BoardData, boardRequestKey, canonicalBoardRef, visibleColumns, type BoardRequest } from './boardData'
 import { BoardMetrics, percentile } from './boardMetrics'
 
@@ -33,11 +33,13 @@ const workspace = (connected: Record<string, boolean> = { [DEMO]: true }) => {
   const transitions: { issueId: string; toStateId: string; expectedRevision: string; settle: Deferred<void> }[] = []
   const creates: { issue: NewIssue; settle: Deferred<void> }[] = []
   const updates: { issueId: string; changes: IssueChanges; expectedRevision: string; settle: Deferred<void> }[] = []
+  const activities: Deferred<IssueActivity>[] = []
   const disposed: string[] = []
   const lookups: string[] = []
   const session = (target: string) => ({
     readBoard: () => { const read = deferred<Board>(); reads.push(read); return read.promise },
     openIssue: (issueId: string) => ({
+      activity: () => { const read = deferred<IssueActivity>(); activities.push(read); return read.promise },
       transition: (toStateId: string, expectedRevision: string) => {
         const settle = deferred<void>(); transitions.push({ issueId, toStateId, expectedRevision, settle }); return settle.promise
       },
@@ -56,7 +58,7 @@ const workspace = (connected: Record<string, boolean> = { [DEMO]: true }) => {
       return { openSession: async () => session(target), [Symbol.dispose]: () => { disposed.push(`client:${target}`) } }
     }),
   } as unknown as RpcStub<Overseer>
-  return { overseer, reads, transitions, creates, updates, disposed, lookups, connected }
+  return { overseer, reads, transitions, creates, updates, activities, disposed, lookups, connected }
 }
 
 const flush = () => new Promise(resolve => setTimeout(resolve, 0))
@@ -97,8 +99,36 @@ describe('BoardData', () => {
     ws.connected[DEMO] = true
     data.refresh(request())
     await flush()
-    expect(ws.lookups).toEqual([DEMO, DEMO])
+    // Unbound means neither the board's own connection nor its organization's account connection.
+    expect(ws.lookups).toEqual([DEMO, 'inferops://demo.local/account', DEMO])
     expect(ws.reads).toHaveLength(1)
+  })
+
+  it('reads a board through the account connection, and shows its refusal as an error, not as unbound', async () => {
+    let refuse = true
+    const opened: string[] = []
+    const overseer = {
+      getGatekeeperByResourceUrl: async (url: string) => url !== 'inferops://demo.local/account' ? null : {
+        openSession: async () => ({
+          openBoard: async (ref: string) => {
+            opened.push(ref)
+            if (refuse) throw new Error('NOT_FOUND: No such InferOps board is available to this connection.')
+            return { readBoard: async () => board([issue('1', 'todo')]), [Symbol.dispose]: () => {} }
+          },
+          [Symbol.dispose]: () => {},
+        }),
+        [Symbol.dispose]: () => {},
+      },
+    } as unknown as RpcStub<Overseer>
+    const data = new BoardData(overseer)
+    listen(data, request())
+    await flush()
+    expect(data.get(request())).toEqual({ status: 'error', code: 'NOT_FOUND', message: 'No such InferOps board is available to this connection.' })
+    refuse = false
+    data.refresh(request())
+    await flush()
+    expect(columns(data.get(request()))).toEqual([['1'], [], []])
+    expect(opened).toEqual([DEMO, DEMO])
   })
 
   it('keys the cache by canonical target, so a differently cased host is the same board', () => {
@@ -127,12 +157,71 @@ describe('BoardData', () => {
     expect(ws.lookups).toEqual([DEMO, DEMO])
     ws.reads[2]!.reject(new Error('UNAUTHORIZED: InferOps rejected the connection.'))
     await flush()
-    expect(data.get(request())).toEqual({ status: 'error', message: 'InferOps rejected the connection.' })
+    expect(data.get(request())).toEqual({ status: 'error', code: 'UNAUTHORIZED', message: 'InferOps rejected the connection.' })
     // The connection removed from the workspace: the reference is unbound and nothing stale is shown.
     ws.connected[DEMO] = false
     data.refresh(request())
     await flush()
     expect(data.get(request())).toEqual({ status: 'unbound' })
+  })
+
+  it('drops every cached board when an activity read is refused', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    const primary = listen(data, request())
+    const duplicate = request(DEMO, { workflow: 'content', showCompleted: true })
+    listen(data, duplicate)
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo')]))
+    await flush()
+
+    const activity = data.activity(request(), '1')
+    await flush()
+    ws.activities[0]!.reject(new Error('UNAUTHORIZED: Sign in to InferOps again.'))
+    await expect(activity).resolves.toEqual({ ok: false, code: 'UNAUTHORIZED', message: 'Sign in to InferOps again.' })
+
+    expect(data.get(request())).toEqual({ status: 'error', code: 'UNAUTHORIZED', message: 'Sign in to InferOps again.' })
+    expect(data.get(duplicate)).toEqual({ status: 'error', code: 'UNAUTHORIZED', message: 'Sign in to InferOps again.' })
+    primary.unsubscribe()
+  })
+
+  it('drops a successful activity result that finishes after another read revokes access', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo')]))
+    await flush()
+
+    const activity = data.activity(request(), '1')
+    await flush()
+    data.refresh(request())
+    await flush()
+    ws.reads[1]!.reject(new Error('UNAUTHORIZED: Sign in to InferOps again.'))
+    await flush()
+    ws.activities[0]!.resolve({ entries: [], omitted: 0 })
+
+    await expect(activity).resolves.toMatchObject({ ok: false, code: 'NOT_CONNECTED' })
+    expect(data.get(request())).toEqual({ status: 'error', code: 'UNAUTHORIZED', message: 'Sign in to InferOps again.' })
+  })
+
+  it('drops every cached board when a board write is refused', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    listen(data, request())
+    const duplicate = request(DEMO, { workflow: 'content', showCompleted: true })
+    listen(data, duplicate)
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo')]))
+    await flush()
+
+    const proposal = data.move(request(), '1', 'done', '1')
+    await flush()
+    ws.transitions[0]!.settle.reject(new Error('FORBIDDEN: You cannot move issues on this board.'))
+    await expect(proposal).resolves.toEqual({ ok: false, code: 'FORBIDDEN', message: 'You cannot move issues on this board.' })
+
+    expect(data.get(request())).toEqual({ status: 'error', code: 'FORBIDDEN', message: 'You cannot move issues on this board.' })
+    expect(data.get(duplicate)).toEqual({ status: 'error', code: 'FORBIDDEN', message: 'You cannot move issues on this board.' })
   })
 
   it('reports InferOps turned off distinctly, drops the held board, and shows it again once it is back on', async () => {
@@ -288,6 +377,29 @@ describe('BoardData', () => {
     expect(await data.move(request(), 'missing', 'done', '1')).toMatchObject({ ok: false, code: 'NOT_FOUND' })
   })
 
+  it('clears proposal text when access is revoked and does not restore it after access returns', async () => {
+    const ws = workspace()
+    const data = new BoardData(ws.overseer)
+    listen(data, request())
+    await flush()
+    ws.reads[0]!.resolve(board([issue('1', 'todo', '7')]))
+    await flush()
+    const result = data.update(request(), '1', { title: 'Private proposed title' }, '7')
+    await flush()
+    expect(data.get(request())).toMatchObject({ changes: [{ changes: { title: 'Private proposed title' } }] })
+
+    ws.updates[0]!.settle.reject(new Error('FORBIDDEN: Access to this board was revoked.'))
+    expect(await result).toEqual({ ok: false, code: 'FORBIDDEN', message: 'Access to this board was revoked.' })
+    expect(data.get(request())).toEqual({ status: 'error', code: 'FORBIDDEN', message: 'Access to this board was revoked.' })
+
+    data.refresh(request())
+    await flush()
+    ws.reads[1]!.resolve(board([issue('1', 'todo', '7')]))
+    await flush()
+    expect(data.get(request())).toMatchObject({ status: 'ready', pending: [], changes: [] })
+    expect(JSON.stringify(data.get(request()))).not.toContain('Private proposed title')
+  })
+
   it('queues a new issue through the session with its state, lists it until the board shows the provisional card, and reports refusals', async () => {
     const ws = workspace()
     const data = new BoardData(ws.overseer)
@@ -425,7 +537,7 @@ describe('BoardData read metrics', () => {
     ws.reads[1]!.reject(new Error('UNAVAILABLE: down'))
     await flush()
     expect(data.get(request())).toMatchObject({ status: 'stale', error: 'down' })
-    expect(data.get(late)).toMatchObject({ status: 'error', message: 'down' })
+    expect(data.get(late)).toMatchObject({ status: 'error', code: 'UNAVAILABLE', message: 'down' })
     // The board on screen is not current, so a third card does not take it: it reads.
     const third = request(DEMO, { workflow: 'content', showCompleted: false })
     listen(data, third)

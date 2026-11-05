@@ -4,7 +4,7 @@
   "id": "inferops",
   "package": "@inferos/gatekeeper-inferops",
   "status": "reference",
-  "summary": "InferOps project boards, coding dispatch, the InferMind Wiki (its structure, page bodies and sections, and approval of drafted page proposals for publication) and read-only custom tables, reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
+  "summary": "InferOps project boards, coding dispatch, the InferMind Wiki (its structure, page bodies and sections, and approval of drafted page proposals for publication) read-only custom tables, and one account connection per organization that opens the person's own boards and Wikis by reference, reached only through scoped bindings whose every read is an observation and every write an approved action. InferOps stays authoritative: nothing here stores a copy of its entities.",
   "entrypoints": {
     "main": "src/inferops.ts",
     "vendor": "GatekeeperVendor",
@@ -18,6 +18,7 @@
       "InferOpsTableGatekeeper",
       "InferOpsMembersGatekeeper",
       "InferOpsWorkflowPolicyGatekeeper",
+      "InferOpsAccountGatekeeper",
       "InferLabLogin",
       "InferOpsCredentials"
     ]
@@ -121,13 +122,29 @@
         { "method": "readWorkflowPolicy", "notes": "The project's policy head as InferOps answered it, parsed strictly and fresh on every call, without rule reasons, agents or publishedBy; compiledHash is InferOps' hash of its compiled source policy, not of this projection." }
       ],
       "writes": []
+    },
+    {
+      "kind": "account",
+      "urlPattern": "inferops://*/account",
+      "gatekeeper": "InferOpsAccountGatekeeper",
+      "session": "InferOpsAccountSession",
+      "scope": "Every InferOps board and InferMind Wiki the signed-in person's own account can open in one organization (inferos ADR 0015). The props hold the account and the tenant label only. Each openBoard/openWiki parses the reference with its own kind's grammar (so dispatch, workflow, table, members and page references are refused), requires the binding's tenant label, resolves the workspace slug among the person's own workspaces of the right product, and confirms the project or Wiki with their own token; every refusal is one NOT_FOUND. The sessions it opens are the board and Wiki sessions, fixed to what was opened. The demo account (inferops://demo.local/account) serves the mock; the stopgap connection is refused. Coding dispatch, workflow policy, custom tables and members keep their own bindings, and Operate keeps exact board bindings.",
+      "enabledBy": ["INFEROPS_ENABLED"],
+      "observers": "exclusion",
+      "reads": [
+        { "method": "listWorkspaces", "notes": "The person's workspaces in the organization. Withheld: every current collaborator is excluded, and once it is recorded the binding is owner-only for good (no collaborator is admitted after it)." },
+        { "method": "findBoards", "notes": "As the board session's search, across the person's InferOps workspaces in the organization. Withheld as listWorkspaces is: the binding is owner-only from then on. So are findBoards on a board it opened and readDocumentText on a Wiki it opened." },
+        { "method": "openBoard", "notes": "Not an observation: narrows to one board. Its session's reads are observations of that board's data set (strategy C)." },
+        { "method": "openWiki", "notes": "Not an observation: narrows to one Wiki. Its session's reads are observations of that Wiki's data set (strategy C)." }
+      ],
+      "writes": []
     }
   ],
   "approval": {
     "autoApprovable": [],
     "fingerprint": true,
     "rejection": "Deletes the pending record, which ends its simulation; a later apply of that id is refused as unknown.",
-    "notes": "Every write is checked against the simulated state, recorded with the exact request it will send and that request's fingerprint, and submitted as an action. Apply recomputes the fingerprint and refuses a mismatch before anything is sent, then sends under <facet instance id>:<action id> as the idempotency key. Applying an applied action is a no-op."
+    "notes": "Every write is checked against the simulated state, recorded with the exact request it will send and that request's fingerprint, and submitted as an action. Apply recomputes the fingerprint and refuses a mismatch before anything is sent, then sends under <facet instance id>:<action id> as the idempotency key. Applying an applied action is a no-op. An account binding's actions are proposed through the board and Wiki sessions it opens: each record carries its resolved target (kind, host, workspace id, project key), the fingerprint covers it, records are kept per target and indexed by the binding-wide action id, and apply and revert resolve the workspace again and refuse one that changed."
   },
   "providerErrors": [
     { "code": "NOT_FOUND", "meaning": "The project, issue, run, page or section does not exist or is outside the binding's scope; the two are indistinguishable.", "retryable": false },
@@ -159,6 +176,7 @@
     { "name": "INFEROPS_API_TOKEN", "kind": "secret", "purpose": "Local-development stopgap connection shared by accounts with no identity. Never backs a connected person." },
     { "name": "INFEROPS_WORKSPACE_ID", "kind": "var", "purpose": "The stopgap connection's workspace id." },
     { "name": "INFEROPS_WORKSPACE_SLUG", "kind": "var", "purpose": "The workspace slug a URL must name to use the stopgap connection." },
+    { "name": "INFEROPS_COMPANY", "kind": "var", "purpose": "The one company this deployment belongs to: an InferOps tenant id, or internal (reserved tenants only). InferOps refuses a session in any other company at the token exchange (auth.sso.inferosCompanies); with a tenant id the gatekeeper also refuses a sign-in, connect, reconnect or stored connection in another one. Grants nothing.", "default": "Unset: InferOps alone decides (local development). Set but malformed: sign-in is off." },
     { "name": "INFEROPS_ENABLED", "kind": "var", "purpose": "Capability switch for the whole integration, checked on every call.", "default": "Unset counts as on." },
     { "name": "CODING_WORKBENCH_ENABLED", "kind": "var", "purpose": "Capability switch for project/dispatch.", "default": "Unset counts as off." },
     { "name": "INFEROPS_TABLES_ENABLED", "kind": "var", "purpose": "Capability switch for object/table, checked on every call.", "default": "Unset counts as off." },
@@ -171,9 +189,9 @@
     "provider": {
       "name": "InferOps",
       "repository": "https://github.com/factory-level/inferops",
-      "revision": "3dae0f50d5b4fa467d734cbb2adf857f39942b31",
+      "revision": "f9b3bf540e193d6f9d309ca4c9420170f9b011bc",
       "apiVersion": null,
-      "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract. The Wiki structure read, page body/version/masterRole and the strict page-body write need InferOps at or after c536b63718478842a1b163b473eb03b16dd7f9b7 (factory-level/inferops#2345); the revision above stays the board-schema pin. Wiki proposal reads and approval need InferOps at or after 5483e7cd (factory-level/inferops#2368) with knowledge.wikiPublish.enabled on; otherwise those calls are NOT_FOUND."
+      "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract. The Wiki structure read, page body/version/masterRole and the strict page-body write need InferOps at or after c536b63718478842a1b163b473eb03b16dd7f9b7 (factory-level/inferops#2345); the revision above stays the board-schema pin. Wiki proposal reads and approval need InferOps at or after 5483e7cd (factory-level/inferops#2368) with knowledge.wikiPublish.enabled on; otherwise those calls are NOT_FOUND. Wiki search (searchWiki) needs InferOps at or after a2f27606 (factory-level/inferops#2563, knowledge.search); against an earlier one every search is UNAVAILABLE, never an empty list. The console widget index (`PUT` and `DELETE /knowledge/widget-definitions`, `widget.publish` and `widget.withdraw`) needs InferOps at or after 1d68de3591900c44212db8a05239241f9819b1b1 (factory-level/inferops#2573)."
     },
     "inferos": { "gatekeeperApi": [1] },
     "contracts": [
@@ -228,6 +246,17 @@
         "kind": "object/table",
         "cases": ["approval", "apply-once", "stale-revision", "lost-response-retry"],
         "reason": "Not applicable: the kind proposes no writes, so there is nothing to approve, apply or retry. Its tests assert the mock and the HTTP client see no non-GET request."
+      },
+      {
+        "kind": "account",
+        "cases": ["resource-scope", "observation", "sharing", "approval", "apply-once"],
+        "reason": "No shared-suite adapter yet: the shared cases assume a session that writes directly, and this kind's writes go through the board and Wiki sessions it opens. Its own suites cover opening and every refusal, per-target pending actions, routing of apply, reject and revert, the fingerprinted target, the workspace check at apply, and strategy C admission and exclusion.",
+        "coveredBy": ["__tests__/account-binding.test.ts", "__tests__/account.test.ts"]
+      },
+      {
+        "kind": "account",
+        "cases": ["stale-revision", "server-error-retry", "lost-response-retry", "revocation"],
+        "reason": "Not tested for this kind. Apply, revert and retry run the same board and Wiki functions over the same data source and account credentials as project/board and knowledge/wiki, whose cases are covered there."
       }
     ]
   }

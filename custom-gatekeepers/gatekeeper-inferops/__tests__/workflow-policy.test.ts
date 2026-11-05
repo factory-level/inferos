@@ -118,6 +118,8 @@ describe("the workflow-policy parse", () => {
     ["schemaVersion '2'", h => { h.policy.schemaVersion = "2"; }],
     ["a software head", h => { h.workflow = "software"; }],
     ["a software policy", h => { h.policy.workflow = "software"; }],
+    ["a service head", h => { h.workflow = "service"; }],
+    ["a service policy", h => { h.policy.workflow = "service"; }],
     ["another workflow", h => { h.workflow = "release"; }],
     ["an unknown action", h => { h.policy.rules[0].actions.push("delete"); }],
     ["an unknown effect", h => { h.policy.rules[1].effect = "maybe"; }],

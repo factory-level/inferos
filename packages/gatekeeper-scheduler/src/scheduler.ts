@@ -19,6 +19,7 @@ import type {
   GatekeeperUserVerifier,
   HookController,
   HookInitiator,
+  HookInvocation,
   HookTargetMetadata,
   ResourceConfiguratorFrame,
   ResourceDescription,
@@ -216,6 +217,17 @@ export class ScheduleHookController
   /** Removes all driver state for this schedule activation. */
   disable(): Promise<void> {
     return disableScheduleController(this.ctx.props, this.#driver());
+  }
+
+  /**
+   * Runs the schedule once now, for a request the Workshop admitted through its trigger's control.
+   * Only the invocation id is read; the firing is the schedule's own (`ScheduleDriver.runRequested`).
+   */
+  invoke(invocation: HookInvocation): Promise<void> {
+    if (typeof invocation?.invocationId !== "string" || !invocation.invocationId) {
+      throw new TypeError("An invocation id is required.");
+    }
+    return this.#driver().runRequested(this.ctx.props.workspaceId, this.ctx.props.scheduleId, invocation.invocationId);
   }
 
   #driver(): DurableObjectStub<ScheduleDriver> {

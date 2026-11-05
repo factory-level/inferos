@@ -4,8 +4,12 @@ import { openAiCommand } from './openai-plugin.js';
 import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assistant-plugin-openai/protocol';
 import { localApiModels } from './local-api-models.js';
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
+import {
+  WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, recoverWidgetState, widgetEventsFrom,
+  type WidgetStateMachine, type WidgetStateSnapshot,
+} from '@gadgets/workshop-shared/widget-state';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -19,9 +23,15 @@ import { blueprintVersionKeys, isReservedBlueprintKey, readBlueprintContent, rea
 import { assertPublicationFlagOn, byRequestedDesc, PUBLICATION_AUDIENCES, readPublicationSnapshot, withPublicationStatus, type StoredPublicationRecord } from "./publication.js";
 import { filterEnabledResources, isResourceDisabled, readAdminConfig } from "./admin-config.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import { CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken, PENDING_HANDOFF_LIFETIME_MS } from "./connect-handoff.js";
 
 const logger = createWorkshopLogger("workshop.user");
+
+// When a person's connected accounts answer for more than one scope (for InferOps, a company).
+const SHARED_CONFIGURATION_AMBIGUOUS =
+  "Your connected accounts belong to more than one organization, so it isn't clear which one " +
+  "decides who may change shared configuration here. Disconnect the others, then try again.";
 
 // How many workspaces one Outputs catch-up pass examines, bounding the Durable Objects a single
 // listOutputs() call wakes and how long it waits. The client calls again until catch-up is done.
@@ -121,12 +131,58 @@ export type ProvidedAccountInfo = {
 // usable directly, the way the runtime stub actually behaves.
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
+// Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names; see the note above.
+type SharedConfigurationAccountStub = Required<Pick<GatekeeperUser, "holdsSharedConfiguration">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
   if (record.credentialExpiresAt && record.credentialExpiresAt.valueOf() < Date.now()) return false;
   return true;
 }
+
+/**
+ * Whether `vendorId` says the person may `action` shared configuration here, asking each of their
+ * connected accounts of that vendor with live credentials. Every answer must be about one scope
+ * (`SharedConfigurationAnswer.scope`, for InferOps the company): accounts answering for different
+ * scopes are refused as ambiguous, since nothing says which one this deployment belongs to, and an
+ * account answering for none counts as no. Within the one scope, a yes from any account is a yes.
+ * Only a literal `holds: true` with a scope counts. An account that can't answer fails the whole
+ * check, since its scope is unknown too.
+ */
+export async function holdsSharedConfiguration(
+    records: Iterable<ConnectedAccountRecord>, vendorId: string, action: SharedConfigurationAction,
+): Promise<boolean> {
+  let scopes = new Set<string>();
+  let holds = false;
+  for (let record of records) {
+    if (record.vendorId !== vendorId || !areCredentialsValid(record)) continue;
+    let answer: SharedConfigurationAnswer;
+    try {
+      answer = await (record.account as unknown as SharedConfigurationAccountStub)
+        .holdsSharedConfiguration(action);
+    } catch (err) {
+      logger.warn("shared configuration authority could not be read", {
+        event: "shared.configuration.check.failed", vendorId, accountId: record.id, error: err,
+      });
+      throw new Error("Couldn't check whether you may change shared configuration. Try again.", { cause: err });
+    }
+    if (typeof answer?.scope !== "string" || answer.scope === "") continue;
+    scopes.add(answer.scope);
+    if (answer.holds === true) holds = true;
+  }
+  if (scopes.size > 1) throw new Error(SHARED_CONFIGURATION_AMBIGUOUS);
+  return holds;
+}
+
+// Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names, by a console
+// publication (see UserDurableObject.widgetIndexWorkspaces).
+type WidgetIndexAccountStub = Required<Pick<GatekeeperUser, "widgetIndexWorkspaces" | "registerWidget" | "withdrawWidget">>;
+
+/** A workspace in which the person may list widgets, with the account of theirs that may. */
+export type PersonWidgetIndexWorkspace = WidgetIndexWorkspace & { accountId: number };
+
+/** Why a widget index write was not sent: the account is not one of the person's own live ones. */
+const WIDGET_INDEX_NOT_YOURS = "Your InferOps sign-in for this workspace has expired or was removed. Sign in again.";
 
 /**
  * Vendor id of the Cloudflare gatekeeper (the suffix of GATEKEEPER_CLOUDFLARE, lowercased). The AI
@@ -328,6 +384,10 @@ function makeUserStorage(storage: DurableObjectStorage) {
       operateEvents: collection<OperateEventRecord>()({
         primaryKey: record => operateEventKey(record.seq),
       }),
+      // This person's running state of each console widget whose states persist per person
+      // (FAC-86, widget-state.ts), keyed by widgetStateKey(). Apart from the operate page: nothing
+      // here is read or written by dispatchOperateEvent(), nor this by it.
+      widgetStates: collection<StoredWidgetState>()({ primaryKey: "key" }),
     },
     singletons: {
       operateReadGeneration: "1",
@@ -386,6 +446,20 @@ function makeUserStorage(storage: DurableObjectStorage) {
       operatePage: <OperateSessionUpdate>{ seq: 0, state: INITIAL_OPERATE_PAGE },
     }
   });
+}
+
+/** One person's stored state of one console widget (see UserDurableObject.readWidgetState). */
+type StoredWidgetState = { key: string; state: string; seq: number; at: number };
+
+/** Most console widget states one person keeps; the least recently changed is dropped past it. */
+const MAX_STORED_WIDGET_STATES = 256;
+
+// A widget state key as widgetStateKey() makes it: bounded, printable, with no path tricks.
+function validWidgetStateKey(key: string): string {
+  if (typeof key !== "string" || key.length === 0 || key.length > 512 || [...key].some(c => c.charCodeAt(0) < 0x20)) {
+    throw new TypeError("Invalid widget state key.");
+  }
+  return key;
 }
 
 function operateEventKey(seq: number): string {
@@ -1172,6 +1246,49 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       if (!record || record.chatId !== undefined) throw new Error("RUN_ALREADY_RESERVED");
       runs.put({...record, chatId});
     });
+  }
+
+  /**
+   * This person's state of the console widget `key` names, following `machine` (its published
+   * declaration, which the caller read through the person's own access): the stored state when the
+   * machine still declares it, else its initial state. Reads nothing of the operate page.
+   */
+  async readWidgetState(key: string, machine: WidgetStateMachine): Promise<WidgetStateSnapshot> {
+    return this.#widgetState(key, machine);
+  }
+
+  #widgetState(key: string, machine: WidgetStateMachine): WidgetStateSnapshot {
+    let stored = this.storage.widgetStates.get(validWidgetStateKey(key));
+    let state = recoverWidgetState(machine, stored?.state);
+    return { state, seq: stored?.seq ?? 0, events: widgetEventsFrom(machine, state) };
+  }
+
+  /**
+   * Moves this person's state of console widget `key` by `event`, if `expectedSeq` is current and
+   * `machine` permits it; see OperateSession.transitionWidget(). It never touches the operate page:
+   * a widget's state changes only itself (FAC-86 criterion 1).
+   */
+  async transitionWidgetState(key: string, machine: WidgetStateMachine, event: string,
+                              expectedSeq: number): Promise<WidgetStateSnapshot> {
+    // One synchronous read, check and write: no await, so no other request interleaves.
+    let current = this.#widgetState(key, machine);
+    if (expectedSeq !== current.seq) {
+      throw new WidgetStateError(WIDGET_STATE_ERROR_CODES.conflict, "The widget's state changed. Read it again.");
+    }
+    let state = applyWidgetTransition(machine, current.state, event);
+    let next: StoredWidgetState = { key, state, seq: current.seq + 1, at: Date.now() };
+    this.storage.widgetStates.put(next);
+    this.#pruneWidgetStates();
+    return { state, seq: next.seq, events: widgetEventsFrom(machine, state) };
+  }
+
+  // Keeps the newest MAX_STORED_WIDGET_STATES; an older widget then starts again at its initial state.
+  #pruneWidgetStates(): void {
+    let all = [...this.storage.widgetStates.list()];
+    if (all.length <= MAX_STORED_WIDGET_STATES) return;
+    for (let old of all.toSorted((a, b) => a.at - b.at).slice(0, all.length - MAX_STORED_WIDGET_STATES)) {
+      this.storage.widgetStates.delete(old.key);
+    }
   }
 
   /**
@@ -2015,6 +2132,64 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let record = this.storage.connectedAccounts.get(accountId);
     if (!record?.description.providesUi) throw new Error("No such app.");
     return (record.account as unknown as SingletonAccountStub).startAppUi(context);
+  }
+
+  /**
+   * Whether this person may `build` or `publish` shared configuration, as the deployment's
+   * SHARED_CONFIGURATION_GATEKEEPER vendor decides it through their own connected accounts (the
+   * module-level `holdsSharedConfiguration`). True when the deployment names no vendor.
+   */
+  async holdsSharedConfiguration(action: SharedConfigurationAction): Promise<boolean> {
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    if (!vendorId) return true;
+    return holdsSharedConfiguration(this.#connectedAccountRecords(), vendorId, action);
+  }
+
+  /**
+   * The workspaces in which this person may list a console's widgets for their company (FAC-11),
+   * as the deployment's SHARED_CONFIGURATION_GATEKEEPER vendor answers through each of their own
+   * connected accounts with live credentials, each workspace once, with the first account that
+   * may. Empty when the deployment names no vendor. Throws when an account can't answer, so a
+   * publication reports that rather than choosing without it.
+   */
+  async widgetIndexWorkspaces(): Promise<PersonWidgetIndexWorkspace[]> {
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    if (!vendorId) return [];
+    let found = new Map<string, PersonWidgetIndexWorkspace>();
+    for (let record of this.#connectedAccountRecords()) {
+      if (record.vendorId !== vendorId || !areCredentialsValid(record)) continue;
+      let workspaces = await (record.account as unknown as WidgetIndexAccountStub).widgetIndexWorkspaces();
+      for (let workspace of workspaces) {
+        if (!found.has(workspace.workspaceId)) found.set(workspace.workspaceId, { ...workspace, accountId: record.id });
+      }
+    }
+    return [...found.values()];
+  }
+
+  /**
+   * Lists one widget version in `workspaceId` through this person's own account `accountId` of
+   * the SHARED_CONFIGURATION_GATEKEEPER vendor, answering as the service did. Refused, and never
+   * sent, for an account that isn't theirs, isn't that vendor's or has no live credentials.
+   */
+  async registerWidget(accountId: number, workspaceId: string, entry: WidgetIndexEntry): Promise<WidgetIndexOutcome> {
+    let account = this.#widgetIndexAccount(accountId);
+    if (!account) return { status: "refused", reason: WIDGET_INDEX_NOT_YOURS };
+    return account.registerWidget(workspaceId, entry);
+  }
+
+  /** Removes one widget version's listing, as `registerWidget` writes it. */
+  async withdrawWidget(accountId: number, workspaceId: string, sourceId: string, sourceVersion: number)
+      : Promise<WidgetIndexOutcome> {
+    let account = this.#widgetIndexAccount(accountId);
+    if (!account) return { status: "refused", reason: WIDGET_INDEX_NOT_YOURS };
+    return account.withdrawWidget(workspaceId, sourceId, sourceVersion);
+  }
+
+  #widgetIndexAccount(accountId: number): WidgetIndexAccountStub | null {
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    let record = this.storage.connectedAccounts.get(accountId);
+    if (!vendorId || !record || record.vendorId !== vendorId || !areCredentialsValid(record)) return null;
+    return record.account as unknown as WidgetIndexAccountStub;
   }
 
   async ensureAccountResources(accountId: number, resourceUrlPatterns: string[])

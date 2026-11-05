@@ -42,7 +42,7 @@
 //   deployment. Local development only; it never backs a connected person.
 
 import { createLogger } from "@gadgets/observability/logger";
-import { readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
+import { ResponseTooLargeError, readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
 import {
   HOST_BOARD_LIMITS, type HostBoardColumn, type HostBoardIssue, type HostBoardScope,
   type HostBoardSnapshot, type HostBoardUnavailableReason,
@@ -52,16 +52,17 @@ import {
   type IssueChanges, type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
   type RepoRecord, type RunRecord, type WikiDocumentHead, type WikiDocumentRecord,
   type TableColumnRecord, type TableRead, type TableReadOptions, type TableRecordSchema,
-  type TableRowRecord, type TableSummary, type WikiPageChanges, type WikiPageWrite,
+  type TableRowRecord, type TableSummary, type WidgetDefinitionWrite, type WikiPageChanges, type WikiPageWrite,
   type WorkspaceMemberRecord, type WorkspaceMembersRead,
-  type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
+  type WikiSearchRecord, type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
   type WikiProposalRecord, type WikiProposalState, PROPOSAL_APPROVE_REFUSED,
+  ActivityWindow, type HistoryEntryRecord,
 } from "./inferops-client";
 import { membersNotFound } from "./members";
 import { readWorkflowPolicyAnswer, workflowPolicyNotFound, type WorkflowHeadRecord } from "./workflow-policy";
 import { isSlug } from "./resources";
 import type {
-  Issue, Project, Revision, RunPatch, RunReasonCode, RunResult, RunStatus, RunTestCommand, RunTests,
+  Issue, IssueActivity, Project, Revision, RunPatch, RunReasonCode, RunResult, RunStatus, RunTestCommand, RunTests,
   State, StateGroup, TableTargetKind, WikiPillar, WikiPillarMember, WikiProposalFreshness,
   WikiProposalSource, WikiStructurePage, Workflow,
 } from "./types";
@@ -154,7 +155,7 @@ const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const WIRE_CODE = /^[A-Z_]{1,40}$/;
 
 const STATE_GROUPS: readonly StateGroup[] = ["backlog", "unstarted", "started", "completed", "cancelled"];
-const WORKFLOWS: readonly Workflow[] = ["content", "software"];
+const WORKFLOWS: readonly Workflow[] = ["content", "software", "service"];
 const PRIORITIES: readonly Issue["priority"][] = ["urgent", "high", "medium", "low", "none"];
 const RUN_STATUSES: readonly RunStatus[] = ["queued", "running", "succeeded", "failed", "cancelled", "unknown"];
 const RUN_REASON_CODES: readonly RunReasonCode[] = ["AUTH_BLOCKED", "QUOTA_BLOCKED", "TESTS_FAILED"];
@@ -204,6 +205,54 @@ function runNotFound(): InferOpsError {
 // Response parsing. Each parser copies the fields it names and nothing else.
 
 class Malformed extends Error {}
+
+/**
+ * One activity read's bounds. A page is one `issue.history` request whose body is read through the
+ * streaming cap of HISTORY_PAGE_BYTES (HOST_BOARD_LIMITS.bytes, 256 KiB) before it is parsed.
+ *
+ * Why the page size adapts rather than being fixed: InferOps allows a comment or a description of
+ * 20,000 characters, which JSON can make up to 6 bytes each (a `\u00XX` escape), so one entry is
+ * at most about 120 KB with its other fields, and always fits a page alone. Only 2 such entries
+ * are certain to fit, while a typical entry (a state change) is a few hundred bytes. So a read
+ * asks for up to HISTORY_PAGE_SIZE entries, sizes each next page from the bytes per entry of the
+ * last (aiming at 3/4 of the cap), and asks again for half as many at the same cursor when a page
+ * goes over the cap. A legitimate page therefore never fails the read; only a single entry larger
+ * than the cap, which InferOps' own limits rule out, does (UNAVAILABLE).
+ *
+ * HISTORY_REQUESTS bounds the requests, retries included: about 5,000 typical entries, and at
+ * least 50 of the largest. `ActivityWindow` bounds what is kept across pages to the newest
+ * ISSUE_ACTIVITY_LIMIT, shortened.
+ */
+const HISTORY_PAGE_SIZE = 100;
+const HISTORY_PAGE_BYTES = HOST_BOARD_LIMITS.bytes;
+const HISTORY_REQUESTS = 50;
+
+/** How many entries to ask for next, after a page of `entries` took `bytes`. */
+function nextHistoryPageSize(entries: number, bytes: number): number {
+  if (entries === 0 || bytes === 0) return HISTORY_PAGE_SIZE;
+  const fit = Math.floor((HISTORY_PAGE_BYTES * 3) / 4 / (bytes / entries));
+  return Math.min(HISTORY_PAGE_SIZE, Math.max(1, fit));
+}
+
+/** One `issue.history` page: its entries, and the cursor to the next page (null on the last). */
+function parseHistoryPage(raw: unknown): { entries: HistoryEntryRecord[]; nextCursor: string | null } {
+  const response = record(raw, "response");
+  if (!Array.isArray(response.entries)) throw new Error("entries is not an array");
+  const entries = response.entries.map((item): HistoryEntryRecord => {
+    const entry = record(item, "entry");
+    const actor = entry.actorType;
+    return {
+      kind: entry.kind === "comment" ? "comment" : "claim",
+      at: text(entry.at, "entry.at"),
+      actorType: actor === "user" || actor === "service_account" || actor === "system" ? actor : null,
+      field: typeof entry.field === "string" ? entry.field : null,
+      value: entry.value ?? null,
+      body: typeof entry.body === "string" ? entry.body : null,
+    };
+  });
+  const cursor = response.nextCursor;
+  return { entries, nextCursor: typeof cursor === "string" && /^\d+$/.test(cursor) ? cursor : null };
+}
 
 function record(value: unknown, what: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -357,6 +406,29 @@ function parseSection(value: unknown): WikiSectionRecord {
     version: int(section.version, "section.version"),
   };
 }
+
+/** The longest snippet `knowledge.search` returns, in code points. */
+const SNIPPET_MAX = 300;
+
+/** One `knowledge.search` hit; its `score` is dropped (decision 5), any other extra field ignored. */
+function parseSearchHit(value: unknown): WikiSearchRecord {
+  const hit = record(value, "hit");
+  const snippet = text(hit.snippet, "hit.snippet");
+  if ([...snippet].length > SNIPPET_MAX) throw new Malformed("hit.snippet is longer than the contract allows");
+  return {
+    sectionId: text(hit.sectionId, "hit.sectionId", UUID).toLowerCase(),
+    sectionVersion: int(hit.sectionVersion, "hit.sectionVersion"),
+    tag: text(hit.tag, "hit.tag"),
+    documentId: text(hit.documentId, "hit.documentId", UUID).toLowerCase(),
+    documentSlug: text(hit.documentSlug, "hit.documentSlug"),
+    documentTitle: text(hit.documentTitle, "hit.documentTitle"),
+    snippet,
+  };
+}
+
+/** Why a Wiki search failed when it could not run: never shown as "no results". */
+export const SEARCH_UNAVAILABLE =
+  "InferMind Wiki search is unavailable right now, so this is not an empty result. Try again shortly.";
 
 function parseRepo(value: unknown): RepoRecord {
   const repo = record(value, "repo");
@@ -741,6 +813,40 @@ function restated(error: InferOpsError, code: InferOpsErrorCode, detail: string)
   return new InferOpsError(code, detail, error.facts);
 }
 
+/** What InferOps' refusal of a widget index write says: only `configuration:publish` lists a widget. */
+export const WIDGET_INDEX_FORBIDDEN =
+  "InferOps refused: listing widgets for your company needs the shared configuration publish permission in this workspace.";
+
+// A widget index write's own refusals: a 403 is the permission (any other cause reads the same, so
+// nothing tells them apart); a 400 or 422 is a definition InferOps would not take.
+function widgetIndexFailure(status: number): SendFailure | undefined {
+  if (status === 403) return { code: "FORBIDDEN", detail: WIDGET_INDEX_FORBIDDEN, refusal: true };
+  if (status === 400 || status === 422) {
+    return { code: "INVALID_REQUEST", detail: "InferOps would not take this widget definition.", refusal: true };
+  }
+  return undefined;
+}
+
+// A widget pointer InferOps accepts: an id of 1 to 128 characters and a version from 1.
+function checkWidgetPointer(sourceId: string, sourceVersion: number): void {
+  if (typeof sourceId !== "string" || sourceId.length < 1 || sourceId.length > 128) {
+    throw new InferOpsError("INVALID_REQUEST", "A widget's Blueprint id must be 1 to 128 characters.");
+  }
+  if (!Number.isSafeInteger(sourceVersion) || sourceVersion < 1) {
+    throw new InferOpsError("INVALID_REQUEST", "A widget's Blueprint version must be a positive integer.");
+  }
+}
+
+// A definition InferOps accepts: a pointer as above, a title of 1 to 120 characters and a purpose
+// of 1 to 2000, after trimming, as `widget.publish` checks them.
+function checkWidgetDefinition(entry: WidgetDefinitionWrite): void {
+  checkWidgetPointer(entry.sourceId, entry.sourceVersion);
+  const title = entry.title.trim().length;
+  const purpose = entry.purpose.trim().length;
+  if (title < 1 || title > 120) throw new InferOpsError("INVALID_REQUEST", "A widget's title must be 1 to 120 characters.");
+  if (purpose < 1 || purpose > 2000) throw new InferOpsError("INVALID_REQUEST", "A widget's purpose must be 1 to 2000 characters.");
+}
+
 /** The gatekeeper code for a failed response, from its status and InferOps error code. */
 function failureCode(status: number, code: string | null): InferOpsErrorCode {
   if (status === 401) return "UNAUTHORIZED";
@@ -1037,12 +1143,25 @@ export async function fetchBoardSnapshot(baseUrl: string, token: string, ref: st
 type SendFailure = { code: InferOpsErrorCode; detail: string; refusal?: true };
 
 type Send = {
-  method: "GET" | "POST" | "PATCH"; path: string; body?: unknown; idempotencyKey?: string;
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE"; path: string; body?: unknown; idempotencyKey?: string;
   /** A successful response may have no body (InferOps' answer for a missing Wiki item). */
   maybeEmpty?: boolean;
   /** Read a failed response before the shared mapping; undefined falls back to it. */
   failure?: (status: number, wire: string | null) => SendFailure | undefined;
+  /**
+   * Read the body through the streaming byte cap before any parsing: a successful one over it
+   * throws `BodyTooLarge` (cancelled, nothing parsed), a failed one is capped at
+   * `HOST_BOARD_LIMITS.errorBytes`. `received` is told how many bytes a successful body had.
+   */
+  capped?: { maxBytes: number; received: (bytes: number) => void };
 };
+
+/** A successful response over its request's byte cap: cancelled unread, so nothing was parsed. */
+class BodyTooLarge extends InferOpsError {
+  constructor() {
+    super("UNAVAILABLE", FAILURE_DETAIL.UNAVAILABLE);
+  }
+}
 
 /**
  * The InferOps HTTP data source for one connection: a fixed credential, or an endpoint whose
@@ -1093,10 +1212,32 @@ export function openHttpInferOpsClient(
       throw unavailable(0, error);
     }
     let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      body = undefined;
+    if (send.capped) {
+      let raw = "";
+      try {
+        raw = await readTextCapped(response, response.ok ? send.capped.maxBytes : L.errorBytes);
+      } catch (error) {
+        if (response.ok && error instanceof ResponseTooLargeError) {
+          logger.warn("InferOps request failed", {
+            event: "http.request.failed", operation, status: response.status, code: "TOO_LARGE",
+          });
+          throw new BodyTooLarge();
+        }
+        // A failed response over its cap, or a stream that broke: nothing to parse, so the
+        // status alone decides below.
+      }
+      if (response.ok) send.capped.received(new TextEncoder().encode(raw).byteLength);
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        body = undefined;
+      }
+    } else {
+      try {
+        body = await response.json();
+      } catch {
+        body = undefined;
+      }
     }
     if (!response.ok) {
       const wire = wireCode(body);
@@ -1232,6 +1373,46 @@ export function openHttpInferOpsClient(
     return issue;
   }
 
+  /**
+   * The issue's `issue.history`, after `readIssue` has placed it in `projectKey`'s project (so an
+   * issue elsewhere is the same NOT_FOUND). InferOps pages it oldest first, so the newest entries
+   * come last: each page goes straight into a rolling window of the newest ISSUE_ACTIVITY_LIMIT,
+   * and only one page is held at a time. Each page is byte-capped before parsing, and sized to fit
+   * the cap (see HISTORY_PAGE_SIZE). A history needing more than HISTORY_REQUESTS requests fails
+   * UNAVAILABLE rather than show older entries as the latest.
+   */
+  async function readIssueActivity(projectKey: string, issueId: string): Promise<IssueActivity> {
+    await readIssue(projectKey, issueId);
+    const window = new ActivityWindow();
+    let after: string | null = null;
+    let size = HISTORY_PAGE_SIZE;
+    for (let sent = 0; sent < HISTORY_REQUESTS; sent++) {
+      const query = `limit=${size}${after ? `&afterSeq=${after}` : ""}`;
+      let body: unknown;
+      let bytes = 0;
+      try {
+        body = await request("issue.history", {
+          method: "GET", path: `/project/issues/${issueId}/history?${query}`,
+          capped: { maxBytes: HISTORY_PAGE_BYTES, received: received => { bytes = received; } },
+        });
+      } catch (error) {
+        // Over the cap: the same cursor again for half as many, down to a single entry.
+        if (error instanceof BodyTooLarge && size > 1) {
+          size = Math.max(1, Math.floor(size / 2));
+          continue;
+        }
+        if (error instanceof InferOpsError && error.code === "NOT_FOUND") throw issueNotFound();
+        throw error;
+      }
+      const { entries, nextCursor } = parsed("issue.history", body, parseHistoryPage);
+      window.add(entries);
+      if (!nextCursor) return window.result();
+      after = nextCursor;
+      size = nextHistoryPageSize(entries.length, bytes);
+    }
+    throw new InferOpsError("UNAVAILABLE", "This issue's history is too long to show here.");
+  }
+
   /** The run, provided its issue belongs to `projectKey`'s project; otherwise the one NOT_FOUND. */
   async function readRun(projectKey: string, runId: string): Promise<RunRecord> {
     if (!UUID.test(runId)) throw runNotFound();
@@ -1276,6 +1457,7 @@ export function openHttpInferOpsClient(
     },
 
     readIssue,
+    readIssueActivity,
 
     async transition(
       projectKey: string, issueId: string, toStateId: string, expectedRevision: Revision,
@@ -1497,6 +1679,28 @@ export function openHttpInferOpsClient(
       });
     },
 
+    async searchWiki(query: string, limit: number): Promise<WikiSearchRecord[]> {
+      // `query` and `limit` only: InferOps refuses any other parameter, and its seed size and graph
+      // weight stay at its defaults (decision 4).
+      const params = new URLSearchParams({ query, limit: String(limit) });
+      let body: unknown;
+      try {
+        body = await knowledge("wiki.search", { method: "GET", path: `/knowledge/search?${params}` });
+      } catch (error) {
+        // A 404 is an InferOps without `knowledge.search`; it, a timeout (503 SEARCH_TIMEOUT), a
+        // rate limit (429) and an outage are all "search unavailable", never an empty list.
+        if (error instanceof InferOpsError && (error.code === "NOT_FOUND" || error.code === "UNAVAILABLE")) {
+          throw restated(error, "UNAVAILABLE", SEARCH_UNAVAILABLE);
+        }
+        throw error;
+      }
+      return parsed("wiki.search", body, raw => {
+        const hits = list(record(raw, "response").hits, "hits");
+        if (hits.length > limit) throw new Malformed("more hits than the limit");
+        return hits.map(parseSearchHit);
+      });
+    },
+
     async readStructure(): Promise<WikiStructureRecord> {
       const body = await knowledge("wiki.structure.get", { method: "GET", path: "/knowledge/wiki/structure" });
       return parsed("wiki.structure.get", body, parseStructure);
@@ -1656,6 +1860,54 @@ export function openHttpInferOpsClient(
       return embed("object.table.read",
         `inferops://${host}/object/table-view/${tableId.toLowerCase()}?${query}`, "table-view",
         read => read.table.id === tableId.toLowerCase() && read.rows.length <= options.limit);
+    },
+
+    async holdsPermission(permission: string): Promise<boolean> {
+      let body: unknown;
+      try {
+        body = await request("auth.permissions", {
+          method: "GET", path: `/auth/permissions?permissions=${encodeURIComponent(permission)}`,
+        });
+      } catch (error) {
+        const code = inferOpsCode(error);
+        if (code === "NOT_FOUND" || code === "FORBIDDEN") return false;
+        throw error;
+      }
+      // Only InferOps' decision for exactly the permission asked about counts.
+      return parsed("auth.permissions", body, raw => {
+        const decision = list(record(raw, "response").decisions, "decisions")
+          .map((value, i) => record(value, `decisions[${i}]`))
+          .find(d => d.permission === permission);
+        if (!decision) throw new Malformed(`decisions has no entry for the permission asked about`);
+        return bool(decision.allowed, "decisions.allowed");
+      });
+    },
+
+    async publishWidgetDefinition(entry: WidgetDefinitionWrite): Promise<void> {
+      await beforeSending(async () => checkWidgetDefinition(entry));
+      const response = await request("widget.publish", {
+        method: "PUT", path: "/knowledge/widget-definitions",
+        body: { source: "inferos.blueprint", sourceId: entry.sourceId, sourceVersion: entry.sourceVersion,
+                title: entry.title, purpose: entry.purpose, visibility: "company" },
+        failure: widgetIndexFailure,
+      });
+      parsed("widget.publish", response, raw => {
+        const definition = record(raw, "response");
+        if (text(definition.sourceId, "sourceId") !== entry.sourceId ||
+            int(definition.sourceVersion, "sourceVersion") !== entry.sourceVersion) {
+          throw new Malformed("another widget definition was returned");
+        }
+      });
+    },
+
+    async withdrawWidgetDefinition(sourceId: string, sourceVersion: number): Promise<boolean> {
+      await beforeSending(async () => checkWidgetPointer(sourceId, sourceVersion));
+      const response = await request("widget.withdraw", {
+        method: "DELETE",
+        path: `/knowledge/widget-definitions/${encodeURIComponent(sourceId)}/${sourceVersion}`,
+        failure: widgetIndexFailure,
+      });
+      return parsed("widget.withdraw", response, raw => bool(record(raw, "response").withdrawn, "withdrawn"));
     },
 
     async listWorkspaceMembers(workspaceId?: string): Promise<WorkspaceMembersRead> {

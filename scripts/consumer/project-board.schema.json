@@ -1,7 +1,7 @@
 {
   "source": {
     "repository": "https://github.com/factory-level/inferops",
-    "revision": "3dae0f50d5b4fa467d734cbb2adf857f39942b31",
+    "revision": "f9b3bf540e193d6f9d309ca4c9420170f9b011bc",
     "path": "domain/ts/project/shared/board.dto.ts",
     "export": "BoardResponseSchema"
   },
@@ -81,7 +81,8 @@
                   "type": "string",
                   "enum": [
                     "content",
-                    "software"
+                    "software",
+                    "service"
                   ]
                 }
               },
@@ -139,7 +140,8 @@
                     "type": "string",
                     "enum": [
                       "content",
-                      "software"
+                      "software",
+                      "service"
                     ]
                   },
                   "revision": {

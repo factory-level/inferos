@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Board, Issue, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardActivityItem } from './boardActivity'
 import type { IssueChanges, NewIssue } from '@inferos/gatekeeper-inferops/src/types'
-import type { PendingChange, PendingMove, ProposalResult } from './boardData'
+import type { ActivityResult, PendingChange, PendingMove, ProposalResult } from './boardData'
 import { KanbanBoard, type KanbanLayout } from './KanbanBoard'
 import { dialogField, setFieldValue } from './kumoPopupDoubles'
 
@@ -32,11 +32,12 @@ const basic = board([TODO, [issue('1', 'todo', { priority: 'high', assigneeId: '
 const onMove = vi.fn<(issue: Issue, toState: State) => Promise<ProposalResult>>(async () => ({ ok: true }))
 const onCreate = vi.fn<(issue: NewIssue) => Promise<ProposalResult>>(async () => ({ ok: true }))
 const onUpdate = vi.fn<(issue: Issue, changes: IssueChanges) => Promise<ProposalResult>>(async () => ({ ok: true }))
+const onActivity = vi.fn<(issue: Issue) => Promise<ActivityResult>>(async () => ({ ok: true, activity: { entries: [], omitted: 0 } }))
 
 const render = async (b: Board, pending: PendingMove[] = [], layout: KanbanLayout = 'embedded', columns = b.columns,
   awaiting: ReadonlyMap<string, BoardActivityItem> = new Map(), changes: PendingChange[] = [], decided: BoardActivityItem[] = []) => {
   await act(async () => root.render(<KanbanBoard board={b} columns={columns} pending={pending} changes={changes} awaiting={awaiting} decided={decided} layout={layout}
-    onMove={onMove} onCreate={onCreate} onUpdate={onUpdate} />))
+    onMove={onMove} onCreate={onCreate} onUpdate={onUpdate} onActivity={onActivity} />))
 }
 const card = (id: string) => [...container.querySelectorAll<HTMLElement>('[data-issue-id]')].find(item => item.dataset.issueId === id)!
 const column = (id: string) => [...container.querySelectorAll<HTMLElement>('[data-state-id]')].find(item => item.dataset.stateId === id)!
@@ -61,6 +62,7 @@ beforeEach(() => {
   onMove.mockClear().mockResolvedValue({ ok: true })
   onCreate.mockClear().mockResolvedValue({ ok: true })
   onUpdate.mockClear().mockResolvedValue({ ok: true })
+  onActivity.mockClear().mockResolvedValue({ ok: true, activity: { entries: [], omitted: 0 } })
 })
 // Restore the clock first, so an unmount that throws cannot leave Date frozen for later tests.
 afterEach(async () => { vi.useRealTimers(); await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals() })
@@ -260,7 +262,7 @@ it('keeps the form open with the reason when a proposal is refused: a stale revi
   await act(async () => button('Edit DEMO-1')!.click())
   await enter(field('Title'), 'Renamed')
   await submit()
-  expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('This issue changed; refresh and try again.')
+  expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('This issue changed; refresh and try again. The server said: DEMO-1 is at revision 2, not 1.')
   onUpdate.mockResolvedValueOnce({ ok: false, code: 'FORBIDDEN', message: 'The workflow policy does not allow this change.' })
   await submit()
   expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('The workflow policy does not allow this change.')
@@ -273,6 +275,41 @@ it('keeps the form open with the reason when a proposal is refused: a stale revi
   expect(dialog()?.querySelector('[role="alert"]')?.textContent).toBe('You may not create issues in this project.')
 })
 
+it('opens an issue read-only with its activity, newest first, naming states and marking agents', async () => {
+  onActivity.mockResolvedValueOnce({ ok: true, activity: { omitted: 2, entries: [
+    { kind: 'comment', at: '2026-11-03T09:05:00.000Z', actor: 'agent', field: null, value: null, body: 'Picked this up.', shortened: true },
+    { kind: 'change', at: '2026-11-03T09:00:00.000Z', actor: 'person', field: 'stateId', value: 'doing', body: null, shortened: false },
+  ] } })
+  await render(basic)
+  await act(async () => button('Details of DEMO-1')!.click())
+  expect(onActivity).toHaveBeenCalledWith(expect.objectContaining({ id: '1' }))
+  const shown = dialog()!
+  expect(shown.querySelector('h2')?.textContent).toBe('DEMO-1: Issue 1')
+  expect(shown.textContent).toContain('Read-only.')
+  // No form: nothing here proposes a change.
+  expect(shown.querySelector('form, input, textarea, button[type="submit"]')).toBeNull()
+  const entries = [...shown.querySelectorAll('ol > li')].map(li => li.textContent)
+  expect(entries[0]).toContain('Agent')
+  expect(entries[0]).toContain('Picked this up.')
+  expect(entries[0]).toContain('Comment shortened; the issue in InferOps has the whole text.')
+  expect(entries[1]).not.toContain('shortened')
+  expect(entries[1]).toContain('A person')
+  expect(entries[1]).toContain('Set State to Doing')
+  expect(entries[2]).toBe('2 earlier entries not shown.')
+})
+
+it('shows a refused activity read in the gatekeeper\'s words with Try again, never as no activity', async () => {
+  onActivity.mockResolvedValueOnce({ ok: false, code: 'FORBIDDEN', message: 'InferOps refused this read.' })
+  await render(basic)
+  await act(async () => button('Details of DEMO-1')!.click())
+  const alert = dialog()!.querySelector('[role="alert"]')!
+  expect(alert.textContent).toContain('InferOps refused this read.')
+  expect(dialog()!.textContent).not.toContain('Nothing recorded')
+  await act(async () => [...alert.querySelectorAll('button')].find(b => b.textContent === 'Try again')!.click())
+  expect(onActivity).toHaveBeenCalledTimes(2)
+  expect(dialog()!.textContent).toContain('Nothing recorded on this issue yet.')
+})
+
 it('shows an issue not created yet as a provisional card that cannot be dragged, moved or edited', async () => {
   const provisional = issue('pending-9', 'todo', { identifier: 'DEMO-new', title: 'Write docs', revision: '0', pending: 'create', priority: 'urgent' })
   await render(board([TODO, [issue('1', 'todo'), provisional]], [DOING, []]))
@@ -282,6 +319,7 @@ it('shows an issue not created yet as a provisional card that cannot be dragged,
   expect(card9.getAttribute('draggable')).toBe('false')
   expect(menuItems('pending-9')).toEqual([])
   expect(button('Edit DEMO-new')).toBeNull()
+  expect(button('Details of DEMO-new')).toBeNull()
   // Listed after the issues that exist, whatever its priority.
   expect([...column('todo').querySelectorAll('[data-issue-id]')].map(c => c.getAttribute('data-issue-id'))).toEqual(['1', 'pending-9'])
   await act(async () => card9.focus())
@@ -434,7 +472,7 @@ it('keeps an ordinary edit dialog and its draft mounted when its card scrolls ou
 it('mounts an externally controlled issue dialog before its off-window card has been visited', async () => {
   const b = board([TODO, manyIssues()], [DOING, []])
   await act(async () => root.render(<KanbanBoard board={b} columns={b.columns} pending={[]} changes={[]} awaiting={new Map()} decided={[]}
-    layout="embedded" onMove={onMove} onCreate={onCreate} onUpdate={onUpdate} openIssue={{ issueId: '80', onChange: vi.fn<(issueId: string | null) => void>() }} />))
+    layout="embedded" onMove={onMove} onCreate={onCreate} onUpdate={onUpdate} onActivity={onActivity} openIssue={{ issueId: '80', onChange: vi.fn<(issueId: string | null) => void>() }} />))
   expect(card('80')).not.toBeUndefined()
   expect(dialog()?.querySelector('h2')?.textContent).toBe('Edit DEMO-80')
   await scrollColumn('todo', 30 * 148)

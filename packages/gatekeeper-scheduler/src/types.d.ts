@@ -248,6 +248,11 @@ export interface ScheduledFiring {
   actualTime: number;
   /** Schedule timezone, or `UTC` for elapsed intervals and numeric one-shots. */
   timeZone: string;
+  /**
+   * Set when a person ran this task now through its trigger's control, outside the schedule: an
+   * extra run that counts as no occurrence, with `scheduledTime` the time it was asked for.
+   */
+  requested?: true;
 }
 
 /**

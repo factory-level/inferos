@@ -12,6 +12,7 @@ import { WikiIssueEmbed } from './WikiIssueEmbed'
 import { WikiMarkdown } from './WikiMarkdown'
 import { WikiNavigation } from './WikiNavigation'
 import { WikiPageBody } from './WikiPageBody'
+import { WikiSearch } from './WikiSearch'
 import { WikiSection } from './WikiSection'
 import type { WikiStructureState } from './wikiData'
 import { authoredBody, bodyEditable, firstNavigationPage, generatedBlock, pageText, parseWikiReference, wikiNavigation } from './wikiPage'
@@ -41,7 +42,8 @@ const GeneratedBlock = ({ document, structure, onOpenPage }: {
  * body as Markdown, else its sections, then a Master's generated page list. A board or issue
  * reference that stands alone as a paragraph shows live through the scope's board adapter, only
  * where the workspace holds its own connection to that board; a page reference or `/wiki/<slug>`
- * link of the same Wiki opens that page. With `editable`, the body (or, for a page without one, each
+ * link of the same Wiki opens that page. A search over the sections the connection can read opens a
+ * result's page, read again then. With `editable`, the body (or, for a page without one, each
  * section) can be edited, the edit being a proposal through the approval path. The agent view shows
  * the page as an agent reads it.
  */
@@ -88,7 +90,7 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
   const failed = (list.status === 'ready' ? list.error : undefined) ?? (page?.status === 'ready' ? page.error : undefined)
     ?? (structure.status === 'ready' ? structure.error : undefined)
   const body = document ? authoredBody(document) : null
-  return <article aria-label={`InferMind Wiki ${widget.targetRef}`} className="flex min-w-0 flex-col rounded-lg border border-kumo-line bg-kumo-base">
+  return <article aria-label={`InferMind Wiki ${widget.targetRef}`} className="flex h-full min-w-0 flex-col rounded-lg border border-kumo-line bg-kumo-base">
     <header className="flex flex-wrap items-center gap-2 border-b border-kumo-line px-3 py-2">
       <div className="min-w-0 flex-1">
         <h3 className="truncate text-sm font-medium text-kumo-default">{document ? document.title : 'InferMind Wiki'}</h3>
@@ -100,17 +102,19 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
       <Button size="sm" shape="square" variant="ghost" icon={ArrowClockwise} aria-label="Refresh Wiki"
         disabled={list.status === 'loading'} onClick={() => data?.refresh()} />
     </header>
-    <div className="p-3">
+    <div className="min-h-0 flex-1 p-3">
       {list.status === 'loading' && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the Wiki…</p>}
       {list.status === 'unbound' && <p className="text-sm text-kumo-subtle">
-        Not connected. This workspace has no connection to this Wiki. Connect it, for example by asking in the chat, to read it here.
+        Not connected. This workspace has no connection to this Wiki or to its organization's InferOps account. Connect one, for example by asking in the chat, to read it here.
       </p>}
       {list.status === 'disabled' && <p role="status" className="text-sm text-kumo-subtle">
         {list.message} The connection to this Wiki is kept; it shows the Wiki again once InferOps is turned back on.
       </p>}
       {list.status === 'error' && <div className="space-y-2">
         <p role="alert" className="text-sm text-kumo-danger">
-          {list.code === 'FORBIDDEN' || list.code === 'UNAUTHORIZED' ? 'No access to this Wiki' : 'Could not read the Wiki'}: {list.message}
+          {list.code === 'UNAUTHORIZED' ? 'Sign in to InferOps again to read this Wiki.'
+            : list.code === 'FORBIDDEN' ? `No access to this Wiki: ${list.message}`
+              : `Could not read the Wiki: ${list.message}`}
         </p>
         <Button size="sm" onClick={() => data?.refresh()}>Try again</Button>
       </div>}
@@ -121,9 +125,13 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
       {navigation && (list.status === 'ready' && list.documents.length === 0
         ? <p className="text-sm text-kumo-subtle">This Wiki has no pages you can open.</p>
         : <div className="flex flex-wrap gap-4">
-          <nav aria-label="Wiki pages" className="w-full min-w-0 @3xl:w-56 @3xl:shrink-0">
-            <WikiNavigation navigation={navigation} selected={slug} onSelect={setChosen} />
-          </nav>
+          <div className="w-full min-w-0 space-y-3 @3xl:w-56 @3xl:shrink-0">
+            <WikiSearch onOpenPage={setChosen} onSearch={query => data?.search(query)
+              ?? Promise.resolve({ ok: false, code: 'NOT_LOADED', message: 'The Wiki is not loaded.' })} />
+            <nav aria-label="Wiki pages">
+              <WikiNavigation navigation={navigation} selected={slug} onSelect={setChosen} />
+            </nav>
+          </div>
           <div className="min-w-0 flex-1 space-y-3">
             {slug === null && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the Wiki…</p>}
             {slug !== null && !listed && <p role="status" className="text-sm text-kumo-subtle">

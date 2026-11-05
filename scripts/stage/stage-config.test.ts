@@ -8,7 +8,7 @@ import { gatekeeperShortName, isGatekeeperPackage, readDeployablePackages } from
 import { ROOT, gatekeeperBindingName, type StagingConfig } from "../preview/staging-config.ts";
 import {
   buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageBucketName,
-  stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageTiers,
+  stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageR2Buckets, stageTiers,
   stageWorkerHost, stageWorkerName, resolveStageAdmins,
 } from "./stage-config.ts";
 import { STAGES, resolveStage, stageDefinitionProblems, type StageDefinition } from "./stages.ts";
@@ -33,12 +33,12 @@ test("a malformed stage definition is refused before anything is generated", () 
     ...STAGES.dev,
     hostname: "Dev-OS.example",
     workerPrefix: "inferos-dev",
-    inferops: { baseUrl: "http://localhost:8080", authOrigin: "https://auth.example/path" },
+    inferops: { baseUrl: "http://localhost:8080", authOrigin: "https://auth.example/path", company: "acme" },
     gatekeepers: ["gatekeeper-context", "gatekeeper-context"],
   };
   const problems = stageDefinitionProblems(bad).join("\n");
   for (const fragment of ["hostname", "workerPrefix", "inferops.baseUrl", "inferops.authOrigin",
-    "must include gatekeeper-inferops", "twice"]) {
+    "inferops.company", "must include gatekeeper-inferops", "twice"]) {
     assert.match(problems, new RegExp(fragment));
   }
 });
@@ -133,6 +133,7 @@ test("resources are the stage's own, named stably and bound by id", () => {
   }
   assert.deepEqual(backend.r2_buckets, [{ binding: "BLUEPRINT_CONTENT", bucket_name: "inferos-prod-blueprint-content" }]);
   assert.equal(stageBucketName(stage, "BLUEPRINT_CONTENT"), "inferos-prod-blueprint-content");
+  assert.deepEqual(stageR2Buckets(stage, ALL_PACKAGES), ["inferos-prod-blueprint-content"]);
   assert.deepEqual(stageKvNamespaces(stage, ALL_PACKAGES).map((ns) => ns.title).toSorted(), [
     "inferos-prod-gatekeeper-context-context-collections",
     "inferos-prod-workshop-backend-avatars",
@@ -153,6 +154,8 @@ test("gatekeepers live under the stage origin; InferOps points at the stage's In
     assert.equal(inferops.vars?.INFEROPS_BASE_URL, stage.inferops.baseUrl);
     assert.equal(inferops.vars?.INFERLAB_AUTH_ORIGIN, stage.inferops.authOrigin);
     assert.equal(inferops.vars?.INFEROPS_ENABLED, "true");
+    // FAC-160: each stage names its company; both are InferLab's own today.
+    assert.equal(inferops.vars?.INFEROPS_COMPANY, "internal");
     assert.equal(inferops.vars?.CODING_WORKBENCH_ENABLED, "false");
     for (const name of ["INFEROPS_API_TOKEN", "INFEROPS_WORKSPACE_ID", "INFEROPS_WORKSPACE_SLUG", "MOCK_INFEROPS_SYNTHETIC_ISSUES"]) {
       assert.equal(inferops.vars?.[name], undefined, `${name} reached a stage`);
@@ -162,11 +165,34 @@ test("gatekeepers live under the stage origin; InferOps points at the stage's In
   assert.equal(STAGES.prod.inferops.authOrigin, "https://auth.inferlab.io");
 });
 
+test("each stage offers only the optional InferOps resource kinds it lists, and states every switch", () => {
+  const vars = (stageName: "dev" | "prod") =>
+    (build(stageName).get("gatekeeper-inferops") as StagingConfig).vars ?? {};
+  // FAC-149: dev offers workflow policy and custom tables; prod offers none.
+  assert.equal(vars("dev").INFEROPS_WORKFLOW_POLICY_ENABLED, "true");
+  assert.equal(vars("dev").INFEROPS_TABLES_ENABLED, "true");
+  assert.equal(vars("dev").INFEROPS_MEMBERS_ENABLED, "false");
+  for (const name of ["INFEROPS_TABLES_ENABLED", "INFEROPS_MEMBERS_ENABLED", "INFEROPS_WORKFLOW_POLICY_ENABLED"]) {
+    assert.equal(vars("prod")[name], "false", `${name} on prod`);
+  }
+  const listed: StageDefinition = { ...STAGES.dev, inferops: { ...STAGES.dev.inferops, resources: ["tables", "workflowPolicy"] } };
+  const withTables = buildStageConfigs({ stageName: "dev", stage: listed, packages: ALL_PACKAGES,
+    accountId: ACCOUNT_ID,
+    kvIds: new Map(stageKvNamespaces(listed, ALL_PACKAGES).map((ns, i) => [ns.title, `kv-${i}`])) })
+    .get("gatekeeper-inferops") as StagingConfig;
+  assert.equal(withTables.vars?.INFEROPS_TABLES_ENABLED, "true");
+  assert.equal(withTables.vars?.INFEROPS_MEMBERS_ENABLED, "false");
+});
+
 test("the backend signs in with InferLab only and carries no secret in its vars", () => {
   const backend = build("dev", JSON.stringify({ widgets: [] })).get("workshop-backend") as StagingConfig;
   assert.equal(backend.vars?.PUBLIC_BASE_URL, "https://dev-os.factorylevel.dev");
   assert.equal(backend.vars?.AUTH_GATEKEEPERS, "inferops");
   assert.equal(backend.vars?.DISABLE_PASSWORD_AUTH, "true");
+  assert.equal(backend.vars?.SHARED_CONFIGURATION_GATEKEEPER, "inferops");
+  // Production too: only an InferOps Admin edits or publishes shared configuration on any stage.
+  assert.equal((build("prod").get("workshop-backend") as StagingConfig).vars?.SHARED_CONFIGURATION_GATEKEEPER,
+    "inferops");
   assert.equal(backend.vars?.COMPOSABLE_VIEWS, "true");
   assert.equal(backend.vars?.DURABLE_VIEWS, "true");
   assert.equal(backend.vars?.CANVAS_CATALOG, JSON.stringify({ widgets: [] }));
@@ -252,9 +278,15 @@ test("destructive Durable Object migrations are found; the committed ones have n
 
 test("the CLI parses its flags and refuses anything else", () => {
   assert.deepEqual(parseStageArgs(["deploy", "dev", "--dry-run", "--allow-dirty"]), {
-    command: "deploy", stage: "dev", dryRun: true, allowDirty: true,
+    command: "deploy", stage: "dev", wrapper: undefined, dryRun: true, allowDirty: true,
     allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined,
   });
+  assert.deepEqual(parseStageArgs(["deploy", "--wrapper", "/w", "--dry-run"]), {
+    command: "deploy", stage: "", wrapper: "/w", dryRun: true, allowDirty: false,
+    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined,
+  });
+  assert.throws(() => parseStageArgs(["deploy", "dev", "--wrapper", "/w"]), /not both or neither/);
+  assert.throws(() => parseStageArgs(["deploy", "--wrapper", "/w", "--allow-dirty"]), /clean tree/);
   assert.equal(parseStageArgs(["delete", "prod", "--confirm", "os.factorylevel.dev"]).confirm, "os.factorylevel.dev");
   assert.throws(() => parseStageArgs(["deploy"]), /Usage/);
   assert.throws(() => parseStageArgs(["deploy", "dev", "--force"]), /unknown argument: --force/);

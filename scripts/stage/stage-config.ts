@@ -22,12 +22,12 @@ import {
 import {
   INFEROPS_GATEKEEPER, INFERLAB_LOGIN_VENDOR, inferLabLoginStartupError,
 } from "../dev-server-config.ts";
-import type { StageDefinition, StageName } from "./stages.ts";
+import { INFEROPS_OPTIONAL_RESOURCES, type StageDefinition } from "./stages.ts";
 
 type PackageConfig = Pick<DeployablePackage, "name" | "config">;
 
 /** The generated per-package config a stage deploys from (gitignored — it is build output). */
-export function stageConfigFileName(stageName: StageName): string {
+export function stageConfigFileName(stageName: string): string {
   return `wrangler.stage-${stageName}.jsonc`;
 }
 
@@ -52,6 +52,12 @@ export function stageKvTitle(stage: StageDefinition, pkgName: string, binding: s
 /** The R2 bucket a stage binds as `binding`. Wrangler creates it on first deploy if it is missing. */
 export function stageBucketName(stage: StageDefinition, binding: string): string {
   return `${stage.resourcePrefix}${kebab(binding)}`;
+}
+
+/** Every stage-prefixed R2 bucket, deduplicated when several packages bind it. */
+export function stageR2Buckets(stage: StageDefinition, packages: readonly PackageConfig[]): string[] {
+  return [...new Set(stagePackages(stage, packages).flatMap((pkg) =>
+    (pkg.config.r2_buckets ?? []).map(({ binding }) => stageBucketName(stage, binding))))];
 }
 
 /** One KV namespace a stage needs, before its id is known. */
@@ -115,13 +121,14 @@ export function inferOpsGatekeeperVars(stage: StageDefinition): Record<string, s
     INFERLAB_AUTH_ORIGIN: stage.inferops.authOrigin,
     ...(stage.inferops.authorizeOrigin ? { INFERLAB_AUTHORIZE_ORIGIN: stage.inferops.authorizeOrigin } : {}),
     INFEROPS_ENABLED: "true",
+    INFEROPS_COMPANY: stage.inferops.company,
     // Every optional switch is stated rather than left to the gatekeeper's "unset" default, so a
     // stage's behaviour never depends on a default changing. Coding dispatch stays off: it needs a
     // separate `project/dispatch` grant and a local runner a stage does not have.
     CODING_WORKBENCH_ENABLED: "false",
-    INFEROPS_TABLES_ENABLED: "false",
-    INFEROPS_MEMBERS_ENABLED: "false",
-    INFEROPS_WORKFLOW_POLICY_ENABLED: "false",
+    // Each optional resource kind is on only where the stage lists it (`inferops.resources`).
+    ...Object.fromEntries(Object.entries(INFEROPS_OPTIONAL_RESOURCES).map(([kind, name]) =>
+      [name, String((stage.inferops.resources ?? [] as readonly string[]).includes(kind))])),
     INFEROPS_HOST_BOARDS: "false",
   };
 }
@@ -153,6 +160,9 @@ export function backendVars(stage: StageDefinition, origin: string, canvasCatalo
     // is allowlisted, so the pair is checked together (inferLabLoginStartupError) before deploying.
     AUTH_GATEKEEPERS: INFERLAB_LOGIN_VENDOR,
     DISABLE_PASSWORD_AUTH: "true",
+    // Only an InferOps Admin edits and publishes shared configuration (FAC-44): InferOps'
+    // configuration:build / configuration:publish, asked through the person's own connection.
+    SHARED_CONFIGURATION_GATEKEEPER: INFERLAB_LOGIN_VENDOR,
     // Composition with saved views, as a wrapper with `composableViews` + `durableViews` gets it
     // from `pnpm dev-server`: the InferOps board is shown on a canvas.
     COMPOSABLE_VIEWS: "true",
@@ -185,7 +195,7 @@ const FORBIDDEN_GATEKEEPER_VARS = [
 export function buildStageConfigs({
   stageName, stage, packages, accountId, kvIds, canvasCatalog,
 }: {
-  stageName: StageName;
+  stageName: string;
   stage: StageDefinition;
   packages: readonly PackageConfig[];
   accountId: string;
@@ -348,14 +358,19 @@ export function stageTiers(configs: ReadonlyMap<string, StagingConfig>): StageTi
  * `gatekeeperSecretNames` the secrets a gatekeeper package is uploaded with, by package name.
  */
 export function formatStagePlan({ stageName, stage, configs, secretNames, gatekeeperSecretNames = {}, kv }: {
-  stageName: StageName;
+  stageName: string;
   stage: StageDefinition;
   configs: ReadonlyMap<string, StagingConfig>;
   secretNames: string[];
   gatekeeperSecretNames?: Readonly<Record<string, readonly string[]>>;
   kv: readonly StageKvNamespace[];
 }): string {
-  const lines = [`stage "${stageName}" -> https://${stage.hostname} (InferLab ${stage.inferops.baseUrl})`];
+  // The company is named only when it's `internal`: a company's tenant id goes to
+  // `INFEROPS_COMPANY` alone, never into a plan meant to be pasted into a PR or a log.
+  const company = stage.inferops.company === "internal" ? "internal" : "tenant id set";
+  const lines = [
+    `stage "${stageName}" -> https://${stage.hostname} (InferLab ${stage.inferops.baseUrl}, company ${company})`,
+  ];
   for (const tier of stageTiers(configs)) {
     lines.push(`  ${tier.label}:`);
     for (const pkgName of tier.packages) {

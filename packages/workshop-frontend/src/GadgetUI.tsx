@@ -102,7 +102,7 @@ window.addEventListener('unhandledrejection', (event) => {
 
 `);
 
-const createSandboxedHtml = (jsCode: string): string => {
+export const createSandboxedHtml = (jsCode: string): string => {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -128,6 +128,10 @@ interface GadgetUIProps {
   // Reports whether the "No gadget UI yet" placeholder is showing: true only once a load has
   // confirmed the gadget has no UI, so a spinner or a not-yet-loaded view never counts.
   onNoUiChange?: (showsNoUi: boolean) => void
+  // A console widget's current local state in Operate (FAC-86), told to the gadget as a
+  // `{type: 'widget-state', state}` message once it connects and whenever it changes. One way and
+  // read-only: the gadget can draw it, and changes it only through the host's own controls.
+  widgetState?: string | null
 }
 
 // How long to wait for a UI bundle before offering a retry instead of a spinner. Not a latency
@@ -139,7 +143,7 @@ export default function GadgetUI(props: GadgetUIProps) {
   return <GadgetUISession key={props.chatId} {...props} />
 }
 
-function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, onNoUiChange }: GadgetUIProps) {
+function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chatId, onConsoleLog, onIframeEscape, onNoUiChange, widgetState }: GadgetUIProps) {
   const [sandboxedHtml, setSandboxedHtml] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -171,6 +175,18 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
   onConsoleLogRef.current = onConsoleLog
   const onNoUiChangeRef = useRef(onNoUiChange)
   onNoUiChangeRef.current = onNoUiChange
+  const widgetStateRef = useRef(widgetState)
+  widgetStateRef.current = widgetState
+
+  // The sandboxed frame's origin is opaque ("null"), which no target origin can name, so the
+  // message goes to its window with '*'. It carries only the state's name, which the person sees.
+  const tellWidgetState = () => {
+    const state = widgetStateRef.current
+    if (typeof state === 'string') {
+      iframeRef.current?.contentWindow?.postMessage({ type: 'widget-state', state }, '*')
+    }
+  }
+  useEffect(tellWidgetState, [widgetState])
 
   // A code change invalidates the view without clearing `hasLoaded`, so the previous load's "no UI"
   // result must not keep counting while the replacement load is pending.
@@ -382,6 +398,8 @@ function GadgetUISession({ gadget, height, reloadTrigger, isVisible = true, chat
             },
           })
           rpcSessionRef.current = newMessagePortRpcSession(port, forwardingTarget)
+          // A (re)loaded frame knows nothing yet: tell it the widget's state now it is listening.
+          tellWidgetState()
         } catch (caught) {
           gadgetStub?.[Symbol.dispose]?.()
           port.close()

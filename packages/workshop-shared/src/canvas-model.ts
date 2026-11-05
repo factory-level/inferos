@@ -1,13 +1,13 @@
 /**
- * The versioned nested canvas model (ADR 0014, proposed). Nothing stores, renders or runs it yet:
- * saved canvases stay `CanvasDefinition` until the migration that wires this in.
+ * The versioned nested canvas model (ADR 0014, proposed). Saved canvases stay `CanvasDefinition`,
+ * and a page is read from one by conversion. Nothing renders or runs this model yet.
  *
  * Containment says only where a node sits and what is removed with it. Nothing passes along it:
  * no permission, setting or event reaches a parent or child unless an attachment names that target.
  * A reference identifies a target and an attachment grants nothing; both are checked at use, under
  * the acting person's or run's own authority.
  */
-import { CANVAS_ID, CANVAS_REVISION, parseCanvasWidget, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
+import { CANVAS_ID, CANVAS_REVISION, parseCanvasDefinition, parseCanvasWidget, type CanvasDefinition, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
 
 /** The schema version this module reads. `CanvasDefinition`, with sections, is version 1. */
 export const CANVAS_MODEL_SCHEMA_VERSION = 2;
@@ -392,6 +392,47 @@ export function parseCanvasWorkspacePages(value: unknown): CanvasPage[] {
   return pages;
 }
 
+/**
+ * The page a version 1 definition maps to. Pure and deterministic, so converting twice or
+ * concurrently gives the same IDs and one result. It keeps the revision, because conversion isn't
+ * an edit, and throws without changing anything if the definition isn't valid.
+ */
+export function canvasPageFromDefinition(definition: unknown): CanvasPage {
+  const { id, revision, title, sections } = parseCanvasDefinition(definition);
+  return parseCanvasPage({
+    schemaVersion: CANVAS_MODEL_SCHEMA_VERSION, id, revision, title, attachments: [],
+    children: sections.map(section => section.id),
+    nodes: sections.flatMap(section => [
+      { nodeType: "object", id: section.id, title: section.title, columns: section.columns, attachments: [],
+        children: section.widgets.map(widget => widget.id) },
+      ...section.widgets.map(widget => ({ ...widget, nodeType: "widget", attachments: [] })),
+    ]),
+  });
+}
+
+/**
+ * The version 1 definition that holds this page exactly, or null if version 1 can't: it has
+ * attachments, nesting, a widget directly under the page, or more sections than version 1 allows.
+ */
+export function canvasDefinitionFromPage(page: CanvasPage): CanvasDefinition | null {
+  if (page.attachments.length > 0 || page.children.length > 12) return null;
+  const byId = new Map(page.nodes.map(node => [node.id, node]));
+  const sections: CanvasDefinition["sections"] = [];
+  for (const sectionId of page.children) {
+    const section = byId.get(sectionId);
+    if (section?.nodeType !== "object" || section.attachments.length > 0) return null;
+    const widgets: CanvasWidget[] = [];
+    for (const widgetId of section.children) {
+      const node = byId.get(widgetId);
+      if (node?.nodeType !== "widget" || node.attachments.length > 0) return null;
+      const { nodeType: _nodeType, attachments: _attachments, ...widget } = node;
+      widgets.push(widget);
+    }
+    sections.push({ id: section.id, title: section.title, columns: section.columns, widgets });
+  }
+  return parseCanvasDefinition({ schemaVersion: 1, id: page.id, revision: page.revision, title: page.title, sections });
+}
+
 /** An explicit edit target. It identifies what is selected within one workspace and authorizes nothing. */
 export type CanvasTarget =
   | { kind: "workspace" }
@@ -441,4 +482,231 @@ export function resolveCanvasTarget(page: CanvasPage, target: CanvasTarget): Can
     if (attachment) return { kind: "attachment", attachment, ownerId: owner.id };
   }
   return null;
+}
+
+/** One step of a target's path from the workspace down: what it is, and the target that selects it alone. */
+export type CanvasTargetStep =
+  | { kind: "workspace"; target: CanvasTarget }
+  | { kind: "page"; target: CanvasTarget; page: CanvasPage }
+  | { kind: "object"; target: CanvasTarget; node: CanvasObjectNode }
+  | { kind: "widget"; target: CanvasTarget; node: CanvasWidgetNode }
+  | { kind: "attachment"; target: CanvasTarget; attachment: CanvasAttachment };
+
+/**
+ * Where `target` sits on this page, for a breadcrumb: the workspace, the page, every object that
+ * contains it, outermost first, then the target itself; an attachment follows the page or node that
+ * holds it. Null when this page doesn't hold the target. Each step's target selects that step only.
+ * Authorizes nothing.
+ */
+export function canvasTargetPath(page: CanvasPage, target: CanvasTarget): CanvasTargetStep[] | null {
+  const workspace: CanvasTargetStep = { kind: "workspace", target: { kind: "workspace" } };
+  if (target.kind === "workspace") return [workspace];
+  const resolved = resolveCanvasTarget(page, target);
+  if (!resolved) return null;
+  const pageStep: CanvasTargetStep = { kind: "page", target: { kind: "page", pageId: page.id }, page };
+  const byId = new Map(page.nodes.map(node => [node.id, node]));
+  const parentOf = new Map<string, string>();
+  for (const node of page.nodes) if (node.nodeType === "object") for (const child of node.children) parentOf.set(child, node.id);
+  // Containment is acyclic and every node is reached once (parseCanvasPage checks both), so this ends.
+  const nodeSteps = (id: string): CanvasTargetStep[] => {
+    const steps: CanvasTargetStep[] = [];
+    for (let at: string | undefined = id; at !== undefined; at = parentOf.get(at)) {
+      const node = byId.get(at)!;
+      const nodeTarget: CanvasTarget = { kind: "node", pageId: page.id, nodeId: node.id };
+      steps.unshift(node.nodeType === "object" ? { kind: "object", target: nodeTarget, node } : { kind: "widget", target: nodeTarget, node });
+    }
+    return steps;
+  };
+  switch (resolved.kind) {
+    case "page": return [workspace, pageStep];
+    case "object": case "widget": return [workspace, pageStep, ...nodeSteps(resolved.node.id)];
+    case "attachment": return [workspace, pageStep, ...(resolved.ownerId === page.id ? [] : nodeSteps(resolved.ownerId)),
+      { kind: "attachment", target, attachment: resolved.attachment }];
+  }
+}
+
+/** Direct children of a page, which are all objects: version 1's section limit, so every page projects to version 1. */
+export const CANVAS_PAGE_TOP_OBJECTS = 12;
+
+/**
+ * One typed edit to a page (FAC-83). Each names its target by stable ID. None reads or writes
+ * business data: removing a node removes only the reference on this page, never the record it names.
+ */
+export type CanvasPageOperation =
+  /** Change the page's plain-text title. */
+  | { type: "renamePage"; title: string }
+  /** Insert an empty object under the page or an object, at a zero-based position. */
+  | { type: "addObject"; parent: string; index: number; object: { id: string; title: string; columns: 1 | 2 | 3 } }
+  /** Insert a widget instance under an object, at a zero-based position. */
+  | { type: "addWidget"; parent: string; index: number; widget: CanvasWidget }
+  /** Move a node, with what it contains, under another parent or to another position under the same one. */
+  | { type: "moveNode"; nodeId: string; parent: string; index: number }
+  /** Change an object's heading and column count. */
+  | { type: "configureObject"; nodeId: string; title: string; columns: 1 | 2 | 3 }
+  /** Replace a widget instance's parameters, reference or size, keeping its ID and attachments. */
+  | { type: "configureWidget"; widget: CanvasWidget }
+  /** Remove a node and everything it contains from the page. */
+  | { type: "removeNode"; nodeId: string }
+  /** Replace the attachments of the page or of one node. */
+  | { type: "setAttachments"; target: string; attachments: CanvasAttachment[] };
+
+const COLUMNS = (value: unknown, at: string): 1 | 2 | 3 =>
+  value === 1 || value === 2 || value === 3 ? value : reject("invalid-shape", at);
+
+/**
+ * Apply page operations in order to a validated page and return the validated result, at the same
+ * revision: the store checks the revision and moves it. Throws `CanvasModelError` and changes nothing
+ * if any operation, or the page they produce, is invalid. A page's direct children must be objects,
+ * at most `CANVAS_PAGE_TOP_OBJECTS`, so a version 1 reader can always be shown the page.
+ */
+export function applyCanvasPageOperations(current: CanvasPage, operations: unknown): CanvasPage {
+  if (!Array.isArray(operations) || operations.length < 1 || operations.length > 32) return reject("invalid-shape", "operations");
+  const page = parseCanvasPage(current);
+  let title = page.title;
+  let pageChildren = [...page.children];
+  let pageAttachments = page.attachments;
+  const nodes = new Map<string, CanvasNode>(page.nodes.map(node => [node.id, node]));
+
+  const childrenOf = (parent: string, at: string): string[] => {
+    if (parent === page.id) return pageChildren;
+    const node = nodes.get(parent);
+    return node?.nodeType === "object" ? node.children : reject("invalid-target", at);
+  };
+  const setChildren = (parent: string, children: string[]) => {
+    if (parent === page.id) pageChildren = children;
+    else nodes.set(parent, { ...(nodes.get(parent) as CanvasObjectNode), children });
+  };
+  const insert = (parent: string, index: unknown, id: string, at: string) => {
+    const children = childrenOf(parent, at);
+    if (typeof index !== "number" || !Number.isInteger(index) || index < 0 || index > children.length) return reject("invalid-shape", at);
+    setChildren(parent, [...children.slice(0, index), id, ...children.slice(index)]);
+  };
+  const detach = (id: string) => {
+    for (const parent of [page.id, ...nodes.keys()]) {
+      const node = parent === page.id ? undefined : nodes.get(parent);
+      if (parent !== page.id && node?.nodeType !== "object") continue;
+      const children = childrenOf(parent, id);
+      if (children.includes(id)) setChildren(parent, children.filter(child => child !== id));
+    }
+  };
+  const fresh = (id: string, at: string): string => {
+    const parsed = parseId(id, at);
+    return parsed === page.id || nodes.has(parsed) ? reject("duplicate-id", parsed) : parsed;
+  };
+  const widgetOf = (value: unknown, at: string): CanvasWidget => {
+    try {
+      return parseCanvasWidget(value);
+    } catch {
+      return reject("invalid-widget", at);
+    }
+  };
+
+  operations.forEach((raw, index) => {
+    const at = `operations[${index}]`;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return reject("invalid-shape", at);
+    const op = raw as Record<string, unknown>;
+    switch (op.type) {
+      case "renamePage":
+        title = parseTitle(fields(op, ["type", "title"], at).title, at);
+        return;
+      case "addObject": {
+        const o = fields(op, ["type", "parent", "index", "object"], at);
+        const spec = fields(o.object, ["id", "title", "columns"], at);
+        const id = fresh(spec.id as string, at);
+        nodes.set(id, { nodeType: "object", id, title: parseTitle(spec.title, at), columns: COLUMNS(spec.columns, at), children: [], attachments: [] });
+        return insert(parseId(o.parent, at), o.index, id, at);
+      }
+      case "addWidget": {
+        const o = fields(op, ["type", "parent", "index", "widget"], at);
+        const widget = widgetOf(o.widget, at);
+        fresh(widget.id, at);
+        const parent = parseId(o.parent, at);
+        if (parent === page.id) return reject("invalid-nesting", at);
+        nodes.set(widget.id, { ...widget, nodeType: "widget", attachments: [] });
+        return insert(parent, o.index, widget.id, at);
+      }
+      case "moveNode": {
+        const o = fields(op, ["type", "nodeId", "parent", "index"], at);
+        const id = parseId(o.nodeId, at);
+        if (!nodes.has(id)) return reject("missing-reference", at);
+        const parent = parseId(o.parent, at);
+        childrenOf(parent, at);
+        detach(id);
+        return insert(parent, o.index, id, at);
+      }
+      case "configureObject": {
+        const o = fields(op, ["type", "nodeId", "title", "columns"], at);
+        const node = nodes.get(parseId(o.nodeId, at));
+        if (node?.nodeType !== "object") return reject("invalid-target", at);
+        nodes.set(node.id, { ...node, title: parseTitle(o.title, at), columns: COLUMNS(o.columns, at) });
+        return;
+      }
+      case "configureWidget": {
+        const o = fields(op, ["type", "widget"], at);
+        const widget = widgetOf(o.widget, at);
+        const node = nodes.get(widget.id);
+        if (node?.nodeType !== "widget") return reject("invalid-target", at);
+        nodes.set(widget.id, { ...widget, nodeType: "widget", attachments: node.attachments });
+        return;
+      }
+      case "removeNode": {
+        const o = fields(op, ["type", "nodeId"], at);
+        const id = parseId(o.nodeId, at);
+        if (!nodes.has(id)) return reject("missing-reference", at);
+        detach(id);
+        const drop = (nodeId: string) => {
+          const node = nodes.get(nodeId);
+          nodes.delete(nodeId);
+          if (node?.nodeType === "object") node.children.forEach(drop);
+        };
+        drop(id);
+        return;
+      }
+      case "setAttachments": {
+        const o = fields(op, ["type", "target", "attachments"], at);
+        const target = parseId(o.target, at);
+        const attachments = parseAttachments(o.attachments, at);
+        if (target === page.id) pageAttachments = attachments;
+        else {
+          const node = nodes.get(target);
+          if (!node) return reject("missing-reference", at);
+          nodes.set(target, { ...node, attachments });
+        }
+        return;
+      }
+      default:
+        return reject("invalid-shape", at);
+    }
+  });
+
+  if (pageChildren.length > CANVAS_PAGE_TOP_OBJECTS) return reject("limit-exceeded", page.id);
+  if (pageChildren.some(child => nodes.get(child)?.nodeType !== "object")) return reject("invalid-nesting", page.id);
+  return parseCanvasPage({ ...page, title, children: pageChildren, attachments: pageAttachments, nodes: [...nodes.values()] });
+}
+
+/**
+ * What a reader of version 1 sees of a page that version 1 can't hold exactly: each top-level object
+ * as a section holding every widget beneath it, in tree order, under that object's heading and
+ * columns. Widget IDs, kinds, references and revision are kept; nesting and attachments aren't shown.
+ * Throws `CanvasModelError` if the page breaks the top-level rule `applyCanvasPageOperations` keeps.
+ */
+export function canvasDefinitionProjection(page: CanvasPage): CanvasDefinition {
+  const exact = canvasDefinitionFromPage(page);
+  if (exact) return exact;
+  const byId = new Map(page.nodes.map(node => [node.id, node]));
+  const widgetsUnder = (id: string): CanvasWidget[] => {
+    const node = byId.get(id);
+    if (node?.nodeType === "widget") {
+      const { nodeType: _nodeType, attachments: _attachments, ...widget } = node;
+      return [widget];
+    }
+    return node?.nodeType === "object" ? node.children.flatMap(widgetsUnder) : [];
+  };
+  if (page.children.length > CANVAS_PAGE_TOP_OBJECTS) return reject("limit-exceeded", page.id);
+  const sections = page.children.map(id => {
+    const node = byId.get(id);
+    if (node?.nodeType !== "object") return reject("invalid-nesting", page.id);
+    return { id: node.id, title: node.title, columns: node.columns, widgets: widgetsUnder(id) };
+  });
+  return parseCanvasDefinition({ schemaVersion: 1, id: page.id, revision: page.revision, title: page.title, sections });
 }

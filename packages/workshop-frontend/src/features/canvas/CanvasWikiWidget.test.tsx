@@ -172,7 +172,7 @@ it('renders the other embeds when one fails, and the last page with a failed ref
 it('says the Wiki is not connected without a connection, and has no access once it is refused', async () => {
   bindings.delete(WIKI)
   await render(widget())
-  expect(wikiArticle().textContent).toContain('Not connected. This workspace has no connection to this Wiki.')
+  expect(wikiArticle().textContent).toContain("Not connected. This workspace has no connection to this Wiki or to its organization's InferOps account.")
   expect(wikiArticle().querySelector('section')).toBeNull()
   bindings.set(WIKI, connection(wiki.session))
   await click(button(wikiArticle(), 'Refresh Wiki'))
@@ -180,6 +180,10 @@ it('says the Wiki is not connected without a connection, and has no access once 
   wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: FORBIDDEN: No InferMind access.'))
   await click(button(wikiArticle(), 'Refresh Wiki'))
   expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('No access to this Wiki: No InferMind access.')
+  expect(wikiArticle().querySelector('section')).toBeNull()
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: Sign in to InferOps again.'))
+  await click(button(wikiArticle(), 'Refresh Wiki'))
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('Sign in to InferOps again to read this Wiki.')
   expect(wikiArticle().querySelector('section')).toBeNull()
 })
 
@@ -239,6 +243,34 @@ it('shows what an agent reads through the same connection, and does not compare 
   // The handbook embeds the DEMO board.
   expect(panel.textContent).toContain('Not compared: an agent reads each embedded widget as its live text.')
   expect(wiki.session.readDocumentText).toHaveBeenCalledWith('handbook')
+})
+
+/** Serves the Wiki only through the organization's InferOps account connection, as `openWiki` does. */
+const throughAccount = () => {
+  bindings.delete(WIKI)
+  const openWiki = vi.fn<(ref: string) => Promise<object>>(async () => wiki.session)
+  bindings.set('inferops://acme/account', connection({ openWiki, openBoard: async () => ({}), [Symbol.dispose]: () => {} }))
+  return openWiki
+}
+
+it.each([
+  ['a page', 'handbook', 'handbook'],
+  ['a Master, from the structure read', 'engineering', 'engineering'],
+])('through an account connection, composes %s\'s agent text from what it read and never calls readDocumentText', async (_, shown, slug) => {
+  organize()
+  const openWiki = throughAccount()
+  await render(widget(shown))
+  await click(button(wikiArticle(), 'Agent view'))
+  const panel = wikiArticle().querySelector<HTMLElement>('[aria-label="Agent view"]')!
+  expect(openWiki).toHaveBeenCalledWith(WIKI)
+  // readDocumentText would make the whole account connection owner-only for good.
+  expect(wiki.session.readDocumentText).not.toHaveBeenCalled()
+  // The same bytes the gatekeeper's page-text contract gives for the same data (the double's
+  // readDocumentText is that contract; called directly here, so it records no call).
+  const contract = wiki.session.readDocumentText.getMockImplementation()!
+  expect(panel.querySelector('pre')?.textContent).toBe(await contract(slug))
+  expect(panel.textContent).toContain('Composed from this page as read here')
+  expect(panel.textContent).not.toContain('Same as this page')
 })
 
 it('disposes the Wiki and board sessions with the view', async () => {
@@ -446,7 +478,7 @@ it('keeps a pending body deletion visible after a reload, read-only too', async 
   expect(pageBody().textContent).toContain("The proposed body is empty: approving it removes this page's body.")
 })
 
-it('says why a body edit was not sent, stale, conflicting or denied, keeping the draft', async () => {
+it('says why a body edit was not sent or stale, keeps retryable drafts, and clears them when access is revoked', async () => {
   organize()
   await render(widget('operations'))
   await click(button(pageBody(), 'Edit page body'))
@@ -454,7 +486,7 @@ it('says why a body edit was not sent, stale, conflicting or denied, keeping the
   await act(async () => setFieldValue(pageBody().querySelector('textarea')!, 'Mine'))
   await act(async () => pageBody().querySelector('form')!.requestSubmit())
   await settle()
-  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: the page changed since the page was read. The page was read again; edit the current text.')
+  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: the page changed since the page was read. The page was read again; edit the current text. The server said: Page operations is at version 4, not 3. Read it again.')
   expect(pageBody().querySelector('textarea')?.value).toBe('Mine')
   await click(button(pageBody(), 'Cancel'))
   expect(pageBody().textContent).toContain('Changed in InferMind meanwhile.')
@@ -465,8 +497,8 @@ it('says why a body edit was not sent, stale, conflicting or denied, keeping the
   await click(button(pageBody(), 'Cancel'))
   wiki.session.updateDocumentBody.mockRejectedValueOnce(new Error('Error: FORBIDDEN: Your InferOps access cannot edit this Wiki.'))
   await proposeBody('Third try')
-  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: Your InferOps access cannot edit this Wiki.')
-  expect(pageBody().querySelector('textarea')?.value).toBe('Third try')
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('No access to this Wiki: Your InferOps access cannot edit this Wiki.')
+  expect(wikiArticle().querySelector('textarea')).toBeNull()
 })
 
 it('offers to add a body to a page that reads as its sections, keeping section edits, and no body edit read-only', async () => {
@@ -494,4 +526,62 @@ it('opens a slash-slug page from a page reference of the same Wiki', async () =>
   expect(current()).toEqual(['Incident response, filed in several pillars', 'Incident response, filed in several pillars'])
   expect(pageBody().textContent).toContain('Page the on-call engineer.')
   expect(wiki.session.readDocument).toHaveBeenLastCalledWith('ops/incident-response')
+})
+
+// FAC-66: searching the Wiki through the connection's own sign-in.
+const searchForm = () => wikiArticle().querySelector<HTMLFormElement>('form[role="search"]')!
+const search = async (query: string) => {
+  await act(async () => setFieldValue(searchForm().querySelector('input')!, query))
+  await act(async () => searchForm().requestSubmit())
+  await settle()
+}
+const results = () => wikiArticle().querySelector<HTMLElement>('ul[aria-label="Search results"]')
+
+it('searches the Wiki and opens a result\'s page, showing its snippet as text with only the matched words marked', async () => {
+  await render(widget())
+  await search('  team  ')
+  expect(wiki.session.searchWiki).toHaveBeenCalledWith('team')
+  const hit = results()!.querySelector('button')!
+  expect(hit.getAttribute('aria-label')).toBe('Open Team handbook, section purpose')
+  // The section's own `<script>` is literal text; nothing from a snippet becomes an element but a mark.
+  expect(hit.querySelector('script, b')).toBeNull()
+  expect(hit.textContent).toContain('<script>alert(1)</script>')
+  expect([...hit.querySelectorAll('mark')].map(m => m.textContent)).toEqual(['team', 'raw'])
+  await click(button(wikiArticle(), 'Clear search'))
+  expect(results()).toBeNull()
+  await search('pair small')
+  await click(results()!.querySelector('button')!)
+  expect(button(pageNav(), 'Onboarding').getAttribute('aria-current')).toBe('page')
+  expect(section('first-week').textContent).toContain('Pair on one small issue.')
+})
+
+it('says when nothing readable matches, and never calls an unavailable search empty', async () => {
+  await render(widget())
+  await search('zebra')
+  expect(wikiArticle().textContent).toContain('No section you can read matches “zebra”.')
+  wiki.setSearchDown(true)
+  await search('team')
+  const alert = wikiArticle().querySelector('[role="alert"]')!
+  expect(alert.textContent).toContain('Search unavailable, so this is not an empty result')
+  expect(wikiArticle().textContent).not.toContain('No section you can read matches')
+  expect(results()).toBeNull()
+  wiki.setSearchDown(false)
+  await click(button(wikiArticle(), 'Try again'))
+  expect(results()!.querySelectorAll('li')).toHaveLength(1)
+})
+
+it('marks a result whose section has an edit of this connection waiting', async () => {
+  await render(widget())
+  await wiki.session.updateSection('s3', 'Shadow the on-call.', 1)
+  await search('pair')
+  expect(results()!.textContent).toContain('Edit pending')
+})
+
+it('shows a lone closing marker in a snippet as the text it is', async () => {
+  await render(widget())
+  wiki.writeElsewhere('s3', 'Pair on one small issue.</b> Ask first.')
+  await search('pair')
+  const hit = results()!.querySelector('button')!
+  expect([...hit.querySelectorAll('mark')].map(m => m.textContent)).toEqual(['Pair'])
+  expect(hit.textContent).toContain('on one small issue.</b> Ask first.')
 })

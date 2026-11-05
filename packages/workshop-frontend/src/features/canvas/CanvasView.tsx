@@ -18,8 +18,15 @@ export type CanvasResourceScope = {
   unboundAction: (targetRef: string, retry: () => void) => ReactNode
 }
 
-export const CanvasView = ({ definition, gadgets, overseer, resourceScope, offeredBy, onOpenWidget, codingDispatch, wikiEditable, scrollRoot }: {
+const sameTitle = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase()
+
+export const CanvasView = ({ definition, gadgets, overseer, resourceScope, offeredBy, onOpenWidget, codingDispatch, wikiEditable, scrollRoot, shownTitle }: {
   definition: CanvasDefinition
+  /**
+   * The heading the host already shows above this canvas. A section titled the same keeps its
+   * heading for assistive technology only, so the page doesn't print the title twice.
+   */
+  shownTitle?: string
   /** The pane that clips and scrolls this canvas, for widget preloading. */
   scrollRoot?: RefObject<HTMLElement | null>
   gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
@@ -39,7 +46,10 @@ export const CanvasView = ({ definition, gadgets, overseer, resourceScope, offer
   return <div className="space-y-6">
     {definition.sections.length === 0 && <p className="text-sm text-kumo-subtle">This view is empty. Edit the layout to add a section.</p>}
     {definition.sections.map(section => <section key={section.id} aria-labelledby={`canvas-section-${section.id}`} className="@container space-y-3">
-      <h2 id={`canvas-section-${section.id}`} className="font-medium text-kumo-default">{section.title}</h2>
+      <h2 id={`canvas-section-${section.id}`}
+        className={shownTitle !== undefined && sameTitle(section.title, shownTitle) ? 'sr-only' : 'font-medium text-kumo-default'}>
+        {section.title}
+      </h2>
       {section.widgets.length === 0 ? <p className="text-sm text-kumo-subtle">No widgets in this section yet.</p>
         : <div className={sectionGridClass(section.columns)}>
           {section.widgets.map(widget => <div key={widget.id} className={`min-w-0 ${widgetSpanClass(widget.size, section.columns)}`}>

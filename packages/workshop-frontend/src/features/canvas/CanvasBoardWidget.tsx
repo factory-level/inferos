@@ -55,7 +55,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
   // A card reads nothing (the board, its coding runs) until it first comes near the screen, and
   // stays subscribed after (see the Kanban performance notes); the full view is always on screen.
   const nearScreen = useHasBeenOnScreen(ref, presentation === 'full', props.scrollRoot)
-  const { state, refresh, move, create, update } = useBoardData(overseer, widget, nearScreen)
+  const { state, refresh, move, create, update, activity: issueActivity } = useBoardData(overseer, widget, nearScreen)
   const dispatchRef = props.codingDispatch && nearScreen ? dispatchRefOf(widget.targetRef) : null
   const coding = useCodingDispatch(overseer, dispatchRef)
   const board = 'board' in state ? state.board : undefined
@@ -97,13 +97,17 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
     <div className={`min-h-0 flex-1 p-3 ${full ? 'flex flex-col' : ''} ${!full && state.status === 'loading' ? 'min-h-[32rem]' : ''}`}>
       {state.status === 'loading' && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the board…</p>}
       {state.status === 'unbound' && (props.unboundAction ? props.unboundAction(refresh) : <p className="text-sm text-kumo-subtle">
-        Not connected. This workspace has no connection to this board. Connect it, for example by asking in the chat, to see it live.
+        Not connected. This workspace has no connection to this board or to its organization's InferOps account. Connect one, for example by asking in the chat, to see it live.
       </p>)}
       {state.status === 'disabled' && <p role="status" className="text-sm text-kumo-subtle">
         {state.message} The connection to this board is kept; it shows the board again once InferOps is turned back on.
       </p>}
       {state.status === 'error' && <div className="space-y-2">
-        <p role="alert" className="text-sm text-kumo-danger">Could not read the board: {state.message}</p>
+        <p role="alert" className="text-sm text-kumo-danger">
+          {state.code === 'UNAUTHORIZED' ? 'Sign in to InferOps again to read this board.'
+            : state.code === 'FORBIDDEN' ? `No access to this board: ${state.message}`
+              : `Could not read the board: ${state.message}`}
+        </p>
         <Button size="sm" onClick={refresh}>Try again</Button>
       </div>}
       {state.status === 'stale' && state.error && <p role="alert" className="mb-2 text-xs text-kumo-danger">Showing the last board read; refresh failed: {state.error}</p>}
@@ -118,6 +122,7 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
           onMove={(issue, toState) => move(issue.id, toState.id, issue.revision)}
           onCreate={create}
           onUpdate={(issue, changes) => update(issue.id, changes, issue.revision)}
+          onActivity={issue => issueActivity(issue.id)}
           openIssue={openIssue}
           coding={coding.state.status === 'unavailable' ? undefined : {
             state: coding.state, activity: codingActivity,

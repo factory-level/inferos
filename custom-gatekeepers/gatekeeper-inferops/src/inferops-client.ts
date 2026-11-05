@@ -4,9 +4,9 @@
 // place that chooses between them.
 
 import type {
-  Board, Issue, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
+  Board, Issue, IssueActivity, IssueActivityEntry, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
   WikiDocumentNode, WikiProposal, WikiProposalFreshness, WikiProposalSource, WikiProposalState,
-  WikiStructure,
+  WikiSearchHit, WikiStructure,
 } from "./types";
 import type { WorkflowHeadRecord } from "./workflow-policy";
 
@@ -120,7 +120,7 @@ export type NewIssueRequest = {
   description?: string;
   priority?: Priority;
   stateId: string;
-  workflow?: "content";
+  workflow?: "content" | "service";
 };
 
 /** Changed fields of an issue as the gatekeeper sends them (trimmed, unchanged ones dropped). */
@@ -152,6 +152,21 @@ export type WikiDocumentHead = Pick<WikiDocumentNode, "id" | "slug" | "title"> &
 
 /** The Wiki's structure as InferOps reports it, with page ids lowercased. */
 export type WikiStructureRecord = WikiStructure;
+
+/** One InferOS Blueprint widget version as `publishWidgetDefinition` lists it. */
+export type WidgetDefinitionWrite = {
+  /** The Blueprint's id. */
+  sourceId: string;
+  /** The Blueprint version, from 1. */
+  sourceVersion: number;
+  /** The widget's name, 1 to 120 characters. */
+  title: string;
+  /** What the widget is for, 1 to 2000 characters. */
+  purpose: string;
+};
+
+/** One `knowledge.search` hit as InferOps returns it, without its `score` (decision 5). */
+export type WikiSearchRecord = Omit<WikiSearchHit, "pending">;
 
 /** What a body edit sends: the page's new markdown. */
 export type WikiPageChanges = { body: string };
@@ -289,6 +304,13 @@ export interface InferOpsClient {
   readIssue(projectKey: string, issueId: string): Promise<Issue>;
 
   /**
+   * One issue's recorded activity (`issue.history`: field changes and comments), newest first, at
+   * most ISSUE_ACTIVITY_LIMIT entries. The issue must belong to the project, with readIssue's one
+   * NOT_FOUND otherwise. Read with the connection's own InferOps access.
+   */
+  readIssueActivity(projectKey: string, issueId: string): Promise<IssueActivity>;
+
+  /**
    * Move an issue to another state of its project, after checking scope, state membership,
    * workflow and the expected revision. The returned issue carries its new revision, which is
    * opaque: nothing may assume how far a move advances it. A repeated `idempotencyKey` for the same
@@ -372,6 +394,15 @@ export interface InferOpsClient {
   readDocumentText(documentId: string): Promise<string | null>;
 
   /**
+   * `knowledge.search` (`GET /knowledge/search`, `query` and `limit` only): the sections the account
+   * can read that best match `query`, best first, at most `limit`. InferOps applies its row rules
+   * and the InferMind lens before choosing candidates. An empty list means no readable match; a
+   * search that could not run (a timeout, an outage, an InferOps without the route, a rate limit)
+   * fails with UNAVAILABLE, never an empty list. The caller has already validated both arguments.
+   */
+  searchWiki(query: string, limit: number): Promise<WikiSearchRecord[]>;
+
+  /**
    * Replace a page's body (InferMind `knowledge:write`), compare-and-swap on the page version: a
    * page not at `expectedVersion` fails with STALE_REVISION, even when it already holds this body,
    * except that a retry under the same `idempotencyKey` is replayed when the page is exactly one
@@ -443,6 +474,28 @@ export interface InferOpsClient {
   listWorkspaceMembers(workspaceId?: string): Promise<WorkspaceMembersRead>;
 
   /**
+   * Whether the account holds `permission` in the client's own workspace, as InferOps'
+   * `auth.permissions` decides it there (the grant's role, its denies, any assumption ceiling).
+   * A refusal of the question itself (no grant in the workspace, 403 or 404) is false.
+   */
+  holdsPermission(permission: string): Promise<boolean>;
+
+  /**
+   * Lists one published widget version in the client's own workspace, for the account's whole
+   * company, as InferOps' `widget.publish` (FAC-11): a pointer to the InferOS Blueprint version, its
+   * title and purpose, and nothing else. Writing the same version again replaces it, so a retry is
+   * one definition. InferOps refuses an account without `configuration:publish` there (FORBIDDEN).
+   */
+  publishWidgetDefinition(entry: WidgetDefinitionWrite): Promise<void>;
+
+  /**
+   * Removes one widget version's listing from the client's own workspace, as InferOps'
+   * `widget.withdraw`: true when InferOps removed one, false when there was none to remove.
+   * Refused as `publishWidgetDefinition` is.
+   */
+  withdrawWidgetDefinition(sourceId: string, sourceVersion: number): Promise<boolean>;
+
+  /**
    * The published content-workflow policy head of the project with key `projectKey`, as InferOps'
    * `workflow.get` answers it under the account's `project:read`: the key is resolved through the
    * project list of the client's own workspace first, then that one project's head is read and
@@ -456,4 +509,74 @@ export interface InferOpsClient {
 
   /** Delete everything held for this account (the mock's data; nothing for a remote service). */
   forget(): Promise<void>;
+}
+
+/** The most recent activity entries an issue's `activity()` returns. */
+export const ISSUE_ACTIVITY_LIMIT = 100;
+
+/** The longest comment or value an activity entry keeps; a longer one is shortened and marked. */
+export const ACTIVITY_TEXT_MAX = 2000;
+
+/** One `issue.history` entry as InferOps returns it (only the fields the gatekeeper reads). */
+export interface HistoryEntryRecord {
+  kind: "claim" | "comment";
+  at: string;
+  actorType: "user" | "service_account" | "system" | null;
+  field: string | null;
+  value: unknown;
+  body: string | null;
+}
+
+const ACTORS = { user: "person", service_account: "agent", system: "system" } as const;
+
+const shorten = (text: string | null): { text: string | null; shortened: boolean } =>
+  text !== null && text.length > ACTIVITY_TEXT_MAX
+    ? { text: text.slice(0, ACTIVITY_TEXT_MAX), shortened: true }
+    : { text, shortened: false };
+
+/** One history record as an activity entry, its long text already shortened. */
+export function toActivityEntry(entry: HistoryEntryRecord): IssueActivityEntry {
+  const value = entry.kind === "claim"
+    ? shorten(typeof entry.value === "string" ? entry.value : entry.value == null ? null : JSON.stringify(entry.value))
+    : { text: null, shortened: false };
+  const body = entry.kind === "comment" ? shorten(entry.body) : { text: null, shortened: false };
+  return {
+    kind: entry.kind === "claim" ? "change" : "comment",
+    at: entry.at,
+    actor: entry.actorType ? ACTORS[entry.actorType] : null,
+    field: entry.kind === "claim" ? entry.field : null,
+    value: value.text,
+    body: body.text,
+    shortened: value.shortened || body.shortened,
+  };
+}
+
+/**
+ * The newest ISSUE_ACTIVITY_LIMIT of a history read oldest first, as it streams in: `add` keeps a
+ * rolling window of already-shortened entries, so however long the history, what is held stays
+ * within ISSUE_ACTIVITY_LIMIT entries of ACTIVITY_TEXT_MAX characters each. `result` is newest first.
+ * Who acted is reduced to person, agent or system; no principal id is kept.
+ */
+export class ActivityWindow {
+  #kept: IssueActivityEntry[] = [];
+  #seen = 0;
+
+  add(records: readonly HistoryEntryRecord[]): void {
+    for (const record of records) {
+      this.#seen++;
+      this.#kept.push(toActivityEntry(record));
+      if (this.#kept.length > ISSUE_ACTIVITY_LIMIT) this.#kept.shift();
+    }
+  }
+
+  result(): IssueActivity {
+    return { entries: this.#kept.toReversed(), omitted: this.#seen - this.#kept.length };
+  }
+}
+
+/** A whole history at once, oldest first (the mock's), as `activity()` returns it. */
+export function toIssueActivity(oldestFirst: readonly HistoryEntryRecord[]): IssueActivity {
+  const window = new ActivityWindow();
+  window.add(oldestFirst);
+  return window.result();
 }

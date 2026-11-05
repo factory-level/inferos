@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
+import { canvasPageFromDefinition } from '@gadgets/workshop-shared/canvas-model'
 import { CANVAS_REFRESH_MS, useCanvasWorkspace, type CanvasStorage } from './useCanvasWorkspace'
 
 let root: Root
@@ -16,6 +17,8 @@ const api = () => ({
   createCanvas: vi.fn<Overseer['createCanvas']>(async () => initial()),
   editCanvas: vi.fn<Overseer['editCanvas']>(async () => ({ ...initial(), revision: '1', title: 'Edited' })),
   deleteCanvas: vi.fn<Overseer['deleteCanvas']>(async () => {}),
+  getCanvasPage: vi.fn<Overseer['getCanvasPage']>(async () => canvasPageFromDefinition(initial())),
+  editCanvasPage: vi.fn<Overseer['editCanvasPage']>(),
 })
 const Probe = ({ storage, initialViewId = null }: { storage: CanvasStorage; initialViewId?: string | null }) => {
   canvas = useCanvasWorkspace(storage, initialViewId)
@@ -51,6 +54,8 @@ it('retains the displayed snapshot on a rejected write and reloads authoritative
   await act(async () => { await canvas.edit([{ type: 'rename', title: 'Stale edit' }]) })
   expect(container.textContent).toContain('Saved')
   expect(container.querySelector('[role="alert"]')).not.toBeNull()
+  // FAC-97: the server's own reason is kept beside the hint.
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('The server said: Canvas changed')
   expect(canvas.canUndo).toBe(false)
   remote.listCanvases.mockResolvedValueOnce([{ ...initial(), revision: '4', title: 'Other editor' }])
   await act(async () => { await canvas.reload() })
@@ -137,4 +142,38 @@ it('catches up on edits made while the page was hidden as soon as it is shown ag
   await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
   expect(canvas.active?.title).toBe('Edited while away')
   vi.restoreAllMocks()
+})
+
+it('refuses to undo once anyone else has changed the view, so undo never reverts their edit', async () => {
+  vi.useFakeTimers()
+  try {
+    const storage = api()
+    await render({ kind: 'durable', api: storage })
+    await act(async () => { await canvas.edit([{ type: 'rename', title: 'Mine' }]) })
+    expect(canvas.canUndo).toBe(true)
+    // The chat agent edits the same view; the quiet re-read brings its revision in.
+    storage.listCanvases.mockResolvedValue([{ ...initial(), revision: '2', title: 'Agent edited' }])
+    await act(async () => { await vi.advanceTimersByTimeAsync(CANVAS_REFRESH_MS) })
+    expect(canvas.active?.revision).toBe('2')
+    expect(canvas.canUndo).toBe(false)
+    expect(canvas.undoBlocked).toBe(true)
+    storage.editCanvas.mockClear()
+    await act(async () => { expect(await canvas.undo()).toBe(false) })
+    expect(storage.editCanvas).not.toHaveBeenCalled()
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('undoes several of its own edits in turn while nothing else changed the view', async () => {
+  await render({ kind: 'temporary' })
+  await act(async () => { await canvas.create({ title: 'Start', sections: [] }) })
+  await act(async () => { await canvas.edit([{ type: 'rename', title: 'One' }]) })
+  await act(async () => { await canvas.edit([{ type: 'rename', title: 'Two' }]) })
+  await act(async () => { await canvas.undo() })
+  expect(canvas.active?.title).toBe('One')
+  expect(canvas.canUndo).toBe(true)
+  await act(async () => { await canvas.undo() })
+  expect(canvas.active?.title).toBe('Start')
+  expect(canvas.canUndo).toBe(false)
 })

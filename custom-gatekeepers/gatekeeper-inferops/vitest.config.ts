@@ -1,9 +1,27 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import capnwebValidate from "capnweb-validate/vite";
+import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import deployed from "./cloudflare.config.ts";
 
 const { compatibilityDate, compatibilityFlags } = deployed.worker;
+
+// capnweb-validate decides what to transform by the id with its query stripped, so it also takes
+// `foo.ts?raw`, whose code is vite's `export default "<source>"`, and splices edits whose offsets
+// come from the file's TypeScript source into that string. edge-header.test.ts reads `src/` through
+// `?raw` to scan what is on disk, so those ids are left untransformed, as workshop-backend's
+// `rpcValidation` does; every other module is validated as before.
+const STRING_QUERY = /[?&](?:raw|url|inline)(?:[&=]|$)/;
+function rpcValidation(): Plugin {
+  const plugin = capnwebValidate() as Plugin;
+  const hook = plugin.transform;
+  const transform = typeof hook === "function" ? hook : hook?.handler;
+  if (!transform) throw new Error("capnweb-validate has no transform hook to wrap");
+  const wrapped: typeof transform = function (code, id, options) {
+    return STRING_QUERY.test(id) ? null : transform.call(this, code, id, options);
+  };
+  return { ...plugin, transform: typeof hook === "function" ? wrapped : { ...hook, handler: wrapped } };
+}
 
 /**
  * The workerd suite: sessions are `RpcTarget`s handed out by a Durable Object facet carrying
@@ -11,7 +29,7 @@ const { compatibilityDate, compatibilityFlags } = deployed.worker;
  */
 export default defineConfig({
   plugins: [
-    capnwebValidate(),
+    rpcValidation(),
     cloudflareTest({
       main: "./__tests__/worker.ts",
       miniflare: {
@@ -46,6 +64,9 @@ export default defineConfig({
           MEMBERS_GATEKEEPER: { className: "InferOpsMembersGatekeeper", useSQLite: true },
           // The workflow-policy gatekeeper, the same way.
           WORKFLOW_POLICY_GATEKEEPER: { className: "InferOpsWorkflowPolicyGatekeeper", useSQLite: true },
+          // The account gatekeeper, the same way, with raw storage access through `TestHooks`.
+          ACCOUNT_GATEKEEPER: { className: "InferOpsAccountGatekeeper", useSQLite: true },
+          TEST_ACCOUNT_GATEKEEPER: { className: "TestAccountGatekeeper", useSQLite: true },
           // One sign-in attempt per object; the tests seed its callback from inside the object.
           INFERLAB_LOGIN: { className: "InferLabLogin", useSQLite: true },
           // One per connected account; the tests reach it through the account entrypoints.

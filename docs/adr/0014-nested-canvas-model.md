@@ -33,7 +33,7 @@ The contract is `packages/workshop-shared/src/canvas-model.ts`, schema version 2
 
 ### Existing section-based canvases
 
-The saved form stays version 1 until FAC-81 wires this in, and each version refuses the other rather than guessing.
+Each version refuses the other rather than guessing. FAC-81 added storage: a page version 1 can hold stays in its version 1 row, and any other sits in a separate collection beside its untouched row, so a rollback keeps every canvas listed. See [the architecture](../architecture/inferops-canvas.md#pages-in-storage-and-rollback).
 
 | Version 1 | Version 2 |
 | --- | --- |
@@ -57,8 +57,9 @@ So every reference and all of the layout carries over, and the mapping can be re
 
 ## Consequences
 
-- FAC-81 has a parser and fixtures to wire in, and owns conversion, storage and rollback. Older code rejects a version 2 page, so a rollback after version 2 is written needs its own answer.
-- Every reader of `sections` needs a decision in FAC-81: `canvas-store.ts`, `console-store.ts` (including published copies), `overseer.ts`, `agent.ts`, the frontend's canvas layout, `scripts/consumer/views.ts` and `scripts/consumer/canvas.ts`.
+- Older code rejects a version 2 page, and parses every row to list any of them, so version 2 is never written to `canvases`. That is FAC-81's answer to rollback.
+- Every reader of `sections` keeps reading version 1 rows, so none changes yet. A nested page shows its earlier layout to them until FAC-83 teaches them pages, and that has to happen before anything offers a nested save.
+  - **Amended for FAC-83 (proposed):** instead of each reader learning pages, the store shows version 1 readers a projection of a nested page: each top-level object as a section with every widget beneath it, IDs and revision kept. The rows stay version 1, so rollback is unaffected. To keep the projection total, a page's direct children are objects, at most 12.
 - Operations stay version 1 until FAC-83. Adding a listener before the attachment that raises its event is rejected, so an edit batch has to order them.
 - **Not defined here, and rejected until it is:** event payloads, including what an action needs from the event that requested it (FAC-94, FAC-97); explicit overrides (FAC-94); states (FAC-86, FAC-87). A `request-action` can be saved in this model, and nothing runs it yet.
 - Draft and published states stay in storage (FAC-89). This model holds no publication field.

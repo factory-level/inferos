@@ -27,6 +27,24 @@ describe("board rules", () => {
     expect(moveTargets(board, findIssue(board, "3")!.issue)).toEqual([]);
   });
 
+  it("moves a service job only along the service ladder, in board order", () => {
+    const ladder = ["enquiry", "quoted", "booked", "scheduled", "on-site", "completed", "cancelled"];
+    const withService: Board = {
+      ...board,
+      columns: [
+        ...board.columns,
+        ...ladder.map(id => ({
+          state: state(id, "service"),
+          issues: id === "quoted" ? [issue("4", "quoted", { workflow: "service" })] : [],
+        })),
+      ],
+    };
+    expect(moveTargets(withService, findIssue(withService, "4")!.issue).map(s => s.id))
+      .toEqual(ladder.filter(id => id !== "quoted"));
+    // The software issue still sees only its own ladder.
+    expect(moveTargets(withService, findIssue(withService, "1")!.issue).map(s => s.id)).toEqual(["doing"]);
+  });
+
   it("moves a card locally without touching the other columns", () => {
     const moved = withIssueMoved(board, "1", "doing");
 

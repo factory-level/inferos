@@ -1,15 +1,16 @@
 // One InferMind workspace's Wiki, read through the workspace's Wiki connection for it
-// (`inferops://<tenant>.<workspace>/knowledge/wiki`). Like a board, the reference is resolved only
-// through a connection the workspace already holds (Overseer.getGatekeeperByResourceUrl), so it
-// identifies a Wiki and authorizes nothing. InferMind stays authoritative: this keeps the latest
+// (`inferops://<tenant>.<workspace>/knowledge/wiki`), or its InferOps account connection for the
+// Wiki's organization. Like a board, the reference is resolved only through connections the
+// workspace already holds (inferopsConnection.ts), so it identifies a Wiki and authorizes nothing. InferMind stays authoritative: this keeps the latest
 // reads (the page list, the Wiki structure, the pages), and a section or page body edit is only
 // proposed through the gatekeeper's approval path. What became of an edit is read from the page,
 // never assumed: a proposal is not a save.
 import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
-import type { InferOpsWikiSession, WikiDocument, WikiDocumentNode, WikiSection, WikiStructure } from '@inferos/gatekeeper-inferops/src/types'
+import type { InferOpsWikiSession, WikiDocument, WikiDocumentNode, WikiSearchHit, WikiSection, WikiStructure } from '@inferos/gatekeeper-inferops/src/types'
 import { canonicalBoardRef, codeOf, messageOf, type ProposalResult } from './boardData'
-import { bodyEditActionTitle, isOpenEdit, reconcileBodyEdit, reconcileEdit, type BodyEdit, type SectionEdit } from './wikiPage'
+import { resolveInferOpsSession, type InferOpsConnectionKind } from './inferopsConnection'
+import { bodyEditActionTitle, isOpenEdit, pageText, reconcileBodyEdit, reconcileEdit, type BodyEdit, type SectionEdit } from './wikiPage'
 
 export type WikiListState =
   | { status: 'loading' }
@@ -54,8 +55,17 @@ export type WikiSnapshot = {
   bodyEdits: ReadonlyMap<string, BodyEdit>
 }
 
-/** The agent's text of one page, or why it could not be read. */
-export type AgentTextResult = { ok: true; text: string } | { ok: false; code: string; message: string }
+/**
+ * The agent's text of one page, or why it could not be read. `composed` when it was built here
+ * from the page read (an account connection), rather than read as InferOps composes it.
+ */
+/**
+ * A Wiki search's answer. `UNAVAILABLE` means the search could not run (InferOps timed out, is down,
+ * lacks search, or this connection searched too often), which is not the same as no match.
+ */
+export type WikiSearchResult = { ok: true; hits: WikiSearchHit[] } | { ok: false; code: string; message: string }
+
+export type AgentTextResult = { ok: true; text: string; composed?: true } | { ok: false; code: string; message: string }
 
 /** Nothing read yet; one object, so snapshots compare equal. */
 export const LOADING_WIKI: WikiSnapshot = { list: { status: 'loading' }, structure: { status: 'loading' }, pages: new Map(), edits: new Map(), bodyEdits: new Map() }
@@ -79,8 +89,11 @@ export class WikiData {
   readonly #edits = new Map<string, Edit>()
   readonly #bodyEdits = new Map<string, PageEdit>()
   #session?: Promise<RpcStub<InferOpsWikiSession> | null>
+  /** The connection the current session came through, once resolved. */
+  #via?: InferOpsConnectionKind
   // Orders reads: a result older than the newest read of the same thing never lands.
   #clock = 0
+  #accessGeneration = 0
   #listRead = 0
   #structureRead = 0
   readonly #pageReads = new Map<string, number>()
@@ -126,24 +139,28 @@ export class WikiData {
       return { ok: false, code: 'CONFLICT', message: 'This section already has an edit that has not taken effect yet.' }
     }
     if (body === section.body) return { ok: false, code: 'UNCHANGED', message: 'Nothing changed.' }
+    const accessGeneration = this.#accessGeneration
     const edit: Edit = { slug, sectionId: section.id, body, expectedVersion: section.version, phase: 'proposing' }
     this.#putEdit(edit)
     try {
       const session = await this.#sessionOf()
+      if (accessGeneration !== this.#accessGeneration) return NOT_CONNECTED
       if (!session) {
         this.#putEdit({ ...edit, phase: 'refused', code: NOT_CONNECTED.code, message: NOT_CONNECTED.message })
         return NOT_CONNECTED
       }
       await session.updateSection(section.id, body, section.version)
+      if (accessGeneration !== this.#accessGeneration) return NOT_CONNECTED
       this.#putEdit({ ...edit, phase: 'awaiting', queued: ++this.#clock })
       return { ok: true }
     } catch (error) {
       const code = codeOf(error)
       const message = messageOf(error)
+      if (this.#failed(error) || accessGeneration !== this.#accessGeneration) return { ok: false, code, message }
       this.#putEdit({ ...edit, phase: 'refused', code, message })
       return { ok: false, code, message }
     } finally {
-      if (!this.#disposed) void this.#readPage(slug)
+      if (!this.#disposed && accessGeneration === this.#accessGeneration) void this.#readPage(slug)
     }
   }
 
@@ -157,25 +174,29 @@ export class WikiData {
       return { ok: false, code: 'CONFLICT', message: 'This page already has a body edit that has not taken effect yet.' }
     }
     if (body === document.body) return { ok: false, code: 'UNCHANGED', message: 'Nothing changed.' }
+    const accessGeneration = this.#accessGeneration
     const edit: PageEdit = { slug: document.slug, title: document.title, documentId: document.id, body, expectedVersion: document.version, phase: 'proposing' }
     this.#putBodyEdit(edit)
     try {
       const session = await this.#sessionOf()
+      if (accessGeneration !== this.#accessGeneration) return NOT_CONNECTED
       if (!session) {
         this.#putBodyEdit({ ...edit, phase: 'refused', code: NOT_CONNECTED.code, message: NOT_CONNECTED.message })
         return NOT_CONNECTED
       }
       await session.updateDocumentBody(document.id, body, document.version)
+      if (accessGeneration !== this.#accessGeneration) return NOT_CONNECTED
       // Its approval may already have been logged (and correlated) while the proposal was answered.
       this.#putBodyEdit({ ...edit, actionId: this.#bodyEdits.get(edit.documentId)?.actionId, phase: 'awaiting', queued: ++this.#clock })
       return { ok: true }
     } catch (error) {
       const code = codeOf(error)
       const message = messageOf(error)
+      if (this.#failed(error) || accessGeneration !== this.#accessGeneration) return { ok: false, code, message }
       this.#putBodyEdit({ ...edit, phase: 'refused', code, message })
       return { ok: false, code, message }
     } finally {
-      if (!this.#disposed) void this.#readPage(document.slug)
+      if (!this.#disposed && accessGeneration === this.#accessGeneration) void this.#readPage(document.slug)
     }
   }
 
@@ -214,15 +235,60 @@ export class WikiData {
     this.#publish({})
   }
 
-  /** The page as the agent reads it (`readDocumentText`), through the same connection. Each read is an observation. */
-  async readAgentText(slug: string): Promise<AgentTextResult> {
+  /**
+   * The page as the agent reads it. Through the Wiki's own connection that is `readDocumentText`,
+   * an observation. Through an InferOps account connection it is composed here instead, from the
+   * page and structure already read, by the gatekeeper's own page-text serializer (`pageText`):
+   * `readDocumentText` there would make the whole account connection owner-only for good, which a
+   * view toggle must not do (owner decision, 2026-11-03). That text leaves out what only InferOps
+   * adds: a Master's coverage block and embedded widgets' live text.
+   */
+  /**
+   * Search the Wiki as this connection's sign-in can read it. The hits are held by the caller for
+   * this search only, never in the snapshot: a hit is a pointer, and opening its page reads it again.
+   */
+  async search(query: string): Promise<WikiSearchResult> {
+    const accessGeneration = this.#accessGeneration
+    const current = (): boolean => !this.#disposed && accessGeneration === this.#accessGeneration
     try {
       const session = await this.#sessionOf()
+      if (!current()) return NOT_CONNECTED
       if (!session) return NOT_CONNECTED
-      return { ok: true, text: await session.readDocumentText(slug) }
+      const hits = await session.searchWiki(query)
+      return current() ? { ok: true, hits } : NOT_CONNECTED
     } catch (error) {
+      if (!current()) return NOT_CONNECTED
+      this.#failed(error)
       return { ok: false, code: codeOf(error), message: messageOf(error) }
     }
+  }
+
+  async readAgentText(slug: string): Promise<AgentTextResult> {
+    const accessGeneration = this.#accessGeneration
+    const current = (): boolean => !this.#disposed && accessGeneration === this.#accessGeneration
+    try {
+      const session = await this.#sessionOf()
+      if (!current()) return NOT_CONNECTED
+      if (!session) return NOT_CONNECTED
+      if (this.#via === 'account') return this.#composedText(slug)
+      const text = await session.readDocumentText(slug)
+      return current() ? { ok: true, text } : NOT_CONNECTED
+    } catch (error) {
+      if (!current()) return NOT_CONNECTED
+      this.#failed(error)
+      return { ok: false, code: codeOf(error), message: messageOf(error) }
+    }
+  }
+
+  #composedText(slug: string): AgentTextResult {
+    const page = this.#snapshot.pages.get(slug)
+    if (page?.status !== 'ready') return { ok: false, code: 'NOT_LOADED', message: 'The page is not loaded.' }
+    const { structure } = this.#snapshot
+    const text = pageText(page.document, structure.status === 'ready' ? structure.structure : null)
+    if (text === null) {
+      return { ok: false, code: 'NOT_COMPOSED', message: 'This page lists the Wiki structure, which is not read here.' }
+    }
+    return { ok: true, text, composed: true }
   }
 
   /** Drop the session; late results are discarded. */
@@ -255,8 +321,11 @@ export class WikiData {
   // Access to the whole Wiki changed: what was read under it is dropped, not shown as current, and
   // no read started before the loss may land after it.
   #lose(list: WikiListState): void {
+    this.#accessGeneration++
     this.#forgetSession()
     this.#pageReads.clear()
+    this.#edits.clear()
+    this.#bodyEdits.clear()
     this.#listRead = this.#structureRead = ++this.#clock
     this.#publish({ list, structure: { status: 'loading' }, pages: new Map() })
   }
@@ -358,15 +427,10 @@ export class WikiData {
   #sessionOf(): Promise<RpcStub<InferOpsWikiSession> | null> {
     if (this.#disposed) return Promise.resolve(null)
     if (!this.#session) {
-      const session = (async () => {
-        const client = await this.#overseer.getGatekeeperByResourceUrl(this.target)
-        if (!client) return null
-        try {
-          return await client.openSession() as RpcStub<InferOpsWikiSession>
-        } finally {
-          client[Symbol.dispose]()
-        }
-      })()
+      const session = resolveInferOpsSession(this.#overseer, this.target, 'wiki').then(resolved => {
+        if (resolved) this.#via = resolved.via
+        return resolved?.session ?? null
+      })
       this.#session = session
       // No binding is not cached: the next read looks the connection up again.
       void session.then(stub => { if (stub === null && this.#session === session) this.#session = undefined }, () => {})

@@ -25,6 +25,13 @@ export const UNIT_NODE: readonly string[] = [
   "blueprint-version-bindings.test.ts",
   "browser-export.test.ts",
   "canvas-catalog.test.ts",
+  "action-receipt-scope.test.ts",
+  "canvas-store-page-edits.test.ts",
+  "canvas-writes.test.ts",
+  "canvas-store-pages.test.ts",
+  "console-publication-pages.test.ts",
+  "console-publication-apps.test.ts",
+  "console-widget-index.test.ts",
   "chat-attachment-pdf.test.ts",
   "chat-attachment-validation.test.ts",
   "chat-change-statuses.test.ts",
@@ -81,6 +88,9 @@ export const WORKERD_LIGHT: readonly string[] = [
   "gatekeeper-lookup.test.ts",
   "overseer-hooks.test.ts",
   "sharing.test.ts",
+  "shared-configuration.test.ts",
+  "workflow-definitions.test.ts",
+  "workflow-invocation.test.ts",
   "user-directory.test.ts",
 ];
 
@@ -90,8 +100,10 @@ export const WORKERD_LIGHT: readonly string[] = [
  * worker instead of once per file; a file here must not leave state another file can see.
  */
 export const BACKEND: readonly string[] = [
+  "agent-spawner-config.test.ts",
   "operate-agui.test.ts",
   "operate-flow-start.test.ts",
+  "widget-state.test.ts",
   "agent-calls.test.ts",
   "agent-tracing.test.ts",
   "authorize-observation-flags.test.ts",

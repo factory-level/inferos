@@ -25,8 +25,9 @@ import {
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { connectHandoffPageHtml, htmlResponse } from "@gadgets/gatekeeper-kit/connect-pages";
 import { ActionApplyError, ActionOutcomeUnknownError, applyActionOutcome } from "@gadgets/gatekeeper-kit/actions";
+import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import type {
-  AccountDescription, ActionApplyFailure, ActionKind, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
+  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ActionReceipt, AgentCatalog, ApprovalQueue, ConnectHandoff, Gatekeeper,
   GatekeeperConnectCallback, GatekeeperUser, GatekeeperUserVerifier, HookController, HookInitiator,
   HookTargetMetadata, ResourceDescription, ResourceConfiguratorFrame, SupportedResource,
   VendorDescription,
@@ -203,14 +204,14 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
    * results in `STRUCTURED`: `retry` is an unknown outcome the adapter supports retrying,
    * `notApplied-retry` a refusal that may pass, and the `-unflagged` ones carry no `retryable`.
    */
-  failNextApply(label: string, reason: string, outcome: ApplyFailureOutcome = "thrown"): void {
-    this.ctx.storage.kv.put(`fail-next-apply:${label}`, { reason, outcome });
+  failNextApply(label: string, reason: string, outcome: ApplyFailureOutcome = "thrown", code?: string): void {
+    this.ctx.storage.kv.put(`fail-next-apply:${label}`, { reason, outcome, ...(code ? { code } : {}) });
   }
 
   /** Returns rather than throws, so consuming the failure commits. */
-  takeApplyFailure(label: string): { reason: string; outcome: ApplyFailureOutcome } | null {
+  takeApplyFailure(label: string): { reason: string; outcome: ApplyFailureOutcome; code?: string } | null {
     const key = `fail-next-apply:${label}`;
-    const failure = this.ctx.storage.kv.get<{ reason: string; outcome: ApplyFailureOutcome }>(key);
+    const failure = this.ctx.storage.kv.get<{ reason: string; outcome: ApplyFailureOutcome; code?: string }>(key);
     if (failure === undefined) return null;
     this.ctx.storage.kv.delete(key);
     return failure;
@@ -218,6 +219,19 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
 
   recordApplyAttempt(label: string): void {
     this.ctx.storage.kv.put(`apply-attempts:${label}`, this.getApplyAttempts(label) + 1);
+  }
+
+  /** The next successful applyAction() for `label` reports `result` as what the provider produced. */
+  resultNextApply(label: string, result: unknown): void {
+    this.ctx.storage.kv.put(`result-next-apply:${label}`, result);
+  }
+
+  /** One-shot, like takeApplyFailure(). */
+  takeApplyResult(label: string): unknown {
+    const key = `result-next-apply:${label}`;
+    const result = this.ctx.storage.kv.get<unknown>(key);
+    this.ctx.storage.kv.delete(key);
+    return result;
   }
 
   /** Every applyAction() call, including ones that then fail: a double dispatch shows up here. */
@@ -644,6 +658,8 @@ export interface TestSession {
   search(query: string): Promise<number>;
   /** `incomplete` omits the `descriptionIsComplete` claim, as a summary-only gatekeeper would. */
   writeValue(value: number, opts?: { autoApprovable?: boolean; incomplete?: boolean }): Promise<number>;
+  /** `writeValue`, handing on the kernel's receipt (FAC-97) instead of the fixture's own id. */
+  writeValueWithReceipt(value: number): Promise<ActionReceipt>;
   writeValues(values: number[]): Promise<number[]>;
   /**
    * Parks the calling code until `/control/release-code` for this account, so a test can act while
@@ -708,6 +724,22 @@ class TestSessionTarget extends RpcTarget implements TestSession {
         ...(opts?.autoApprovable ? { autoApprovable: true } : {}),
       });
       return id;
+    } catch (error) {
+      await this.state.discardAction(this.label, id);
+      throw error;
+    }
+  }
+
+  async writeValueWithReceipt(value: number): Promise<ActionReceipt> {
+    const id = await this.state.stageAction(this.label, value);
+    try {
+      return await this.approvalQueue.submitAction(id, {
+        title: `Set the test value to ${value}`,
+        description: `Set the deterministic integration-test value to **${value}**.`,
+        descriptionIsComplete: true,
+        implementsRevert: false,
+        actionKind: SET_VALUE_ACTION_KIND,
+      });
     } catch (error) {
       await this.state.discardAction(this.label, id);
       throw error;
@@ -835,8 +867,8 @@ export class TestGatekeeper
   }
 
   /** The kit's terminal failures reach the overseer as its structured result (applyActionOutcome). */
-  async applyAction(action: number): Promise<void | { failed: ActionApplyFailure }> {
-    let structured: { outcome: "unknown" | "notApplied"; retryable?: boolean; message: string } | undefined;
+  async applyAction(action: number): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
+    let structured: { outcome: "unknown" | "notApplied"; retryable?: boolean; message: string; code?: string } | undefined;
     const outcome = await applyActionOutcome(async () => {
       const state = control(this.ctx.exports);
       const { label } = this.ctx.props;
@@ -848,11 +880,13 @@ export class TestGatekeeper
       if (failure?.outcome === "unknown") throw new ActionOutcomeUnknownError(failure.reason);
       const result = failure && STRUCTURED[failure.outcome];
       if (failure && result) {
-        structured = { ...result, message: failure.reason };
+        structured = { ...result, message: failure.reason, ...(failure.code ? { code: failure.code } : {}) };
         return;
       }
       if (failure !== null) throw new Error(failure.reason);
       await state.applyAction(label, action);
+      // Passed on unchecked, so a test can show the overseer bounding what a gatekeeper reports.
+      return (await state.takeApplyResult(label) ?? undefined) as ActionResult | undefined;
     });
     // Returned as is, so a missing flag reaches the overseer missing, as from an older gatekeeper.
     if (structured !== undefined) return { failed: structured as ActionApplyFailure };
@@ -1072,10 +1106,19 @@ export default {
       return new Response(null, { status: 204 });
     }
 
+    // One-shot: the next successful applyAction() for `label` reports `result` as what it produced.
+    // Body: {"label": "...", "result": any JSON (passed on unchecked)}
+    if (url.pathname === "/control/result-next-apply" && req.method === "POST") {
+      const { label, result } = body as Record<string, unknown>;
+      if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
+      await control(ctx.exports).resultNextApply(label, result);
+      return new Response(null, { status: 204 });
+    }
+
     // One-shot: the next applyAction() for `label` throws `reason` without applying.
-    // Body: {"label": "...", "reason": "...", "outcome"?: an ApplyFailureOutcome}
+    // Body: {"label": "...", "reason": "...", "outcome"?: an ApplyFailureOutcome, "code"?: the provider code a structured outcome reports}
     if (url.pathname === "/control/fail-next-apply" && req.method === "POST") {
-      const { label, reason, outcome } = body as Record<string, unknown>;
+      const { label, reason, outcome, code } = body as Record<string, unknown>;
       if (!isNonEmptyString(label)) return badRequest("`label` must be a non-empty string");
       if (reason !== undefined && typeof reason !== "string") {
         return badRequest("`reason` must be a string when present");
@@ -1085,9 +1128,10 @@ export default {
       if (outcome !== undefined && (typeof outcome !== "string" || !outcomes.includes(outcome))) {
         return badRequest(`\`outcome\` must be one of ${outcomes.join(", ")} when present`);
       }
+      if (code !== undefined && typeof code !== "string") return badRequest("`code` must be a string when present");
       await control(ctx.exports).failNextApply(
           label, reason ?? "The test gatekeeper failed to apply this action.",
-          (outcome ?? "thrown") as ApplyFailureOutcome);
+          (outcome ?? "thrown") as ApplyFailureOutcome, code);
       return new Response(null, { status: 204 });
     }
 

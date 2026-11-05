@@ -10,7 +10,8 @@ import { agentTextShown } from './wikiPage'
  * includes a Master's documentation coverage, computed with the person's own access; the comparison
  * leaves that block out. It is read
  * when shown and again whenever the page read changes; each read is an observation in the action
- * log.
+ * log. Through an InferOps account connection the text is composed from the page read instead
+ * (`composed`, see `WikiData.readAgentText`), so there is nothing to compare.
  */
 export const WikiAgentText = ({ document, shownText, onRead }: {
   document: WikiDocument
@@ -32,7 +33,8 @@ export const WikiAgentText = ({ document, shownText, onRead }: {
   const current = result?.document === document ? result.value : null
   // An agent reads each embedded widget as its live text, which this page draws instead.
   const withWidgets = document.references.length > 0
-  const compared = current?.ok === true && shownText !== null && !withWidgets
+  const composed = current?.ok === true && current.composed === true
+  const compared = current?.ok === true && !composed && shownText !== null && !withWidgets
   const matches = compared && agentTextShown(current.text) === shownText
   return <section aria-label="Agent view" className="space-y-2 rounded-lg border border-kumo-line p-3">
     <div className="flex flex-wrap items-center gap-2">
@@ -42,8 +44,11 @@ export const WikiAgentText = ({ document, shownText, onRead }: {
     {!current && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Reading the agent text…</p>}
     {current && !current.ok && <p role="alert" className="text-sm text-kumo-danger">Could not read the agent text: {current.message}</p>}
     {compared && !matches && <p className="text-xs text-kumo-subtle">The page changed between the two reads. Refresh to compare again.</p>}
-    {current?.ok && shownText === null && <p className="text-xs text-kumo-subtle">Not compared: the Wiki structure this page lists is not read here.</p>}
-    {current?.ok && shownText !== null && withWidgets && <p className="text-xs text-kumo-subtle">Not compared: an agent reads each embedded widget as its live text.</p>}
+    {composed && <p className="text-xs text-kumo-subtle">
+      Composed from this page as read here, the way an agent's page text is composed. Through this account connection it leaves out what only InferOps adds: a Master's coverage and embedded widgets' live text.
+    </p>}
+    {current?.ok && !composed && shownText === null && <p className="text-xs text-kumo-subtle">Not compared: the Wiki structure this page lists is not read here.</p>}
+    {current?.ok && !composed && shownText !== null && withWidgets && <p className="text-xs text-kumo-subtle">Not compared: an agent reads each embedded widget as its live text.</p>}
     {current?.ok && <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-md bg-kumo-elevated p-2 font-mono text-xs text-kumo-default">{current.text}</pre>}
   </section>
 }

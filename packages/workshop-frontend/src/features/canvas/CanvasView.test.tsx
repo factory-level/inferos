@@ -36,6 +36,8 @@ const overseer = {
   getGadget: vi.fn<(id: WorkpieceId) => object>((id: WorkpieceId) => ({ [Symbol.dispose]: () => { disposed.push(id) } })),
   getConsoleWidget: vi.fn<(consoleId: string, revision: string, id: WorkpieceId) => object>(
       (_consoleId: string, _revision: string, id: WorkpieceId) => ({ [Symbol.dispose]: () => { disposed.push(`console ${id}`) } })),
+  getConsoleApp: vi.fn<(consoleId: string, revision: string, id: WorkpieceId) => object>(
+      (_consoleId: string, _revision: string, id: WorkpieceId) => ({ getTitle: async () => 'App', [Symbol.dispose]: () => { disposed.push(`console app ${id}`) } })),
   getGatekeeperByResourceUrl: lookup,
   subscribeToActions: async (subscriber: typeof actions) => { actions = subscriber; return { [Symbol.dispose]: () => {} } },
   listActions: async () => ({ entries: [] }),
@@ -56,7 +58,7 @@ const render = async (view: CanvasDefinition, gadgets: Map<WorkpieceId, GadgetSu
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-  disposed.length = 0; vi.mocked(overseer.getGadget).mockClear(); vi.mocked(overseer.getConsoleWidget).mockClear(); readBoard.mockClear(); actions = undefined
+  disposed.length = 0; vi.mocked(overseer.getGadget).mockClear(); vi.mocked(overseer.getConsoleWidget).mockClear(); vi.mocked(overseer.getConsoleApp).mockClear(); readBoard.mockClear(); actions = undefined
   lookup.mockClear().mockResolvedValue(null)
 })
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals() })
@@ -169,15 +171,49 @@ it('keeps a board card that scrolled away subscribed, so a decided action still 
   expect(boardCards().map(issueCount)).toEqual([2, 3])
 })
 
-it('opens a published console\'s registered widgets through that console revision, and other gadgets as before', async () => {
+it('opens a published console\'s registered widgets and placed apps through that console revision, and nothing directly', async () => {
   const frozenFor = { consoleId: 'floor', revision: '4', sourceGadgetId: 2 }
   await act(async () => root.render(<CanvasView definition={definition([gadgetWidget('w', 'gadget:9'), gadgetWidget('a', 'gadget:3')])}
     gadgets={summaries({ id: 9, type: 'gadget', title: 'Status', commitId: 'c9', frozenFor }, { id: 3, type: 'gadget', title: 'Counter app', commitId: 'c3' })}
     overseer={overseer} offeredBy={{ consoleId: 'floor', revision: '4' }} />))
   expect(overseer.getConsoleWidget).toHaveBeenCalledWith('floor', '4', 9)
   expect(overseer.getConsoleWidget).toHaveBeenCalledTimes(1)
-  expect(overseer.getGadget).toHaveBeenCalledWith(3)
-  expect(overseer.getGadget).not.toHaveBeenCalledWith(9)
+  // An app the published console places is fenced at the commit it published (FAC-89 part 2).
+  expect(overseer.getConsoleApp).toHaveBeenCalledWith('floor', '4', 3)
+  expect(overseer.getGadget).not.toHaveBeenCalled()
+  // The app is shown once the console answers that it is still at the published commit.
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  expect(container.querySelector('[aria-label="Counter app"] [data-testid="gadget-ui"]')).not.toBeNull()
   await act(async () => root.render(<CanvasView definition={definition([])} gadgets={summaries()} overseer={overseer} />))
-  expect(disposed.toSorted()).toEqual([3, 'console 9'].toSorted())
+  expect(disposed.toSorted()).toEqual(['console 9', 'console app 3'].toSorted())
+})
+
+it('shows the console\'s own words when a placed app changed since it was published, and no app', async () => {
+  const words = 'App Counter app has changed since console Floor was published; a builder must publish the console again before operators can open it.'
+  vi.mocked(overseer.getConsoleApp).mockImplementationOnce(((_consoleId: string, _revision: string, id: WorkpieceId) =>
+    ({ getTitle: async () => { throw new Error(words) }, [Symbol.dispose]: () => { disposed.push(`console app ${id}`) } })) as never)
+  await act(async () => root.render(<CanvasView definition={definition([gadgetWidget('a', 'gadget:3')])}
+    gadgets={summaries({ id: 3, type: 'gadget', title: 'Counter app', commitId: 'c4' })}
+    overseer={overseer} offeredBy={{ consoleId: 'floor', revision: '4' }} />))
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  const card = container.querySelector('[aria-label="Counter app"]')
+  expect(card?.querySelector('[role="status"]')?.textContent).toBe(words)
+  expect(card?.querySelector('[data-testid="gadget-ui"]')).toBeNull()
+  expect(overseer.getGadget).not.toHaveBeenCalled()
+})
+
+it('keeps a section titled like the shown heading for assistive technology only', async () => {
+  const twoSections: CanvasDefinition = { ...definition([]), sections: [
+    { id: 'main', title: ' main ', columns: 1, widgets: [] },
+    { id: 'more', title: 'More', columns: 1, widgets: [] },
+  ] }
+  await act(async () => root.render(<CanvasView definition={twoSections} gadgets={summaries()} overseer={overseer} shownTitle="Main" />))
+  const heading = (id: string) => container.querySelector(`#canvas-section-${id}`)!
+  expect(heading('main').className).toBe('sr-only')
+  expect(container.querySelector('section[aria-labelledby="canvas-section-main"]')).not.toBeNull()
+  expect(heading('more').className).not.toContain('sr-only')
+
+  // Without a heading above it (a console screen or a flow step), every section shows its own.
+  await act(async () => root.render(<CanvasView definition={twoSections} gadgets={summaries()} overseer={overseer} />))
+  expect(heading('main').className).not.toContain('sr-only')
 })

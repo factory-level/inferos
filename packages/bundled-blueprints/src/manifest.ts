@@ -6,6 +6,9 @@
 const OUTPUT_ICONS = ["fileText", "gridNine", "presentation", "appWindow", "flowArrow",
     "kanban", "chartBar", "table", "notebook", "listChecks"];
 
+// Duplicated from the shared API's WORKSPACE_KINDS for the same reason as OUTPUT_ICONS.
+const WORKSPACE_KINDS = ["app", "widget", "workflow"];
+
 // Must match isReservedBlueprintKey() in src/blueprint-archive.ts.
 const RESERVED_BLUEPRINT_KEYS = new Set([".featured", ".adminConfig"]);
 
@@ -16,6 +19,11 @@ export type BundledBlueprintManifest = {
   output: {id: string; noun: string; plural: string; icon: string};
   author: {type: "user"; name: string; id: string};
   revision: number;
+  /**
+   * The kind every install of it takes ("app", "widget" or "workflow"). Absent means an app, as
+   * every blueprint was before kinds; the installer stores it with the version's content.
+   */
+  kind?: "app" | "widget" | "workflow";
   created: string;
   version: number;
   lastUpdated: string;
@@ -70,7 +78,7 @@ function parsePresentation(
 ): BundledBlueprintPresentation {
   let bad = (message: string): never => { throw new Error(`${label}: ${message}`); };
   let {
-    blueprintId, title, description, output, author, revision, $comment, ...rest
+    blueprintId, title, description, output, author, revision, kind, $comment, ...rest
   } = parsed;
   let unknown = Object.keys(rest).filter(key => !allowedExtra.includes(key));
   if (unknown.length > 0) bad(`unknown keys: ${unknown.join(", ")}`);
@@ -105,6 +113,9 @@ function parsePresentation(
     bad(`unknown author keys: ${Object.keys(authorRest).join(", ")}`);
   }
   if (authorType !== undefined && authorType !== "user") bad(`author.type must be "user"`);
+  if (kind !== undefined && !WORKSPACE_KINDS.includes(kind as string)) {
+    bad(`kind must be one of: ${WORKSPACE_KINDS.join(", ")}`);
+  }
 
   return {
     blueprintId: blueprintId as string,
@@ -122,5 +133,6 @@ function parsePresentation(
       id: string(authorId, "author.id"),
     },
     revision: revision as number,
+    ...(kind !== undefined ? {kind: kind as "app" | "widget" | "workflow"} : {}),
   };
 }

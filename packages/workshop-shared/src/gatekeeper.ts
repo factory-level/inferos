@@ -1,3 +1,4 @@
+import type { ActionOutcome, ActionReceiptCode, ActionResult } from "./action-outcome";
 import type { ApprovalEdit, ApprovalProposal } from "./operate-approval";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
@@ -79,6 +80,61 @@ export type VendorDescription = {
    */
   autoProvisionsAccount?: boolean;
 }
+
+/**
+ * What a person asks to do with configuration other people use (see
+ * `GatekeeperUser.holdsSharedConfiguration`): `build` edits a shared workspace, `publish` shares a
+ * workspace or makes its configuration live for the people it is shared with.
+ */
+export type SharedConfigurationAction = "build" | "publish";
+
+/**
+ * One account's answer to `GatekeeperUser.holdsSharedConfiguration`. `scope` names what the answer
+ * is about in the vendor's own terms (for InferOps, the company of the account's session); it is
+ * null when the account can speak for nothing this deployment belongs to, and `holds` is then false.
+ * The Workshop takes answers from one scope only: a person whose connected accounts span more than
+ * one scope is refused, since nothing says which of them this deployment belongs to.
+ */
+export type SharedConfigurationAnswer = { holds: boolean; scope: string | null };
+
+/**
+ * A workspace of the service in which the person may list widgets for their company (see
+ * `GatekeeperUser.widgetIndexWorkspaces`): for InferOps, one where they hold `configuration:publish`.
+ */
+export type WidgetIndexWorkspace = {
+  /** The service's workspace id. */
+  workspaceId: string;
+  /** The workspace's name, for a person choosing among several. */
+  name: string;
+};
+
+/**
+ * One published widget version to list in the service's widget index (FAC-11): a pointer and words
+ * only, never code, bindings, a connection or any record. For InferOps it is `widget.publish`'s
+ * input, with source `inferos.blueprint` and visibility `company`.
+ */
+export type WidgetIndexEntry = {
+  /** The Blueprint's id. */
+  sourceId: string;
+  /** The Blueprint version, from 1. */
+  sourceVersion: number;
+  /** The widget's name, as its console entry labels it. */
+  title: string;
+  /** What the widget is for, in plain words: what the service's retrieval ranks. */
+  purpose: string;
+};
+
+/**
+ * The service's answer to one widget index write, as it gave it. `applied` is a write it made live;
+ * `proposed` is one it took for someone else to confirm, never shown as done; `refused` carries the
+ * service's own words (for InferOps, a person without `configuration:publish`); `unavailable` is
+ * any failure that proves nothing. A withdraw reports whether a definition was there to remove.
+ */
+export type WidgetIndexOutcome =
+  | { status: "applied"; removed?: boolean }
+  | { status: "proposed"; reason: string }
+  | { status: "refused"; reason: string }
+  | { status: "unavailable"; reason: string };
 
 /**
  * Per-open context the Workshop passes to GatekeeperUser.startAppUi(). `isAdmin` is supplied fresh
@@ -758,6 +814,40 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    */
   startAppUi?(context: AppUiContext): Promise<GatekeeperUiFrame>;
 
+  /**
+   * Whether the person behind this account may `build` (edit) or `publish` (share, make live)
+   * configuration other people use in this deployment, as the service this account signs in to
+   * decides it, freshly, with the person's own credentials, and only within the scope this
+   * deployment belongs to (see `SharedConfigurationAnswer`). Called only on accounts of the vendor a
+   * deployment names in `SHARED_CONFIGURATION_GATEKEEPER`; the Workshop gates on that setting
+   * rather than probing the stub. Answer `holds: false` when the person holds no such authority
+   * there; throw when it can't be told, and the Workshop refuses.
+   */
+  holdsSharedConfiguration?(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer>;
+
+  /**
+   * The workspaces of the service in which the person behind this account may list widgets for
+   * their company, asked freshly with their own credentials (for InferOps, those where they hold
+   * `configuration:publish`), in the service's order. Called only on accounts of the vendor
+   * `SHARED_CONFIGURATION_GATEKEEPER` names, and only by the Workshop's own console publication,
+   * never by a gadget, agent or operate session. Empty for an account without a connected person.
+   */
+  widgetIndexWorkspaces?(): Promise<WidgetIndexWorkspace[]>;
+
+  /**
+   * Lists, or lists again, one published widget version in workspace `workspaceId` of the service,
+   * as the person behind this account with their own credentials, and answers as the service did
+   * (see `WidgetIndexOutcome`). The same entry written twice is one definition. `workspaceId` must
+   * be one of the person's own; any other is refused. Called as `widgetIndexWorkspaces` is.
+   */
+  registerWidget?(workspaceId: string, entry: WidgetIndexEntry): Promise<WidgetIndexOutcome>;
+
+  /**
+   * Removes one widget version's listing from workspace `workspaceId`, as `registerWidget` writes
+   * it; `applied` with `removed: false` when there was none. Called as `widgetIndexWorkspaces` is.
+   */
+  withdrawWidget?(workspaceId: string, sourceId: string, sourceVersion: number): Promise<WidgetIndexOutcome>;
+
   // TODO:
   // - Query whether account has scope to access a particular URL.
 }
@@ -778,6 +868,12 @@ export interface GatekeeperUser extends WorkerEntrypoint {
  * that created it, so addObserver() can then call that non-standard method and trust the results.
  */
 export interface GatekeeperUserVerifier extends WorkerEntrypoint {}
+
+/**
+ * A successful apply that reports what the provider produced (`ActionResult`), which the overseer
+ * keeps as the action's `result`. Returning nothing still means the apply succeeded.
+ */
+export type ActionApplied = { applied: { result: ActionResult } };
 
 /**
  * An apply that did not succeed, as `applyAction` reports it when it knows more than a thrown error
@@ -982,7 +1078,7 @@ export interface Gatekeeper<Session> extends DurableObject {
    * ignore this parameter (and can even omit the parameter from their `applyAction()`
    * declaration).
    */
-  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void | { failed: ActionApplyFailure }>;
+  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void | { failed: ActionApplyFailure } | ActionApplied>;
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
@@ -1103,6 +1199,39 @@ export interface SlashCommandProvider extends RpcTarget {
   ): Promise<SlashCommandResult>;
 }
 
+/** Where one submitted action stands, as its receipt reads it now (FAC-97). */
+export interface ActionReceiptStatus {
+  /** Where it stands (see `ActionOutcome`). Only `succeeded` means the work was done. */
+  outcome: ActionOutcome;
+  /** What the provider reported the apply produced, once `succeeded` and only when it reported something; bounded like the action log's `result`. */
+  result?: ActionResult;
+  /**
+   * Why it didn't simply succeed, once `failed` or `unknown`, or while `waiting` again after a
+   * refusal that may be retried: a fixed code (`ACTION_RECEIPT_CODES`).
+   */
+  code?: ActionReceiptCode;
+  /**
+   * With `code`, the kernel's own fixed sentence for it (`ACTION_RECEIPT_REASON`). Never the
+   * gatekeeper's or provider's text: that stays in the action log, for the people deciding actions.
+   */
+  reason?: string;
+}
+
+/**
+ * A receipt for one submitted action, returned by `ApprovalQueue.submitAction()` (FAC-97). It is
+ * passed by value: `actionId` is a plain string, and `status` is a function, which RPC passes as a
+ * callable stub. Holding that function is the only way to read the action's status, and it reads
+ * that one action, of the workspace and connection it was submitted through, and nothing else;
+ * there is no lookup by id. A gatekeeper may hand the receipt on to its caller, which can then tell
+ * a queued write from a done one, while simulation still shows the write as applied to its reads.
+ */
+export interface ActionReceipt {
+  /** An opaque id for showing and correlating the action. It names it; it doesn't grant reading it. */
+  actionId: string;
+  /** The action's status now. */
+  status(): Promise<ActionReceiptStatus>;
+}
+
 /**
  * Used by a gatekeeper to request an action that has side effects (is not read-only). Any such
  * action may be subject to human-in-the-loop approval and audit logging. Whether or not review is
@@ -1129,10 +1258,13 @@ export interface ApprovalQueue extends ObservationAuthorizer {
    * `description` describes the action in a way that can direct UI representation and policy
    * enforcement details.
    *
+   * It resolves to the action's receipt (`ActionReceipt`). A gatekeeper may ignore it, or return it
+   * to its caller so the caller can tell a queued write from a done one.
+   *
    * TODO: It would be nice if we can link this with the output gate so that if the submission
    *   does not complete, any SQL writes performed just before submit() are rolled back...
    */
-  submitAction(action: number, description: ActionDescription): Promise<void>;
+  submitAction(action: number, description: ActionDescription): Promise<ActionReceipt>;
 
   /**
    * Notifies the overseer that the gadget (or an agent) has requested to register a persistent
@@ -1544,7 +1676,19 @@ export interface HookController<Hook extends RpcTarget> extends WorkerEntrypoint
    * However, the overseer can also call enable() again in the future.
    */
   disable(): Promise<void>;
+
+  /**
+   * Optional: deliver this hook once now, because a person asked through its trigger's control and
+   * the overseer has already admitted the request (inferops ADR 0011 S6). Deliver it as an ordinary
+   * occurrence of the hook, passing `invocation` to `initiator.startHook()`, and take nothing else
+   * from the request: the occurrence's data is the gatekeeper's own. Throw when the hook can't run
+   * now (disabled, finished). A gatekeeper without it can't be run on request.
+   */
+  invoke?(invocation: HookInvocation): Promise<void>;
 }
+
+/** An admitted request to run a hook now (HookController.invoke); its id is the overseer's. */
+export type HookInvocation = { invocationId: string };
 
 /**
  * Object passed to HookController.enable(), used to inform the overseer when a hook event occurs.
@@ -1559,8 +1703,12 @@ export interface HookInitiator<Hook extends RpcTarget> extends WorkerEntrypoint 
    * actions resulting from this hook invocation. Most (but not necessarily all) hooks involve an
    * observation. Some hooks may even pass callbacks or interpret the return value in a way that
    * causes side effects, which should be registered as actions.
+   *
+   * `request` is the invocation from `HookController.invoke()` when this delivery is one a person
+   * asked for, and must be omitted otherwise. The overseer accepts only an invocation it admitted
+   * for this hook and not yet delivered.
    */
-  startHook(): Promise<{callback: RpcStub<Hook>, approvalQueue: RpcStub<ApprovalQueue>}>;
+  startHook(request?: HookInvocation): Promise<{callback: RpcStub<Hook>, approvalQueue: RpcStub<ApprovalQueue>}>;
 }
 
 /**

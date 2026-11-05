@@ -1,7 +1,9 @@
 import type { WorkpieceId } from "./api.js";
+import type { WidgetIndexOutcome } from "./gatekeeper.js";
 import { MAX_WORKSPACE_FLOWS, type OperateFlow } from "./operate-flow.js";
 import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
 import type { WidgetToolDeclaration } from "./widget-tools.js";
+import type { WidgetStateMachine } from "./widget-state.js";
 import type { CanvasProjectBoardWidget } from "./canvas.js";
 
 /** Authorized presentation of a published console for the version-1 AG-UI read adapter. */
@@ -137,6 +139,12 @@ export type ConsoleWidgetFreeze = {
    * while console tools are on (`CONSOLE_TOOLS`).
    */
   tools?: WidgetToolDeclaration[];
+  /**
+   * The local states that commit's `states.json` declares (FAC-86), snapshotted at publication
+   * like `tools`: what each operator's running state of the widget follows. Absent when the commit
+   * declares none, or on entries published before publication recorded it.
+   */
+  states?: WidgetStateMachine;
 };
 
 /**
@@ -160,6 +168,46 @@ export type ConsoleWidgetEntry = {
   state: ConsoleWidgetState;
   /** Set by publication only, `ui` and `tools` included; a client-supplied value is dropped. */
   frozen?: ConsoleWidgetFreeze;
+};
+
+/**
+ * A registered widget's stable version: `<blueprintId>@<version>`. It is the same for a draft entry,
+ * the install it names and every publication of it, although each publication runs a new frozen
+ * install; `ConsoleWidgetFreeze.commitId` says which code a publication runs.
+ */
+export function consoleWidgetVersionId(widget: Pick<ConsoleWidgetEntry, "blueprintId" | "version">): string {
+  return `${widget.blueprintId}@${widget.version}`;
+}
+
+/**
+ * One widget install of a workspace, as a builder choosing what a console registers sees it: its
+ * stable version, what its current commit offers, and whether a console can offer it now. Frozen
+ * installs and gadgets that aren't widget installs are never candidates.
+ */
+export type ConsoleWidgetCandidate = {
+  /** The install, which a `ConsoleWidgetEntry` names to register it. */
+  gadgetId: WorkpieceId;
+  /** The blueprint the install came from. */
+  blueprintId: string;
+  /** The blueprint version it runs. */
+  version: number;
+  /** `consoleWidgetVersionId` of the two. */
+  versionId: string;
+  /** The install's current commit, or null if it has none yet. */
+  commitId: string | null;
+  /**
+   * What that commit offers a console: a UI (`client.js`), the names of the tools its
+   * `tools.json` declares, and the local states its `states.json` declares (null when it declares
+   * none). Operators reach declared tools only while console tools are on (`CONSOLE_TOOLS`). Null
+   * when the commit is not a widget a console runs, or there is none.
+   */
+  surfaces: { ui: boolean; tools: string[]; states: string[] | null } | null;
+  /**
+   * Why a console cannot offer it now, as saving a console that registers it would refuse it; null
+   * when one can. Registering offers the widget only, and publishing still needs the deployment's
+   * shared-configuration authority.
+   */
+  refusal: string | null;
 };
 
 /** The one resource a host board requires: an InferOps board, read as a bounded snapshot. */
@@ -299,6 +347,54 @@ export type ConsolePublication = {
    * lists none. Operators run only these: a later edit to a flow reaches them through a republish.
    */
   flows?: OperateFlow[];
+  /**
+   * Each screen the publication copied, in the order the console shows them, with the revision of
+   * the page it froze (FAC-89): together with the frozen widget entries, the one set of page and
+   * widget versions operators get. Absent on publications made before it was recorded.
+   */
+  screens?: { id: string; revision: string }[];
+  /**
+   * Each app the publication's screens place (FAC-89 part 2), once, in the order the screens show
+   * them, with the commit it ran when published. An app is a placed gadget that isn't a widget
+   * install, and keeps its own storage and bindings, so it is never copied: operators open it only
+   * while its current commit is this one (see `ConsolePublishedApp`). An app with no commit then is
+   * not listed. Absent on publications made before it was recorded.
+   */
+  apps?: ConsolePublishedApp[];
+};
+
+/**
+ * Where one console stands in the widget index of the deployment's shared-configuration service
+ * (FAC-11; InferOps' scoped index): which of its workspaces the console lists its widgets in, and
+ * what the service answered for each widget the live publication registers. Kept beside the
+ * console, never in its content, and read only with build access (`Overseer.getConsoleWidgetIndex`).
+ * Absent while the deployment names no such service.
+ */
+export type ConsoleWidgetIndexReport = {
+  /** The service workspace this console lists its widgets in, once chosen (or set because it was the only one). */
+  target: { workspaceId: string; name: string } | null;
+  /**
+   * Why the last publication or delete wrote nothing, in words for the builder: no sign-in, no
+   * workspace where they may, several to choose from, or a chosen one where they no longer may.
+   * Null when it wrote.
+   */
+  blocked: string | null;
+  /** Each widget version the live publication lists, with the service's last answer for it. */
+  widgets: { versionId: string; label: string; outcome: WidgetIndexOutcome }[];
+  /** Widget versions whose withdrawal was refused or failed, to try again on the next publication or delete. */
+  pendingWithdraws: { versionId: string; reason: string }[];
+};
+
+/**
+ * An app as one console publication fenced it: the gadget and the commit it ran then. The console
+ * offers the app to operators only while the gadget's current commit is still `commitId`; once a
+ * builder moves it, operators are refused until the console is published again.
+ */
+export type ConsolePublishedApp = {
+  /** The placed gadget: the live app, not a copy. */
+  gadgetId: WorkpieceId;
+  /** The commit the gadget ran when the console was published. */
+  commitId: string;
 };
 
 /**

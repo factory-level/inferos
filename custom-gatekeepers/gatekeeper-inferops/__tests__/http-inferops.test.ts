@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
+  WIDGET_INDEX_FORBIDDEN, WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
   type InferOpsConnection,
 } from "../src/http-inferops";
 import { PROPOSAL_APPROVE_REFUSED, inferOpsErrorCode, isPolicyRefusal, writeStage } from "../src/inferops-client";
@@ -179,6 +179,33 @@ describe("reads", () => {
     }
   });
 
+  it("reads a service board's seven states in board order, and still refuses an unknown workflow", async () => {
+    // InferOps' `service` ladder (FAC-166, inferops 0bc12ccc), positions after the other two.
+    const ladder = [
+      ["Enquiry", "backlog"], ["Quoted", "backlog"], ["Booked", "unstarted"], ["Scheduled", "started"],
+      ["On site", "started"], ["Completed", "completed"], ["Cancelled", "cancelled"],
+    ] as const;
+    const states = ladder.map(([name, group], i) => ({
+      id: `20000000-0000-4000-8000-0000000001${String(i).padStart(2, "0")}`, name, group, position: 10 + i,
+      workflow: "service",
+    }));
+    const job = { ...card(DEMO_1, "DEMO-1", states[1]!.id, "1041"), workflow: "service" };
+    const board = (columns: unknown[]) => Response.json({ projectId: DEMO.id, projects: [DEMO, ENG], columns });
+    const serving = (columns: unknown[]) => fakeInferOps(call =>
+      call.path === `/project/board?projectId=${DEMO.id}` ? board(columns) : undefined).client;
+
+    const snapshot = await serving(states.map(s => ({ state: s, issues: s.id === job.stateId ? [job] : [] })))
+      .readProject("DEMO");
+    expect(snapshot.states.map(s => [s.name, s.group, s.workflow]))
+      .toEqual(ladder.map(([name, group]) => [name, group, "service"]));
+    expect(snapshot.issues.map(i => [i.identifier, i.workflow, i.stateId])).toEqual([["DEMO-1", "service", states[1]!.id]]);
+
+    const unknown = serving([{ state: { ...states[0], workflow: "maintenance" }, issues: [] }]);
+    expect((await failure(unknown.readProject("DEMO"))).code).toBe("UNAVAILABLE");
+    const unknownCard = serving([{ state: states[0], issues: [{ ...job, stateId: states[0]!.id, workflow: "maintenance" }] }]);
+    expect((await failure(unknownCard.readProject("DEMO"))).code).toBe("UNAVAILABLE");
+  });
+
   it("lists projects by key and name, and answers an unknown project with NOT_FOUND", async () => {
     const { client } = fakeInferOps();
 
@@ -199,6 +226,172 @@ describe("reads", () => {
       "assigneeId", "blockedReason", "id", "identifier", "priority", "revision", "stateId",
       "targetDate", "title", "workflow",
     ]);
+  });
+});
+
+describe("activity", () => {
+  const AGENT = "40000000-0000-4000-8000-000000000001";
+  const PERSON = "40000000-0000-4000-8000-000000000002";
+  const entry = (n: number, over: Record<string, unknown> = {}) => ({
+    kind: "claim", id: String(n), at: `2026-11-03T08:${String(n % 60).padStart(2, "0")}:00.000Z`,
+    actorId: PERSON, actorType: "user", field: "title", value: `title ${n}`, body: null,
+    correlationId: null, ...over,
+  });
+  const historyOf = (pages: Record<string, { entries: unknown[]; nextCursor: string | null }>) =>
+    (call: Call) => {
+      const match = /^\/project\/issues\/([^/]+)\/history\?(.*)$/.exec(call.path);
+      if (!match) return undefined;
+      const after = new URLSearchParams(match[2]).get("afterSeq") ?? "start";
+      return Response.json(pages[after] ?? { entries: [], nextCursor: null });
+    };
+
+  it("reads the issue's history newest first, as person, agent or system, with no principal id", async () => {
+    const { client, calls } = fakeInferOps(historyOf({
+      start: {
+        entries: [
+          entry(1),
+          entry(2, { actorId: AGENT, actorType: "service_account", field: "stateId", value: WORKING }),
+          { kind: "comment", id: "3", at: "2026-11-03T08:03:00.000Z", actorId: AGENT, actorType: "service_account",
+            field: null, value: null, body: "Started on this.", correlationId: null },
+          entry(4, { actorId: null, actorType: "system", field: "priority", value: { level: 2 } }),
+        ],
+        nextCursor: null,
+      },
+    }));
+
+    const activity = await client.readIssueActivity("DEMO", DEMO_1);
+
+    expect(activity).toEqual({
+      omitted: 0,
+      entries: [
+        { kind: "change", at: "2026-11-03T08:04:00.000Z", actor: "system", field: "priority", value: '{"level":2}', body: null, shortened: false },
+        { kind: "comment", at: "2026-11-03T08:03:00.000Z", actor: "agent", field: null, value: null, body: "Started on this.", shortened: false },
+        { kind: "change", at: "2026-11-03T08:02:00.000Z", actor: "agent", field: "stateId", value: WORKING, body: null, shortened: false },
+        { kind: "change", at: "2026-11-03T08:01:00.000Z", actor: "person", field: "title", value: "title 1", body: null, shortened: false },
+      ],
+    });
+    expect(JSON.stringify(activity)).not.toContain(AGENT);
+    expect(JSON.stringify(activity)).not.toContain(PERSON);
+    expect(calls.map(c => c.path)).toContain(`/project/issues/${DEMO_1}/history?limit=100`);
+  });
+
+  it("keeps only the newest 100 of a 5,000-record history with long comments, shortened, holding one page at a time", async () => {
+    // InferOps' own bounds: 100 per page here, comments up to 20,000 characters (2,000 shown).
+    const long = (n: number) => `comment ${n} ` + "x".repeat(2400);
+    const record = (n: number) => n % 2 === 0
+      ? { kind: "comment", id: String(n), at: "2026-11-03T08:00:00.000Z", actorId: PERSON, actorType: "user",
+        field: null, value: null, body: long(n), correlationId: null }
+      : entry(n);
+    let largestPage = 0;
+    const { client, calls } = fakeInferOps(call => {
+      const match = /^\/project\/issues\/[^/]+\/history\?(.*)$/.exec(call.path);
+      if (!match) return undefined;
+      const query = new URLSearchParams(match[1]);
+      const after = Number(query.get("afterSeq") ?? 0);
+      const limit = Number(query.get("limit"));
+      const page = Array.from({ length: Math.max(0, Math.min(limit, 5000 - after)) }, (_, i) => record(after + i + 1));
+      const body = JSON.stringify({ entries: page, nextCursor: after + page.length < 5000 ? String(after + page.length) : null });
+      largestPage = Math.max(largestPage, body.length);
+      return new Response(body, { headers: { "content-type": "application/json" } });
+    });
+
+    const activity = await client.readIssueActivity("DEMO", DEMO_1);
+
+    expect(activity.entries).toHaveLength(100);
+    expect(activity.omitted).toBe(4900);
+    expect(activity.entries[0]).toMatchObject({ kind: "comment", shortened: true });
+    expect(activity.entries[0]!.body).toHaveLength(2000);
+    expect(activity.entries[0]!.body!.startsWith("comment 5000 ")).toBe(true);
+    expect(activity.entries[1]).toMatchObject({ kind: "change", value: "title 4999", shortened: false });
+    // What is kept is bounded by the window, whatever the history's length.
+    expect(JSON.stringify(activity).length).toBeLessThan(100 * 2200);
+    // Pages of this size fit the cap, so none had to be asked for again.
+    expect(largestPage).toBeLessThan(256 * 1024);
+    expect(calls.filter(c => c.path.includes("/history"))).toHaveLength(50);
+  });
+
+  it("stops reading a page at the 256 KiB cap before parsing it, and fails UNAVAILABLE when even one entry is over", async () => {
+    // A body that never ends: without the cap it would be buffered whole before JSON.parse.
+    const streams: { pulled: number; cancelled: boolean }[] = [];
+    const chunk = new TextEncoder().encode(`{"entries":[${'"x",'.repeat(4096)}`);
+    const { client, calls } = fakeInferOps(call => {
+      if (!call.path.includes("/history")) return undefined;
+      const stream = { pulled: 0, cancelled: false };
+      streams.push(stream);
+      return new Response(new ReadableStream({
+        pull(controller) { stream.pulled += chunk.byteLength; controller.enqueue(chunk); },
+        cancel() { stream.cancelled = true; },
+      }), { headers: { "content-type": "application/json" } });
+    });
+
+    const refused = await failure(client.readIssueActivity("DEMO", DEMO_1));
+
+    expect(refused.code).toBe("UNAVAILABLE");
+    expect(refused.message).not.toContain("entries");
+    // The same cursor, for half as many each time, down to one entry.
+    expect(calls.filter(c => c.path.includes("/history")).map(c => new URLSearchParams(c.path.split("?")[1]).get("limit")))
+      .toEqual(["100", "50", "25", "12", "6", "3", "1"]);
+    for (const stream of streams) {
+      expect(stream.cancelled).toBe(true);
+      expect(stream.pulled).toBeLessThanOrEqual(256 * 1024 + 2 * chunk.byteLength);
+    }
+  });
+
+  it("reads a history of InferOps' largest comments, asking for smaller pages until each fits the cap", async () => {
+    // 20,000 characters is InferOps' comment limit; "€" is 3 bytes in UTF-8, and a control
+    // character 6 bytes as a JSON escape, so these are about 60 KB and 120 KB an entry.
+    const body = (n: number) => (n % 2 === 0 ? "€" : "\u0001").repeat(20_000);
+    const comment = (n: number) => ({ kind: "comment", id: String(n), at: "2026-11-03T08:00:00.000Z", actorId: PERSON,
+      actorType: "user", field: null, value: null, body: body(n), correlationId: null });
+    const served: number[] = [];
+    const { client, calls } = fakeInferOps(call => {
+      const match = /^\/project\/issues\/[^/]+\/history\?(.*)$/.exec(call.path);
+      if (!match) return undefined;
+      const query = new URLSearchParams(match[1]);
+      const after = Number(query.get("afterSeq") ?? 0);
+      const page = Array.from({ length: Math.max(0, Math.min(Number(query.get("limit")), 30 - after)) }, (_, i) => comment(after + i + 1));
+      const text = JSON.stringify({ entries: page, nextCursor: after + page.length < 30 ? String(after + page.length) : null });
+      served.push(new TextEncoder().encode(text).byteLength);
+      return new Response(text, { headers: { "content-type": "application/json" } });
+    });
+
+    const activity = await client.readIssueActivity("DEMO", DEMO_1);
+
+    expect(activity.omitted).toBe(0);
+    expect(activity.entries).toHaveLength(30);
+    expect(activity.entries[0]).toMatchObject({ kind: "comment", body: "€".repeat(2000), shortened: true });
+    expect(activity.entries[1]).toMatchObject({ kind: "comment", body: "\u0001".repeat(2000), shortened: true });
+    expect(served.some(bytes => bytes > 256 * 1024)).toBe(true);
+    expect(Math.max(...served.filter(bytes => bytes <= 256 * 1024))).toBeGreaterThan(100_000);
+    expect(calls.filter(c => c.path.includes("/history")).length).toBeLessThan(50);
+  });
+
+  it("refuses another project's issue as NOT_FOUND without asking for its history", async () => {
+    const { client, calls } = fakeInferOps(historyOf({}));
+
+    const refused = await failure(client.readIssueActivity("DEMO", ENG_41));
+
+    expect(refused).toEqual({ code: "NOT_FOUND", message: "InferOpsError: NOT_FOUND: No such issue in this project." });
+    expect(calls.some(c => c.path.includes("/history"))).toBe(false);
+  });
+
+  it("passes InferOps' refusal of the history on as FORBIDDEN, without the server's detail", async () => {
+    const { client } = fakeInferOps(call => call.path.includes("/history")
+      ? Response.json({ success: false, error: { code: "FORBIDDEN", message: "server detail for FORBIDDEN" } }, { status: 403 })
+      : undefined);
+
+    const refused = await failure(client.readIssueActivity("DEMO", DEMO_1));
+
+    expect(refused.code).toBe("FORBIDDEN");
+    expect(refused.message).not.toContain("server detail");
+  });
+
+  it("fails UNAVAILABLE rather than show older entries as the latest when the history is too long", async () => {
+    const { client } = fakeInferOps(call => call.path.includes("/history")
+      ? Response.json({ entries: [entry(1)], nextCursor: "1" })
+      : undefined);
+
+    expect((await failure(client.readIssueActivity("DEMO", DEMO_1))).code).toBe("UNAVAILABLE");
   });
 });
 
@@ -318,6 +511,20 @@ describe("creates", () => {
     expect(calls.find(c => c.method === "POST")!.body).toEqual({
       projectId: DEMO.id, title: "Post", description: "Body", stateId: DRAFTING, workflow: "content",
     });
+  });
+
+  it("names a service workflow, so a job in a service state is not created as software", async () => {
+    const ENQUIRY = "20000000-0000-4000-8000-000000000100";
+    const { client, calls } = fakeInferOps(call => call.method === "POST" && call.path === "/project/issues"
+      ? Response.json({ issue: { ...card(DEMO_1, "DEMO-1", ENQUIRY, "5"), workflow: "service" } }, { status: 201 })
+      : undefined);
+
+    const created = await client.createIssue("DEMO", { title: "Rewire", stateId: ENQUIRY, workflow: "service" }, "k");
+
+    expect(calls.find(c => c.method === "POST")!.body).toEqual({
+      projectId: DEMO.id, title: "Rewire", stateId: ENQUIRY, workflow: "service",
+    });
+    expect(created.workflow).toBe("service");
   });
 
   it("retries a create whose response was lost under the same key, creating one issue", async () => {
@@ -1063,6 +1270,82 @@ describe("the InferMind Wiki over HTTP", () => {
     const error = await refused.readDocumentText(DOC).catch(e => e) as Error;
     expect(error.message).toBe(`FORBIDDEN: ${WIKI_FORBIDDEN}`);
   });
+
+  // FAC-66: `knowledge.search` under the accepted knowledge read and search contract.
+  const HIT = {
+    sectionId: SECTION.toUpperCase(), sectionVersion: 4, documentId: DOC, documentSlug: "handbook",
+    documentTitle: "Handbook", tag: "purpose", snippet: "The <b>purpose</b> of this", score: 0.8,
+  };
+  const searchAnswer = (answer: () => Response) =>
+    fakeWiki(call => call.path.startsWith("/knowledge/search") ? answer() : undefined);
+
+  it("searches with the query and limit only, as the binding's own sign-in, and drops score", async () => {
+    const { client, calls } = searchAnswer(() => Response.json({ hits: [HIT] }));
+    expect(await client.searchWiki("purpose & scope?", 5)).toEqual([{
+      sectionId: SECTION, sectionVersion: 4, documentId: DOC, documentSlug: "handbook",
+      documentTitle: "Handbook", tag: "purpose", snippet: "The <b>purpose</b> of this",
+    }]);
+    const call = calls.at(-1)!;
+    const url = new URL(`https://x${call.path}`);
+    expect(call.method).toBe("GET");
+    expect(url.pathname).toBe("/knowledge/search");
+    expect([...url.searchParams.keys()]).toEqual(["query", "limit"]);
+    expect(url.searchParams.get("query")).toBe("purpose & scope?");
+    expect(url.searchParams.get("limit")).toBe("5");
+    expect(call.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(call.headers.get("x-workspace-id")).toBe(CONNECTION.workspaceId);
+    // No readable match is an empty list.
+    const { client: none } = searchAnswer(() => Response.json({ hits: [] }));
+    expect(await none.searchWiki("nothing", 20)).toEqual([]);
+  });
+
+  it("keeps each company's search to its own sign-in and workspace, and adds nothing", async () => {
+    // Two companies' connections: each search carries only its own token and workspace, and the
+    // hits are exactly what InferOps returned for that sign-in (a viewer's lens is InferOps').
+    const other: InferOpsConnection = {
+      ...CONNECTION, token: "iex_other-company", workspaceId: "90000000-0000-4000-8000-0000000000b2",
+    };
+    const seen: { token: string | null; workspace: string | null }[] = [];
+    const fetcher = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      seen.push({ token: headers.get("authorization"), workspace: headers.get("x-workspace-id") });
+      return Response.json({ hits: headers.get("x-workspace-id") === CONNECTION.workspaceId ? [HIT] : [] });
+    }) as typeof fetch;
+    expect(await openHttpInferOpsClient(other, fetcher).searchWiki("purpose", 20)).toEqual([]);
+    expect((await openHttpInferOpsClient(CONNECTION, fetcher).searchWiki("purpose", 20)).map(h => h.sectionId))
+      .toEqual([SECTION]);
+    expect(seen).toEqual([
+      { token: "Bearer iex_other-company", workspace: other.workspaceId },
+      { token: `Bearer ${TOKEN}`, workspace: CONNECTION.workspaceId },
+    ]);
+  });
+
+  it("reports a search that could not run as unavailable, never as no results", async () => {
+    const envelope = (status: number, code: string) =>
+      () => Response.json({ success: false, error: { code, message: "x" } }, { status });
+    for (const [what, answer] of [
+      ["a timeout", envelope(503, "SEARCH_TIMEOUT")],
+      ["a rate limit", envelope(429, "RATE_LIMITED")],
+      ["an InferOps without knowledge.search", envelope(404, "NOT_FOUND")],
+      ["an outage", envelope(500, "INTERNAL")],
+      ["a snippet over 300 characters", () => Response.json({ hits: [{ ...HIT, snippet: "x".repeat(301) }] })],
+      ["more hits than asked for", () => Response.json({ hits: [HIT, HIT] })],
+      ["a hit without its version", () => Response.json({ hits: [{ ...HIT, sectionVersion: undefined }] })],
+      ["no hits list", () => Response.json({ results: [] })],
+    ] as const) {
+      const { client } = searchAnswer(answer);
+      const error = await client.searchWiki("purpose", 1).then(() => null, e => e);
+      expect(inferOpsErrorCode(error), what).toBe("UNAVAILABLE");
+    }
+    // A snippet of 300 code points, emoji included, is within the cap.
+    const { client } = searchAnswer(() => Response.json({ hits: [{ ...HIT, snippet: "😀".repeat(300) }] }));
+    expect((await client.searchWiki("purpose", 1))[0]!.snippet).toHaveLength(600);
+    // A refusal stays a refusal.
+    const { client: refused } = searchAnswer(envelope(403, "FORBIDDEN"));
+    expect(((await refused.searchWiki("purpose", 1).catch(e => e)) as Error).message).toBe(`FORBIDDEN: ${WIKI_FORBIDDEN}`);
+    const { client: bad } = searchAnswer(envelope(400, "VALIDATION"));
+    expect(inferOpsErrorCode(await bad.searchWiki("purpose", 1).catch(e => e))).toBe("INVALID_REQUEST");
+  });
 });
 
 // MVP-40: InferOps' Wiki proposal routes (inferops#2368). Reads go through the Wiki's one 403
@@ -1242,5 +1525,56 @@ describe("Wiki proposals over HTTP", () => {
     const unproven = await placement.updateDocument("60000000-0000-4000-8000-000000000002", { body: "x" }, 2, "k").catch(e => e);
     expect(inferOpsErrorCode(unproven)).toBe("UNAVAILABLE");
     expect(writeStage(unproven)).toBeUndefined();
+  });
+});
+
+// The widget index (FAC-11 slice 2): `widget.publish` and `widget.withdraw` as the connection's
+// own person, in its own workspace, for the company, with nothing but the pointer and its words.
+describe("widget index writes", () => {
+  type Sent = { method: string; path: string; workspaceId: string | null; body: unknown };
+  const widgetIndex = (answer: (sent: Sent) => Response) => {
+    const sent: Sent[] = [];
+    const client = openHttpInferOpsClient(CONNECTION, (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = new URL(String(input));
+      const headers = new Headers(init.headers);
+      const call = { method: init.method ?? "GET", path: url.pathname.replace("/api", "") + url.search,
+        workspaceId: headers.get("x-workspace-id"), body: init.body ? JSON.parse(String(init.body)) : undefined };
+      sent.push(call);
+      return answer(call);
+    }) as typeof fetch);
+    return { client, sent };
+  };
+  const ENTRY = { sourceId: "bp-1", sourceVersion: 2, title: "Free technicians", purpose: "Who is free" };
+
+  it("lists a widget version for the company, and withdraws it by its pointer", async () => {
+    const { client, sent } = widgetIndex(call => call.method === "PUT"
+      ? Response.json({ id: "d1", source: "inferos.blueprint", sourceId: "bp-1", sourceVersion: 2, digest: null,
+          title: "Free technicians", purpose: "Who is free", visibility: "company", publishedAt: "2026-11-04T00:00:00.000Z" })
+      : Response.json({ withdrawn: true }));
+    await client.publishWidgetDefinition(ENTRY);
+    expect(await client.withdrawWidgetDefinition("bp 1/x", 2)).toBe(true);
+    expect(sent).toEqual([
+      { method: "PUT", path: "/knowledge/widget-definitions", workspaceId: CONNECTION.workspaceId,
+        body: { source: "inferos.blueprint", sourceId: "bp-1", sourceVersion: 2, title: "Free technicians",
+                purpose: "Who is free", visibility: "company" } },
+      { method: "DELETE", path: "/knowledge/widget-definitions/bp%201%2Fx/2", workspaceId: CONNECTION.workspaceId, body: undefined },
+    ]);
+  });
+
+  it("refuses in its own words when InferOps refuses the permission, as a write that never took effect", async () => {
+    const { client } = widgetIndex(() => Response.json(
+      { error: { code: "FORBIDDEN", message: "Missing permission: configuration:publish" } }, { status: 403 }));
+    const refused = await client.publishWidgetDefinition(ENTRY).catch(e => e);
+    expect(inferOpsErrorCode(refused)).toBe("FORBIDDEN");
+    expect(refused.detail).toBe(WIDGET_INDEX_FORBIDDEN);
+    expect(writeStage(refused)).toBe("refused");
+  });
+
+  it("sends nothing for a definition InferOps would not take, and calls an answer for another version malformed", async () => {
+    const { client, sent } = widgetIndex(() => Response.json({ sourceId: "bp-other", sourceVersion: 2 }));
+    expect(inferOpsErrorCode(await client.publishWidgetDefinition({ ...ENTRY, title: "  " }).catch(e => e))).toBe("INVALID_REQUEST");
+    expect(inferOpsErrorCode(await client.withdrawWidgetDefinition("bp-1", 0).catch(e => e))).toBe("INVALID_REQUEST");
+    expect(sent).toEqual([]);
+    expect(inferOpsErrorCode(await client.publishWidgetDefinition(ENTRY).catch(e => e))).toBe("UNAVAILABLE");
   });
 });

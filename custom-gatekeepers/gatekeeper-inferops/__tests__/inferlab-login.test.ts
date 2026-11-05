@@ -10,6 +10,7 @@ import {
   exchangeFromTokenResponse, handleInferLabLogin, inferLabAuthOrigin, startInferLabLogin,
   verifiedEmail,
 } from "../src/inferlab-login.js";
+import { companyAdmits, deploymentCompany } from "../src/deployment-company.js";
 import { signIns, type InferLabLogin, type SignInExports } from "./worker.js";
 
 const LOGIN_ENV = {
@@ -35,8 +36,9 @@ async function start(label: string): Promise<string> {
   });
 }
 
-function get(url: string): Promise<Response | null> {
-  return handleInferLabLogin(new Request(url), LOGIN_ENV, env.INFERLAB_LOGIN);
+function get(url: string, company?: string): Promise<Response | null> {
+  return handleInferLabLogin(new Request(url),
+    company === undefined ? LOGIN_ENV : { ...LOGIN_ENV, INFEROPS_COMPANY: company }, env.INFERLAB_LOGIN);
 }
 
 /** Follows the popup URL to InferLab; returns the authorize request's parameters. */
@@ -167,6 +169,8 @@ describe("sign-in flow", () => {
     expect(params.get("client_id")).toBe("inferos");
     expect(params.get("redirect_uri")).toBe(REDIRECT_URI);
     expect(params.get("code_challenge_method")).toBe("S256");
+    // Without a sign-in proxy the session is InferLab's own and is reused: no prompt is sent.
+    expect(params.get("prompt")).toBeNull();
     expect(params.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(params.get("state")).toMatch(/^[0-9a-f]{64}\.[0-9a-f]{64}$/);
   });
@@ -259,9 +263,14 @@ describe("sign-in flow", () => {
   it("sends the browser to the authorize origin but exchanges the code at the InferLab origin", async () => {
     const proxied = { ...LOGIN_ENV, INFERLAB_AUTHORIZE_ORIGIN: "http://127.0.0.1:8788" };
     const popup = await handleInferLabLogin(new Request(await start("proxied")), proxied, env.INFERLAB_LOGIN);
+    // Straight to /authorize on the proxy, asking for the sign-in page: no /logout, which would also
+    // end the InferLab session behind an account already connected through this host.
     const location = new URL(popup!.headers.get("Location")!);
     expect(`${location.origin}${location.pathname}`).toBe("http://127.0.0.1:8788/authorize");
+    expect(location.searchParams.get("prompt")).toBe("select_account");
+    expect(location.searchParams.get("client_id")).toBe("inferos");
     expect(location.searchParams.get("redirect_uri")).toBe(REDIRECT_URI);
+    expect(location.searchParams.get("code_challenge_method")).toBe("S256");
 
     const exchanges = tokenEndpoint(signedIn("ada@example.com"));
     const done = await handleInferLabLogin(new Request(
@@ -280,5 +289,80 @@ describe("sign-in flow", () => {
     expect(await get("http://localhost:8787/gatekeeper/inferops/elsewhere")).toBeNull();
     expect(await handleInferLabLogin(
       new Request(REDIRECT_URI, { method: "POST" }), LOGIN_ENV, env.INFERLAB_LOGIN)).toBeNull();
+  });
+});
+
+// The deployment belongs to one company (inferops ADR 0009 T6, FAC-160).
+describe("deployment company", () => {
+  const OWN = "20000000-0000-4000-8000-0000000000aa";
+  const OTHER = "20000000-0000-4000-8000-0000000000bb";
+  const inCompany = (tenantId: string) => () => Response.json({
+    token: "access", refreshToken: "refresh", user: { ...user("ada@example.com"), tenantId },
+  });
+
+  it("reads INFEROPS_COMPANY as unset, internal, a tenant id, or malformed", () => {
+    expect(deploymentCompany({})).toEqual({ kind: "unset" });
+    expect(deploymentCompany({ INFEROPS_COMPANY: " " })).toEqual({ kind: "unset" });
+    expect(deploymentCompany({ INFEROPS_COMPANY: "internal" })).toEqual({ kind: "internal" });
+    expect(deploymentCompany({ INFEROPS_COMPANY: OWN.toUpperCase() })).toEqual({ kind: "tenant", tenantId: OWN });
+    for (const bad of ["acme", "Internal", `${OWN}x`, "*"]) {
+      expect(deploymentCompany({ INFEROPS_COMPANY: bad }), bad).toBeNull();
+    }
+  });
+
+  it("refuses only another company's session, and only when a tenant id is named", () => {
+    expect(companyAdmits({ kind: "tenant", tenantId: OWN }, OWN.toUpperCase())).toBe(true);
+    expect(companyAdmits({ kind: "tenant", tenantId: OWN }, OTHER)).toBe(false);
+    // InferOps alone decides these: it holds the reserved list.
+    expect(companyAdmits({ kind: "internal" }, OTHER)).toBe(true);
+    expect(companyAdmits({ kind: "unset" }, OTHER)).toBe(true);
+  });
+
+  it("signs in a person whose session is in the deployment's company", async () => {
+    const params = await authorize("own-company");
+    tokenEndpoint(inCompany(OWN));
+
+    const response = await get(`${REDIRECT_URI}?code=c&state=${params.get("state")}`, OWN);
+
+    expect(response?.status).toBe(200);
+    expect(signIns).toContainEqual({ label: "own-company", email: "ada@example.com" });
+  });
+
+  it("refuses and signs out a session from another company, naming neither", async () => {
+    const params = await authorize("other-company");
+    const requests = tokenEndpoint(inCompany(OTHER));
+
+    const response = await get(`${REDIRECT_URI}?code=c&state=${params.get("state")}`, OWN);
+
+    expect(response?.status).toBe(502);
+    const html = await response!.text();
+    expect(html).toContain("belongs to another company");
+    expect(html).not.toContain(OWN);
+    expect(html).not.toContain(OTHER);
+    expect(requests.logouts).toEqual(["refresh"]);
+    expect(signIns.some(s => s.label === "other-company")).toBe(false);
+  });
+
+  it("shows InferOps' own refusal of another company's session in the same words", async () => {
+    const params = await authorize("refused-upstream");
+    tokenEndpoint(() => Response.json({ error: "company_not_this_deployment" }, { status: 403 }));
+
+    const response = await get(`${REDIRECT_URI}?code=c&state=${params.get("state")}`, "internal");
+
+    expect(response?.status).toBe(502);
+    expect(await response!.text()).toContain("belongs to another company");
+    expect(signIns.some(s => s.label === "refused-upstream")).toBe(false);
+  });
+
+  it("turns sign-in off, without exchanging the code, when the setting is malformed", async () => {
+    const params = await authorize("misconfigured");
+    const requests = tokenEndpoint(inCompany(OWN));
+
+    const response = await get(`${REDIRECT_URI}?code=c&state=${params.get("state")}`, "acme");
+
+    expect(response?.status).toBe(502);
+    expect(await response!.text()).toContain("INFEROPS_COMPANY");
+    expect(requests).toHaveLength(0);
+    expect(signIns.some(s => s.label === "misconfigured")).toBe(false);
   });
 });

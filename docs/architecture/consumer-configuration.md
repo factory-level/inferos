@@ -13,6 +13,7 @@ covers:
   - packages/workshop-frontend/src/ServerConfigContext.tsx
   - packages/workshop-frontend/src/BlueprintsPage.tsx
   - packages/workshop-frontend/src/components/GadgetList.tsx
+  - packages/workshop-frontend/src/routes/outputs.tsx
   - scripts/run-dev-server.ts
   - scripts/dev-server-config.ts
   - packages/router
@@ -23,7 +24,7 @@ covers:
   - .agents/skills/verify-inferos
   - .agents/skills/upgrade-inferos
   - .agents/skills/recover-inferos
-updated: 2026-10-13
+updated: 2026-11-03
 ---
 
 # Consumer configuration and bootstrap implementation
@@ -38,7 +39,7 @@ The working tree now contains a dependency-free Node bootstrap command and stric
 | --- | --- |
 | `scripts/consumer/config.ts` | Version 1 and 2 contract, exact keys/types, pin and URL checks, flag and capability dependency validation, version 1 to 2 migration |
 | `scripts/consumer/bootstrap.ts` | Atomic creation in a sibling temporary directory, pinned submodule, wrapper files, copied standard blueprint sources, optional profile/capability choice with InferOps gatekeeper selection, and rerun protection. The wrapper's `.gitignore` covers `node_modules/`, `.wrangler/`, `.env*`, `.dev.vars*`, `.inferos/state/` and the generated, machine-specific `wrangler.consumer.jsonc` and `wrangler.dev.jsonc` files (the dev server writes the latter beside each wrapper gatekeeper, with absolute paths and the local port) |
-| `scripts/consumer/runtime.ts` | Check actual submodule/index pin, report capability support, install locked dependencies, diagnose local prerequisites, launch native Workshop baseline, delegate `pnpm local` to the pinned lifecycle operator, migrate a version 1 file (`config migrate`) and delegate `intake apply` to the pinned intake command |
+| `scripts/consumer/runtime.ts` | Check actual submodule/index pin, report capability support, install locked dependencies, diagnose local prerequisites, launch native Workshop baseline, delegate `pnpm local` to the pinned lifecycle operator, migrate a version 1 file (`config migrate`), delegate `intake apply` to the pinned intake command, and delegate `pnpm inferos:deploy` (`deployArgs`) to the pinned `stage.ts --wrapper <root>` after refusing a pin without wrapper deploys, unsupported capabilities, `customCloudflareCode` and, outside a dry run, a modified pinned checkout ([wrapper deploys](stage-deploy.md)) |
 | `scripts/consumer/wrapper-files.ts` | What bootstrap writes and who owns it: the templates (`.inferos` helpers, wrapper skills, README, `.gitignore`), the managed `package.json` keys, and the `.inferos/files.json` record with each file's class and sha256 ([maintenance](#wrapper-maintenance-verify-upgrade-recover)) |
 | `scripts/consumer/maintenance.ts` | Copied to `.inferos/maintenance.ts`: `verify`, `recover <ports\|config\|fixtures\|state>` and the `upgrade` driver that runs the target revision's planner |
 | `scripts/consumer/upgrade.ts` | Plan or apply a pin change from a checkout at the target revision; `--branch` commits it as a reviewed upgrade and `--open-pr` opens the PR |
@@ -173,6 +174,8 @@ Capability configuration ([#67](https://github.com/factory-level/inferos/issues/
 `displayDensity` is normalized to comfortable for missing/invalid persisted values and published in admin/public configuration. `AdminApi.setDisplayDensity` validates comfortable/compact and supports later administrator changes. Profile initialization treats an existing compact setting as customization, preserving all target settings together. Initialization already consumed by an older version is not reapplied when density support is added; use the explicit setter.
 
 The frontend reads deployment density from its existing server-config context. Compact spacing applies at the `sm` breakpoint and above to workspace rows, Explore rows, grid gaps and card content; mobile spacing is unchanged. Loading rows/grid gaps follow the same density. Font sizes, Kumo colors, keyboard interactions, menus and gadget-owned layouts remain unchanged. This is curated listing spacing, not a global CSS scale or a canvas density implementation. Configuration refresh requires a client reconnect/reload; an admin-panel control remains pending.
+
+Each Explore grid card is one link to its blueprint (`FeaturedBlueprintCard`), as each list row already was, so a click on its thumbnail, title, description or badges opens it; the card holds no control of its own. The Outputs page keeps its filters in the URL (`type`, a format id, and `owner`, `mine` or `shared`; absent means all), so a reload, Back or a shared link keeps them. A filter change replaces the history entry rather than adding one, and a format id the page does not offer reads as all. The text search stays page state.
 
 ## InferOps-backed sign-in
 

@@ -3,13 +3,14 @@
 // gatekeeper as a facet with props, hands it an approval queue that records what it is told, and
 // applies or rejects the actions it collected.
 
+import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
-  ActionApplyFailure, ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  ActionApplied, ActionApplyFailure, ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
-  InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
+  InferOpsAccountGatekeeper, InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper, InferOpsWorkflowPolicyGatekeeper,
   MockInferOps as BaseMockInferOps,
 } from "../src/inferops.js";
@@ -21,7 +22,7 @@ import {
 import type { MockTables } from "../src/mock-inferops.js";
 import type { Issue, Revision } from "../src/types.js";
 import type {
-  InferOpsDispatchSession, InferOpsMembersSession, InferOpsProjectSession, InferOpsTableSession,
+  InferOpsAccountSession, InferOpsDispatchSession, InferOpsMembersSession, InferOpsProjectSession, InferOpsTableSession,
   InferOpsWikiSession, InferOpsWorkflowPolicySession,
 } from "../src/types.js";
 
@@ -30,7 +31,7 @@ export * from "../src/inferops.js";
 // Vitest's ctx.exports analyzer does not follow `export *`, so the classes reached through
 // ctx.exports are named explicitly.
 export {
-  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
+  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsAccountGatekeeper, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
   InferOpsWorkflowPolicyGatekeeper,
 } from "../src/inferops.js";
@@ -179,6 +180,25 @@ export class TestWikiGatekeeper extends InferOpsWikiGatekeeper {
   }
 }
 
+/** The production account gatekeeper plus raw storage access, as `TestProjectGatekeeper`. */
+export class TestAccountGatekeeper extends InferOpsAccountGatekeeper {
+  async putRaw(key: string, value: unknown): Promise<void> {
+    this.ctx.storage.kv.put(key, value);
+  }
+
+  async getRaw(key: string): Promise<unknown> {
+    return this.ctx.storage.kv.get(key);
+  }
+
+  /** Every storage key under `prefix`. */
+  async rawKeys(prefix: string): Promise<string[]> {
+    return Array.from(this.ctx.storage.kv.list({ prefix }), ([key]) => key);
+  }
+}
+
+/** The props the Workshop bakes into one account binding. */
+export type AccountBindingProps = { accountId: string; tenant: string; connected?: boolean };
+
 /** The props the Workshop bakes into one custom-table binding. */
 export type TableProps = {
   accountId: string; host: string; tableId: string; connected?: boolean; workspaceId?: string;
@@ -280,6 +300,23 @@ class TestGitCache extends RpcTarget implements GitCache {
   }
 }
 
+/**
+ * Stands in for another user's account during an account binding's admission and forward checks:
+ * it reaches exactly the listed project keys and Wiki hosts.
+ */
+export class TestScopedVerifier extends WorkerEntrypoint<Cloudflare.Env, ScopedAccess> {
+  async hasProjectAccess(_host: string, projectKey: string): Promise<boolean> {
+    return this.ctx.props.projects.includes(projectKey);
+  }
+
+  async hasWikiAccess(host: string): Promise<boolean> {
+    return this.ctx.props.wikis.includes(host);
+  }
+}
+
+/** The boards (by key) and Wikis (by host) a `TestScopedVerifier` reaches. */
+export type ScopedAccess = { projects: string[]; wikis: string[] };
+
 /** Stands in for another user's account during an observer admission check. */
 class TestVerifier extends RpcTarget {
   constructor(private readonly hasAccess: boolean) {
@@ -331,6 +368,7 @@ export type SignInExports = {
 };
 
 type TestExports = {
+  TestAccountGatekeeper(options: { props: AccountBindingProps }): DurableObjectClass<TestAccountGatekeeper>;
   TestProjectGatekeeper(options: { props: BindingProps }):
     DurableObjectClass<TestProjectGatekeeper>;
   InferOpsAccount(options: { props: AccountProps }): Fetcher<GatekeeperUser>;
@@ -348,6 +386,10 @@ type ConfiguratorRpc = {
   listWorkspaces(): Promise<Array<{ value: string; title: string }>>;
   listProjects(query: string, host: string): Promise<Array<{ value: string }>>;
 };
+
+/** The failure an `applyAction` answer reports, if it reports one. */
+const failureOf = (outcome: void | { failed: ActionApplyFailure } | ActionApplied) =>
+  outcome && "failed" in outcome ? outcome.failed : undefined;
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -375,6 +417,18 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
 
   async describeAccount(props: AccountProps) {
     return this.#account(props).describe();
+  }
+
+  /** The account's answer to the Workshop's shared-configuration question, or its failure message. */
+  async holdsSharedConfiguration(props: AccountProps, action: "build" | "publish")
+      : Promise<{ holds: boolean; scope: string | null } | string> {
+    const account = this.#account(props) as unknown as
+      Required<Pick<GatekeeperUser, "holdsSharedConfiguration">>;
+    try {
+      return { ...await account.holdsSharedConfiguration(action) };
+    } catch (error) {
+      return String(error instanceof Error ? error.message : error);
+    }
   }
 
   /** The resource URL patterns the account offers now. */
@@ -700,10 +754,15 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action of a bound binding; returns the failure message, or null on success. */
   async applyBound(name: string, actionId: number): Promise<string | null> {
     try {
-      return (await this.#bound(name).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
+      return failureOf(await this.#bound(name).applyAction(actionId, new RpcStub(new TestGitCache())))?.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
+  }
+
+  /** Revert an action of a bound binding; the message it reports, or null once reverted. */
+  async revertBound(name: string, actionId: number): Promise<string | null> {
+    return (await this.#bound(name).revertAction(actionId))?.message ?? null;
   }
 
   /** Admission of a collaborator by their own account's verifier, over a bound binding. */
@@ -754,7 +813,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action of a dispatch binding; returns the failure message, or null on success. */
   async applyDispatch(props: BindingProps, actionId: number): Promise<string | null> {
     try {
-      return (await this.#dispatchGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
+      return failureOf(await this.#dispatchGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -795,7 +854,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action of a Wiki binding; returns the failure message, or null on success. */
   async applyWiki(props: WikiProps, actionId: number): Promise<string | null> {
     try {
-      return (await this.#wikiGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
+      return failureOf(await this.#wikiGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -879,6 +938,96 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     return (frame.ui as unknown as ConfiguratorRpc).listWorkspaces();
   }
 
+  #accountGatekeeper(props: AccountBindingProps) {
+    const exports = this.ctx.exports as unknown as TestExports;
+    return this.ctx.facets.get<TestAccountGatekeeper>(
+      `${props.accountId}/account/${props.tenant}`,
+      () => ({ class: exports.TestAccountGatekeeper({ props }) }));
+  }
+
+  /** An account session over an account binding with these props. */
+  async startAccountSession(props: AccountBindingProps): Promise<InferOpsAccountSession> {
+    return this.#accountGatekeeper(props).startSession(
+      new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
+  /**
+   * A board session opened through an account session that is disposed before the board session
+   * is returned, as an agent's executeCode ends while a widget keeps the board.
+   */
+  async openBoardThenDispose(props: AccountBindingProps, boardRef: string): Promise<InferOpsProjectSession> {
+    const account = await this.#accountGatekeeper(props).startSession(
+      new RpcStub(new TestApprovalQueue(this.#log)) as never);
+    const board = await account.openBoard(boardRef);
+    account[Symbol.dispose]();
+    return board;
+  }
+
+  /** Apply an action of an account binding; the failure message, or null once applied. */
+  async applyAccount(props: AccountBindingProps, actionId: number): Promise<string | null> {
+    try {
+      return failureOf(await this.#accountGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))
+        ?.message ?? null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  async rejectAccount(props: AccountBindingProps, actionId: number): Promise<void> {
+    await this.#accountGatekeeper(props).rejectAction(actionId);
+  }
+
+  async revertAccount(props: AccountBindingProps, actionId: number): Promise<string | null> {
+    const result = await this.#accountGatekeeper(props).revertAction(actionId);
+    return result?.message ?? null;
+  }
+
+  async getAccountRaw(props: AccountBindingProps, key: string): Promise<unknown> {
+    return this.#accountGatekeeper(props).getRaw(key);
+  }
+
+  async putAccountRaw(props: AccountBindingProps, key: string, value: unknown): Promise<void> {
+    await this.#accountGatekeeper(props).putRaw(key, value);
+  }
+
+  async accountRawKeys(props: AccountBindingProps, prefix: string): Promise<string[]> {
+    return this.#accountGatekeeper(props).rawKeys(prefix);
+  }
+
+  async describeAccountBinding(props: AccountBindingProps) {
+    return this.#accountGatekeeper(props).describe();
+  }
+
+  /**
+   * Admission of collaborator `id` to an account binding, whose own account reaches exactly
+   * `access`; the failure message, or null once admitted.
+   */
+  async addAccountObserver(props: AccountBindingProps, id: string,
+                           access: ScopedAccess): Promise<string | null> {
+    try {
+      // A service stub, as the overseer's verifiers are: the binding stores it to check later reads.
+      const verifier = (this.ctx.exports as unknown as {
+        TestScopedVerifier(options: { props: ScopedAccess }): Fetcher<GatekeeperUserVerifier>;
+      }).TestScopedVerifier({ props: access });
+      await this.#accountGatekeeper(props).addObserver(id, verifier);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  async removeAccountObserver(props: AccountBindingProps, id: string): Promise<void> {
+    await this.#accountGatekeeper(props).removeObserver(id);
+  }
+
+  /** An account session over an account binding `bindAccount` made under `name`. */
+  async startBoundAccountSession(name: string): Promise<InferOpsAccountSession> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsAccountGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    return this.ctx.facets.get<InferOpsAccountGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+      .startSession(new RpcStub(new TestApprovalQueue(this.#log)) as never);
+  }
+
   /** A session over a binding, recording into this object's queue log. */
   async startSession(props: BindingProps): Promise<InferOpsProjectSession> {
     return this.#gatekeeper(props).startSession(
@@ -892,7 +1041,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action; returns the failure message, or null on success. */
   async apply(props: BindingProps, actionId: number): Promise<string | null> {
     try {
-      return (await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
+      return failureOf(await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -909,10 +1058,20 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       : kind === "dispatch" ? this.#dispatchGatekeeper(props as BindingProps)
       : this.#gatekeeper(props as BindingProps);
     try {
-      return (await gatekeeper.applyAction(actionId, new RpcStub(new TestGitCache())))?.failed ?? null;
+      return failureOf(await gatekeeper.applyAction(actionId, new RpcStub(new TestGitCache()))) ?? null;
     } catch (error) {
       return { thrown: messageOf(error) };
     }
+  }
+
+  /** What a successful apply reported it produced (`{applied: {result}}`), or null when it reported none. */
+  async appliedResult(props: BindingProps | WikiProps, actionId: number,
+                      kind: "board" | "dispatch" | "wiki" = "board"): Promise<ActionResult | null> {
+    const gatekeeper = kind === "wiki" ? this.#wikiGatekeeper(props as WikiProps)
+      : kind === "dispatch" ? this.#dispatchGatekeeper(props as BindingProps)
+      : this.#gatekeeper(props as BindingProps);
+    const outcome = await gatekeeper.applyAction(actionId, new RpcStub(new TestGitCache()));
+    return outcome && "applied" in outcome ? outcome.applied.result : null;
   }
 
   /** Write a raw value into the binding's storage, as an older version might have left it. */

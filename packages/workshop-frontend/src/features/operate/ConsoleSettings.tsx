@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Button, Checkbox } from '@cloudflare/kumo'
-import { DEFAULT_CONSOLE_CUSTOMIZATION, type BoundViewEntry, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
+import { consoleScreens, DEFAULT_CONSOLE_CUSTOMIZATION, type BoundViewEntry, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
@@ -10,7 +10,11 @@ import { buildReturnHref } from './operateMode'
 import { consoleContentForSave, type ConsoleEntry } from './consoles'
 import { ConsoleBoundViewRegistry } from './ConsoleBoundViewRegistry'
 import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
+import { ConsolePlacedAppsNotice } from './ConsolePlacedAppsNotice'
+import { usePublishedConsolePlacements } from './usePublishedConsolePlacements'
+import { ConsoleWidgetIndex } from './ConsoleWidgetIndex'
 import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
+import { useConsoleWidgetCandidates } from './useConsoleWidgetCandidates'
 
 const ignore = () => {}
 const options = [
@@ -43,6 +47,11 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
   const { workpieces } = useWorkspaceWorkpieces(overseer, entry.workspace.id)
   const candidates = [...workpieces.values()].flatMap(piece => piece.type === 'gadget' && piece.chatId === undefined &&
     !piece.frozenFor && piece.installedFrom?.kind === 'widget' ? [piece] : [])
+  const widgetCandidates = useConsoleWidgetCandidates(overseer, candidates)
+  // A console published before apps were fenced lists none; its published pages say which it places.
+  const legacyPublication = entry.console.published && entry.console.published.apps === undefined ? entry.console.published : null
+  const placed = usePublishedConsolePlacements(overseer?.stub, entry.console.id,
+    legacyPublication ? consoleScreens(legacyPublication.content) : [], legacyPublication !== null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const editable = !!overseer && !!metadata && metadata.role !== 'use' && !accessError
@@ -64,6 +73,7 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
       <h1 className="text-xl font-semibold text-kumo-default">Settings</h1>
       <p className="mt-1 text-sm text-kumo-subtle">{entry.console.title}</p>
     </div><Button variant="ghost" disabled={saving} onClick={onClose}>Done</Button></header>
+    <ConsolePlacedAppsNotice published={entry.console.published} placed={placed} workpieces={workpieces} consoleTitle={entry.console.title} />
     <div className="space-y-5">
       <div><h2 className="text-sm font-medium text-kumo-default">User customization</h2>
         <p className="mt-1 text-sm text-kumo-subtle">Personal additions leave the shared pages unchanged. Pages can be reused across consoles. Settings save to the draft; operators get them when you publish.</p></div>
@@ -74,8 +84,10 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
       </div>)}
       {!editable && <p role="status" className="text-sm text-kumo-subtle">Console owners and editors manage these settings.</p>}
     </div>
-    <ConsoleWidgetRegistry widgets={widgets} published={entry.console.published?.content.widgets} candidates={candidates}
+    <ConsoleWidgetRegistry widgets={widgets} published={entry.console.published?.content.widgets} candidates={widgetCandidates}
       hostBoardCount={shownHostBoards.length + shownBoundViews.length} disabled={!editable || saving} onChange={setWidgets} />
+    {overseer && <ConsoleWidgetIndex overseer={overseer.stub} consoleId={entry.console.id}
+      hasWidgets={(entry.console.published?.content.widgets ?? []).length > 0} editable={editable} />}
     {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={entry.console.published?.content.hostBoards}
       widgetCount={widgets.length + shownBoundViews.length} assistantOnly={entry.console.fullChat === 'only'} disabled={!editable || saving} onChange={setHostBoards} />}
     {boundViewsOn && <ConsoleBoundViewRegistry boundViews={shownBoundViews} published={entry.console.published?.content.boundViews}

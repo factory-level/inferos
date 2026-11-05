@@ -15,3 +15,8 @@ export const gadgetRef = (id: WorkpieceId) => `gadget:${id}`
 
 /** Only valid on a parsed `inferos.gadget` widget, whose reference the contract already checked. */
 export const gadgetIdOf = (targetRef: string): WorkpieceId => Number(targetRef.slice('gadget:'.length))
+
+/** What a widget is called wherever the builder names it: its gadget's title, or its reference. */
+export const widgetLabel = (widget: Pick<CanvasWidget, 'kind' | 'targetRef'>, gadgets: ReadonlyMap<WorkpieceId, { title: string }>) =>
+  widget.kind === 'inferos.gadget' ? `Gadget ${gadgets.get(gadgetIdOf(widget.targetRef))?.title ?? widget.targetRef}`
+    : widget.kind === 'inferops.wiki' ? `InferMind Wiki ${widget.targetRef}` : `Project board ${widget.targetRef}`
