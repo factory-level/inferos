@@ -37,7 +37,8 @@ export default defineGadgetsWorker({
     // local development. Add `remote: true` to use a remote browser running on Cloudflare instead.
     BROWSER: bindings.browser(),
 
-    // All DO classes (UserDurableObject, OverseerDurableObject, AdminSettings, PendingLogin,
+    // All DO classes (UserDurableObject, OverseerDurableObject, AuthoredWidgetBuildDurableObject,
+    // AdminSettings, PendingLogin,
     // UserDirectoryDurableObject, SubjectPresenceDurableObject)
     // are reached via ctx.exports and need no explicit durable_objects binding.
     BLUEPRINTS: bindings.kv(),
@@ -65,6 +66,7 @@ export default defineGadgetsWorker({
 
 export const wrangler = {
   build: { command: "pnpm run build:worker", watch_dir: "src" },
+  rules: [{ type: "CompiledWasm", globs: ["**/*.wasm"], fallthrough: false }],
   kvPreviewIds: { BLUEPRINTS: "gadgets-blueprint-metadata", AVATARS: "gadgets-avatars" },
 } satisfies WranglerExtras;
 
@@ -77,4 +79,5 @@ export const migrations: DurableObjectMigration[] = [
   { tag: "v3", new_sqlite_classes: ["UserDirectoryDurableObject"] },
   // Live presence on operate subjects: one in-memory roster per subject reference.
   { tag: "v4", new_sqlite_classes: ["SubjectPresenceDurableObject"] },
+  { tag: "v5", new_sqlite_classes: ["AuthoredWidgetBuildDurableObject"] },
 ];

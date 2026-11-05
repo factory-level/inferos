@@ -34,6 +34,10 @@ export default {
         command: 'node scripts/build-bundled-blueprints.ts',
         cache: false,
       },
+      'build:authored-widget-dependencies': {
+        command: 'node scripts/build-authored-widget-dependencies.ts',
+        cache: false,
+      },
       'build:browser-runtime': {
         command: withTestTimeout('node scripts/build-browser-runtime.ts'),
         cache: false,
@@ -81,7 +85,9 @@ export default {
           'tsc --project tsconfig.browser.json',
           'tsc --project tsconfig.operator.json',
         ],
-        dependsOn: ['build:bundled-blueprints', 'build:browser-runtime'],
+        dependsOn: [
+          'build:authored-widget-dependencies', 'build:bundled-blueprints', 'build:browser-runtime',
+        ],
         cache: false,
       },
       /**
@@ -106,7 +112,8 @@ export default {
         ...unitTask,
         cache: { ...unitTask.cache, env: [...unitTask.cache.env, 'BACKEND_TEST_WORKERS'] },
         dependsOn: [
-          '@gadgets/typed-storage#build', 'build:bundled-blueprints', 'build:browser-runtime',
+          '@gadgets/typed-storage#build', 'build:authored-widget-dependencies',
+          'build:bundled-blueprints', 'build:browser-runtime',
         ],
       },
     },
