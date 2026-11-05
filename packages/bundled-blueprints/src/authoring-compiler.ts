@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
-import { build, transform, version as esbuildVersion } from "esbuild";
+import { context as createBuildContext, transform, version as esbuildVersion } from "esbuild";
 import ts from "typescript6";
 import { scanModule } from "./scan.ts";
 
@@ -22,6 +22,9 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(packageRoot, "../..");
 const lockfilePath = join(repositoryRoot, "pnpm-lock.yaml");
 const maximumSourceBytes = 1024 * 1024;
+const maximumSourceFileBytes = 256 * 1024;
+const maximumSourceFiles = 100;
+const compileTimeoutMs = 10_000;
 const compilerConfigVersion = 2;
 const entryShim = `import Widget from "./client.tsx";\n` +
     `import { createElement } from "react";\n` +
@@ -109,6 +112,10 @@ export async function compileAuthoredWidget(
 ): Promise<AuthoredWidgetArtifact> {
   const startedAt = performance.now();
   const sources = await validateSources(authoredFiles);
+  return compileValidatedWidget(sources, startedAt);
+}
+
+async function compileValidatedWidget(sources: Map<string, string>, startedAt: number): Promise<AuthoredWidgetArtifact> {
   const sourceHash = hashSourceFiles(sources);
   const dependencyLock = await readFile(lockfilePath, "utf8");
   const dependencyLockHash = hashAllowedLockEntries(dependencyLock);
@@ -134,8 +141,10 @@ export async function compileAuthoredWidget(
   }));
 
   let result;
+  let buildContext: Awaited<ReturnType<typeof createBuildContext>> | undefined;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    result = await build({
+    buildContext = await createBuildContext({
       absWorkingDir: packageRoot,
       bundle: true,
       entryPoints: ["__gadget_entry__.tsx"],
@@ -153,8 +162,20 @@ export async function compileAuthoredWidget(
       logLevel: "silent",
       plugins: [authoredSourcesPlugin(sources)],
     });
+    result = await Promise.race([
+      buildContext.rebuild(),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          void buildContext?.cancel();
+          reject(new Error(`Authored widget compile refused: build exceeded ${compileTimeoutMs}ms.`));
+        }, compileTimeoutMs);
+      }),
+    ]);
   } catch (error) {
     throw new Error(`Authored widget compile refused: ${errorMessage(error)}`, { cause: error });
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    await buildContext?.dispose();
   }
 
   const output = result.outputFiles[0];
@@ -213,7 +234,14 @@ async function validateSources(authoredFiles: Readonly<Record<string, string>>):
     if (typeof source !== "string") {
       throw new Error(`Authored widget refused: ${JSON.stringify(path)} must be UTF-8 text.`);
     }
-    totalBytes += Buffer.byteLength(source, "utf8");
+    const sourceBytes = Buffer.byteLength(source, "utf8");
+    if (sourceBytes > maximumSourceFileBytes) {
+      throw new Error(`Authored widget refused: ${JSON.stringify(path)} exceeds ${maximumSourceFileBytes} bytes.`);
+    }
+    if (files.size >= maximumSourceFiles) {
+      throw new Error(`Authored widget refused: source exceeds ${maximumSourceFiles} files.`);
+    }
+    totalBytes += sourceBytes;
     if (totalBytes > maximumSourceBytes) {
       throw new Error(`Authored widget refused: source exceeds ${maximumSourceBytes} bytes.`);
     }
@@ -242,7 +270,7 @@ async function validateStylesheet(path: string, source: string): Promise<void> {
   } catch (error) {
     throw new Error(`Authored widget refused: ${path} has invalid CSS: ${errorMessage(error)}`, { cause: error });
   }
-  if (/@import\b|\burl\s*\(|(?:-webkit-)?image-set\s*\(/iu.test(normalized)) {
+  if (/@import\b|\burl\s*\(|(?:-webkit-)?image-set\s*\(|\bimage\s*\(/iu.test(normalized)) {
     throw new Error(`Authored widget refused: ${path} contains a CSS network or external asset reference.`);
   }
 }
@@ -407,11 +435,44 @@ function hashSourceFiles(files: Map<string, string>): string {
   )));
 }
 
-function hashAllowedLockEntries(lockfile: string): string {
-  const packageBlocks = lockfile.split(/(?=^  [^\s][^\n]*:\s*$)/mu);
-  const selected = packageBlocks.filter(block => Object.keys(AUTHORED_WIDGET_DEPENDENCY_VERSIONS)
-    .some(name => block.startsWith(`  '${name}@`) || block.startsWith(`  ${name}@`)));
-  return sha256(selected.toSorted().join("\n"));
+export function hashAllowedLockEntries(lockfile: string): string {
+  const sections = lockfile.split(/^snapshots:\s*$/mu);
+  const [, packageSection] = sections[0]?.split(/^packages:\s*$/mu) ?? [];
+  const snapshotSection = sections[1];
+  if (!packageSection || !snapshotSection) throw new Error("Authored widget compile refused: pnpm lockfile has no package/snapshot sections.");
+  const packageBlocks = packageSection.split(/(?=^  [^\s][^\n]*:(?:[ \t]*\{\})?[ \t]*$)/mu).filter(Boolean);
+  const snapshotBlocks = (sections[1] ?? "").split(/(?=^  [^\s][^\n]*:(?:[ \t]*\{\})?[ \t]*$)/mu).filter(Boolean);
+  const selectedPackages = new Map(packageBlocks.map(block => [lockBlockName(block), block]));
+  const selectedSnapshots = new Map(snapshotBlocks.map(block => [lockBlockName(block), block]));
+  const roots = Object.entries(AUTHORED_WIDGET_DEPENDENCY_VERSIONS).map(([name, version]) => {
+    const packageId = `${name}@${version}`;
+    if (!selectedPackages.has(packageId)) throw new Error(`Authored widget compile refused: ${packageId} is not pinned in the lockfile.`);
+    const snapshots = [...selectedSnapshots.keys()].filter(key => key === packageId || key.startsWith(`${packageId}(`));
+    if (snapshots.length === 0) throw new Error(`Authored widget compile refused: ${packageId} has no lockfile snapshot.`);
+    return snapshots;
+  });
+  const closure = new Set<string>();
+  const visit = (name: string): void => {
+    if (closure.has(name)) return;
+    closure.add(name);
+    const snapshot = selectedSnapshots.get(name);
+    const peerSuffix = name.indexOf("(");
+    const pkgName = peerSuffix < 0 ? name : name.slice(0, peerSuffix);
+    const pkg = selectedPackages.get(pkgName);
+    if (!snapshot || !pkg) throw new Error(`Authored widget compile refused: locked dependency ${name} has no package/snapshot entry.`);
+    for (const match of snapshot.matchAll(/^      (?:dependencies|optionalDependencies):\n((?:        [^\n]+\n)*)/gmu)) {
+      for (const line of match[1]!.split("\n").filter(Boolean)) {
+        const dependency = line.match(/^        (.+): (.+)$/u);
+        if (dependency) visit(`${dependency[1]}@${dependency[2]}`);
+      }
+    }
+  };
+  for (const rootGroup of roots) for (const root of rootGroup) visit(root);
+  return sha256([...closure].sort().map(name => `${selectedPackages.get(name)}\n${selectedSnapshots.get(name)}`).join("\n"));
+}
+
+function lockBlockName(block: string): string {
+  return block.match(/^  (.+?):(?:[ \t]*\{\})?[ \t]*$/mu)?.[1]?.replace(/^'|'$/gu, "") ?? "";
 }
 
 function sha256(value: Uint8Array | string): string {
