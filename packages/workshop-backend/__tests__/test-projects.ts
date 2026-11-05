@@ -78,6 +78,7 @@ export const UNIT_NODE: readonly string[] = [
  * several replace modules with `vi.mock`, which a shared graph would leak into the next file.
  */
 export const WORKERD_LIGHT: readonly string[] = [
+  "authored-widget-publication.test.ts",
   "access.test.ts",
   "action-log-pagination.test.ts",
   "operate-approval.test.ts",

@@ -91,6 +91,7 @@ import { chatChangeStatuses, foldProposedChanges, type ChangeBatch } from "./age
 import { ambientGatekeeperMode } from "./provisioning-policy";
 import { blueprintSnapshotFiles, blueprintVersionKeys, blueprintVersionMetadata, checkDataContract, listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, readBlueprintVersionBindings, sanitizeBlueprintOutput, writeBlueprintVersionBindings } from "./blueprint-archive";
 import { assertUpgradeCompatible, createBlueprintBindings, readBlueprintVersionToInstall } from "./blueprint-install";
+import { compileAuthoredWidgetPublication } from "./authored-widget-publication.js";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
 import type { AgentSpawnerBinding, CallableAgent, SpawnCallableOptions } from "./agent-spawner-binding";
@@ -9604,41 +9605,19 @@ class OverseerImpl implements AgentHooks {
 
   /** Compile an authored widget into a child commit when the opt-in feature flag is enabled. */
   async compileAuthoredWidgetCommit(sourceCommitId: string): Promise<string> {
-    if (this.env.AUTHORED_WIDGET_BUILD_ENABLED !== "true") return sourceCommitId;
-    let files = await this.gitStore.readCommitFiles(sourceCommitId);
-    if (!files.has("client.tsx")) return sourceCommitId;
-
-    let builds = this.ctx.exports.AuthoredWidgetBuildDurableObject;
-    let build = builds.get(builds.newUniqueId());
-    // Blueprint metadata and auxiliary assets remain in the source commit; only authored TSX/CSS
-    // modules enter the compiler's bounded in-memory source tree.
-    let authoredSources = Object.fromEntries([...files].filter(([path]) =>
-      path.endsWith(".tsx") || path.endsWith(".css")));
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    let result: Awaited<ReturnType<typeof build.compile>>;
-    let buildStartedAt = performance.now();
-    try {
-      result = await Promise.race([
-        build.compile(authoredSources),
-        new Promise<never>((_, reject) => {
-          timeout = setTimeout(() => reject(new Error("build deadline")), 15_000);
-        }),
-      ]).finally(() => { if (timeout !== undefined) clearTimeout(timeout); });
-    } catch {
-      this.logger.warn("authored widget publication build refused", {
-        event: "authored_widget.publication.build_refused",
-        durationMs: Math.round(performance.now() - buildStartedAt),
-        outcome: "error",
-      });
-      throw new Error("Build failed: it ran out of resources; try fewer or smaller files.");
-    }
-
-    files.set("client.js", result.clientJs);
-    return this.gitStore.writeFilesAsCommit(files, {
-      parents: [sourceCommitId],
-      author: await this.#ownerCommitIdentity(),
-      message: "Build authored widget for publication",
-      timestamp: new Date(),
+    return compileAuthoredWidgetPublication({
+      enabled: this.env.AUTHORED_WIDGET_BUILD_ENABLED === "true",
+      sourceCommitId,
+      gitStore: this.gitStore,
+      builds: this.ctx.exports.AuthoredWidgetBuildDurableObject,
+      author: () => this.#ownerCommitIdentity(),
+      onFailure: durationMs => {
+        this.logger.warn("authored widget publication build refused", {
+          event: "authored_widget.publication.build_refused",
+          durationMs,
+          outcome: "error",
+        });
+      },
     });
   }
 

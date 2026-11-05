@@ -3,6 +3,7 @@ import ts from "typescript6";
 const maximumSourceBytes = 1024 * 1024;
 const maximumSourceFileBytes = 256 * 1024;
 const maximumSourceFiles = 100;
+/** Package imports available to authored widgets in the reviewed build closure. */
 export const allowedAuthoredWidgetImports = new Set([
   "@refinedev/core", "@tanstack/react-query", "react", "react-dom/client", "react/jsx-runtime",
 ]);
@@ -95,6 +96,7 @@ function isPropertyName(node: ts.Identifier): boolean {
     (ts.isMethodDeclaration(node.parent) && node.parent.name === node);
 }
 
+/** Resolve a relative authored source import without allowing it to leave the source tree. */
 export function resolveSourcePath(importer: string, specifier: string,
     files?: ReadonlyMap<string, string>): string | undefined {
   const parts = [...importer.split("/").slice(0, -1), ...specifier.split("/")];
