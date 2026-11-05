@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { Miniflare } from "miniflare";
 import {
-  assertPurgeAllowed, exportCompanyStorage, purgeLocalCompany, type CompanyStorageBindings,
+  assertPurgeAllowed, containedRealPath, exportCompanyStorage, pinContainedPath, purgeLocalCompany, verifyPinnedPath,
+  type CompanyStorageBindings,
   type KeyValueStore, type ObjectStore, type OffboardingStatus, type StorageResourceNames,
 } from "./company-storage.ts";
 
@@ -83,7 +84,7 @@ test("Miniflare export is allow-listed and delimiter-bounded; purge is gated and
     assert.equal((document.r2 as unknown[]).length, 1);
     assert.match(text, /not on export allow-list/);
     assert.match(text, /ARCHIVE/);
-    assert.match(text, /not exported: arbitrary gadget state/);
+    assert.match(text, /not exported: platform and gatekeeper objects, not gadget state/);
     assert.doesNotMatch(text, /opaque credential value/);
     assert.doesNotMatch(text, /acme2/);
     assert.match(text, /workspace-a/);
@@ -137,4 +138,91 @@ test("purge refuses a .wrangler/state symlink that resolves outside its wrapper"
 
 test("offboarding status must belong to the selected company", async () => {
   await assert.rejects(assertPurgeAllowed("tenant-a", async () => status("tenant-b"), new Date("2026-03-01")), /does not match/);
+});
+
+test("a manifest path must really be inside its wrapper: no symlink on the way, no .., no escape", () => {
+  const wrapper = join(scratch, "contained", "wrapper-a");
+  const sibling = join(scratch, "contained", "wrapper-b");
+  const outside = join(scratch, "contained", "outside");
+  for (const dir of [join(wrapper, ".wrangler", "state"), join(sibling, ".wrangler", "state"), outside, join(wrapper, "inner")]) {
+    mkdirSync(dir, { recursive: true });
+  }
+  // A normal path passes, and comes back resolved.
+  assert.equal(containedRealPath(wrapper, join(wrapper, ".wrangler", "state"), "stateDirectory"),
+    realpathSync(join(wrapper, ".wrangler", "state")));
+  // A symlink to a sibling wrapper's state is refused.
+  const toSibling = join(wrapper, "state-link");
+  symlinkSync(join(sibling, ".wrangler", "state"), toSibling, "dir");
+  assert.throws(() => containedRealPath(wrapper, toSibling, "stateDirectory"), /stateDirectory must be inside the wrapper root/);
+  // A symlink inside the root that resolves outside it is refused, even reached through a real directory.
+  symlinkSync(outside, join(wrapper, "inner", "escape"), "dir");
+  assert.throws(() => containedRealPath(wrapper, join(wrapper, "inner", "escape"), "stateDirectory"), /must be inside the wrapper root/);
+  // A symlink that stays inside the root is refused too: no link anywhere between root and target.
+  symlinkSync(join(wrapper, ".wrangler"), join(wrapper, "inner", "loop"), "dir");
+  assert.throws(() => containedRealPath(wrapper, join(wrapper, "inner", "loop", "state"), "stateDirectory"), /passes through a symbolic link/);
+  // .. is refused before anything is resolved, and so are relative paths and missing ones.
+  assert.throws(() => containedRealPath(wrapper, join(wrapper, "inner") + "/../.wrangler/state", "stateDirectory"), /must not contain \.\./);
+  assert.throws(() => containedRealPath(wrapper, ".wrangler/state", "stateDirectory"), /absolute path/);
+  assert.throws(() => containedRealPath(wrapper, join(wrapper, "missing"), "stateDirectory"), /doesn't exist/);
+  // The root itself isn't a path inside it.
+  assert.throws(() => containedRealPath(wrapper, wrapper, "stateDirectory"), /must be inside the wrapper root/);
+});
+
+test("a pinned manifest path is refused if any part of it changes between the check and the use", () => {
+  const base = join(scratch, "pinned");
+  const fresh = (name: string) => {
+    const wrapper = join(base, name);
+    mkdirSync(join(wrapper, ".wrangler", "state"), { recursive: true });
+    return wrapper;
+  };
+  const sibling = fresh("sibling");
+
+  // Unchanged: the re-check passes and gives the canonical path, never the manifest's string.
+  const steady = fresh("steady");
+  const pin = pinContainedPath(steady, join(steady, ".wrangler", "state"), "stateDirectory");
+  assert.equal(pin.path, realpathSync(join(steady, ".wrangler", "state")));
+  assert.equal(verifyPinnedPath(pin), pin.path);
+
+  // A checked component swapped for a symlink to a sibling wrapper's state.
+  const linked = fresh("linked");
+  const linkedPin = pinContainedPath(linked, join(linked, ".wrangler", "state"), "stateDirectory");
+  renameSync(join(linked, ".wrangler"), join(linked, ".wrangler-checked"));
+  mkdirSync(join(linked, ".wrangler"));
+  symlinkSync(join(sibling, ".wrangler", "state"), join(linked, ".wrangler", "state"), "dir");
+  assert.throws(() => verifyPinnedPath(linkedPin), /stateDirectory changed since it was checked.*nothing was started/s);
+
+  // The final directory swapped for a symlink.
+  const leaf = fresh("leaf");
+  const leafPin = pinContainedPath(leaf, join(leaf, ".wrangler", "state"), "stateDirectory");
+  renameSync(join(leaf, ".wrangler", "state"), join(leaf, ".wrangler", "state-checked"));
+  symlinkSync(join(sibling, ".wrangler", "state"), join(leaf, ".wrangler", "state"), "dir");
+  assert.throws(() => verifyPinnedPath(leafPin), /stateDirectory changed since it was checked/);
+
+  // A component replaced by a different real directory: no link, so only its identity shows it.
+  const moved = fresh("moved");
+  const movedPin = pinContainedPath(moved, join(moved, ".wrangler", "state"), "stateDirectory");
+  renameSync(join(moved, ".wrangler"), join(moved, ".wrangler-checked"));
+  mkdirSync(join(moved, ".wrangler", "state"), { recursive: true });
+  assert.throws(() => verifyPinnedPath(movedPin), new RegExp(`stateDirectory changed since it was checked \\(${join(realpathSync(moved), ".wrangler").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\)`));
+
+  // A file replaced by another file.
+  const config = fresh("config");
+  writeFileSync(join(config, "wrangler.jsonc"), "{}");
+  const configPin = pinContainedPath(config, join(config, "wrangler.jsonc"), "workerConfig");
+  writeFileSync(join(config, "wrangler.next"), "{}");
+  renameSync(join(config, "wrangler.next"), join(config, "wrangler.jsonc"));
+  assert.throws(() => verifyPinnedPath(configPin), /workerConfig changed since it was checked/);
+
+  // The wrapper root itself replaced.
+  const root = fresh("root");
+  const rootPin = pinContainedPath(root, join(root, ".wrangler", "state"), "stateDirectory");
+  renameSync(root, `${root}-checked`);
+  mkdirSync(join(root, ".wrangler", "state"), { recursive: true });
+  assert.throws(() => verifyPinnedPath(rootPin), /stateDirectory changed since it was checked/);
+
+  // A removed path is refused, not resolved afresh.
+  const gone = fresh("gone");
+  const gonePin = pinContainedPath(gone, join(gone, ".wrangler", "state"), "stateDirectory");
+  rmSync(join(gone, ".wrangler"), { recursive: true });
+  assert.throws(() => verifyPinnedPath(gonePin), /stateDirectory changed since it was checked/);
 });

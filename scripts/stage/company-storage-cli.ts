@@ -1,13 +1,16 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
-import { unstable_getMiniflareWorkerOptions } from "wrangler";
+import { unstable_getMiniflareWorkerOptions, unstable_readConfig } from "wrangler";
 import { waitForMiniflareReady } from "./miniflare-readiness.ts";
+import { GADGET_VALUE_RULES, type GadgetStateAllowList } from "./gadget-state.ts";
+import { runInProcessGroup, stopWithParent } from "./process-group.ts";
 import {
-  credentialResource, exportCompanyStorage, httpStatusReader, purgeLocalCompany, type CompanyStorageBindings,
-  type KeyValueStore, type ObjectStore, type StorageResourceNames,
+  credentialResource, exportCompanyStorage, httpStatusReader, pinContainedPath, purgeLocalCompany, verifyPinnedPath,
+  type CompanyStorageBindings, type KeyValueStore, type ObjectStore, type PinnedPath, type StorageResourceNames,
 } from "./company-storage.ts";
 
 interface LocalManifest {
@@ -25,40 +28,66 @@ interface LocalManifest {
     exportKv?: string[];
     /** Missing means no R2 resources are exported. */
     exportR2?: string[];
+    /**
+     * Per blueprint, the gadget storage keys that may be exported and each value's rule (see
+     * gadget-state.ts). Missing means every gadget's keys are listed by name only.
+     */
+    exportGadgetState?: GadgetStateAllowList;
   };
 }
 
 const MINIFLARE_READY_TIMEOUT_MS = 30_000;
+const MINIFLARE_DISPOSE_TIMEOUT_MS = 30_000;
+const BUNDLE_TIMEOUT_MS = 120_000;
+/** The whole export-local run, bundle and startup included; --timeout-ms overrides it. */
+const EXPORT_TIMEOUT_MS = 300_000;
+const CHILD_COMMAND = "__export-local-in-group";
+/** The binding this export gives an Overseer the worker declares unbound (reached via ctx.exports). */
+const OVERSEER_EXPORT_BINDING = "__INFEROS_STORAGE_EXPORT_OVERSEER";
 
 const usage = `
 Usage:
   pnpm stage:company-storage plan --manifest FILE
-  pnpm stage:company-storage export-local --manifest FILE
+  pnpm stage:company-storage export-local --manifest FILE [--timeout-ms N]
   pnpm stage:company-storage purge-local --manifest FILE [--apply]
 
 Each wrapper must contain exactly one company's data; never point purge at a shared state directory.
 Only resources named in resources.exportKv/exportR2 are exported; omitted lists export nothing.
+Gadget storage is exported only for keys resources.exportGadgetState allow-lists per blueprint;
+every other key is listed by name. export-local runs in its own process group and is killed,
+with everything it started, after --timeout-ms (default 300000).
 Manifest contains only local wrapper paths and resource names. A real stage has no apply command.
+Its paths are checked by real path and re-checked before each use; don't change the wrapper while it runs.
 Set INFEROPS_OFFBOARDING_TOKEN to an internal InferOps bearer only for purge-local --apply.
 `;
 
-function args(argv: string[]): { command: string; manifest?: string; apply: boolean } {
+function args(argv: string[]): { command: string; manifest?: string; apply: boolean; timeoutMs: number } {
   const [command, ...rest] = argv;
-  if (!command || !["plan", "export-local", "purge-local"].includes(command)) throw new Error(usage);
+  if (!command || !["plan", "export-local", "purge-local", CHILD_COMMAND].includes(command)) throw new Error(usage);
   let manifest: string | undefined;
   let apply = false;
+  let timeoutMs = EXPORT_TIMEOUT_MS;
   for (let i = 0; i < rest.length; i++) {
     if (rest[i] === "--manifest") manifest = rest[++i];
     else if (rest[i] === "--apply") apply = true;
-    else throw new Error(`Unknown option ${rest[i]}\n${usage}`);
+    else if (rest[i] === "--timeout-ms" && command === "export-local") {
+      const value = rest[++i];
+      if (!value || !/^[1-9][0-9]*$/.test(value)) throw new Error("--timeout-ms needs a positive whole number of milliseconds");
+      timeoutMs = Number(value);
+    } else throw new Error(`Unknown option ${rest[i]}\n${usage}`);
   }
   if (!manifest) throw new Error(`--manifest is required\n${usage}`);
   if (command !== "purge-local" && apply) throw new Error("--apply is only valid for purge-local");
-  return { command, manifest: resolve(manifest), apply };
+  return { command, manifest: resolve(manifest), apply, timeoutMs };
 }
 
-function readManifest(path: string): LocalManifest {
-  const manifest = JSON.parse(readFileSync(path, "utf8")) as LocalManifest;
+/** A manifest whose paths are real paths, each pinned as it was checked and re-checked before use. */
+interface CheckedManifest extends LocalManifest {
+  pins: { stateDirectory: PinnedPath; workerConfig: PinnedPath };
+}
+
+function readManifest(path: string): CheckedManifest {
+  const manifest = JSON.parse(readFileSync(path, "utf8")) as CheckedManifest;
   if (!/^[0-9a-f-]{36}$/i.test(manifest.tenantId) || !manifest.resourcePrefix ||
       !/[/:_-]$/.test(manifest.resourcePrefix) ||
       !manifest.inferopsBaseUrl || !manifest.wrapperRoot || !manifest.stateDirectory ||
@@ -66,14 +95,15 @@ function readManifest(path: string): LocalManifest {
       !Array.isArray(manifest.resources.kv) || !Array.isArray(manifest.resources.r2)) {
     throw new Error("Malformed local company storage manifest");
   }
-  const root = realpathSync(manifest.wrapperRoot);
-  for (const candidate of [manifest.stateDirectory, manifest.workerConfig]) {
-    const absolute = resolve(candidate);
-    const rel = relative(root, absolute);
-    if (!isAbsolute(candidate) || !rel || rel.startsWith("..") || isAbsolute(rel)) {
-      throw new Error("Manifest state and worker config must be inside the local wrapper root");
-    }
-  }
+  // Checked and used by real path, so a symbolic link can't lead into another wrapper's state, and
+  // pinned, so a path changed after this check is refused at its re-check before each use.
+  manifest.pins = {
+    stateDirectory: pinContainedPath(manifest.wrapperRoot, manifest.stateDirectory, "stateDirectory"),
+    workerConfig: pinContainedPath(manifest.wrapperRoot, manifest.workerConfig, "workerConfig"),
+  };
+  manifest.stateDirectory = manifest.pins.stateDirectory.path;
+  manifest.workerConfig = manifest.pins.workerConfig.path;
+  manifest.wrapperRoot = manifest.pins.stateDirectory.root;
   if ([...manifest.resources.kv, ...manifest.resources.r2].some(resource => !resource.binding || !resource.name)) {
     throw new Error("Every local resource needs a binding and a resource name");
   }
@@ -88,18 +118,56 @@ function readManifest(path: string): LocalManifest {
       throw new Error(`resources.export${kind} may contain only unique names listed in resources.${kind.toLowerCase()}`);
     }
   }
+  const gadgetAllowList = manifest.resources.exportGadgetState;
+  if (gadgetAllowList !== undefined) {
+    if (!Array.isArray(gadgetAllowList)) throw new Error("resources.exportGadgetState must be an array of { blueprintId, keys }");
+    const seen = new Set<string>();
+    for (const entry of gadgetAllowList as unknown[]) {
+      const { blueprintId, keys, clearNames } = (entry ?? {}) as { blueprintId?: unknown; keys?: unknown; clearNames?: unknown };
+      if (typeof blueprintId !== "string" || !blueprintId || seen.has(blueprintId)) {
+        throw new Error("resources.exportGadgetState needs a unique blueprintId on every entry");
+      }
+      seen.add(blueprintId);
+      if (!keys || typeof keys !== "object" || Array.isArray(keys) ||
+          Object.values(keys).some(rule => !(GADGET_VALUE_RULES as readonly unknown[]).includes(rule))) {
+        throw new Error(`resources.exportGadgetState for ${blueprintId} needs keys, each with one of: ${GADGET_VALUE_RULES.join(", ")}`);
+      }
+      if (clearNames !== undefined && (!Array.isArray(clearNames) ||
+          clearNames.some(name => typeof name !== "string" || !name) || new Set(clearNames).size !== clearNames.length)) {
+        throw new Error(`resources.exportGadgetState for ${blueprintId}: clearNames must be unique, non-empty names`);
+      }
+      if (Object.keys(keys).length === 0 && !(clearNames as unknown[] | undefined)?.length) {
+        throw new Error(`resources.exportGadgetState for ${blueprintId} lists no keys and no clearNames`);
+      }
+    }
+  }
   return manifest;
 }
 
-async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Miniflare; bindings: CompanyStorageBindings; cleanup: () => void }> {
+/** Disposes Miniflare, failing rather than waiting when it doesn't stop within its bound. */
+async function disposeBounded(mf: Miniflare): Promise<void> {
+  await waitForMiniflareReady(mf.dispose(), MINIFLARE_DISPOSE_TIMEOUT_MS).catch(error => {
+    throw new Error(`Miniflare did not stop: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
+async function openLocalBindings(manifest: CheckedManifest): Promise<{ mf: Miniflare; bindings: CompanyStorageBindings; cleanup: () => void }> {
+  const { pins } = manifest;
+  verifyPinnedPath(pins.stateDirectory);
+  verifyPinnedPath(pins.workerConfig);
   const bundleDirectory = mkdtempSync(join(tmpdir(), "inferos-company-storage-"));
   try {
+    // Bounded on its own, for a clear error; the process group bounds anything it leaves behind.
     execFileSync("pnpm", ["exec", "wrangler", "deploy", "--dry-run", "--outdir", bundleDirectory,
-      "-c", manifest.workerConfig], { cwd: manifest.wrapperRoot, stdio: "inherit" });
+      "-c", manifest.workerConfig], { cwd: manifest.wrapperRoot, stdio: "inherit",
+      timeout: BUNDLE_TIMEOUT_MS, killSignal: "SIGKILL" });
   } catch (error) {
     rmSync(bundleDirectory, { recursive: true, force: true });
     throw new Error(`Wrangler could not bundle the local wrapper without deploying: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
+  // The wrapper's own build has just run: re-check the config before Wrangler reads it again.
+  try { verifyPinnedPath(pins.workerConfig); }
+  catch (error) { rmSync(bundleDirectory, { recursive: true, force: true }); throw error; }
   const { workerOptions, externalWorkers } = unstable_getMiniflareWorkerOptions(manifest.workerConfig);
   const main = join(bundleDirectory, "index.js");
   try {
@@ -108,7 +176,26 @@ async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Minifla
     rmSync(bundleDirectory, { recursive: true, force: true });
     throw new Error(`Wrangler dry-run did not emit the expected bundled worker at ${main}`);
   }
-  const { modulesRules, ...workerConfig } = workerOptions;
+  const { modulesRules, ...declaredConfig } = workerOptions as typeof workerOptions & {
+    durableObjects?: Record<string, string | { className: string; useSQLite?: boolean }>;
+    additionalUnboundDurableObjects?: { className: string; useSQLite?: boolean }[];
+  };
+  // The InferOS backend declares its Durable Object classes unbound and reaches them through
+  // ctx.exports, so give an unbound Overseer a binding of the export's own to open it by. Its
+  // storage is keyed by worker and class, so it's the same state either way. The worker's name
+  // comes from its config, as `wrangler dev` names it, so this reads the state that dev wrote.
+  const workerName = declaredConfig.name ?? unstable_readConfig({ config: manifest.workerConfig }).name;
+  const unbound = declaredConfig.additionalUnboundDurableObjects ?? [];
+  const boundOverseer = Object.values(declaredConfig.durableObjects ?? {})
+    .some(binding => (typeof binding === "string" ? binding : binding.className) === "OverseerDurableObject");
+  const unboundOverseer = unbound.find(({ className }) => className === "OverseerDurableObject");
+  const workerConfig = {
+    ...declaredConfig,
+    name: workerName,
+    durableObjects: { ...declaredConfig.durableObjects,
+      ...(!boundOverseer && unboundOverseer ? { [OVERSEER_EXPORT_BINDING]: unboundOverseer } : {}) },
+    additionalUnboundDurableObjects: unbound.filter(entry => boundOverseer || entry !== unboundOverseer),
+  };
   const defaultRules = [
     { type: "Text", include: ["**/*.txt", "**/*.html", "**/*.sql"] },
     { type: "Data", include: ["**/*.bin"] },
@@ -118,22 +205,25 @@ async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Minifla
     rmSync(bundleDirectory, { recursive: true, force: true });
     throw new Error("Custom Wrangler modulesRules need an explicit Miniflare v5 manifest mapping");
   }
+  try { verifyPinnedPath(pins.stateDirectory); }
+  catch (error) { rmSync(bundleDirectory, { recursive: true, force: true }); throw error; }
   const mf = new Miniflare(convertV4MiniflareOptions({
-    workers: [{ ...workerConfig, rootPath: bundleDirectory, scriptPath: main, modules: true }, ...externalWorkers, {
+    workers: [{ ...workerConfig, rootPath: bundleDirectory, scriptPath: main, modules: true }, ...externalWorkers,
+      ...(workerName === "workshop-backend" ? [] : [{
       // The router config contains a production service binding, but storage export never routes
       // requests through it. Give Miniflare an inert local target instead of resolving a remote
       // service or requiring the full application stack.
       name: "workshop-backend",
       modules: true,
       script: "export default { fetch: () => new Response('Local storage export does not serve requests', { status: 503 }) }",
-    }],
+    }])],
     resourcePersistencePath: manifest.stateDirectory,
     remoteBindings: false,
   }));
   try {
     await waitForMiniflareReady(mf.ready, MINIFLARE_READY_TIMEOUT_MS);
   } catch (error) {
-    try { await mf.dispose(); } catch { /* retain the startup failure as the actionable error */ }
+    try { await disposeBounded(mf); } catch { /* retain the startup failure as the actionable error */ }
     rmSync(bundleDirectory, { recursive: true, force: true });
     throw error;
   }
@@ -148,26 +238,43 @@ async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Minifla
     }[];
     const workspaces = new Map<string, { exportWorkspaceRecords(): Promise<unknown> }>();
     const gadgetDurableObjects: { namespace: string; ids: string[] }[] = [];
+    let overseerWorker: string | undefined;
     for (const worker of workers) {
-      for (const binding of Object.values(worker.durableObjects ?? {})) {
+      for (const [bindingName, binding] of Object.entries(worker.durableObjects ?? {})) {
         const className = typeof binding === "string" ? binding : binding.className;
-        const ids = await mf.listDurableObjectIds(className, worker.name);
+        // Miniflare lists each facet's database (`<id>.<n>`) beside its object; only objects are
+        // opened here, and a workspace's facets are read from disk by exportGadgetState.
+        const ids = (await mf.listDurableObjectIds(className, worker.name)).filter(id => /^[0-9a-f]{64}$/.test(id));
         if (className === "OverseerDurableObject") {
-          const namespace = await mf.getDurableObjectNamespace(className, worker.name);
+          if (overseerWorker !== undefined && overseerWorker !== worker.name) throw new Error("Two workers declare the Overseer");
+          overseerWorker = worker.name;
+          // A namespace is opened by its binding's name, not its class's.
+          const namespace = await mf.getDurableObjectNamespace(bindingName, worker.name);
           for (const id of ids) {
             const stub = namespace.get(namespace.idFromString(id)) as unknown as { exportWorkspaceRecords?: () => Promise<unknown> };
             if (typeof stub.exportWorkspaceRecords !== "function") {
               throw new Error(`Workspace ${id} does not expose the merged kernel exportWorkspaceRecords method`);
             }
-            workspaces.set(id, { exportWorkspaceRecords: () => stub.exportWorkspaceRecords!() });
+            // Copied out as plain data at once: an RPC result is a stub that dies with the runtime,
+            // which stops before gadget state is read.
+            workspaces.set(id, { exportWorkspaceRecords: async () => JSON.parse(JSON.stringify(await stub.exportWorkspaceRecords!())) });
           }
         } else if (ids.length) gadgetDurableObjects.push({ namespace: className, ids });
       }
     }
-    return { mf, bindings: { kv, r2, workspaces, gadgetDurableObjects },
+    let closed = false;
+    const closeRuntime = async () => { if (!closed) { closed = true; await disposeBounded(mf); } };
+    const gadgetState = overseerWorker === undefined ? undefined : {
+      // Miniflare persists a class's objects at <state>/do/<worker>-<class>/.
+      durableObjectDirectory: join(manifest.stateDirectory, "do", `${overseerWorker}-OverseerDurableObject`),
+      allowList: manifest.resources.exportGadgetState ?? [],
+      scratchDirectory: bundleDirectory,
+      verifyPaths: () => { verifyPinnedPath(pins.stateDirectory); },
+    };
+    return { mf, bindings: { kv, r2, workspaces, gadgetDurableObjects, gadgetState, closeRuntime },
       cleanup: () => rmSync(bundleDirectory, { recursive: true, force: true }) };
   } catch (error) {
-    await mf.dispose();
+    try { await disposeBounded(mf); } catch { /* retain the original failure */ }
     rmSync(bundleDirectory, { recursive: true, force: true });
     throw error;
   }
@@ -192,13 +299,26 @@ async function main(argv: string[]): Promise<void> {
         ...resources.r2.filter(name => credentialResource(name) || !(resources.exportR2 ?? []).includes(name))
           .map(name => ({ kind: "r2", name, reason: credentialResource(name) ? "credential store" : "not on export allow-list" })),
       ],
-      durableObjects: "workspace allow-list export; gadget state listed, not exported",
+      durableObjects: "workspace allow-list export; gadget storage through resources.exportGadgetState, other keys by name",
+      exportGadgetState: manifest.resources.exportGadgetState ?? [],
       remoteDeletion: "not performed; real Cloudflare deletion is a person-run step",
     }, null, 2));
     return;
   }
   if (parsed.command === "export-local") {
-    const { mf, bindings, cleanup } = await openLocalBindings(manifest);
+    // Run the export in its own process group, so a hung bundle or runtime start, and everything
+    // it started, is killed at the deadline instead of holding a heavy-run slot.
+    const result = await runInProcessGroup(process.execPath,
+      [fileURLToPath(import.meta.url), CHILD_COMMAND, "--manifest", parsed.manifest!],
+      { timeoutMs: parsed.timeoutMs, label: "export-local" });
+    if (result.timedOut) throw new Error(result.message);
+    if (result.code !== 0) process.exitCode = result.code ?? 1;
+    return;
+  }
+  if (parsed.command === CHILD_COMMAND) {
+    // Its own process group escapes the caller's, so it ends itself if its parent is killed outright.
+    stopWithParent();
+    const { bindings, cleanup } = await openLocalBindings(manifest);
     try {
       const result = await exportCompanyStorage({ tenantId: manifest.tenantId, prefix: manifest.resourcePrefix,
         resources, bindings, outputDirectory: manifest.outputDirectory });
@@ -206,9 +326,12 @@ async function main(argv: string[]): Promise<void> {
         path: join(manifest.outputDirectory, `company-${manifest.tenantId}-export.json`),
         keyValues: (result.kv as unknown[]).length, objects: (result.r2 as unknown[]).length,
         workspaces: (result.workspaces as unknown[]).length,
-        gadgetNamespaces: (result.gadgetDurableObjects as unknown[]).length }, null, 2));
+        gadgets: ((result.gadgetState as { workspaces: { gadgets: unknown[] }[] } | null)?.workspaces ?? [])
+          .reduce((total, workspace) => total + workspace.gadgets.length, 0),
+        otherDurableObjectNamespaces: (result.gadgetDurableObjects as unknown[]).length,
+        structureDigest: result.structureDigest }, null, 2));
     } finally {
-      try { await mf.dispose(); }
+      try { await bindings.closeRuntime?.(); }
       finally { cleanup(); }
     }
     return;
@@ -219,8 +342,11 @@ async function main(argv: string[]): Promise<void> {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
   const token = process.env.INFEROPS_OFFBOARDING_TOKEN ?? "";
-  const result = await purgeLocalCompany({ tenantId: manifest.tenantId, stateDirectory: manifest.stateDirectory,
+  const result = await purgeLocalCompany({ tenantId: manifest.tenantId, stateDirectory: verifyPinnedPath(manifest.pins.stateDirectory),
     wrapperRoot: manifest.wrapperRoot, apply: parsed.apply,
+    // Again after InferOps' status round-trip, right before the delete: a path swapped while that
+    // request was out would otherwise lead the delete into another wrapper's state.
+    beforeDelete: async () => { verifyPinnedPath(manifest.pins.stateDirectory); },
     readStatus: parsed.apply
       ? httpStatusReader(manifest.inferopsBaseUrl, token)
       : async () => { throw new Error("Offboarding status is read only during --apply"); } });
