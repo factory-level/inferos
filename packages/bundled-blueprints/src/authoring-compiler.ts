@@ -178,9 +178,14 @@ async function compileValidatedWidget(sources: Map<string, string>, startedAt: n
     await buildContext?.dispose();
   }
 
-  const output = result.outputFiles[0];
+  const outputFiles = result.outputFiles;
+  const metafile = result.metafile;
+  if (!outputFiles || !metafile) {
+    throw new Error("Authored widget compile failed: esbuild did not return in-memory output and metadata.");
+  }
+  const output = outputFiles[0];
   if (!output) throw new Error("Authored widget compile failed: no client JavaScript was emitted.");
-  const externalImports = Object.values(result.metafile.outputs)
+  const externalImports = Object.values(metafile.outputs)
     .flatMap(file => file.imports)
     .filter(imported => imported.external);
   if (externalImports.length > 0) {
@@ -440,10 +445,8 @@ export function hashAllowedLockEntries(lockfile: string): string {
   const [, packageSection] = sections[0]?.split(/^packages:\s*$/mu) ?? [];
   const snapshotSection = sections[1];
   if (!packageSection || !snapshotSection) throw new Error("Authored widget compile refused: pnpm lockfile has no package/snapshot sections.");
-  const packageBlocks = packageSection.split(/(?=^  [^\s][^\n]*:(?:[ \t]*\{\})?[ \t]*$)/mu).filter(Boolean);
-  const snapshotBlocks = (sections[1] ?? "").split(/(?=^  [^\s][^\n]*:(?:[ \t]*\{\})?[ \t]*$)/mu).filter(Boolean);
-  const selectedPackages = new Map(packageBlocks.map(block => [lockBlockName(block), block]));
-  const selectedSnapshots = new Map(snapshotBlocks.map(block => [lockBlockName(block), block]));
+  const selectedPackages = new Map(lockSectionBlocks(packageSection));
+  const selectedSnapshots = new Map(lockSectionBlocks(snapshotSection));
   const roots = Object.entries(AUTHORED_WIDGET_DEPENDENCY_VERSIONS).map(([name, version]) => {
     const packageId = `${name}@${version}`;
     if (!selectedPackages.has(packageId)) throw new Error(`Authored widget compile refused: ${packageId} is not pinned in the lockfile.`);
@@ -460,19 +463,56 @@ export function hashAllowedLockEntries(lockfile: string): string {
     const pkgName = peerSuffix < 0 ? name : name.slice(0, peerSuffix);
     const pkg = selectedPackages.get(pkgName);
     if (!snapshot || !pkg) throw new Error(`Authored widget compile refused: locked dependency ${name} has no package/snapshot entry.`);
-    for (const match of snapshot.matchAll(/^      (?:dependencies|optionalDependencies):\n((?:        [^\n]+\n)*)/gmu)) {
-      for (const line of match[1]!.split("\n").filter(Boolean)) {
-        const dependency = line.match(/^        (.+): (.+)$/u);
-        if (dependency) visit(`${dependency[1]}@${dependency[2]}`);
-      }
+    for (const dependency of snapshotDependencies(snapshot)) {
+      visit(`${dependency.name}@${dependency.version}`);
     }
   };
   for (const rootGroup of roots) for (const root of rootGroup) visit(root);
-  return sha256([...closure].sort().map(name => `${selectedPackages.get(name)}\n${selectedSnapshots.get(name)}`).join("\n"));
+  return sha256([...closure].sort().map(name => {
+    const packageId = name.slice(0, name.indexOf("(") < 0 ? name.length : name.indexOf("("));
+    return `${name}\n${selectedPackages.get(packageId)}\n${selectedSnapshots.get(name)}`;
+  }).join("\n"));
 }
 
-function lockBlockName(block: string): string {
-  return block.match(/^  (.+?):(?:[ \t]*\{\})?[ \t]*$/mu)?.[1]?.replace(/^'|'$/gu, "") ?? "";
+function lockSectionBlocks(section: string): [string, string][] {
+  const blocks: [string, string][] = [];
+  let currentName: string | undefined;
+  let currentLines: string[] = [];
+  const flush = () => {
+    if (currentName !== undefined) blocks.push([currentName, currentLines.join("\n")]);
+  };
+  for (const line of section.split("\n")) {
+    const entry = line.match(/^  ('(?:[^']|'')+'|"(?:[^"]|"")+"|[^\s:#][^:]*):(?:[ \t]*\{\})?[ \t]*$/u);
+    if (entry) {
+      flush();
+      currentName = unquoteLockKey(entry[1]!);
+      currentLines = [line];
+    } else if (currentName !== undefined) {
+      currentLines.push(line);
+    }
+  }
+  flush();
+  return blocks;
+}
+
+function snapshotDependencies(snapshot: string): { name: string; version: string }[] {
+  const dependencies: { name: string; version: string }[] = [];
+  const lines = snapshot.split("\n");
+  for (let index = 1; index < lines.length; index++) {
+    if (!/^    (?:dependencies|optionalDependencies):[ \t]*$/u.test(lines[index]!)) continue;
+    for (index++; index < lines.length && /^      \S/u.test(lines[index]!); index++) {
+      const entry = lines[index]!.match(/^      ('(?:[^']|'')+'|"(?:[^"]|"")+"|[^:]+):[ \t]*(\S.*)$/u);
+      if (entry) dependencies.push({ name: unquoteLockKey(entry[1]!), version: entry[2]! });
+    }
+    index--;
+  }
+  return dependencies;
+}
+
+function unquoteLockKey(key: string): string {
+  if (key.startsWith("'") && key.endsWith("'")) return key.slice(1, -1).replaceAll("''", "'");
+  if (key.startsWith('"') && key.endsWith('"')) return key.slice(1, -1).replaceAll('""', '"');
+  return key;
 }
 
 function sha256(value: Uint8Array | string): string {

@@ -60,10 +60,18 @@ describe("compileAuthoredWidget", () => {
     const lockfile = await readFile(new URL("../../../pnpm-lock.yaml", import.meta.url), "utf8");
     const baseline = hashAllowedLockEntries(lockfile);
     const changedTransitiveSnapshot = lockfile.replace(
-      "      lodash: 4.18.1",
-      "      lodash: 4.18.2",
+      "  scheduler@0.27.0: {}",
+      "  scheduler@0.27.0:\n    resolution: {integrity: sha512-mutated-transitive-snapshot}",
     );
+    expect(changedTransitiveSnapshot).not.toBe(lockfile);
     expect(hashAllowedLockEntries(changedTransitiveSnapshot)).not.toBe(baseline);
+
+    const changedPeerRootPackage = lockfile.replace(
+      /(^  react-dom@19\.2\.8:\n    resolution: \{integrity: )([^}]+)(\})/mu,
+      "$1sha512-mutated-peer-root$3",
+    );
+    expect(changedPeerRootPackage).not.toBe(lockfile);
+    expect(hashAllowedLockEntries(changedPeerRootPackage)).not.toBe(baseline);
   });
 
   it("does not accept authored package manifests or unsupported source files", async () => {
