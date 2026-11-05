@@ -71,10 +71,6 @@ describe("authored widget publication commit boundary", () => {
       ["trailing slash", "a/"],
       ["trailing dot", "a.tsx."],
       ["trailing space", "a.tsx "],
-      ["package manifest", "package.json"],
-      ["nested package manifest", "lib/package.json"],
-      ["unsupported extension", "bad.exe"],
-      ["no extension", "bad"],
     ].map(([label, path]) => [
       `${label} path`,
       {
@@ -177,14 +173,18 @@ describe("authored widget publication commit boundary", () => {
     });
   });
 
-  it("keeps companion .js and .json files and sends only the .tsx and .css sources to the build", async () => {
+  it("keeps safe companion files and sends only the .tsx and .css sources to the build", async () => {
     let sent: Readonly<Record<string, string>> | undefined;
     let written: Map<string, string> | undefined;
     const files = new Map([
       ["client.tsx", "export default function Widget(){ return <div/> }"],
       ["styles/main.css", ".widget { color: red }"],
       ["blueprint.json", "{}"], ["states.json", "{}"], ["tools.json", "[]"], ["notes.json", "{}"],
-      ["server.js", "export default {}"], ["client.js", "stale"],
+      ["package.json", "{\"name\":\"ignored-by-compiler\"}"], ["lib/package.json", "{}"],
+      ["server.js", "export default {}"], ["server.ts", "export default {}"],
+      ["lib/util.ts", "export const value = 1"], ["README.md", "Widget notes"],
+      ["icon.svg", "<svg/>"], ["LICENSE", "license"], ["payload.exe", "ignored"], ["metadata", "plain companion"],
+      ["client.js", "stale"],
     ]);
     const result = await compileAuthoredWidgetPublication({
       enabled: true, sourceCommitId: "source-commit",

@@ -71,11 +71,12 @@ and generated dependency closure, then returns only the compiled client module a
 measurements. A failed or timed-out build refuses publication before the stored Blueprint record is
 changed. The deadline bounds the caller's wait, not synchronous WASM execution; work may continue
 until a DO reset. Before any file is chosen as a source, every path in the published commit
-must pass the same structural path rule and be an authored source (`.tsx`, `.css`) or a companion
-`.js` or `.json` file (for example `server.js`, `blueprint.json`, `states.json`, `tools.json`); a
-path that only resembles a source (`a.tsx.`, `a.tsx `), a directory path, any `package.json` or any
-other kind of file refuses publication with `Invalid source path.` before a build object is
-allocated. The successful source plus `client.js` is stored as a child GitStore commit,
+must pass the same structural path rule. Only `.tsx` and `.css` files become compiler sources; safe
+auxiliary files are retained unchanged regardless of type (for example `server.ts`, `README.md`,
+`.svg`, `.js`, `.json`, `package.json`, or files with no extension). Auxiliary files are not sent to
+the compiler. Paths ending in a dot or space and directory paths also refuse publication with
+`Invalid source path.` before a build object is allocated. The successful source plus `client.js` is
+stored as a child GitStore commit,
 leaving the editable gadget head unchanged. `build:worker` also runs
 `build-bundled-blueprints.ts`. The closure generator resolves production package conditions to match
 the minified Worker build. The current dry-run bundle is recorded in the FAC-8 #362 PR; Cloudflare
