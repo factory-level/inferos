@@ -1,5 +1,6 @@
 import type { GitStore } from "./git-store.js";
 import type { AuthoredWidgetBuildResult } from "./authored-widget-build.js";
+import { isValidAuthoredWidgetCommitPath } from "./authored-widget-path.js";
 import { validateAuthoredWidgetPreflight } from "./authored-widget-preflight.js";
 
 const sourceFreeValidationMessages = new Set([
@@ -45,6 +46,11 @@ export async function compileAuthoredWidgetPublication(
   let files = await gitStore.readCommitFiles(sourceCommitId);
   if (!files.has("client.tsx")) return sourceCommitId;
 
+  // Every path of the commit is checked before any is chosen as a source, so a path that only
+  // resembles one (or isn't one at all) can't skip validation by falling outside the filter below.
+  for (let path of files.keys()) {
+    if (!isValidAuthoredWidgetCommitPath(path)) throw new Error("Invalid source path.");
+  }
   let authoredSources = Object.fromEntries([...files].filter(([path]) =>
     path.endsWith(".tsx") || path.endsWith(".css")));
   // Reject malformed, oversized or unapproved source before allocating/calling the build DO.

@@ -67,6 +67,14 @@ describe("authored widget publication commit boundary", () => {
       ["fraction slash", "folder⁄widget.tsx"],
       ["bidi override", "folder\u202Ewidget.tsx"],
       ["zero-width space", "folder\u200Bwidget.tsx"],
+      // QA at e910f6b4: paths outside the source suffixes used to skip validation entirely.
+      ["trailing slash", "a/"],
+      ["trailing dot", "a.tsx."],
+      ["trailing space", "a.tsx "],
+      ["package manifest", "package.json"],
+      ["nested package manifest", "lib/package.json"],
+      ["unsupported extension", "bad.exe"],
+      ["no extension", "bad"],
     ].map(([label, path]) => [
       `${label} path`,
       {
@@ -167,5 +175,31 @@ describe("authored widget publication commit boundary", () => {
     expect(test.written?.options).toMatchObject({
       parents: ["source-commit"], message: "Build authored widget for publication",
     });
+  });
+
+  it("keeps companion .js and .json files and sends only the .tsx and .css sources to the build", async () => {
+    let sent: Readonly<Record<string, string>> | undefined;
+    let written: Map<string, string> | undefined;
+    const files = new Map([
+      ["client.tsx", "export default function Widget(){ return <div/> }"],
+      ["styles/main.css", ".widget { color: red }"],
+      ["blueprint.json", "{}"], ["states.json", "{}"], ["tools.json", "[]"], ["notes.json", "{}"],
+      ["server.js", "export default {}"], ["client.js", "stale"],
+    ]);
+    const result = await compileAuthoredWidgetPublication({
+      enabled: true, sourceCommitId: "source-commit",
+      gitStore: {
+        readCommitFiles: async () => new Map(files),
+        writeFilesAsCommit: async (out: Map<string, string>) => { written = new Map(out); return "compiled-commit"; },
+      } as never,
+      builds: { newUniqueId: () => "build-id",
+        get: () => ({ compile: async (input: Readonly<Record<string, string>>) => { sent = input; return { clientJs: "compiled" }; } }) },
+      author: async () => ({ name: "test", email: "test@example.com" }) as never,
+      onFailure: () => {},
+    });
+    expect(result).toBe("compiled-commit");
+    expect(Object.keys(sent ?? {}).toSorted()).toEqual(["client.tsx", "styles/main.css"]);
+    expect([...written!.keys()].toSorted()).toEqual([...files.keys()].toSorted());
+    expect(written!.get("client.js")).toBe("compiled");
   });
 });
