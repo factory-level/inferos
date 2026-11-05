@@ -630,11 +630,27 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
    * whose reference has nothing provisioned, or whose credential the service refuses, fails its
    * calls rather than falling back to another credential.
    *
+   * `connection.resourceUrl` is the resource the assigned connection serves, read by the Workshop
+   * from that connection's own record: the class serves only it.
+   *
    * Kernel-only: the Workshop calls it from its own server-side run of an admitted invocation, and
    * vendors are reachable only through the deployment's service bindings. Absent on vendors with
    * no system credentials; the Workshop then refuses such a run.
    */
-  getSystemGatekeeperClass?(credentialRef: string): Promise<DurableObjectClass<Gatekeeper<any>>>;
+  getSystemGatekeeperClass?(credentialRef: string, connection: { resourceUrl: string }):
+      Promise<DurableObjectClass<Gatekeeper<any>>>;
+
+  /**
+   * Store `key` as the service account's credential for `credentialRef` (FAC-102), replacing any
+   * stored before (a rotation), for the resource `connection.resourceUrl` names. The vendor checks
+   * the key with its service before storing it, and throws when the service doesn't accept it, so a
+   * wrong key is never stored. The Workshop relays the key once, from an Admin, and keeps nothing of
+   * it; the vendor never returns, logs or exposes it. Kernel-only, like `getSystemGatekeeperClass`.
+   */
+  provisionSystemCredential?(credentialRef: string, connection: { resourceUrl: string }, key: string): Promise<void>;
+
+  /** Delete the credential stored for `credentialRef`, if any (its assignment changed or went). Kernel-only. */
+  forgetSystemCredential?(credentialRef: string): Promise<void>;
 }
 
 export interface GatekeeperConnectCallback extends WorkerEntrypoint {

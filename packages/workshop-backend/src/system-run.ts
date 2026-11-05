@@ -92,6 +92,8 @@ export interface SystemRunHost {
   /** Loads code as a fresh dynamic worker. */
   loadWorker(code: { mainModule: string; modules: Record<string, string>; env: Record<string, unknown> }):
       { getEntrypoint(name: string): unknown };
+  /** The resource connection `gatekeeperId` serves, from its own record, or undefined. */
+  resourceUrlOf(gatekeeperId: number): string | undefined;
   /** The vendor id of connection `gatekeeperId`, or undefined. */
   vendorIdOf(gatekeeperId: number): string | undefined;
   /** The deployment's gatekeeper vendors, by id. */
@@ -100,6 +102,40 @@ export interface SystemRunHost {
   facet(name: string, cls: DurableObjectClass<Gatekeeper<any>>): Fetcher<Gatekeeper<any>>;
   /** Opens a gatekeeper session on `facet` for connection `gatekeeperId`. */
   openSession(gatekeeperId: number, facet: Fetcher<Gatekeeper<any>>, caller: SystemRunCaller): Promise<unknown>;
+  /** Makes the revocable wrapper an RPC capability (a stub over it), so every call reaches it. */
+  wrapSession(wrapper: object): unknown;
+}
+
+// Refuses unless `caller`'s run is live now: still running, its assignment and credential reference
+// unchanged, and its hook live. Every refusal reads the same and names nothing.
+function assertRunLive(host: SystemRunHost, caller: SystemRunCaller, run: SystemRun): void {
+  let assignment = host.assignmentOf(run.hookId);
+  try {
+    host.systemRuns.require(caller);
+    host.liveHookGadget(run.hookId);
+  } catch {
+    throw new Error(SYSTEM_RUN_ENDED);
+  }
+  if (assignment?.credentialRef !== run.credentialRef || assignment.gatekeeperId !== run.gatekeeperId) {
+    throw new Error(SYSTEM_RUN_ENDED);
+  }
+}
+
+/**
+ * The session a run's binding gets: every call, whichever method, first checks that the run is live
+ * (`assertRunLive`), then forwards to the system session. A run ending, its assignment changing or
+ * going, or its hook being deleted makes the next call fail, even through a stub the worker kept.
+ */
+export function revocableSession(session: object, assertLive: () => void): object {
+  return new Proxy({}, {
+    get(_target, prop) {
+      if (typeof prop === "symbol" || prop === "then") return undefined;
+      return async (...args: unknown[]) => {
+        assertLive();
+        return (session as Record<string, (...a: unknown[]) => unknown>)[prop](...args);
+      };
+    },
+  });
 }
 
 /**
@@ -148,10 +184,11 @@ export async function openSystemRunSession(host: SystemRunHost, target: { type: 
   if (target.type !== "gatekeeper" || target.id !== run.gatekeeperId) throw new Error(SYSTEM_RUN_WRONG_CONNECTION);
   let vendorId = host.vendorIdOf(run.gatekeeperId);
   let vendor = vendorId === undefined ? undefined : host.vendor(vendorId);
-  if (!vendor?.getSystemGatekeeperClass) throw new Error(SYSTEM_RUN_UNSUPPORTED);
+  let resourceUrl = host.resourceUrlOf(run.gatekeeperId);
+  if (!vendor?.getSystemGatekeeperClass || resourceUrl === undefined) throw new Error(SYSTEM_RUN_UNSUPPORTED);
   let cls: DurableObjectClass<Gatekeeper<any>>;
   try {
-    cls = await vendor.getSystemGatekeeperClass(run.credentialRef);
+    cls = await vendor.getSystemGatekeeperClass(run.credentialRef, { resourceUrl });
   } catch (error) {
     throw new Error(SYSTEM_RUN_UNSUPPORTED, { cause: error });
   }
@@ -162,5 +199,6 @@ export async function openSystemRunSession(host: SystemRunHost, target: { type: 
     throw new Error(SYSTEM_RUN_ASSIGNMENT_CHANGED);
   }
   host.liveHookGadget(run.hookId);
-  return host.openSession(run.gatekeeperId, host.facet(systemGatekeeperFacetName(run.credentialRef), cls), caller);
+  let session = await host.openSession(run.gatekeeperId, host.facet(systemGatekeeperFacetName(run.credentialRef), cls), caller);
+  return host.wrapSession(revocableSession(session as object, () => assertRunLive(host, caller, run)));
 }

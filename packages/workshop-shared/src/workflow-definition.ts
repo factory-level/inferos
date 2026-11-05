@@ -111,6 +111,13 @@ export type TriggerAssignment = {
   credentialRef: string;
   assignedBy: AiChatAuthorInfo;
   assignedAt: Date;
+  /**
+   * Who last gave the connection the service account's key for this assignment, and when
+   * (`provisionTriggerCredential`); absent until then. A record only: the key itself is never kept
+   * or shown by the Workshop.
+   */
+  provisionedBy?: AiChatAuthorInfo;
+  provisionedAt?: Date;
 };
 
 /** What a builder sets to assign a trigger's runs: the connection whose system credential runs it. */

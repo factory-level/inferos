@@ -2783,6 +2783,14 @@ export interface Overseer extends RpcTarget {
   /** The assignment of trigger `hookId`, or null. Build only. */
   getTriggerAssignment(hookId: number): Promise<TriggerAssignment | null>;
   /**
+   * Give assigned trigger `hookId`'s connection the service account's key (FAC-102), replacing any
+   * given before. The Workshop relays `key` once to the connection's vendor, which checks it with its
+   * service before storing it, and keeps nothing of it: the key is never stored, logged, echoed or
+   * returned here. A key the service doesn't accept is refused in fixed words. Records who gave it
+   * and when. The same authority as `setTriggerAssignment`.
+   */
+  provisionTriggerCredential(hookId: number, key: string): Promise<TriggerAssignment>;
+  /**
    * Ask pinned trigger `hookId` to run now, as its control allows (inferops ADR 0011 S6). The server
    * checks that the trigger has a control listing the caller, is enabled and still pinned, and only
    * then asks the trigger's gatekeeper to deliver it once. The run is the trigger's own: the gadget

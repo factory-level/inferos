@@ -249,6 +249,20 @@ export class WorkspaceWorkflowDefinitionStore {
     });
   }
 
+  /**
+   * Records that `by` gave the service account's key for trigger `hookId`'s assignment, if the
+   * assignment still has `credentialRef` (one changed meanwhile isn't touched). Never the key.
+   */
+  markProvisioned(hookId: number, credentialRef: string, by: AiChatAuthorInfo): TriggerAssignment | null {
+    return this.durableStorage.transactionSync(() => {
+      let stored = this.storage.workflowTriggerAssignments.get(hookId);
+      if (!stored || stored.credentialRef !== credentialRef) return null;
+      let updated: TriggerAssignment = { ...stored, provisionedBy: by, provisionedAt: new Date() };
+      this.storage.workflowTriggerAssignments.put(updated);
+      return { ...updated };
+    });
+  }
+
   /** The assignment of trigger `hookId`, or null. */
   assignmentOf(hookId: number): TriggerAssignment | null {
     let stored = this.storage.workflowTriggerAssignments.get(hookId);

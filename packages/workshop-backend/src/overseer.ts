@@ -136,6 +136,21 @@ import {
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
 
+/**
+ * The one refusal for a service-account key the Workshop won't relay or the service doesn't accept
+ * (FAC-102). Fixed words: nothing of the key or of the service's reason is ever repeated.
+ */
+export const PROVISION_REFUSED = "The key wasn't accepted.";
+
+/** Longest service-account key relayed for provisioning. */
+const MAX_PROVISIONED_KEY_LENGTH = 1024;
+
+// The resource a gatekeeper connection serves, from its own record.
+function gatekeeperResourceUrl(record: GatekeeperRecord | undefined): string | undefined {
+  let spec = record?.creationSpec;
+  return spec && "resourceUrl" in spec && typeof spec.resourceUrl === "string" ? spec.resourceUrl : undefined;
+}
+
 /** The refusal when the invoker's own InferOps grant doesn't include `workflow:invoke` (FAC-102). */
 export const WORKFLOW_INVOKE_REFUSED =
   "You don't have permission to run workflows here. Ask an Admin for it.";
@@ -3553,6 +3568,7 @@ class OverseerImpl implements AgentHooks {
       await record.controller.disable();
     }
     this.storage.boundHooks.delete(record.id);
+    retireTriggerAssignment(this, record.id);
     this.workflowDefinitionStore().forgetTrigger(record.id);
 
     stampBindHookAction(this.storage, record.actionId, false, {clearHookId: true});
@@ -6524,6 +6540,7 @@ class OverseerImpl implements AgentHooks {
     for (let hook of Array.from(this.storage.boundHooks.list())) {
       if (hook.gatekeeperId !== id) continue;
       this.storage.boundHooks.delete(hook.id);
+      retireTriggerAssignment(this, hook.id);
       this.workflowDefinitionStore().forgetTrigger(hook.id);
       stampBindHookAction(this.storage, hook.actionId, false, {clearHookId: true});
       if (hook.enabled) {
@@ -6605,10 +6622,13 @@ class OverseerImpl implements AgentHooks {
       },
       loadWorker: code => this.env.LOADER.load({compatibilityDate: "2026-02-01", ...code, globalOutbound: null}),
       vendorIdOf: gatekeeperId => gatekeeperVendorId(this.storage.gatekeepers.get(gatekeeperId)),
+      resourceUrlOf: gatekeeperId => gatekeeperResourceUrl(this.storage.gatekeepers.get(gatekeeperId)),
       vendor: vendorId => buildGatekeeperVendorMap(this.env).get(vendorId) as unknown as
           Pick<GatekeeperVendor, "getSystemGatekeeperClass"> | undefined,
       facet: (name, cls) => this.ctx.facets.get(name, async () => ({class: cls})) as Fetcher<Gatekeeper<any>>,
       openSession: (gatekeeperId, facet, caller) => this.openGatekeeperSession(gatekeeperId, facet, caller),
+      // A stub over the revocable wrapper, so every call the worker makes re-enters it here.
+      wrapSession: wrapper => new NativeRpcStub(wrapper as RpcTarget),
     };
   }
 
@@ -11450,6 +11470,16 @@ class OverseerImpl implements AgentHooks {
   }
 
   /** This workspace's workflow definitions, their trigger pins and deliveries. */
+  /** See retireTriggerAssignment. */
+  retireTriggerAssignment(hookId: number): void {
+    retireTriggerAssignment(this, hookId);
+  }
+
+  /** See provisionWorkflowTriggerCredential. */
+  provisionTriggerCredential(caller: AiChatAuthorInfo, hookId: number, key: string): Promise<TriggerAssignment> {
+    return provisionWorkflowTriggerCredential(this, caller, hookId, key);
+  }
+
   /** See setWorkflowTriggerAssignment. */
   setTriggerAssignment(caller: AiChatAuthorInfo, hookId: number, settings: TriggerAssignmentSettings | null)
       : TriggerAssignment | null {
@@ -13313,6 +13343,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let profile = await this.#getClientProfile();
     let hook = this.impl.storage.boundHooks.get(hookId);
     if (!hook) throw new Error("No such hook.");
+    // Clearing the pin removes the trigger's assignment too: retire it first (#374 round 2).
+    if (ref === null) this.impl.retireTriggerAssignment(hookId);
     this.impl.workflowDefinitionStore().pinTrigger(profile.id, hookId,
         hook.gadgetId ?? this.impl.defaultGadgetId ?? null, ref);
   }
@@ -13340,6 +13372,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async getTriggerAssignment(hookId: number): Promise<TriggerAssignment | null> {
     return this.impl.workflowDefinitionStore().assignmentOf(hookId);
+  }
+  // Giving the key decides what runs act as, like assigning: the same authority.
+  async provisionTriggerCredential(hookId: number, key: string): Promise<TriggerAssignment> {
+    await this.#requireSharedConfiguration("publish", "always");
+    return this.impl.provisionTriggerCredential(await this.#getClientProfile(), hookId, key);
   }
   async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
     return this.impl.invokeTrigger(this.clientUserId, this.clientProfileId, hookId);
@@ -15944,6 +15981,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
   async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
   async getTriggerAssignment(_hookId: number): Promise<TriggerAssignment | null> { this.#deny(); }
+  async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> {
     return this.impl.workflowDefinitionStore().controls(this.clientProfileId);
   }
@@ -16577,6 +16615,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
   async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
   async getTriggerAssignment(_hookId: number): Promise<TriggerAssignment | null> { this.#deny(); }
+  async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> { this.#deny(); }
   async invokeTrigger(_hookId: number): Promise<WorkflowInvocation> { this.#deny(); }
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
@@ -17203,11 +17242,70 @@ export function setWorkflowTriggerAssignment(
     }
   }
   let assignment = store.setAssignment(caller, hookId, gatekeeperId);
-  if (previous && previous.credentialRef !== assignment?.credentialRef) {
-    impl.ctx.facets.abort(systemGatekeeperFacetName(previous.credentialRef),
-        new Error("The trigger's assignment changed."));
-  }
+  if (previous && previous.credentialRef !== assignment?.credentialRef) retireAssignment(impl, previous);
   return assignment;
+}
+
+// Ends an assignment's reach: aborts its system facet, so open sessions on it fail, and asks its
+// connection's vendor to delete the key stored for its reference. Best effort for the key, after
+// the change is committed: a failure is logged by hook (never a key), and the reference is never
+// used again, since runs check the live assignment on every call.
+function retireAssignment(impl: Pick<OverseerImpl, "env" | "storage" | "ctx">, previous: TriggerAssignment): void {
+  impl.ctx.facets.abort(systemGatekeeperFacetName(previous.credentialRef), new Error("The trigger's assignment ended."));
+  let vendorId = gatekeeperVendorId(impl.storage.gatekeepers.get(previous.gatekeeperId));
+  let vendor = vendorId === undefined ? undefined : buildGatekeeperVendorMap(impl.env).get(vendorId) as unknown as
+      Pick<GatekeeperVendor, "forgetSystemCredential"> | undefined;
+  void Promise.resolve().then(() => vendor?.forgetSystemCredential?.(previous.credentialRef)).catch(() => {
+    logger.warn("system credential could not be forgotten", {
+      event: "workflow.system_credential.forget.failed", hookId: previous.hookId,
+    });
+  });
+}
+
+/**
+ * Retires trigger `hookId`'s assignment, if it has one, before a route that removes it without
+ * `setWorkflowTriggerAssignment`: clearing the trigger's pin, deleting its hook or its connection
+ * (FAC-102, #374 round 2). Its system facet is aborted and its stored key forgotten.
+ */
+export function retireTriggerAssignment(impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "workflowDefinitionStore">,
+                                        hookId: number): void {
+  let previous = impl.workflowDefinitionStore().assignmentOf(hookId);
+  if (previous) retireAssignment(impl, previous);
+}
+
+/**
+ * Gives assigned trigger `hookId`'s connection the service account's `key` (FAC-102, the lead's
+ * option a): relayed once to the connection's vendor (`provisionSystemCredential`), which checks it
+ * with its service before storing it, replacing any given before. Nothing of the key is kept, logged,
+ * echoed or returned here, and any refusal reads `PROVISION_REFUSED` whatever the reason, with no
+ * cause attached. Records who gave it and when. Callers check the role and authority first.
+ */
+export async function provisionWorkflowTriggerCredential(
+    impl: Pick<OverseerImpl, "env" | "storage" | "workflowDefinitionStore">,
+    caller: AiChatAuthorInfo, hookId: number, key: string): Promise<TriggerAssignment> {
+  if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
+  let assignment = impl.workflowDefinitionStore().assignmentOf(hookId);
+  if (!assignment) throw new Error("This trigger isn't assigned to a service account.");
+  if (typeof key !== "string" || !key || key.length > MAX_PROVISIONED_KEY_LENGTH) throw new Error(PROVISION_REFUSED);
+  let record = impl.storage.gatekeepers.get(assignment.gatekeeperId);
+  let vendorId = gatekeeperVendorId(record);
+  let resourceUrl = gatekeeperResourceUrl(record);
+  let vendor = vendorId === undefined ? undefined : buildGatekeeperVendorMap(impl.env).get(vendorId) as unknown as
+      Pick<GatekeeperVendor, "provisionSystemCredential"> | undefined;
+  if (!vendor?.provisionSystemCredential || resourceUrl === undefined) throw new Error(PROVISION_REFUSED);
+  try {
+    await vendor.provisionSystemCredential(assignment.credentialRef, {resourceUrl}, key);
+  } catch {
+    // The vendor's reason may quote the key or the service's answer; neither leaves here.
+    logger.warn("system credential was not accepted", {
+      event: "workflow.system_credential.refused", hookId,
+    });
+    throw new Error(PROVISION_REFUSED);
+  }
+  let marked = impl.workflowDefinitionStore().markProvisioned(hookId, assignment.credentialRef, caller);
+  // The assignment changed while the key was being checked: what was stored is for a dead reference.
+  if (!marked) throw new Error("This trigger's assignment changed. Assign it again, then give the key.");
+  return marked;
 }
 
 /**
