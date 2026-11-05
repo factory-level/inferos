@@ -655,25 +655,25 @@ describe("#374 round 3: the assigned connection and what a session hands out", (
   });
 });
 
-describe("#374 round 4: every route that removes the assigned binding retires the assignment", () => {
-  /** An assigned trigger with a run in flight, whose gadget's bindings and records a route can change. */
-  function assignedWithRun() {
-    let forget = vi.fn(async (_ref: string) => {});
-    let made = provisionImpl({ forgetSystemCredential: forget });
-    let assignment = setWorkflowTriggerAssignment(made.impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
-    made.running(assignment.credentialRef);
-    let impl = made.impl as unknown as Record<string, unknown> & { storage: Record<string, { get: (id: number) => unknown }> };
-    let setBindings = (bindings: [string, { target: number }][]) => { impl.visibleBindings = () => bindings; };
-    return { ...made, impl: made.impl, raw: impl, assignment, forget, setBindings };
-  }
-  async function expectRetired(made: ReturnType<typeof assignedWithRun>) {
-    retireUnboundAssignments(made.impl);
-    expect(made.store.assignmentOf(HOOK)).toBeNull();
-    // Its running delivery's facet is aborted, so every capability a session handed out dies.
-    expect(made.aborted).toEqual([systemGatekeeperFacetName(made.assignment.credentialRef, 7)]);
-    await vi.waitFor(() => expect(made.forget).toHaveBeenCalledWith(made.assignment.credentialRef));
-  }
+/** An assigned trigger with a run in flight, whose gadget's bindings and records a route can change. */
+function assignedWithRun() {
+  let forget = vi.fn(async (_ref: string) => {});
+  let made = provisionImpl({ forgetSystemCredential: forget });
+  let assignment = setWorkflowTriggerAssignment(made.impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+  made.running(assignment.credentialRef);
+  let impl = made.impl as unknown as Record<string, unknown> & { storage: Record<string, { get: (id: number) => unknown }> };
+  let setBindings = (bindings: [string, { target: number }][]) => { impl.visibleBindings = () => bindings; };
+  return { ...made, impl: made.impl, raw: impl, assignment, forget, setBindings };
+}
+async function expectRetired(made: ReturnType<typeof assignedWithRun>) {
+  retireUnboundAssignments(made.impl);
+  expect(made.store.assignmentOf(HOOK)).toBeNull();
+  // Its running delivery's facet is aborted, so every capability a session handed out dies.
+  expect(made.aborted).toEqual([systemGatekeeperFacetName(made.assignment.credentialRef, 7)]);
+  await vi.waitFor(() => expect(made.forget).toHaveBeenCalledWith(made.assignment.credentialRef));
+}
 
+describe("#374 round 4: every route that removes the assigned binding retires the assignment", () => {
   it("keeps an assignment whose connection is still bound", () => {
     let made = assignedWithRun();
     retireUnboundAssignments(made.impl);
