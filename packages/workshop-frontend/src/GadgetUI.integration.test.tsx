@@ -188,6 +188,20 @@ describe('GadgetUI RPC recovery', () => {
     )
   })
 
+  it('keeps the generated Gadget frame opaque and denies outbound resource requests', async () => {
+    const gadget = fakeGadget('network-isolation', 'document.body.textContent = "isolated"')
+    await act(async () => {
+      root.render(<GadgetUI gadget={gadget.stub} height="100px" />)
+    })
+    await vi.waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    const iframe = container.querySelector('iframe')!
+    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts allow-popups allow-popups-to-escape-sandbox')
+    expect(iframe.srcdoc).toContain("default-src 'none'")
+    expect(iframe.srcdoc).toContain("connect-src 'none'")
+    expect(iframe.srcdoc).toContain('img-src data:; media-src data:;')
+    expect(iframe.srcdoc).toContain("object-src 'none'; base-uri 'none'; form-action 'none'")
+  })
+
   // FAC-86: a console widget's frame is told its local state once it connects and on each change,
   // and never told anything while no state is known.
   it('tells a connected frame its widget state, and each change of it', async () => {

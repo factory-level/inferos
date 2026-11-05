@@ -102,7 +102,7 @@ window.addEventListener('unhandledrejection', (event) => {
 
 `);
 
-const createSandboxedHtml = (jsCode: string): string => {
+export const createSandboxedHtml = (jsCode: string): string => {
   return `<!DOCTYPE html>
 <html>
 <head>
