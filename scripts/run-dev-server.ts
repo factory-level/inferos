@@ -731,6 +731,7 @@ for (const gk of gatekeepers) {
   // without editing any config files.
   const OPTIONAL_FEATURE_VARS = [
     "DISABLE_PASSWORD_AUTH", "AUTH_GATEKEEPERS", "ENABLE_CLOUDFLARE_LIMITS", "PUBLIC_BASE_URL",
+    "AUTHORED_WIDGET_BUILD_ENABLED",
     // Whether an admin may approve their own publication request (auth config, never AdminConfig).
     "PUBLICATION_SELF_APPROVAL",
     "DAILY_LLM_CALL_LIMIT", "MINIMUM_CLOUDFLARE_BALANCE",

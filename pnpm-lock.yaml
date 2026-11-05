@@ -1189,9 +1189,6 @@ importers:
       pako:
         specifier: ^3.0.2
         version: 3.0.2
-      typescript6:
-        specifier: 'catalog:'
-        version: typescript@6.0.3
       yjs:
         specifier: ^13.6.33
         version: 13.6.33

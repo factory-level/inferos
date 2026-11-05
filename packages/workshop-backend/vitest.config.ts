@@ -216,6 +216,7 @@ export default defineConfig({
               workerLoaders: { LOADER: {} },
               durableObjects: {
                 TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
+                TEST_AUTHORED_WIDGET_BUILD: { className: 'AuthoredWidgetBuildDurableObject', useSQLite: true },
                 TEST_USER: { className: 'UserDurableObject', useSQLite: true },
                 TEST_PENDING_LOGIN: { className: 'PendingLogin', useSQLite: true },
                 // Never addressed by name: a binding is what puts the class in `ctx.exports`, from
@@ -223,6 +224,7 @@ export default defineConfig({
                 TEST_AGENT_SPAWNER: { className: 'AgentSpawnerGatekeeper', useSQLite: true },
                 TEST_USER_DIRECTORY: { className: 'UserDirectoryDurableObject', useSQLite: true },
               },
+              modulesRules: [{ type: 'CompiledWasm', include: ['**/esbuild.wasm'] }],
             },
           }),
         ],
