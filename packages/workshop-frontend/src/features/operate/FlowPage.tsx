@@ -33,9 +33,12 @@ export const FlowPage = ({ flow, console: shown, chatOpen, onEvent }: {
   const [stepTitle, setStepTitle] = useState<string | null>(null)
   // What the session last refused, the move to try again when the failure was only for now, and
   // where the run was then. A refusal belongs to that position: once the run moves, here or from
-  // another tab or device, it is no longer shown.
+  // another tab or device, it is dropped for good, so returning to the same place (Back, then the
+  // same route forward) does not bring it back. It is dropped during render, React's pattern for
+  // resetting state on a changed input, not in an Effect.
   const position = `${flow.index}/${flow.history?.length ?? 0}`
   const [refused, setRefusal] = useState<{ message: string; retry: OperateEvent | null; position: string } | null>(null)
+  if (refused && refused.position !== position) setRefusal(null)
   const refusal = refused?.position === position ? refused : null
   const send = (event: OperateEvent) => {
     setRefusal(null)

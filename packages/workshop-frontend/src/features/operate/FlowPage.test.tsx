@@ -215,6 +215,19 @@ describe('FlowPage, for a flow that names its pages', () => {
     expect(container.querySelector('[role="alert"]')).toBeNull()
   })
 
+  it('does not bring a refusal back when the run returns to the same place, by Back and the same route forward', async () => {
+    onEvent.mockRejectedValueOnce(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.flowNavigationFailed))
+    const review = { ...PAGED, index: 1, history: [0], pageState: 'open' }
+    renderRun(review)
+    act(() => button('Approve').click())
+    await settle()
+    expect(container.querySelector('[role="alert"]')).not.toBeNull()
+    renderRun({ ...PAGED, index: 0, history: [], pageState: null })
+    renderRun(review)
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+    expect([...container.querySelectorAll('button')].some(item => item.textContent?.trim() === 'Try again')).toBe(false)
+  })
+
   it('keys routes by position, so two routes with the same label and destination are both drawn', () => {
     const twice: OperateFlowRun = { ...PAGED, pages: [{ name: 'intake', routes: [{ label: 'Go', to: 'review' }, { label: 'Go', to: 'review' }] }, PAGED.pages![1]!, PAGED.pages![2]!] }
     const errors = vi.mocked(console.error)
