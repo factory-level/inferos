@@ -31,14 +31,18 @@ export const FlowPage = ({ flow, console: shown, chatOpen, onEvent }: {
 }) => {
   const scrollRoot = useRef<HTMLElement>(null)
   const [stepTitle, setStepTitle] = useState<string | null>(null)
-  // What the session last refused, and the move to try again when the failure was only for now.
-  const [refusal, setRefusal] = useState<{ message: string; retry: OperateEvent | null } | null>(null)
+  // What the session last refused, the move to try again when the failure was only for now, and
+  // where the run was then. A refusal belongs to that position: once the run moves, here or from
+  // another tab or device, it is no longer shown.
+  const position = `${flow.index}/${flow.history?.length ?? 0}`
+  const [refused, setRefusal] = useState<{ message: string; retry: OperateEvent | null; position: string } | null>(null)
+  const refusal = refused?.position === position ? refused : null
   const send = (event: OperateEvent) => {
     setRefusal(null)
     onEvent(event).catch(caught => {
       console.error('The flow could not move:', caught)
       const retryable = getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.flowNavigationFailed
-      setRefusal({ message: refusalMessage(caught), retry: retryable ? event : null })
+      setRefusal({ message: refusalMessage(caught), retry: retryable ? event : null, position })
     })
   }
   const pages = flow.pages
@@ -63,8 +67,9 @@ export const FlowPage = ({ flow, console: shown, chatOpen, onEvent }: {
               <WorkshopButton disabled={history.length === 0} onClick={() => send({ type: 'backFlow' })}>
                 <ArrowLeftIcon size={13} aria-hidden className="mr-1" />Back
               </WorkshopButton>
-              {(page.routes ?? []).map(route => (
-                <WorkshopButton key={`${route.to}/${route.label}`} tone="primary" onClick={() => send({ type: 'navigateFlow', to: route.to })}>
+              {/* Keyed by position too: a page may offer two routes with the same label and destination. */}
+              {(page.routes ?? []).map((route, at) => (
+                <WorkshopButton key={`${at}/${route.to}/${route.label}`} tone="primary" onClick={() => send({ type: 'navigateFlow', to: route.to })}>
                   {route.label}<ArrowRightIcon size={13} aria-hidden className="ml-1" />
                 </WorkshopButton>
               ))}

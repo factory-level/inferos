@@ -195,6 +195,34 @@ describe('FlowPage, for a flow that names its pages', () => {
     expect([...container.querySelectorAll('button')].some(item => item.textContent?.trim() === 'Try again')).toBe(false)
   })
 
+  it("drops a refusal and its Try again once the run moves from another tab or device", async () => {
+    onEvent.mockRejectedValueOnce(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.flowNavigationFailed))
+    const at = { ...PAGED, index: 1, history: [0], pageState: 'open' }
+    renderRun(at)
+    act(() => button('Approve').click())
+    await settle()
+    expect(container.querySelector('[role="alert"]')).not.toBeNull()
+    // The session moved on elsewhere: forward to done, then a retry back to the same page (index unchanged).
+    renderRun({ ...PAGED, index: 2, history: [0, 1], pageState: null })
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+    expect([...container.querySelectorAll('button')].some(item => item.textContent?.trim() === 'Try again')).toBe(false)
+    onEvent.mockRejectedValueOnce(new Error('refused'))
+    renderRun(at)
+    act(() => button('Check again').click())
+    await settle()
+    expect(container.querySelector('[role="alert"]')).not.toBeNull()
+    renderRun({ ...at, history: [0, 1] })
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('keys routes by position, so two routes with the same label and destination are both drawn', () => {
+    const twice: OperateFlowRun = { ...PAGED, pages: [{ name: 'intake', routes: [{ label: 'Go', to: 'review' }, { label: 'Go', to: 'review' }] }, PAGED.pages![1]!, PAGED.pages![2]!] }
+    const errors = vi.mocked(console.error)
+    renderRun(twice)
+    expect(navigation()).toEqual(['Back', 'Go', 'Go'])
+    expect(errors.mock.calls.some(([message]) => String(message).includes('same key'))).toBe(false)
+  })
+
   it('says any other refusal plainly, without the internal detail', async () => {
     onEvent.mockRejectedValueOnce(new Error('internal: page index 7 of ws1'))
     renderRun(PAGED)

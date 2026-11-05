@@ -35,7 +35,7 @@ const canonPages = (pages: OperateFlowPage[] | undefined) => pages === undefined
   : JSON.stringify(pages.map(page => [page.name, page.states ?? null, page.routes?.map(route => [route.label, route.to]) ?? null]))
 const samePages = (a: OperateFlowPage[] | undefined, b: OperateFlowPage[] | undefined) => canonPages(a) === canonPages(b)
 
-type Step ={ status: 'loading' } | { status: 'unavailable'; reason: string } | { status: 'ready'; definition: CanvasDefinition }
+type Step = { status: 'loading' } | { status: 'unavailable'; reason: string } | { status: 'ready'; definition: CanvasDefinition }
 
 /**
  * A use-role viewer's step, only through the published console open on the page, as `ConsolePage`
