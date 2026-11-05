@@ -826,6 +826,18 @@ export interface GatekeeperUser extends WorkerEntrypoint {
   holdsSharedConfiguration?(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer>;
 
   /**
+   * Whether the person behind this account may ask a configured system workflow in this deployment
+   * to run (FAC-102, inferops ADR 0011 S6 and D3), as the service this account signs in to decides
+   * it, freshly, with the person's own credentials, within the same scope as
+   * `holdsSharedConfiguration`. Invoking isn't executing: a yes gives the person nothing of the
+   * workflow's, and who may run a particular trigger is still that trigger's own control. Called
+   * only on accounts of the vendor `SHARED_CONFIGURATION_GATEKEEPER` names. Answer `holds: false`
+   * when the person holds no such grant there; throw when it can't be told, and the Workshop
+   * refuses.
+   */
+  holdsWorkflowInvoke?(): Promise<SharedConfigurationAnswer>;
+
+  /**
    * The company the person behind this account works in, for this deployment: the same scope
    * `holdsSharedConfiguration` answers within (for InferOps, the session's tenant id), or null when
    * the account speaks for none here (no connected person, or another company's session). Read from

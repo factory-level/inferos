@@ -5,7 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { getSharedConfigurationGatekeeper } from "../src/auth/config.js";
 import { requireSharedConfiguration } from "../src/overseer.js";
-import { holdsSharedConfiguration } from "../src/user.js";
+import { holdsSharedConfiguration, holdsWorkflowInvoke } from "../src/user.js";
 import { openFakeOverseer } from "./fixtures.js";
 
 const REFUSED = "You don't have permission to share or publish configuration other people use.";
@@ -312,6 +312,10 @@ const account = (id: number, answer: AccountAnswer, extra: Partial<AccountRecord
       if (answer instanceof Error) throw answer;
       return answer;
     },
+    holdsWorkflowInvoke: async () => {
+      if (answer instanceof Error) throw answer;
+      return answer;
+    },
   } as unknown as AccountRecord["account"],
   ...extra,
 });
@@ -361,5 +365,21 @@ describe("the person's own accounts", () => {
   it("only a literal yes counts", async () => {
     expect(await holdsSharedConfiguration([account(1, { holds: "yes", scope: COMPANY_A })], "inferops", "build"))
       .toBe(false);
+  });
+});
+
+describe("workflow:invoke through the person's own accounts (FAC-102)", () => {
+  it("combines answers exactly as shared configuration does", async () => {
+    expect(await holdsWorkflowInvoke([], "inferops")).toBe(false);
+    expect(await holdsWorkflowInvoke([account(1, no(COMPANY_A)), account(2, yes(COMPANY_A))], "inferops")).toBe(true);
+    expect(await holdsWorkflowInvoke([account(1, yes(COMPANY_A), { credentialsExpired: true })], "inferops")).toBe(false);
+    expect(await holdsWorkflowInvoke([account(1, { holds: true, scope: null })], "inferops")).toBe(false);
+    await expect(holdsWorkflowInvoke([account(1, yes(COMPANY_A)), account(2, no(COMPANY_B))], "inferops"))
+      .rejects.toThrow("more than one organization");
+  });
+
+  it("refuses with its own words when an account can't answer", async () => {
+    await expect(holdsWorkflowInvoke([account(1, new Error("down")), account(2, yes(COMPANY_A))], "inferops"))
+      .rejects.toThrow("Couldn't check whether you may run workflows. Try again.");
   });
 });

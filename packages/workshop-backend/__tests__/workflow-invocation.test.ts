@@ -5,7 +5,7 @@
 // to the workflow, its trigger, its bindings or its configuration. The run itself is the trigger's
 // own delivery (startHook), recorded with who asked as a claim, never as authority.
 import { describe, expect, it, vi } from "vitest";
-import { invokeWorkflowTrigger, makeOverseerStorage } from "../src/overseer.js";
+import { invokeWorkflowTrigger, makeOverseerStorage, WORKFLOW_INVOKE_REFUSED } from "../src/overseer.js";
 import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { openFakeOverseer } from "./fixtures.js";
 import { makeMockStorage } from "./mock-storage.js";
@@ -86,19 +86,23 @@ describe("invoking a trigger", () => {
 describe("through the Overseer", () => {
 
   async function session(role: "build" | "use", opts: { invoke?: (...args: unknown[]) => Promise<void>;
-                                                          canBuild?: boolean } = {}) {
+                                                          canBuild?: boolean;
+                                                          mayInvoke?: () => Promise<boolean> } = {}) {
     let { durable, storage, store } = pinned();
     store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
     let invoke = vi.fn(opts.invoke ?? (async () => {}));
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
     let impl = {
-      env: opts.canBuild === undefined ? {} : { SHARED_CONFIGURATION_GATEKEEPER: "inferops" },
+      env: opts.canBuild === undefined && opts.mayInvoke === undefined
+        ? {} : { SHARED_CONFIGURATION_GATEKEEPER: "inferops" },
       isSharedConfiguration: async () => true,
       workflowDefinitionStore: () => store,
       getGadgetHead: headOf,
       defaultGadgetId: GADGET,
       assertGatekeeperUsable: () => {},
-      invokeTrigger(this: never, profileId: string, hookId: number) { return invokeWorkflowTrigger(this, profileId, hookId); },
+      invokeTrigger(this: never, userId: string, profileId: string, hookId: number) {
+        return invokeWorkflowTrigger(this, userId, profileId, hookId);
+      },
       storage: Object.assign(storage, {
         containsRestrictedData: { get: () => false },
         title: { get: () => "Test Workspace" },
@@ -108,15 +112,20 @@ describe("through the Overseer", () => {
       }),
       users: {
         idFromString: (id: string) => id,
-        get: () => ({
+        get: (id: string) => ({
           whoami: async () => ADA, recordSharedGadgetOpen: async () => {},
           holdsSharedConfiguration: async () => opts.canBuild ?? true,
+          holdsWorkflowInvoke: async () => {
+            askedInvoke.push(id);
+            return opts.mayInvoke ? opts.mayInvoke() : true;
+          },
         }),
       },
     };
+    let askedInvoke: string[] = [];
     let overseer = await openFakeOverseer({}, { role, impl });
     void durable;
-    return { overseer, store, invoke, hook };
+    return { overseer, store, invoke, hook, askedInvoke };
   }
 
   it("lets a listed Operator run the trigger, handing its gatekeeper only a server-made invocation", async () => {
@@ -308,11 +317,106 @@ describe("what an invoker sees, and what reaches the gatekeeper", () => {
     let invoke = vi.fn(async (_request: unknown) => {});
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
     let impl = {
-      storage: { boundHooks: { get: () => hook } }, assertGatekeeperUsable: () => {},
+      env: {}, storage: { boundHooks: { get: () => hook } }, assertGatekeeperUsable: () => {},
       workflowDefinitionStore: () => store,
     };
     let direct = invokeWorkflowTrigger as unknown as (...args: unknown[]) => Promise<unknown>;
-    await direct(impl, OPERATOR, HOOK, { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" });
+    await direct(impl, "viewer-id", OPERATOR, HOOK, { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" });
     expect(invoke.mock.calls).toEqual([[{ invocationId: expect.any(String) }]]);
+  });
+});
+
+// The harness for the invoker's own grant: a pinned trigger whose control lists OPERATOR.
+async function invokeSession(mayInvoke?: () => Promise<boolean>) {
+  let { store } = pinned();
+  store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
+  let invoke = vi.fn(async () => {});
+  let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
+  let askedInvoke: string[] = [];
+  let impl = {
+    env: mayInvoke ? { SHARED_CONFIGURATION_GATEKEEPER: "inferops" } : {},
+    isSharedConfiguration: async () => true,
+    workflowDefinitionStore: () => store,
+    getGadgetHead: headOf,
+    defaultGadgetId: GADGET,
+    assertGatekeeperUsable: () => {},
+    storage: Object.assign(makeOverseerStorage(makeMockStorage()), {
+      containsRestrictedData: { get: () => false },
+      title: { get: () => "Test Workspace" },
+      operateSession: { get: () => false },
+      boundHooks: { get: (id: number) => (id === HOOK ? hook : undefined), list: () => [hook] },
+      gatekeepers: { get: () => undefined },
+    }),
+    users: {
+      idFromString: (id: string) => id,
+      get: (id: string) => ({
+        whoami: async () => ADA, recordSharedGadgetOpen: async () => {},
+        holdsSharedConfiguration: async () => true,
+        holdsWorkflowInvoke: async () => {
+          askedInvoke.push(id);
+          return mayInvoke ? mayInvoke() : true;
+        },
+      }),
+    },
+  };
+  (impl as Record<string, unknown>).invokeTrigger = function (this: never, ...args: unknown[]) {
+    return (invokeWorkflowTrigger as (...a: unknown[]) => unknown).call(undefined, this, ...args);
+  };
+  let overseer = await openFakeOverseer({}, { role: "use", impl });
+  return { overseer, store, invoke, askedInvoke };
+}
+
+describe("the invoker's own InferOps grant (workflow:invoke, inferops ADR 0011 D3)", () => {
+
+  it("refuses a listed Operator who doesn't hold it, before anything is minted or handed on", async () => {
+    let { overseer, store, invoke, askedInvoke } = await invokeSession(async () => false);
+    await expect(overseer.invokeTrigger(HOOK)).rejects.toThrow(WORKFLOW_INVOKE_REFUSED);
+    expect(invoke).not.toHaveBeenCalled();
+    // Asked about the person in this session, with their own account.
+    expect(askedInvoke).toEqual(["viewer-id"]);
+    // Nothing was minted: the per-person rate still has all its runs.
+    for (let i = 0; i < 3; i++) store.beginInvocation(OPERATOR, HOOK);
+  });
+
+  it("lets a listed Operator who holds it run the trigger", async () => {
+    let { overseer, invoke } = await invokeSession(async () => true);
+    let invocation = await overseer.invokeTrigger(HOOK);
+    expect(invoke.mock.calls).toEqual([[{ invocationId: invocation.id }]]);
+  });
+
+  it("asks again at every request, so a removed grant stops the next run", async () => {
+    let holds = true;
+    let { overseer, invoke } = await invokeSession(async () => holds);
+    await overseer.invokeTrigger(HOOK);
+    holds = false;
+    await expect(overseer.invokeTrigger(HOOK)).rejects.toThrow(WORKFLOW_INVOKE_REFUSED);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses when the grant can't be read, and mints nothing", async () => {
+    // The person's user object turns any failed answer into this refusal (user.ts holdsWorkflowInvoke).
+    let { overseer, invoke } = await invokeSession(async () => {
+      throw new Error("Couldn't check whether you may run workflows. Try again.");
+    });
+    await expect(overseer.invokeTrigger(HOOK)).rejects.toThrow("Couldn't check whether you may run workflows. Try again.");
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("is not enough alone: a person the control doesn't list is refused even when they hold it", async () => {
+    let builder = await (async () => {
+      let made = await invokeSession(async () => true);
+      return made;
+    })();
+    // The use session is OPERATOR's; drop them from the list so only the grant would admit them.
+    builder.store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [BUILDER] });
+    await expect(builder.overseer.invokeTrigger(HOOK)).rejects.toThrow();
+    expect(builder.invoke).not.toHaveBeenCalled();
+  });
+
+  it("isn't asked where the deployment names no service for it", async () => {
+    let { overseer, invoke, askedInvoke } = await invokeSession(undefined);
+    await overseer.invokeTrigger(HOOK);
+    expect(askedInvoke).toEqual([]);
+    expect(invoke).toHaveBeenCalledTimes(1);
   });
 });

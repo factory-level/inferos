@@ -134,7 +134,7 @@ export type ProvidedAccountInfo = {
 type AccountCreatorStub = Required<Pick<GatekeeperVendor, "createAccount">>;
 type SingletonAccountStub = Required<Pick<GatekeeperUser, "getSingletonGatekeeperClass" | "startAppUi">>;
 // Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names; see the note above.
-type SharedConfigurationAccountStub = Required<Pick<GatekeeperUser, "holdsSharedConfiguration">>;
+type SharedConfigurationAccountStub = Required<Pick<GatekeeperUser, "holdsSharedConfiguration" | "holdsWorkflowInvoke">>;
 
 function areCredentialsValid(record: ConnectedAccountRecord): boolean {
   if (record.credentialsExpired) return false;
@@ -154,19 +154,39 @@ function areCredentialsValid(record: ConnectedAccountRecord): boolean {
 export async function holdsSharedConfiguration(
     records: Iterable<ConnectedAccountRecord>, vendorId: string, action: SharedConfigurationAction,
 ): Promise<boolean> {
+  return holdsDeploymentAuthority(records, vendorId, account => account.holdsSharedConfiguration(action),
+      "Couldn't check whether you may change shared configuration. Try again.");
+}
+
+/**
+ * Whether `vendorId` says the person may ask a configured system workflow to run here (FAC-102,
+ * InferOps' `workflow:invoke`), asked and combined exactly as `holdsSharedConfiguration` is: live
+ * accounts of that vendor only, one scope, a yes from any account in it, and a failed answer refuses.
+ */
+export async function holdsWorkflowInvoke(
+    records: Iterable<ConnectedAccountRecord>, vendorId: string): Promise<boolean> {
+  return holdsDeploymentAuthority(records, vendorId, account => account.holdsWorkflowInvoke(),
+      "Couldn't check whether you may run workflows. Try again.");
+}
+
+// The shared combiner for the two questions above: each live account of `vendorId` is asked once.
+async function holdsDeploymentAuthority(
+    records: Iterable<ConnectedAccountRecord>, vendorId: string,
+    ask: (account: SharedConfigurationAccountStub) => Promise<SharedConfigurationAnswer>,
+    failure: string,
+): Promise<boolean> {
   let scopes = new Set<string>();
   let holds = false;
   for (let record of records) {
     if (record.vendorId !== vendorId || !areCredentialsValid(record)) continue;
     let answer: SharedConfigurationAnswer;
     try {
-      answer = await (record.account as unknown as SharedConfigurationAccountStub)
-        .holdsSharedConfiguration(action);
+      answer = await ask(record.account as unknown as SharedConfigurationAccountStub);
     } catch (err) {
-      logger.warn("shared configuration authority could not be read", {
+      logger.warn("deployment authority could not be read", {
         event: "shared.configuration.check.failed", vendorId, accountId: record.id, error: err,
       });
-      throw new Error("Couldn't check whether you may change shared configuration. Try again.", { cause: err });
+      throw new Error(failure, { cause: err });
     }
     if (typeof answer?.scope !== "string" || answer.scope === "") continue;
     scopes.add(answer.scope);
@@ -2415,6 +2435,17 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let vendorId = getSharedConfigurationGatekeeper(this.env);
     if (!vendorId) return true;
     return holdsSharedConfiguration(this.#connectedAccountRecords(), vendorId, action);
+  }
+
+  /**
+   * Whether this person may ask a configured system workflow to run (FAC-102), as the deployment's
+   * SHARED_CONFIGURATION_GATEKEEPER vendor decides it through their own connected accounts (the
+   * module-level `holdsWorkflowInvoke`). The Overseer asks only when the deployment names a vendor.
+   */
+  async holdsWorkflowInvoke(): Promise<boolean> {
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    if (!vendorId) return true;
+    return holdsWorkflowInvoke(this.#connectedAccountRecords(), vendorId);
   }
 
   /**

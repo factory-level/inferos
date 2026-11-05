@@ -1068,8 +1068,25 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
    * than guessing. Workspaces granted since the person connected count after they reconnect.
    */
   async holdsSharedConfiguration(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer> {
+    if (action !== "build" && action !== "publish") return { holds: false, scope: null };
+    return this.#holdsInCompany(`configuration:${action}`);
+  }
+
+  /**
+   * Whether the connected person may ask a configured system workflow here to run: InferOps'
+   * `workflow:invoke` (FAC-102; a person's `member`, `admin` or `owner` grant holds it, a grant deny
+   * removes it, and a service account never does), asked exactly as `holdsSharedConfiguration`
+   * asks, with the same company scope and the same refusals.
+   */
+  async holdsWorkflowInvoke(): Promise<SharedConfigurationAnswer> {
+    return this.#holdsInCompany("workflow:invoke");
+  }
+
+  // The person's own answer to one InferOps permission, in this deployment's company (see
+  // holdsSharedConfiguration). `permission` is one of the fixed names above, never a caller's.
+  async #holdsInCompany(permission: "configuration:build" | "configuration:publish" | "workflow:invoke"):
+      Promise<SharedConfigurationAnswer> {
     const nothing = { holds: false, scope: null };
-    if (action !== "build" && action !== "publish") return nothing;
     const endpoint = inferOpsApiEndpoint(this.env);
     if (!this.ctx.props.connected || !endpoint) return nothing;
     const company = deploymentCompany(this.env);
@@ -1080,7 +1097,7 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     for (const { workspaceId } of identity.workspaces) {
       const client = whileInferOpsEnabled(this.env, () =>
         accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
-      if (await client.holdsPermission(`configuration:${action}`)) return { holds: true, scope };
+      if (await client.holdsPermission(permission)) return { holds: true, scope };
     }
     return { holds: false, scope };
   }
