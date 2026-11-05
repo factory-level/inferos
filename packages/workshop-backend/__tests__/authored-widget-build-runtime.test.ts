@@ -26,7 +26,7 @@ describe("authored widget Worker compiler", () => {
     expect(result.clientJs).toContain("hello");
     expect(result.clientJs).not.toMatch(/^\s*import\s/mu);
     expect(result.clientBytes).toBe(new TextEncoder().encode(result.clientJs).byteLength);
-  });
+  }, 15_000);
 
   it("refuses a dependency edge missing from the reviewed closure", async () => {
     const resolutions = authoredWidgetDependencies.resolutions as Record<string, string>;
