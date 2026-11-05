@@ -3562,7 +3562,8 @@ class OverseerImpl implements AgentHooks {
         await this.removeWorkpiece(record.id);
       }
     }
-    for (let gadget of this.storage.gadgets.list()) {
+    // Buffer the records first: bumpVersion reads other lists, which would invalidate the cursor.
+    for (let gadget of Array.from(this.storage.gadgets.list())) {
       if (gadget.type !== "gadget") continue;  // worktrees have no binding edges
       let removed = false;
       for (let [name, edge] of Object.entries(gadget.bindings)) {
@@ -5714,7 +5715,8 @@ class OverseerImpl implements AgentHooks {
     let doomed = this.listPendingGadgets(chatId).filter(gadget =>
         gadget.pending!.sequence !== undefined && gadget.pending!.sequence >= revertFrom);
     let doomedIds = new Set(doomed.map(gadget => gadget.id));
-    for (let gadget of this.storage.gadgets.list()) {
+    // Buffer the records first: bumpVersion reads other lists, which would invalidate the cursor.
+    for (let gadget of Array.from(this.storage.gadgets.list())) {
       if (gadget.type !== "gadget" || doomedIds.has(gadget.id)) continue;
       let removed = false;
       for (let [name, edge] of Object.entries(gadget.bindings)) {
@@ -7473,6 +7475,9 @@ class OverseerImpl implements AgentHooks {
   // no merge can change (see assertNotFrozen), so a Build edit doesn't cut off the operators using
   // a published console's widgets; binding changes pass the one gadget they touched so that
   // renaming a binding on gadget A doesn't restart gadget B. Explicit ids are always restarted.
+  // It reads storage lists (the gadgets, and the trigger assignments it retires), so a caller must
+  // never call it while iterating a storage list lazily: only one kv.list() cursor can be open, and
+  // a new one invalidates it. Buffer the list with Array.from first.
   bumpVersion(affectedGadgetIds?: WorkpieceId[]): number {
     let codeVersion = this.storage.codeVersion.get() + 1;
     this.storage.codeVersion.put(codeVersion);
