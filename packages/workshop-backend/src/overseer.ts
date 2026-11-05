@@ -6537,6 +6537,8 @@ class OverseerImpl implements AgentHooks {
     // deliberately not awaited -- parking the teardown behind a gatekeeper round trip would keep
     // the connection's data flowing into the gadget for as long as that call took (or forever, if
     // it hangs), with the record gone and nobody verified against it.
+    // Every assignment whose runs use this connection goes too, wherever its hook is hosted (#374 round 3).
+    retireAssignmentsUsing(this, id);
     for (let hook of Array.from(this.storage.boundHooks.list())) {
       if (hook.gatekeeperId !== id) continue;
       this.storage.boundHooks.delete(hook.id);
@@ -6629,6 +6631,7 @@ class OverseerImpl implements AgentHooks {
       openSession: (gatekeeperId, facet, caller) => this.openGatekeeperSession(gatekeeperId, facet, caller),
       // A stub over the revocable wrapper, so every call the worker makes re-enters it here.
       wrapSession: wrapper => new NativeRpcStub(wrapper as RpcTarget),
+      abortFacet: name => this.ctx.facets.abort(name, new Error("The workflow run ended.")),
     };
   }
 
@@ -17217,7 +17220,7 @@ class SlashCommandAuthorizerImpl extends NativeRpcTarget implements ObservationA
  * the role and authority first.
  */
 export function setWorkflowTriggerAssignment(
-    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "defaultGadgetId" | "workflowDefinitionStore" |
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "defaultGadgetId" | "workflowDefinitionStore" |
         "visibleBindings" | "getGadgetRecord">,
     caller: AiChatAuthorInfo, hookId: number, settings: TriggerAssignmentSettings | null): TriggerAssignment | null {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
@@ -17250,8 +17253,12 @@ export function setWorkflowTriggerAssignment(
 // connection's vendor to delete the key stored for its reference. Best effort for the key, after
 // the change is committed: a failure is logged by hook (never a key), and the reference is never
 // used again, since runs check the live assignment on every call.
-function retireAssignment(impl: Pick<OverseerImpl, "env" | "storage" | "ctx">, previous: TriggerAssignment): void {
-  impl.ctx.facets.abort(systemGatekeeperFacetName(previous.credentialRef), new Error("The trigger's assignment ended."));
+function retireAssignment(impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns">, previous: TriggerAssignment): void {
+  // Each running delivery has its own facet (#374 round 3); abort every one on this reference.
+  for (let deliveryId of impl.systemRuns.deliveriesOf(previous.credentialRef)) {
+    impl.ctx.facets.abort(systemGatekeeperFacetName(previous.credentialRef, deliveryId),
+        new Error("The trigger's assignment ended."));
+  }
   let vendorId = gatekeeperVendorId(impl.storage.gatekeepers.get(previous.gatekeeperId));
   let vendor = vendorId === undefined ? undefined : buildGatekeeperVendorMap(impl.env).get(vendorId) as unknown as
       Pick<GatekeeperVendor, "forgetSystemCredential"> | undefined;
@@ -17267,10 +17274,24 @@ function retireAssignment(impl: Pick<OverseerImpl, "env" | "storage" | "ctx">, p
  * `setWorkflowTriggerAssignment`: clearing the trigger's pin, deleting its hook or its connection
  * (FAC-102, #374 round 2). Its system facet is aborted and its stored key forgotten.
  */
-export function retireTriggerAssignment(impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "workflowDefinitionStore">,
-                                        hookId: number): void {
+export function retireTriggerAssignment(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">, hookId: number): void {
   let previous = impl.workflowDefinitionStore().assignmentOf(hookId);
   if (previous) retireAssignment(impl, previous);
+}
+
+/**
+ * Retires and removes every assignment whose runs use connection `gatekeeperId`, before that
+ * connection is deleted (#374 round 3): an assignment's connection is chosen apart from the hook's
+ * host, so the hooks hosted on it aren't all of them.
+ */
+export function retireAssignmentsUsing(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">, gatekeeperId: number): void {
+  let store = impl.workflowDefinitionStore();
+  for (let assignment of store.assignmentsUsing(gatekeeperId)) {
+    retireAssignment(impl, assignment);
+    store.removeAssignment(assignment.hookId);
+  }
 }
 
 /**

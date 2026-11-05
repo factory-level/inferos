@@ -263,6 +263,23 @@ export class WorkspaceWorkflowDefinitionStore {
     });
   }
 
+  /** The assignments whose runs use connection `gatekeeperId`. */
+  assignmentsUsing(gatekeeperId: number): TriggerAssignment[] {
+    let found: TriggerAssignment[] = [];
+    for (let stored of this.storage.workflowTriggerAssignments.list()) {
+      if (stored.gatekeeperId === gatekeeperId) found.push({ ...stored });
+    }
+    return found;
+  }
+
+  /** Removes trigger `hookId`'s assignment, dropping runs waiting to start on it. */
+  removeAssignment(hookId: number): void {
+    this.durableStorage.transactionSync(() => {
+      this.#dropInvocations(hookId);
+      this.storage.workflowTriggerAssignments.delete(hookId);
+    });
+  }
+
   /** The assignment of trigger `hookId`, or null. */
   assignmentOf(hookId: number): TriggerAssignment | null {
     let stored = this.storage.workflowTriggerAssignments.get(hookId);

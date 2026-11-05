@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
 import {
   OverseerDurableObject, PROVISION_REFUSED, makeOverseerStorage, provisionWorkflowTriggerCredential,
-  retireTriggerAssignment, setWorkflowTriggerAssignment,
+  retireAssignmentsUsing, retireTriggerAssignment, setWorkflowTriggerAssignment,
 } from "../src/overseer.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SYSTEM_RUN_ENDED, SYSTEM_RUN_UNSUPPORTED, SYSTEM_RUN_WRONG_CONNECTION,
@@ -43,8 +43,11 @@ function host(opts: {
   let systemClass = { name: "SystemClass" } as unknown as DurableObjectClass<any>;
   let classRequests: [string, { resourceUrl: string }][] = [];
   let hookLive = true;
+  let unbound = false;
+  let abortedFacets = new Set<string>();
   let h: SystemRunHost & {
     setAssignment(a: typeof assignment): void; whileRunning(f: () => Promise<void>): void; deleteHook(): void;
+    unbindConnection(): void;
   } = {
     systemRuns: new SystemRunRegistry(),
     assignmentOf: () => assignment && { ...assignment, assignedBy: ADA, assignedAt: new Date(0) },
@@ -52,9 +55,10 @@ function host(opts: {
       if (!hookLive) throw new Error("Hook has been deleted or disabled.");
       return GADGET;
     },
-    bindingsOf: () => opts.bindings ?? [
+    bindingsOf: () => (unbound ? [] : opts.bindings ?? [
       ["INFEROPS", { target: INFEROPS }], ["MAIL", { target: 60 }], ["BOARD", { target: INFEROPS }], ["TABLES", { target: 70 }],
-    ],
+    ]),
+    abortFacet: name => { abortedFacets.add(name); },
     makeLoopback: (gatekeeperId, caller) => {
       loopbacks.push([gatekeeperId, caller]);
       return { loopback: gatekeeperId };
@@ -85,13 +89,24 @@ function host(opts: {
     wrapSession: wrapper => wrapper,
     openSession: async (gatekeeperId, facet, caller) => {
       sessions.push([gatekeeperId, (facet as unknown as { facet: string }).facet, caller]);
-      return { session: gatekeeperId, readBoard: async () => "board", moveIssue: async (id: string) => `moved ${id}` };
+      let facetName = (facet as unknown as { facet: string }).facet;
+      return {
+        session: gatekeeperId, readBoard: async () => "board", moveIssue: async (id: string) => `moved ${id}`,
+        // A capability the session hands out lives in its facet, so it dies when the facet is aborted.
+        subSession: async () => ({
+          read: async () => {
+            if (abortedFacets.has(facetName)) throw new Error("The facet was aborted.");
+            return "sub";
+          },
+        }),
+      };
     },
     setAssignment: a => { assignment = a; },
     whileRunning: f => { duringRun = f; },
     deleteHook: () => { hookLive = false; },
+    unbindConnection: () => { unbound = true; },
   };
-  return { h, loaded, loopbacks, sessions, facets, systemClass, classRequests };
+  return { h, loaded, loopbacks, sessions, facets, systemClass, classRequests, abortedFacets };
 }
 
 const DELIVERY = { deliveryId: 7, commitId: commit(1), credentialRef: "ref-1" };
@@ -144,8 +159,10 @@ describe("a run's sessions", () => {
     made.h.whileRunning(async () => { opened = await openSystemRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, CALLER); });
     await runAssignedDelivery(made.h, HOOK, DELIVERY, null, []);
     await expect((opened as any).readBoard()).rejects.toThrow(SYSTEM_RUN_ENDED);
-    expect(made.sessions).toEqual([[INFEROPS, systemGatekeeperFacetName("ref-1"), CALLER]]);
-    expect(made.facets.get(systemGatekeeperFacetName("ref-1"))).toBe(made.systemClass);
+    // The facet is the delivery's own, and is aborted when the run ends.
+    expect(made.sessions).toEqual([[INFEROPS, systemGatekeeperFacetName("ref-1", 7), CALLER]]);
+    expect(made.facets.get(systemGatekeeperFacetName("ref-1", 7))).toBe(made.systemClass);
+    expect(made.abortedFacets.has(systemGatekeeperFacetName("ref-1", 7))).toBe(true);
     // The vendor is told which resource the connection serves, from the connection's own record.
     expect(made.classRequests).toEqual([["ref-1", { resourceUrl: "inferops://grokbot.operations/project/board/GROK" }]]);
     // After the run, the same binding reaches nothing.
@@ -328,8 +345,10 @@ describe("startHook for a trigger with an assignment", () => {
 function assignmentImpl(env: Record<string, string>) {
   let { store } = pinnedStore();
   let aborted: string[] = [];
+  let systemRuns = new SystemRunRegistry();
   let impl = {
     env,
+    systemRuns,
     defaultGadgetId: GADGET,
     workflowDefinitionStore: () => store,
     getGadgetRecord: () => ({}),
@@ -347,7 +366,10 @@ function assignmentImpl(env: Record<string, string>) {
       },
     },
   };
-  return { impl: impl as unknown as Parameters<typeof setWorkflowTriggerAssignment>[0], store, aborted };
+  /** Marks a delivery of `credentialRef` running, as a run in flight would be. */
+  let running = (credentialRef: string, deliveryId = 7) =>
+    systemRuns.begin(deliveryId, { hookId: HOOK, gatekeeperId: INFEROPS, credentialRef });
+  return { impl: impl as unknown as Parameters<typeof setWorkflowTriggerAssignment>[0], store, aborted, running };
 }
 
 describe("assigning a trigger", () => {
@@ -368,12 +390,14 @@ describe("assigning a trigger", () => {
     expect(() => setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })).toThrow("names no service");
   });
 
-  it("ends the old reference's system facet when it changes or goes", () => {
-    let { impl, aborted } = assignmentImpl(GATED);
+  it("ends the old reference's running system facets when it changes or goes", () => {
+    let { impl, aborted, running } = assignmentImpl(GATED);
     let first = setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    running(first.credentialRef, 7);
     let second = setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    running(second.credentialRef, 8);
     setWorkflowTriggerAssignment(impl, ADA, HOOK, null);
-    expect(aborted).toEqual([systemGatekeeperFacetName(first.credentialRef), systemGatekeeperFacetName(second.credentialRef)]);
+    expect(aborted).toEqual([systemGatekeeperFacetName(first.credentialRef, 7), systemGatekeeperFacetName(second.credentialRef, 8)]);
   });
 });
 
@@ -554,13 +578,14 @@ describe("a system session is bound to its run (#374 round 2)", () => {
 describe("retiring an assignment (#374 round 2)", () => {
   it("aborts its system facet and forgets its stored key, on every route that removes it", async () => {
     let forget = vi.fn(async (_ref: string) => {});
-    let { impl, store, aborted } = provisionImpl({ forgetSystemCredential: forget });
+    let { impl, store, aborted, running } = provisionImpl({ forgetSystemCredential: forget });
     let assignment = setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    running(assignment.credentialRef);
     // Clearing the pin, deleting the hook or its connection: the store drops the assignment, and
     // the caller retires it first.
     retireTriggerAssignment(impl, HOOK);
     store.pinTrigger(ADA.id, HOOK, GADGET, null);
-    expect(aborted).toEqual([systemGatekeeperFacetName(assignment.credentialRef)]);
+    expect(aborted).toEqual([systemGatekeeperFacetName(assignment.credentialRef, 7)]);
     await vi.waitFor(() => expect(forget).toHaveBeenCalledWith(assignment.credentialRef));
     // Nothing to retire is a no-op.
     retireTriggerAssignment(impl, HOOK);
@@ -569,8 +594,9 @@ describe("retiring an assignment (#374 round 2)", () => {
 
   it("happens when the pin is cleared through the Overseer", async () => {
     let forget = vi.fn(async (_ref: string) => {});
-    let { impl, store, aborted } = provisionImpl({ forgetSystemCredential: forget });
+    let { impl, store, aborted, running } = provisionImpl({ forgetSystemCredential: forget });
     let assignment = setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    running(assignment.credentialRef);
     let full = Object.assign(impl as object, {
       isSharedConfiguration: async () => false,
       assertGatekeeperUsable: () => {},
@@ -583,6 +609,47 @@ describe("retiring an assignment (#374 round 2)", () => {
     let overseer = await openFakeOverseer({}, { role: "build", impl: full });
     await overseer.pinTriggerDefinition(HOOK, null);
     expect(store.assignmentOf(HOOK)).toBeNull();
-    expect(aborted).toEqual([systemGatekeeperFacetName(assignment.credentialRef)]);
+    expect(aborted).toEqual([systemGatekeeperFacetName(assignment.credentialRef, 7)]);
+  });
+});
+
+describe("#374 round 3: the assigned connection and what a session hands out", () => {
+  it("stops a run at its next call once the assigned connection is no longer bound", async () => {
+    let made = host();
+    let outcomes: string[] = [];
+    made.h.whileRunning(async () => {
+      let held: any = await openSystemRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, CALLER);
+      outcomes.push(await held.readBoard());
+      made.h.unbindConnection();
+      outcomes.push(await held.readBoard().then(() => "read", (e: Error) => e.message));
+    });
+    await runAssignedDelivery(made.h, HOOK, DELIVERY, null, []);
+    expect(outcomes).toEqual(["board", SYSTEM_RUN_ENDED]);
+  });
+
+  it("kills every capability the session handed out when the run ends", async () => {
+    let made = host();
+    let sub: any;
+    made.h.whileRunning(async () => {
+      let held: any = await openSystemRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, CALLER);
+      sub = await held.subSession();
+      expect(await sub.read()).toBe("sub");
+    });
+    await runAssignedDelivery(made.h, HOOK, DELIVERY, null, []);
+    await expect(sub.read()).rejects.toThrow("The facet was aborted.");
+  });
+
+  it("retires every assignment using a removed connection, even one the hook isn't hosted on", async () => {
+    let forget = vi.fn(async (_ref: string) => {});
+    let { impl, store, aborted, running } = provisionImpl({ forgetSystemCredential: forget });
+    // The hook's host is another connection (1); the assignment uses INFEROPS.
+    let assignment = setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    running(assignment.credentialRef);
+    retireAssignmentsUsing(impl, 60);
+    expect(store.assignmentOf(HOOK)).not.toBeNull();
+    retireAssignmentsUsing(impl, INFEROPS);
+    expect(store.assignmentOf(HOOK)).toBeNull();
+    expect(aborted).toEqual([systemGatekeeperFacetName(assignment.credentialRef, 7)]);
+    await vi.waitFor(() => expect(forget).toHaveBeenCalledWith(assignment.credentialRef));
   });
 });

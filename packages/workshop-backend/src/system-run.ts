@@ -32,9 +32,12 @@ export type SystemRun = { hookId: number; gatekeeperId: number; credentialRef: s
 /** The delivery an assigned run executes: its id, the pinned commit and the assignment it was admitted under. */
 export type AssignedDelivery = { deliveryId: number; commitId: string; credentialRef: string };
 
-/** The facet a system run's sessions open on, one per assignment credential reference. */
-export function systemGatekeeperFacetName(credentialRef: string): string {
-  return `systemgatekeeper-${credentialRef}`;
+/**
+ * The facet one delivery's system sessions open on: its own, per run, aborted when the run ends, so
+ * every capability a session handed out dies with it (#374 round 3).
+ */
+export function systemGatekeeperFacetName(credentialRef: string, deliveryId: number): string {
+  return `systemgatekeeper-${credentialRef}-${deliveryId}`;
 }
 
 /**
@@ -66,6 +69,13 @@ export class SystemRunRegistry {
   /** Whether `deliveryId` is running. */
   has(deliveryId: number): boolean {
     return this.#runs.has(deliveryId);
+  }
+
+  /** The running deliveries of `credentialRef`'s assignment. */
+  deliveriesOf(credentialRef: string): number[] {
+    let ids: number[] = [];
+    for (let [id, run] of this.#runs) if (run.credentialRef === credentialRef) ids.push(id);
+    return ids;
   }
 }
 
@@ -102,6 +112,8 @@ export interface SystemRunHost {
   facet(name: string, cls: DurableObjectClass<Gatekeeper<any>>): Fetcher<Gatekeeper<any>>;
   /** Opens a gatekeeper session on `facet` for connection `gatekeeperId`. */
   openSession(gatekeeperId: number, facet: Fetcher<Gatekeeper<any>>, caller: SystemRunCaller): Promise<unknown>;
+  /** Aborts the facet named `name`, ending everything running in it. */
+  abortFacet(name: string): void;
   /** Makes the revocable wrapper an RPC capability (a stub over it), so every call reaches it. */
   wrapSession(wrapper: object): unknown;
 }
@@ -110,13 +122,19 @@ export interface SystemRunHost {
 // unchanged, and its hook live. Every refusal reads the same and names nothing.
 function assertRunLive(host: SystemRunHost, caller: SystemRunCaller, run: SystemRun): void {
   let assignment = host.assignmentOf(run.hookId);
+  let gadgetId: number;
   try {
     host.systemRuns.require(caller);
-    host.liveHookGadget(run.hookId);
+    gadgetId = host.liveHookGadget(run.hookId);
   } catch {
     throw new Error(SYSTEM_RUN_ENDED);
   }
   if (assignment?.credentialRef !== run.credentialRef || assignment.gatekeeperId !== run.gatekeeperId) {
+    throw new Error(SYSTEM_RUN_ENDED);
+  }
+  // The assigned connection must still exist and still be bound to the trigger's gadget (#374 round 3).
+  if (host.vendorIdOf(run.gatekeeperId) === undefined ||
+      systemRunBindingNames(host.bindingsOf(gadgetId), run.gatekeeperId).length === 0) {
     throw new Error(SYSTEM_RUN_ENDED);
   }
 }
@@ -170,6 +188,8 @@ export async function runAssignedDelivery(host: SystemRunHost, hookId: number, d
     return await entry[method ?? "run"](...args);
   } finally {
     host.systemRuns.end(delivery.deliveryId);
+    // The delivery's own facet goes with it, and every capability its sessions handed out.
+    host.abortFacet(systemGatekeeperFacetName(delivery.credentialRef, delivery.deliveryId));
   }
 }
 
@@ -198,7 +218,8 @@ export async function openSystemRunSession(host: SystemRunHost, target: { type: 
       assignment.gatekeeperId !== run.gatekeeperId) {
     throw new Error(SYSTEM_RUN_ASSIGNMENT_CHANGED);
   }
-  host.liveHookGadget(run.hookId);
-  let session = await host.openSession(run.gatekeeperId, host.facet(systemGatekeeperFacetName(run.credentialRef), cls), caller);
+  assertRunLive(host, caller, run);
+  let session = await host.openSession(run.gatekeeperId,
+      host.facet(systemGatekeeperFacetName(run.credentialRef, caller.deliveryId), cls), caller);
   return host.wrapSession(revocableSession(session as object, () => assertRunLive(host, caller, run)));
 }
