@@ -222,6 +222,9 @@ export default defineConfig({
                 // which the overseer instantiates it (with props) as one of its own facets.
                 TEST_AGENT_SPAWNER: { className: 'AgentSpawnerGatekeeper', useSQLite: true },
                 TEST_USER_DIRECTORY: { className: 'UserDirectoryDurableObject', useSQLite: true },
+                // Puts the class in `ctx.exports`, from which a user DO leaves a former subject's
+                // presence on a company change (FAC-88).
+                TEST_SUBJECT_PRESENCE: { className: 'SubjectPresenceDurableObject', useSQLite: true },
               },
             },
           }),

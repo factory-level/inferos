@@ -427,6 +427,10 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // kept, never listed or opened again, for offboarding and retention to find; `revoked` once
       // the workspace itself has revoked what was held on it (#revokeRetiredWorkspaces).
       retiredOperateWorkspaces: collection<RetiredOperateWorkspace>()({ primaryKey: "id" }),
+      // Subjects (boards) the person's page showed when a company change dropped it (FAC-88): the
+      // person is taken out of each one's live presence (SubjectPresenceDurableObject.leaveAll)
+      // before anything else is served, so its roster stops reaching them.
+      retiredSubjectPresence: collection<{ boardRef: string; revoked: boolean }>()({ primaryKey: "boardRef" }),
     },
     singletons: {
       operateReadGeneration: "1",
@@ -1285,10 +1289,31 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         if (stored !== null || this.#holdsPresentationState()) this.#resetPresentationState();
       }
       let pending = [...this.storage.retiredOperateWorkspaces.list()].filter(retired => !retired.revoked);
-      if (pending.length === 0) return;
-      // A retired workspace's held capabilities are revoked before anything else is served, then
-      // the company is read again, since it may have changed while that was awaited.
+      let presence = [...this.storage.retiredSubjectPresence.list()].filter(retired => !retired.revoked);
+      if (pending.length === 0 && presence.length === 0) return;
+      // A retired workspace's held capabilities and streams, and the former subject's presence,
+      // are revoked before anything else is served, then the company is read again, since it may
+      // have changed while that was awaited.
       await this.#revokeRetiredWorkspaces(pending);
+      await this.#leaveRetiredSubjects(presence);
+    }
+  }
+
+  // Takes the person out of each former subject's live presence (SubjectPresenceDurableObject
+  // .leaveAll), ending every presence stream they hold on it, and records each that is done. One
+  // that can't be reached refuses the person's call with `companyUnavailable`, and is tried again.
+  async #leaveRetiredSubjects(pending: { boardRef: string; revoked: boolean }[]): Promise<void> {
+    let userId = this.storage.profile.get().id;
+    for (let retired of pending) {
+      try {
+        await this.ctx.exports.SubjectPresenceDurableObject.getByName(retired.boardRef).leaveAll(userId);
+      } catch (err) {
+        logger.warn("former subject's presence could not be left", {
+          event: "operate.presence.leave.failed", error: err,
+        });
+        throw Object.assign(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.companyUnavailable), { cause: err });
+      }
+      this.storage.retiredSubjectPresence.delete(retired.boardRef);
     }
   }
 
@@ -1310,12 +1335,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       try {
         if (!await overseers.get(id).retireOperateSession(ownerId)) {
           logger.warn("retired operate session workspace refused its retirement", {
-            event: "operate.workspace.retire.refused", workspaceId: retired.id,
+            event: "operate.workspace.retire.refused", durableObjectId: retired.id,
           });
         }
       } catch (err) {
         logger.warn("retired operate session workspace could not be revoked", {
-          event: "operate.workspace.retire.failed", workspaceId: retired.id, error: err,
+          event: "operate.workspace.retire.failed", durableObjectId: retired.id, error: err,
         });
         throw Object.assign(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.companyUnavailable), { cause: err });
       }
@@ -1340,6 +1365,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   // A retired workspace is kept, never deleted: it is unlisted, and Overseer.open refuses it,
   // since it is no longer this person's recorded operate session.
   #resetPresentationState(): void {
+    let formerBoard = this.#operatePage().state.board?.boardRef;
+    if (formerBoard) this.storage.retiredSubjectPresence.put({ boardRef: formerBoard, revoked: false });
     // The keys first, so nothing is deleted while the listing is still being read.
     let widgetKeys = Array.from(this.storage.widgetStates.list(), widget => widget.key);
     for (let key of widgetKeys) this.storage.widgetStates.delete(key);

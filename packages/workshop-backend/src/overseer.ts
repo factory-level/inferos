@@ -2231,12 +2231,18 @@ class OverseerImpl implements AgentHooks {
     subscriber = subscriber.dup();
     let token = {};
     this.#presenceSubscribers.set(token, subscriber);
+    // Ended with every other stream by a retirement (FAC-88; trackStream).
+    let stream = this.trackStream(() => remove());
+    let remove = () => {
+      stream.untrack();
+      this.#removePresenceSubscriber(token);
+    };
     let snapshot = [...this.#presence.keys()].map(id => this.#toParticipant(id));
-    subscriber.init(snapshot).catch(() => this.#removePresenceSubscriber(token));
-    subscriber.onRpcBroken(() => this.#removePresenceSubscriber(token));
+    subscriber.init(snapshot).catch(remove);
+    subscriber.onRpcBroken(remove);
     // @ts-expect-error Bugs in native RPC types make this not work currently.
     return new NativeRpcStub<{}>({
-      [Symbol.dispose]: () => this.#removePresenceSubscriber(token),
+      [Symbol.dispose]: remove,
     });
   }
 
@@ -3613,9 +3619,12 @@ class OverseerImpl implements AgentHooks {
     let unsubscribe = () => {
       if (disposed) return;
       disposed = true;
+      stream.untrack();
       gadgets.unsubscribe(dbSubscriber);
       subscriber[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; trackStream).
+    let stream = this.trackStream(unsubscribe);
 
     // Whether the record is published to this subscriber (see above for what is withheld).
     let published = (record: WorkpieceRecord): boolean =>
@@ -10271,8 +10280,46 @@ class OverseerImpl implements AgentHooks {
   retireOperateSession(): void {
     if (this.storage.operateSessionRetired.get()) return;
     this.storage.operateSessionRetired.put(true);
+    // Every open stream ends before this returns: nothing more reaches any subscriber, whatever
+    // the workspace writes from here on (see trackStream).
+    this.closeAllStreams();
     for (let chatId of Array.from(this.#liveChats.keys())) this.cancelAgent(chatId);
     void this.scheduleAccessRestart("This operate session has ended.");
+  }
+
+  // Every subscription this workspace delivers to, by the closer that ends it (FAC-88). Each
+  // subscribe site registers its own unsubscribe here (trackStream) and removes it when it ends, so
+  // a retirement can end every one synchronously instead of waiting for the access restart.
+  #openStreams = new Set<() => void>();
+
+  /**
+   * Registers `close`, a subscription's own idempotent unsubscribe, so closeAllStreams() can end
+   * it. The subscription calls the returned `untrack` when it ends by itself.
+   */
+  trackStream(close: () => void): { untrack(): void } {
+    this.#openStreams.add(close);
+    return { untrack: () => { this.#openStreams.delete(close); } };
+  }
+
+  /**
+   * Ends every open subscription synchronously: each one's storage subscribers are removed and its
+   * subscriber stub disposed, so no later write or delivery reaches it. Used by a retirement.
+   */
+  closeAllStreams(): void {
+    let closers = Array.from(this.#openStreams);
+    this.#openStreams.clear();
+    for (let close of closers) {
+      try {
+        close();
+      } catch (err) {
+        this.logger.warn("a subscription failed to close", { event: "subscription.close.failed", error: err });
+      }
+    }
+  }
+
+  /** How many subscriptions are open (see trackStream), for tests. */
+  openStreamCount(): number {
+    return this.#openStreams.size;
   }
 
   isConsoleToolTainted(chatId: number): boolean {
@@ -10715,10 +10762,16 @@ class OverseerImpl implements AgentHooks {
     this.#tailSubscribers.add(sub);
 
     let self = this;
+    let ended = false;
     function unsubscribe() {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       self.#tailSubscribers.delete(sub);
       sub[Symbol.dispose]();
     }
+    // Ended with every other stream by a retirement (FAC-88; trackStream).
+    let stream = this.trackStream(unsubscribe);
 
     // @ts-expect-error Bugs in native RPC types make this not work currently.
     return new NativeRpcStub<{}>({
@@ -11960,10 +12013,16 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // Kept past this call, which would otherwise dispose the stub when it returns.
     let kept = (subscriber as unknown as NativeRpcStub<typeof subscriber>).dup();
     deliver = kept as unknown as typeof subscriber;
+    let ended = false;
     let end = () => {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       unsubscribe();
       kept[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(end);
     return { snapshot, subscription: new HostBoardSubscriptionImpl(end) };
   }
 
@@ -13667,7 +13726,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     };
 
+    let ended = false;
     let unsubscribe = () => {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.kind.unsubscribe(kindSubscriber);
       this.impl.storage.installedFrom.unsubscribe(installedFromSubscriber);
@@ -13677,6 +13740,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       this.impl.storage.ownerInvitesOnly.unsubscribe(ownerInvitesOnlySubscriber);
       callback[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(unsubscribe);
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.kind.subscribe(kindSubscriber);
@@ -14931,6 +14996,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     subscriber = subscriber.dup();  // keep stub after return
     let subscribed = false;
     let disposed = false;
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(() => unsubscribe());
     subscriber.onRpcBroken(_ => unsubscribe());
 
     let dbSubscriber = {
@@ -14948,6 +15015,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     function unsubscribe() {
       if (disposed) return;
       disposed = true;
+      stream.untrack();
       if (subscribed) actions.unsubscribe(dbSubscriber);
       subscriber[Symbol.dispose]();
     };
@@ -15105,6 +15173,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let replayCount = 0;
 
     subscriber = subscriber.dup();  // keep stub after return
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(() => unsubscribe());
     this.impl.addChatSubscriber(subscriber);
     subscriber.onRpcBroken(_ => unsubscribe());
 
@@ -15149,6 +15219,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     function unsubscribe() {
       if (disposed) return;
       disposed = true;
+      stream.untrack();
       chats.unsubscribe(msgSubscriber);
       chatMeta.unsubscribe(metaSubscriber);
       self.impl.removeChatSubscriber(subscriber);
@@ -15927,12 +15998,18 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       }
     };
 
+    let ended = false;
     let unsubscribe = () => {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.kind.unsubscribe(kindSubscriber);
       this.impl.storage.testOnly.unsubscribe(testOnlySubscriber);
       callback[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(unsubscribe);
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.kind.subscribe(kindSubscriber);

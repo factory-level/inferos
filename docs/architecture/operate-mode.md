@@ -623,6 +623,21 @@ FAC-88. A person's presentation state is theirs alone, and it belongs to the com
   - **Held capabilities refuse.** Until the restart, every `OperateOverseerInterface` call (the chat list, its history, a new chat or message, a subscription, the action log and every other allowed call) checks the mark first. It refuses with "This operate session has ended. Reload to start a new one.", which names nothing.
   - **Opening refuses.** `Overseer.open` refuses a retired workspace, and one that is no longer the owner's recorded session, with `workspaceNotFound`.
   - **No agent work starts or resumes.** A turn already running is cancelled at retirement. An agent turn the restart interrupted is not resumed in a retired workspace: `#resumeInterruptedAgents` drops its record, reports the chat's turn as "Agent stopped: this operate session has ended.", and drains no pending agent call. `OverseerImpl.startAgent` starts no turn there either, whether it was asked for through a held capability or by the alarm draining a pending call; it reports the turn the same way.
+- **Every open stream ends at the switch, before anything else is served.** No stream is left to the access restart, which stays only as the backstop. The workspace's streams end before `retireOperateSession` returns, and the user DO's gate waits for that, and for the presence eviction, before serving anything.
+  - **In the retired workspace:** each subscribe site registers its own idempotent unsubscribe with `OverseerImpl.trackStream` and removes it when it ends. `retireOperateSession` calls `closeAllStreams()` first, synchronously, before anything else. Each closer removes its storage subscribers and disposes its subscriber stub, so no later write in the workspace reaches it. The streams covered:
+    - chat, including the AG-UI operate streams, which subscribe to it (`subscribeToChat`);
+    - the action log (`subscribeToActions`);
+    - workspace metadata (`subscribeToMetadata`);
+    - workspace presence (`addPresenceSubscriber`);
+    - the workpiece list (`subscribeToWorkpieces`);
+    - console logs (`subscribeToConsoleLogs`);
+    - host-board selection (`subscribeHostBoardSelection`).
+  - **Subject presence on the former board:** `#resetPresentationState` records the board the page showed (`retiredSubjectPresence`). The gate then calls `SubjectPresenceDurableObject.leaveAll(personId)` for it before serving anything. Every join of that person ends synchronously, their subscribers get nothing more, and others see them leave. A presence DO that can't be reached refuses the call with `companyUnavailable`, and is tried again on the next.
+  - **Kept, because it carries only the current company:** the operate page stream (`OperateSession.subscribe`, the user DO's `subscribeOperateSession`). From the switch on, its subscribers get the reset page and then only the new company's page. Nothing they received before the switch is sent again.
+  - **Nothing to close:**
+    - the InferOps gatekeeper's board sessions stream nothing (no `subscribe` in `gatekeeper-inferops`);
+    - hooks can't be authored in an operate workspace;
+    - `subscribeConnectedAccounts` lists the person's own accounts, whatever their company.
 - **State from before FAC-88.** When no company is recorded yet, any state there (a moved page, a widget state, a claimed workspace) can't be shown to belong to the company first read, so it is dropped exactly as on a switch. A person with none just records the company.
 - **Handovers stay in one company.** A board, a sender's name and a note never cross companies:
   - **The check.** `OperateSession.handOver` reads the sender's `currentPresentationCompany()` and delivers the handover with it (`deliverHandover`, `handover-delivery.ts`) to the recipient's own `UserDurableObject.receiveHandover`. The recipient resolves their company, then compares it with the sender's and appends the handover in one synchronous step (`#appendOperateEvent`), so a switch can't land between the check and the append.
@@ -649,6 +664,11 @@ FAC-88. A person's presentation state is theirs alone, and it belongs to the com
     - nobody but the owner retires it.
     
     It also measures the mark's rise with the other inputs. `authz-generation-guard.test.ts` lists the mark as a watched input.
+  - The same file, one test per stream kind: an open chat, action, workpiece, presence, console-log, host-board selection or metadata stream is registered while open, gone once `retireOperateSession` returns, and its subscriber released. Where the test can cause one, a write or log after retirement reaches nobody.
+  - `__tests__/subject-presence.test.ts` ("leaving every join of one person"): every join of the person ends at once, and nothing later reaches them.
+  - `personal-state-partition` ("streams a company switch ends or keeps"):
+    - the page stream carries only the reset page and the new company's page after the switch;
+    - the person is taken out of the former board's presence, and a later join there doesn't reach them.
   - `__tests__/handover-delivery.test.ts`: the sender sees `recipientUnavailable` for a recipient in another company or one whose company can't be told; other failures pass on.
   - `integration-tests/__tests__/operate-company-switch.test.ts`: the real gatekeeper and connect flow.
     - Alice selects an issue in acme, then signs in to InferOps as a person of another company.

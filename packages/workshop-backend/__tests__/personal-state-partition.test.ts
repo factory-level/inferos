@@ -4,16 +4,18 @@
 // the former company's presentation state is dropped, not kept and not restored on switching back.
 // Business records are never held here; the page names references only.
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:workers";
+import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES } from "@gadgets/workshop-shared/api";
 import { INITIAL_OPERATE_PAGE, type OperateEvent, type OperateFlowPage } from "@gadgets/workshop-shared/operate-session";
 import { widgetStateKey, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
 import { presentationCompanyOf, type UserDurableObject } from "../src/user.js";
+import type { SubjectPresenceDurableObject } from "../src/subject-presence.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
     TEST_USER: DurableObjectNamespace<UserDurableObject>;
+    TEST_SUBJECT_PRESENCE: DurableObjectNamespace<SubjectPresenceDurableObject>;
   }
 }
 
@@ -247,6 +249,67 @@ describe("a handover", () => {
       expect(await code(recipient.dispatchOperateEvent({ type: "handoverReceived", handover: HANDOVER }, null, actor)))
         .toBe(OPERATE_SESSION_ERROR_CODES.invalidEvent);
     }
+  });
+});
+
+describe("streams a company switch ends or keeps", () => {
+  it("keeps the page stream, which from the switch on carries only the new company's page", async () => {
+    let company = { now: "tenant-a" };
+    let user = await person(company);
+    await workOn(user);
+    let updates: { state: unknown }[] = [];
+    let stub = new NativeRpcStub((update: { state: unknown }) => { updates.push(update); });
+    using _subscription = await user.subscribeOperateSession(stub as never);
+    await scheduler.wait(10);
+    let before = updates.length;
+    company.now = "tenant-b";
+    await user.getOperatePage();
+    await user.dispatchOperateEvent({ type: "setChatOpen", open: false }, null, "person");
+    await scheduler.wait(10);
+    let after = updates.slice(before);
+    expect(after.length).toBe(2);
+    expect(after[0]!.state).toEqual(INITIAL_OPERATE_PAGE);
+    expect(after[1]!.state).toEqual({ ...INITIAL_OPERATE_PAGE, chatOpen: false });
+  });
+
+  it("takes the person out of the former board's live presence before serving anything", async () => {
+    let company = { now: "tenant-a" };
+    let user = await person(company);
+    let alice = { type: "user" as const, id: `alice-${crypto.randomUUID()}`, name: "Alice" };
+    let board = `${BOARD.boardRef}-${crypto.randomUUID()}`;
+    await runInDurableObject(user, (instance: UserDurableObject) => {
+      (instance as unknown as { storage: { profile: { put(p: typeof alice): void } } }).storage.profile.put(alice);
+    });
+    // The same namespace the user DO reaches through ctx.exports.
+    let presence = env.TEST_SUBJECT_PRESENCE.getByName(board);
+    let page = await user.getOperatePage();
+    await user.dispatchOperateEvent({ type: "openBoard", board: { ...BOARD, boardRef: board } }, page.seq, "person");
+    // Alice's tab, and Bob watching the same board.
+    let aliceSeen: string[] = [];
+    let aliceTab = new NativeRpcStub({
+      init: async () => { aliceSeen.push("init"); }, add: async () => { aliceSeen.push("add"); },
+      remove: async () => { aliceSeen.push("remove"); }, onRpcBroken() {},
+    });
+    let bobRoster: string[][] = [];
+    let bobTab = new NativeRpcStub({
+      init: async (people: { user: { id: string } }[]) => { bobRoster.push(people.map(p => p.user.id)); },
+      add: async () => {}, remove: async () => { bobRoster.push(["removed"]); }, onRpcBroken() {},
+    });
+    await presence.join(alice, null, aliceTab);
+    await presence.join({ type: "user", id: "bob", name: "Bob" }, null, bobTab);
+    await scheduler.wait(10);
+    let seenBefore = aliceSeen.length;
+
+    company.now = "tenant-b";
+    await user.getOperatePage();
+    await scheduler.wait(10);
+    // Bob saw Alice leave; a later join on that board reaches only Bob.
+    expect(bobRoster.at(-1)).toEqual(["removed"]);
+    await presence.join({ type: "user", id: "carol", name: "Carol" }, null, new NativeRpcStub({
+      init: async () => {}, add: async () => {}, remove: async () => {}, onRpcBroken() {},
+    }));
+    await scheduler.wait(10);
+    expect(aliceSeen.length).toBe(seenBefore);
   });
 });
 

@@ -18,7 +18,7 @@ import type { InferOpsProjectSession } from "../../../custom-gatekeepers/gatekee
 import { startHarness, type Harness } from "../src/harness.js";
 import { INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, boardUrl, type FakePerson } from "../src/inferops-fake.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
-import { connect, listConnectedAccounts, nextUsernames, signUp, waitFor } from "../src/rpc-client.js";
+import { connect, listConnectedAccounts, logIn, nextUsernames, signUp, waitFor } from "../src/rpc-client.js";
 
 const INFEROPS_GATEKEEPER_DIR = resolve(import.meta.dirname, "../../../custom-gatekeepers/gatekeeper-inferops");
 const GATEKEEPER_WORKER = "gatekeeper-inferops";
@@ -125,6 +125,11 @@ it("drops a person's page when they sign in to another company, and never restor
     () => heldWorkspace.newChat("Carry on", null)]) {
     await expect(call()).rejects.toThrow();
   }
+  // The retired workspace's access restart ends this connection too, as losing any workspace's
+  // object does (the client then reconnects): Alice signs in again, in globex.
+  await new Promise(done => setTimeout(done, 300));
+  alice.api = await logIn(connect(harness.url), aliceName!);
+  alice.session = await alice.api.getOperateSession();
   await expect(alice.session.dispatch({ type: "closeIssue" }, selected.seq)).rejects.toSatisfy(
     (caught: unknown) => getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.conflict);
   const inGlobex = await alice.session.dispatch({ type: "setChatOpen", open: false }, selected.seq + 1);
@@ -144,6 +149,10 @@ it("drops a person's page when they sign in to another company, and never restor
   await alice.api.disconnectAccount(globexAccount);
   await signInAs(alice.api, aliceAcme);
   expect(await types(alice.session)).toEqual(["companyChanged"]);
+  // Retiring globex's workspace, which this connection opened, ends it the same way.
+  await new Promise(done => setTimeout(done, 300));
+  alice.api = await logIn(connect(harness.url), aliceName!);
+  alice.session = await alice.api.getOperateSession();
   const back = await alice.session.dispatch({ type: "setChatOpen", open: true }, inGlobex.seq + 1);
   expect(back.state.board).toBeNull();
   const acmeAgain = (await (await alice.session.getWorkspace()).getMetadata()).id;

@@ -28,6 +28,8 @@ export class SubjectRoster {
     key: string; user: AiChatAuthorInfo; joins: Map<object, string | null>;
   }>();
   #subscribers = new Map<object, RosterSubscriber>();
+  // Each person's open joins, by the function that ends one (see leaveAll).
+  #leaves = new Map<string, Set<() => void>>();
   #nextKey = 0;
 
   #participant(userId: string): OperateSubjectParticipant {
@@ -81,9 +83,12 @@ export class SubjectRoster {
     this.#deliver(join, subscriber, joined => joined.init(participants));
 
     let left = false;
-    return () => {
+    let leave = () => {
       if (left) return;
       left = true;
+      let leaves = this.#leaves.get(user.id);
+      leaves?.delete(leave);
+      if (leaves?.size === 0) this.#leaves.delete(user.id);
       this.#unsubscribe(join);
       let current = this.#people.get(user.id);
       if (!current) return;
@@ -97,6 +102,19 @@ export class SubjectRoster {
         this.#broadcast(other => other.add(updated));
       }
     };
+    let leaves = this.#leaves.get(user.id) ?? new Set();
+    leaves.add(leave);
+    this.#leaves.set(user.id, leaves);
+    return leave;
+  }
+
+  /**
+   * Ends every join of the person `userId` names, synchronously: each of their subscribers is
+   * released and receives nothing more, and the others see them leave. Used when the person's
+   * company changes (FAC-88), since the subject belongs to the company they worked in.
+   */
+  leaveAll(userId: string): void {
+    for (let leave of Array.from(this.#leaves.get(userId) ?? [])) leave();
   }
 }
 
@@ -115,5 +133,14 @@ export class SubjectPresenceDurableObject extends DurableObject<Cloudflare.Env> 
     subscriber.onRpcBroken(leave);
     // @ts-expect-error Bugs in native RPC types make this not work currently.
     return new NativeRpcStub<{}>({ [Symbol.dispose]: leave });
+  }
+
+  /**
+   * Ends every join of the person `userId` names here (SubjectRoster.leaveAll). Reached only by
+   * that person's own user DO, from Worker code holding the namespace, when their company changes
+   * (FAC-88).
+   */
+  leaveAll(userId: string): void {
+    this.#roster.leaveAll(userId);
   }
 }
