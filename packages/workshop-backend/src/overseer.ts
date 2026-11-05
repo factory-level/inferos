@@ -97,7 +97,8 @@ import type { AgentSpawnerBinding, CallableAgent, SpawnCallableOptions } from ".
 import { recordAnalytics } from "./analytics";
 import { reportIssue } from "@gadgets/observability/error-reporting";
 import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
-import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
+import { checkPlatformTurn } from "./ai-gateway-billing/limits/usage-checker";
+import { drawsOnPlatformAllowance, modelBindingRefusal } from "./model-allowlist";
 import { normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank,
@@ -8374,17 +8375,19 @@ class OverseerImpl implements AgentHooks {
 
         // Enforce the optional free-tier usage limit before starting the turn, and resolve whether
         // it bills the owner's own gateway.
-        // When the Cloudflare limits flow is disabled, checkUsageAndBalance() always allows.
+        // checkPlatformTurn() first refuses, uncounted, a gateway model MODEL_ALLOWLIST doesn't
+        // offer. When the Cloudflare limits flow is disabled, it then allows everything unless
+        // DAILY_AGENT_TURN_LIMIT sets a plain daily cap.
         // (This runs inside the try so the `finally` below still clears the active-agent state and
         // emits a stream "clear" — otherwise the UI would spin forever on a block.)
         let byokRouting: UserGatewayRouting | undefined;
-        if (this.ownerId && aiModel.config.billing === undefined) {
+        if (this.ownerId && drawsOnPlatformAllowance(this.env, aiModel)) {
           let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
-          let usage = await checkUsageAndBalance(this.env, ownerStub);
+          let usage = await checkPlatformTurn(this.env, aiModel, ownerStub);
           if (!usage.allowed) {
-            turn.setErrorType("usage_limit");
+            turn.setErrorType(usage.errorCode ?? "usage_limit");
             this.postAgentErrorMessage(chatId, aiModel.profile,
-                usage.reason ?? "Usage limit reached.", "usage_limit");
+                usage.reason ?? "Usage limit reached.", usage.errorCode ?? "usage_limit");
             turnLogger.debug("agent run finished", {
               event: "agent.run.finished", outcome: "usage_limit",
               durationMs: Date.now() - startedAt,
@@ -14032,11 +14035,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("build", "shared");
     let chatMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(modelId), this.impl.logger);
+    // Under the plain daily cap a binding can't use the platform's models, since its calls aren't
+    // agent turns the cap counts (FAC-152); the allowlist is enforced on every request it makes.
+    let refusal = modelBindingRefusal(this.impl.env, chatMeta.aiModel!);
+    if (refusal) throw new Error(refusal);
     let props: LanguageModelGatekeeperProps = {
       displayName: chatMeta.aiModel!.profile.name,
       config: chatMeta.aiModel!.config,
       initiator: this.impl.gadgetAuthorFor(chatMeta.profile),
       metadata: { source: "model-binding", gadgetId: this.impl.ctx.id.toString() },
+      ...(chatMeta.aiModel!.profile.managed ? { managed: true } : {}),
     }
 
     let creationSpec: GatekeeperCreationSpec = {

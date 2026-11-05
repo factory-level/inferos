@@ -1,6 +1,7 @@
 import {
   AiChatAuthorInfo, AiModelConfig, HTTPS_ONLY_PROVIDERS, SUGGESTED_MODELS,
 } from "@gadgets/workshop-shared/api";
+import { applyModelAllowlist, modelAllowlist } from "./model-allowlist.js";
 import { UserAiModelRecord } from "./user.js";
 
 // The model used for quick tasks like title generation when AI Gateway mode is active.
@@ -34,8 +35,11 @@ export class AiGatewayConfig {
    */
   readonly binding?: Ai;
   readonly providers: Set<string>;
+  /** The models MODEL_ALLOWLIST names, in order, or null to offer every suggested model. */
+  readonly allowlist: readonly string[] | null;
 
   constructor(env: Cloudflare.Env) {
+    this.allowlist = modelAllowlist(env);
     this.gateway = env.CF_AI_GATEWAY!;
     if (!env.CF_AI_GATEWAY_ACCOUNT_ID) {
       throw new Error("CF_AI_GATEWAY_ACCOUNT_ID is required when CF_AI_GATEWAY is set.");
@@ -84,6 +88,7 @@ export class AiGatewayConfig {
   /**
    * Get the list of models offered through AI Gateway, as AiChatAuthorInfo entries. Hidden models
    * are left out but still resolve (see resolveModel), so stored references to them keep working.
+   * With an allowlist, only its models are offered, in its order.
    */
   getModelList(): AiChatAuthorInfo[] {
     let result: AiChatAuthorInfo[] = [];
@@ -95,14 +100,31 @@ export class AiGatewayConfig {
         }
       }
     }
-    return result;
+    return applyModelAllowlist(result, model => model.id, this.allowlist);
+  }
+
+  /**
+   * Whether a request this gateway funds may ask for the model `config` names. Without an
+   * allowlist, any model. With one, only a model it names, matched exactly and listed in the
+   * catalog under the request's own provider, plus the platform's quick model, which titles chats.
+   * getModelViaGateway refuses any other, whatever record it came from: the allowlist bounds the
+   * model the platform pays for, not just the ids it offers.
+   */
+  offersModel(config: Pick<AiModelConfig, "provider" | "model">): boolean {
+    if (!this.allowlist) return true;
+    if (config.provider === "cloudflare" && config.model === QUICK_MODEL_ID) return true;
+    const catalog: Record<string, unknown> | undefined =
+        (SUGGESTED_MODELS as Record<string, Record<string, unknown>>)[config.provider];
+    return this.allowlist.includes(config.model) && catalog !== undefined && Object.hasOwn(catalog, config.model);
   }
 
   /**
    * Look up an AI Gateway model by ID. Returns a UserAiModelRecord if the model is a
-   * SUGGESTED_MODEL for an enabled gateway provider, or undefined otherwise.
+   * SUGGESTED_MODEL for an enabled gateway provider, or undefined otherwise. With an allowlist, a
+   * model it doesn't name doesn't resolve, so a stored choice can't reach a costlier model.
    */
   resolveModel(modelId: string): UserAiModelRecord | undefined {
+    if (this.allowlist && !this.allowlist.includes(modelId)) return undefined;
     for (let [provider, models] of Object.entries(SUGGESTED_MODELS)) {
       if (this.providers.has(provider) && modelId in models) {
         return {
