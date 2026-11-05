@@ -11,8 +11,11 @@ import { fileURLToPath } from "node:url";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 
 const cli = fileURLToPath(new URL("./company-storage-cli.ts", import.meta.url));
-// Inside the checkout, so `pnpm exec wrangler` resolves; .wrangler is gitignored.
-const scratch = mkdtempSync(join(resolve(fileURLToPath(new URL("../..", import.meta.url))), ".wrangler", "fac162-cli-"));
+// Inside the checkout, so `pnpm exec wrangler` resolves; .wrangler is gitignored, and a clean clone
+// (as in CI) doesn't have it yet.
+const checkoutScratch = join(resolve(fileURLToPath(new URL("../..", import.meta.url))), ".wrangler");
+mkdirSync(checkoutScratch, { recursive: true });
+const scratch = mkdtempSync(join(checkoutScratch, "fac162-cli-"));
 after(() => rmSync(scratch, { recursive: true, force: true }));
 
 const TENANT = "6f1c2b3a-0000-4000-8000-00000000a001";
@@ -96,7 +99,10 @@ test("exports a seeded company through the real bundle and runtime, and a rerun 
   const workspace = first.gadgetState.workspaces[0];
   assert.deepEqual(workspace.gadgets[0].entries.map((entry: { key: string }) => entry.key), ["ownerId", "votes"]);
   assert.match(workspace.gadgets[0].entries[0].value, /^sha256:[0-9a-f]{64}$/);
-  assert.deepEqual(workspace.gadgets[0].withheldKeys, [{ key: "note", reason: "not on the export allow-list" }]);
+  // The unlisted key's name is hashed too: only a manifest-listed name is shown in clear.
+  assert.equal(workspace.gadgets[0].withheldKeys.length, 1);
+  assert.match(workspace.gadgets[0].withheldKeys[0].key, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(workspace.gadgets[0].withheldKeys[0].hashed, true);
   assert.deepEqual(workspace.otherFacets, [{ facet: "gatekeeper1", reason: "gatekeeper state may hold credentials; not exported" }]);
   const text = JSON.stringify(documents);
   for (const forbidden of ["person-a@example.test", "Meet Dana", "fictional-gatekeeper-credential"]) assert.ok(!text.includes(forbidden), forbidden);

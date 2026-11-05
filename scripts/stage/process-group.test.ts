@@ -57,3 +57,27 @@ test("a command that finishes in time reports its own exit code and isn't killed
 test("the deadline must be a positive bound", async () => {
   await assert.rejects(runInProcessGroup(process.execPath, ["-e", ""], { timeoutMs: 0, label: "x" }), /positive/);
 });
+
+test("a child whose parent is killed outright ends its own group", async () => {
+  const pids = join(scratch, "orphan-pids.json");
+  const groupModule = JSON.stringify(new URL("./process-group.ts", import.meta.url).href);
+  const child = join(scratch, "orphan-child.mjs");
+  writeFileSync(child, `
+    import { stopWithParent } from ${groupModule};
+    import { writeFileSync } from "node:fs";
+    stopWithParent(100);
+    writeFileSync(${JSON.stringify(pids)}, JSON.stringify({ child: process.pid }));
+    setInterval(() => {}, 1000);
+  `);
+  const parent = join(scratch, "orphan-parent.mjs");
+  writeFileSync(parent, `
+    import { runInProcessGroup } from ${groupModule};
+    await runInProcessGroup(process.execPath, [${JSON.stringify(child)}], { timeoutMs: 60_000, label: "orphan" });
+  `);
+  const { spawn } = await import("node:child_process");
+  const runner = spawn(process.execPath, [parent], { stdio: "ignore" });
+  assert.ok(await until(() => { try { readFileSync(pids); return true; } catch { return false; } }, 10_000), "the child started");
+  const { child: childPid } = JSON.parse(readFileSync(pids, "utf8")) as { child: number };
+  runner.kill("SIGKILL");
+  assert.ok(await until(() => !alive(childPid), 5000), "the orphaned child ended itself");
+});

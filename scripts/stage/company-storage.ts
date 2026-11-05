@@ -216,6 +216,29 @@ export function structureDigest(document: Record<string, unknown>): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(canonical(rest))).digest("hex")}`;
 }
 
+/**
+ * The real path of `candidate`, refusing anything not really inside `root`. It's refused when it's
+ * relative, holds a `..`, doesn't exist, resolves outside the root (or to the root itself), or passes
+ * through a symbolic link anywhere between the root and itself, even one that stays inside: a
+ * manifest names one wrapper's own files, so a link is never needed, and refusing them all means a
+ * path can't be made to lead into another wrapper's state. The root itself may be a link.
+ */
+export function containedRealPath(root: string, candidate: string, label: string): string {
+  if (!isAbsolute(candidate)) throw new Error(`${label} must be an absolute path`);
+  if (candidate.split(/[\\/]/).includes("..")) throw new Error(`${label} must not contain ..`);
+  const realRoot = realpathSync(root);
+  let real: string;
+  try { real = realpathSync(candidate); }
+  catch { throw new Error(`${label} doesn't exist: ${candidate}`); }
+  const rel = relative(realRoot, real);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) throw new Error(`${label} must be inside the wrapper root`);
+  // With no link on the way, the path as written, taken from the real root, is the real path.
+  if (resolve(realRoot, relative(resolve(root), resolve(candidate))) !== real) {
+    throw new Error(`${label} passes through a symbolic link; name the real path inside the wrapper`);
+  }
+  return real;
+}
+
 /** Authoritative gate used by the CLI and its injectable local proof. */
 export async function assertPurgeAllowed(tenantId: string, readStatus: StatusReader, now = new Date()): Promise<OffboardingStatus> {
   const status = await readStatus(tenantId);

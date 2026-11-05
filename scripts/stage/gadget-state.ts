@@ -10,8 +10,9 @@
  * What leaves is decided as the kernel's workspace record export does (#345):
  * - only keys a blueprint's allow-list names, exactly, with a value matching the key's rule;
  * - actor ids as per-export salted hashes, never in clear;
- * - every other key by name only, and a name that looks personal or secret only as a salted hash;
- * - a gadget's SQL tables by name and row count; gatekeeper facets by name, never read.
+ * - every other key withheld, its name shown only as a per-export salted hash unless the manifest
+ *   lists the name as checked; gadget code chooses its own names, so a name is never trusted;
+ * - a gadget's SQL tables by row count, named the same way; gatekeeper facets by name, never read.
  */
 import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -30,8 +31,17 @@ export type GadgetValueRule =
 export const GADGET_VALUE_RULES: readonly GadgetValueRule[] =
   ["number", "boolean", "timestamp", "uuid", "issueKey", "revision", "actorId", "text"];
 
-/** Per blueprint, the storage keys that may be exported and the rule each value must meet. */
-export type GadgetStateAllowList = readonly { blueprintId: string; keys: Readonly<Record<string, GadgetValueRule>> }[];
+/**
+ * Per blueprint, the storage keys that may be exported and the rule each value must meet, and
+ * `clearNames`: other key or SQL table names a person checked aren't personal, which may be shown in
+ * clear though their values are withheld. A key with a rule is a checked name too. Every other name
+ * is hashed: it's chosen by the gadget's code, so no shape of name is trusted.
+ */
+export type GadgetStateAllowList = readonly {
+  blueprintId: string;
+  keys: Readonly<Record<string, GadgetValueRule>>;
+  clearNames?: readonly string[];
+}[];
 
 /** A workspace's gadgets, as the kernel lists them (`exportWorkspaceRecords().gadgets`). */
 export type WorkspaceGadgets = ReadonlyMap<string, readonly { id: number | string; facet: string; blueprintId: string | null }[]>;
@@ -44,8 +54,9 @@ export interface GadgetStateExport {
       id: number | string;
       blueprintId: string | null;
       entries: { key: string; value: unknown }[];
-      withheldKeys: { key: string; reason: string }[];
-      sqlTables: { name: string; rows: number; reason: string }[];
+      /** `key` is the name in clear only when `hashed` is false, which needs the manifest to list it. */
+      withheldKeys: { key: string; hashed: boolean; reason: string }[];
+      sqlTables: { name: string; hashed: boolean; rows: number; reason: string }[];
     }[];
     otherFacets: { facet: string; reason: string }[];
   }[];
@@ -55,19 +66,12 @@ export interface FacetIndexEntry { number: number; parent: number; name: string 
 
 const FACET_INDEX_MAGIC = Buffer.from("57efb0c55bcecdc4", "hex");
 const MAX_TEXT_LENGTH = 2000;
-const MAX_KEY_NAME_LENGTH = 128;
 const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ISSUE_KEY = /^[A-Z][A-Z0-9]{0,15}-[0-9]+$/;
 const REVISION = /^(0|[1-9][0-9]*)$/;
-// Names (keys and tables) that could identify a person or carry a secret are hashed, not shown.
-const PERSONAL_OR_SECRET = /[^\s@]+@[^\s@]+\.[^\s@]+|sk-[A-Za-z0-9_-]{16,}|Bearer\s|\btoken\b|password|secret/i;
-
-/** Whether a name holds a control character (U+0000 to U+001F), which no plain name has. */
-function hasControlCharacter(name: string): boolean {
-  for (let i = 0; i < name.length; i++) if (name.charCodeAt(i) < 0x20) return true;
-  return false;
-}
+// The kernel names a workspace's facets; only these exact forms are shown in clear.
+const KERNEL_FACET_NAME = /^(?:gadget|gatekeeper)[0-9]*$/;
 
 /**
  * Parses workerd's facet index: an 8-byte magic, then one entry per facet in creation order, each
@@ -98,10 +102,13 @@ function salted(salt: string, value: string): string {
   return `sha256:${createHash("sha256").update(`${salt}:${value}`).digest("hex")}`;
 }
 
-/** A key or table name as the export may show it: in clear, or hashed when it looks personal. */
-function reportedName(name: string, salt: string): { name: string; hashed: boolean } {
-  return name.length > MAX_KEY_NAME_LENGTH || PERSONAL_OR_SECRET.test(name) || hasControlCharacter(name)
-    ? { name: salted(salt, name), hashed: true } : { name, hashed: false };
+/**
+ * A gadget-chosen key or table name as the export may show it: in clear only when the manifest
+ * lists it (`checked`), otherwise as a per-export salted hash. It fails closed: no pattern decides
+ * a name is safe, since none can tell a person's name from a field's.
+ */
+function reportedName(name: string, salt: string, checked: ReadonlySet<string>): { name: string; hashed: boolean } {
+  return checked.has(name) ? { name, hashed: false } : { name: salted(salt, name), hashed: true };
 }
 
 /** The exported form of a value under its rule, or undefined when it doesn't match. */
@@ -168,6 +175,9 @@ export async function exportGadgetState({ durableObjectDirectory, workspaces, al
   scratchDirectory: string;
 }): Promise<GadgetStateExport> {
   const rulesByBlueprint = new Map(allowList.map(({ blueprintId, keys }) => [blueprintId, keys]));
+  const checkedByBlueprint = new Map(allowList.map(({ blueprintId, keys, clearNames }) =>
+    [blueprintId, new Set([...Object.keys(keys), ...(clearNames ?? [])])]));
+  const nothingChecked: ReadonlySet<string> = new Set();
   const result: GadgetStateExport = { salt: "per-export", workspaces: [] };
   for (const [workspaceId, gadgets] of [...workspaces].toSorted(([a], [b]) => a.localeCompare(b))) {
     if (!/^[0-9a-f]{64}$/.test(workspaceId)) throw new Error(`Workspace id ${JSON.stringify(workspaceId)} isn't a Durable Object id`);
@@ -182,9 +192,11 @@ export async function exportGadgetState({ durableObjectDirectory, workspaces, al
     for (const gadget of [...gadgets].toSorted((a, b) => Number(a.id) - Number(b.id))) {
       const facet = byName.get(gadget.facet);
       const rules = gadget.blueprintId === null ? undefined : rulesByBlueprint.get(gadget.blueprintId);
+      const checked = (gadget.blueprintId === null ? undefined : checkedByBlueprint.get(gadget.blueprintId)) ?? nothingChecked;
       const entry = { id: gadget.id, blueprintId: gadget.blueprintId,
-        entries: [] as { key: string; value: unknown }[], withheldKeys: [] as { key: string; reason: string }[],
-        sqlTables: [] as { name: string; rows: number; reason: string }[] };
+        entries: [] as { key: string; value: unknown }[],
+        withheldKeys: [] as { key: string; hashed: boolean; reason: string }[],
+        sqlTables: [] as { name: string; hashed: boolean; rows: number; reason: string }[] };
       if (facet) {
         const base = `${workspaceId}.${facet.number}.sqlite`;
         if (!existsSync(join(durableObjectDirectory, base))) throw new Error(`Facet ${gadget.facet} of ${workspaceId} has no storage file`);
@@ -196,21 +208,22 @@ export async function exportGadgetState({ durableObjectDirectory, workspaces, al
             entry.entries.push({ key, value: exported });
             continue;
           }
-          const shown = reportedName(key, salt);
+          const shown = reportedName(key, salt, checked);
           const reason = gadget.blueprintId === null
             ? "the gadget has no blueprint, so nothing of it is on the export allow-list"
             : rule === undefined ? "not on the export allow-list" : `its value doesn't match its allow-list rule (${rule})`;
-          entry.withheldKeys.push({ key: shown.name, reason: shown.hashed ? `${reason}; its name looks personal, so it's hashed` : reason });
+          entry.withheldKeys.push({ key: shown.name, hashed: shown.hashed, reason });
         }
         for (const table of tables) {
-          entry.sqlTables.push({ name: reportedName(table.name, salt).name, rows: table.rows, reason: "a gadget's SQL tables aren't exported" });
+          const shown = reportedName(table.name, salt, checked);
+          entry.sqlTables.push({ name: shown.name, hashed: shown.hashed, rows: table.rows, reason: "a gadget's SQL tables aren't exported" });
         }
       }
       exportedGadgets.push(entry);
     }
     const otherFacets = facets
       .filter(facet => facet.parent !== 0 || !gadgetFacets.has(facet.name))
-      .map(facet => ({ facet: reportedName(facet.name, salt).name,
+      .map(facet => ({ facet: KERNEL_FACET_NAME.test(facet.name) ? facet.name : salted(salt, facet.name),
         reason: facet.parent !== 0 ? "a nested facet; not exported"
           : /^gatekeeper[0-9]*$/.test(facet.name) ? "gatekeeper state may hold credentials; not exported"
           : "not a gadget the kernel lists; not exported" }));

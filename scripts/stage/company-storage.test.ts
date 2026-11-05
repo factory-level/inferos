@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { Miniflare } from "miniflare";
 import {
-  assertPurgeAllowed, exportCompanyStorage, purgeLocalCompany, type CompanyStorageBindings,
+  assertPurgeAllowed, containedRealPath, exportCompanyStorage, purgeLocalCompany, type CompanyStorageBindings,
   type KeyValueStore, type ObjectStore, type OffboardingStatus, type StorageResourceNames,
 } from "./company-storage.ts";
 
@@ -137,4 +137,32 @@ test("purge refuses a .wrangler/state symlink that resolves outside its wrapper"
 
 test("offboarding status must belong to the selected company", async () => {
   await assert.rejects(assertPurgeAllowed("tenant-a", async () => status("tenant-b"), new Date("2026-03-01")), /does not match/);
+});
+
+test("a manifest path must really be inside its wrapper: no symlink on the way, no .., no escape", () => {
+  const wrapper = join(scratch, "contained", "wrapper-a");
+  const sibling = join(scratch, "contained", "wrapper-b");
+  const outside = join(scratch, "contained", "outside");
+  for (const dir of [join(wrapper, ".wrangler", "state"), join(sibling, ".wrangler", "state"), outside, join(wrapper, "inner")]) {
+    mkdirSync(dir, { recursive: true });
+  }
+  // A normal path passes, and comes back resolved.
+  assert.equal(containedRealPath(wrapper, join(wrapper, ".wrangler", "state"), "stateDirectory"),
+    realpathSync(join(wrapper, ".wrangler", "state")));
+  // A symlink to a sibling wrapper's state is refused.
+  const toSibling = join(wrapper, "state-link");
+  symlinkSync(join(sibling, ".wrangler", "state"), toSibling, "dir");
+  assert.throws(() => containedRealPath(wrapper, toSibling, "stateDirectory"), /stateDirectory must be inside the wrapper root/);
+  // A symlink inside the root that resolves outside it is refused, even reached through a real directory.
+  symlinkSync(outside, join(wrapper, "inner", "escape"), "dir");
+  assert.throws(() => containedRealPath(wrapper, join(wrapper, "inner", "escape"), "stateDirectory"), /must be inside the wrapper root/);
+  // A symlink that stays inside the root is refused too: no link anywhere between root and target.
+  symlinkSync(join(wrapper, ".wrangler"), join(wrapper, "inner", "loop"), "dir");
+  assert.throws(() => containedRealPath(wrapper, join(wrapper, "inner", "loop", "state"), "stateDirectory"), /passes through a symbolic link/);
+  // .. is refused before anything is resolved, and so are relative paths and missing ones.
+  assert.throws(() => containedRealPath(wrapper, join(wrapper, "inner") + "/../.wrangler/state", "stateDirectory"), /must not contain \.\./);
+  assert.throws(() => containedRealPath(wrapper, ".wrangler/state", "stateDirectory"), /absolute path/);
+  assert.throws(() => containedRealPath(wrapper, join(wrapper, "missing"), "stateDirectory"), /doesn't exist/);
+  // The root itself isn't a path inside it.
+  assert.throws(() => containedRealPath(wrapper, wrapper, "stateDirectory"), /must be inside the wrapper root/);
 });

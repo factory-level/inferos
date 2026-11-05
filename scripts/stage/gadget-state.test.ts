@@ -75,7 +75,18 @@ const ALLOW_LIST: GadgetStateAllowList = [{
     votes: "number", open: "boolean", closesAt: "timestamp", ownerId: "actorId",
     issue: "issueKey", revision: "revision", runId: "uuid",
   },
+  // Names a person checked aren't personal: shown in clear though their values are withheld.
+  clearNames: ["unlistedNote", "notes"],
 }];
+
+// Names gadget code might choose that hold personal data or secrets. None is listed, so each must be
+// hashed: hashing by default doesn't depend on recognising them.
+const PERSONAL_NAMES = [
+  "alice.smith", "+15551234567", "note: call mom", "api_token", "accessToken",
+  "6b2d7c1e-4f3a-4b2c-9d1e-0a9b8c7d6e5f", "pat@example.test", "voter:Jane Doe", "member:123",
+  "user:6b2d7c1e-4f3a-4b2c-9d1e-0a9b8c7d6e5f", "phone:+15551234567", "note:call her after the review",
+  "bidi\u202eevil", "del\u007fname",
+];
 
 const A_ENTRIES: [string, unknown][] = [
   ["votes", 7], ["open", true], ["closesAt", "2026-11-05T00:00:00.000Z"],
@@ -84,6 +95,7 @@ const A_ENTRIES: [string, unknown][] = [
   // On the allow-list, but not the rule's shape: withheld, by name.
   ["unlistedNote", "Meet Dana at the cafe"], ["contact:dana@example.test", "free text"],
   ["makeTable", 1],
+  ...PERSONAL_NAMES.map((name): [string, unknown] => [name, 1]),
 ];
 
 let companyA: { state: string; workspace: string } | undefined;
@@ -140,23 +152,30 @@ test("exports a company's allow-listed gadget entries, hashing actor ids and wit
   });
   assert.match(String(tracker.entries.find(entry => entry.key === "ownerId")!.value), /^sha256:[0-9a-f]{64}$/);
 
-  const withheld = Object.fromEntries(tracker.withheldKeys.map(entry => [entry.key, entry.reason]));
-  assert.equal(withheld.unlistedNote, "not on the export allow-list");
-  assert.equal(withheld.makeTable, "not on the export allow-list");
-  const hashedName = tracker.withheldKeys.find(entry => entry.key.startsWith("sha256:"));
-  assert.ok(hashedName, "a key name shaped like an email is reported hashed, never in clear");
-  assert.equal(hashedName.reason, "not on the export allow-list; its name looks personal, so it's hashed");
-  assert.deepEqual(tracker.sqlTables, [{ name: "notes", rows: 1, reason: "a gadget's SQL tables aren't exported" }]);
+  // Only a manifest-listed name is shown in clear; every other one is a salted hash, marked so.
+  const clear = tracker.withheldKeys.filter(entry => !entry.hashed);
+  assert.deepEqual(clear, [{ key: "unlistedNote", hashed: false, reason: "not on the export allow-list" }]);
+  const hashed = tracker.withheldKeys.filter(entry => entry.hashed);
+  // makeTable, contact:dana@…, and every personal name.
+  assert.equal(hashed.length, 2 + PERSONAL_NAMES.length);
+  for (const entry of hashed) {
+    assert.match(entry.key, /^sha256:[0-9a-f]{64}$/);
+    assert.equal(entry.reason, "not on the export allow-list");
+  }
+  assert.deepEqual(tracker.sqlTables, [{ name: "notes", hashed: false, rows: 1, reason: "a gadget's SQL tables aren't exported" }]);
 
-  // A gadget built from scratch has no allow-list: its keys are names only.
+  // A gadget built from scratch has no allow-list: its keys appear hashed, and only as a count.
   const scratchGadget = workspace.gadgets.find(gadget => gadget.id === 9)!;
   assert.deepEqual(scratchGadget.entries, []);
-  assert.deepEqual(scratchGadget.withheldKeys, [{ key: "votes", reason: "the gadget has no blueprint, so nothing of it is on the export allow-list" }]);
+  assert.equal(scratchGadget.withheldKeys.length, 1);
+  assert.match(scratchGadget.withheldKeys[0].key, /^sha256:[0-9a-f]{64}$/);
+  assert.deepEqual({ ...scratchGadget.withheldKeys[0], key: "…" },
+    { key: "…", hashed: true, reason: "the gadget has no blueprint, so nothing of it is on the export allow-list" });
   // A gatekeeper's facet is named, never read.
   assert.deepEqual(workspace.otherFacets, [{ facet: "gatekeeper1", reason: "gatekeeper state may hold credentials; not exported" }]);
 
   const text = JSON.stringify(exported);
-  for (const forbidden of ["person-a@example.test", "dana@example.test", "Meet Dana", "free text",
+  for (const forbidden of [...PERSONAL_NAMES, "makeTable", "person-a@example.test", "dana@example.test", "Meet Dana", "free text",
     "fictional-gatekeeper-credential", "a note a person wrote", "token"]) {
     assert.doesNotMatch(text, new RegExp(forbidden.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), forbidden);
   }

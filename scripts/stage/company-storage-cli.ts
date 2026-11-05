@@ -1,15 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
 import { unstable_getMiniflareWorkerOptions, unstable_readConfig } from "wrangler";
 import { waitForMiniflareReady } from "./miniflare-readiness.ts";
 import { GADGET_VALUE_RULES, type GadgetStateAllowList } from "./gadget-state.ts";
-import { runInProcessGroup } from "./process-group.ts";
+import { runInProcessGroup, stopWithParent } from "./process-group.ts";
 import {
-  credentialResource, exportCompanyStorage, httpStatusReader, purgeLocalCompany, type CompanyStorageBindings,
+  containedRealPath, credentialResource, exportCompanyStorage, httpStatusReader, purgeLocalCompany, type CompanyStorageBindings,
   type KeyValueStore, type ObjectStore, type StorageResourceNames,
 } from "./company-storage.ts";
 
@@ -89,14 +89,10 @@ function readManifest(path: string): LocalManifest {
       !Array.isArray(manifest.resources.kv) || !Array.isArray(manifest.resources.r2)) {
     throw new Error("Malformed local company storage manifest");
   }
-  const root = realpathSync(manifest.wrapperRoot);
-  for (const candidate of [manifest.stateDirectory, manifest.workerConfig]) {
-    const absolute = resolve(candidate);
-    const rel = relative(root, absolute);
-    if (!isAbsolute(candidate) || !rel || rel.startsWith("..") || isAbsolute(rel)) {
-      throw new Error("Manifest state and worker config must be inside the local wrapper root");
-    }
-  }
+  // Checked and used by real path, so a symbolic link can't lead into another wrapper's state.
+  manifest.stateDirectory = containedRealPath(manifest.wrapperRoot, manifest.stateDirectory, "stateDirectory");
+  manifest.workerConfig = containedRealPath(manifest.wrapperRoot, manifest.workerConfig, "workerConfig");
+  manifest.wrapperRoot = realpathSync(manifest.wrapperRoot);
   if ([...manifest.resources.kv, ...manifest.resources.r2].some(resource => !resource.binding || !resource.name)) {
     throw new Error("Every local resource needs a binding and a resource name");
   }
@@ -116,14 +112,21 @@ function readManifest(path: string): LocalManifest {
     if (!Array.isArray(gadgetAllowList)) throw new Error("resources.exportGadgetState must be an array of { blueprintId, keys }");
     const seen = new Set<string>();
     for (const entry of gadgetAllowList as unknown[]) {
-      const { blueprintId, keys } = (entry ?? {}) as { blueprintId?: unknown; keys?: unknown };
+      const { blueprintId, keys, clearNames } = (entry ?? {}) as { blueprintId?: unknown; keys?: unknown; clearNames?: unknown };
       if (typeof blueprintId !== "string" || !blueprintId || seen.has(blueprintId)) {
         throw new Error("resources.exportGadgetState needs a unique blueprintId on every entry");
       }
       seen.add(blueprintId);
-      if (!keys || typeof keys !== "object" || Array.isArray(keys) || Object.keys(keys).length === 0 ||
+      if (!keys || typeof keys !== "object" || Array.isArray(keys) ||
           Object.values(keys).some(rule => !(GADGET_VALUE_RULES as readonly unknown[]).includes(rule))) {
         throw new Error(`resources.exportGadgetState for ${blueprintId} needs keys, each with one of: ${GADGET_VALUE_RULES.join(", ")}`);
+      }
+      if (clearNames !== undefined && (!Array.isArray(clearNames) ||
+          clearNames.some(name => typeof name !== "string" || !name) || new Set(clearNames).size !== clearNames.length)) {
+        throw new Error(`resources.exportGadgetState for ${blueprintId}: clearNames must be unique, non-empty names`);
+      }
+      if (Object.keys(keys).length === 0 && !(clearNames as unknown[] | undefined)?.length) {
+        throw new Error(`resources.exportGadgetState for ${blueprintId} lists no keys and no clearNames`);
       }
     }
   }
@@ -293,6 +296,8 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
   if (parsed.command === CHILD_COMMAND) {
+    // Its own process group escapes the caller's, so it ends itself if its parent is killed outright.
+    stopWithParent();
     const { bindings, cleanup } = await openLocalBindings(manifest);
     try {
       const result = await exportCompanyStorage({ tenantId: manifest.tenantId, prefix: manifest.resourcePrefix,
