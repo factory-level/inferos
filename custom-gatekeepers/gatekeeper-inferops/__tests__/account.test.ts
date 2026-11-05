@@ -1921,3 +1921,35 @@ describe("shared configuration authority", () => {
     expect(asked().length).toBe(before);
   });
 });
+
+describe("the company the person works in (FAC-88)", () => {
+  const COMPANY_A = "a0000000-0000-4000-8000-00000000000a";
+  const COMPANY_B = "b0000000-0000-4000-8000-00000000000b";
+  const vars = env as unknown as { INFEROPS_COMPANY?: string };
+  afterEach(() => { delete vars.INFEROPS_COMPANY; });
+
+  it("is the session's company, read without asking InferOps", async () => {
+    inferlab.tenantId = COMPANY_A.toUpperCase();
+    const account = await connect("presentation company");
+    const before = inferlab.apiCalls.length;
+    expect(await hooks().presentationCompany(account)).toBe(COMPANY_A);
+    expect(inferlab.apiCalls.length).toBe(before);
+  });
+
+  it("is none for another company's session, or without a connected person", async () => {
+    inferlab.tenantId = COMPANY_A;
+    const account = await connect("other company");
+    vars.INFEROPS_COMPANY = COMPANY_B;
+    expect(await hooks().presentationCompany(account)).toBeNull();
+    vars.INFEROPS_COMPANY = COMPANY_A;
+    expect(await hooks().presentationCompany(account)).toBe(COMPANY_A);
+    expect(await hooks().presentationCompany(
+      { accountId: "00000000-0000-4000-8000-0000000000fe", connected: false })).toBeNull();
+  });
+
+  it("fails on a malformed INFEROPS_COMPANY instead of answering", async () => {
+    const account = await connect("presentation misconfigured");
+    vars.INFEROPS_COMPANY = "acme";
+    expect(await hooks().presentationCompany(account)).toHaveProperty("failed");
+  });
+});

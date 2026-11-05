@@ -991,7 +991,8 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   async dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot> {
     // Only the kernel records handovers (handOver), so a session's log can't claim one that
     // never happened.
-    if (event.type === "handoverReceived" || event.type === "handoverSent") {
+    // Nor a company change (FAC-88), which only the user DO records.
+    if (event.type === "handoverReceived" || event.type === "handoverSent" || event.type === "companyChanged") {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
     }
     await this.#checkConsoleEvent(event);
@@ -1009,6 +1010,18 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   // person's own access on every call, never taken from the caller. A `person` widget's state lives
   // in the person's user DO, a `session` one only on this connection; neither touches the page.
   #sessionWidgetStates = new WidgetStateMemory();
+  // The person's presentation epoch these session states belong to (FAC-88): when the user DO says
+  // the company has changed since, they are the former company's and are dropped before any read.
+  #sessionWidgetEpoch: number | null = null;
+
+  async #sessionWidgets(): Promise<WidgetStateMemory> {
+    let epoch = await this.user().presentationEpoch();
+    if (epoch !== this.#sessionWidgetEpoch) {
+      this.#sessionWidgetStates = new WidgetStateMemory();
+      this.#sessionWidgetEpoch = epoch;
+    }
+    return this.#sessionWidgetStates;
+  }
 
   async #widgetMachine(ref: OperateWidgetRef): Promise<WidgetStateMachine> {
     let checked = parseOperateWidgetRef(ref);
@@ -1022,7 +1035,7 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     let machine = await this.#widgetMachine(ref);
     let key = widgetStateKey(ref);
     if (machine.persistence === "person") return this.user().readWidgetState(key, machine);
-    return this.#sessionWidgetStates.read(key, machine);
+    return (await this.#sessionWidgets()).read(key, machine);
   }
 
   /**
@@ -1033,7 +1046,7 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     let machine = await this.#widgetMachine(ref);
     let key = widgetStateKey(ref);
     if (machine.persistence === "person") return this.user().transitionWidgetState(key, machine, event, expectedSeq);
-    return this.#sessionWidgetStates.transition(key, machine, event, expectedSeq);
+    return (await this.#sessionWidgets()).transition(key, machine, event, expectedSeq);
   }
 
   /**

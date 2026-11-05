@@ -5,7 +5,7 @@ import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assis
 import { localApiModels } from './local-api-models.js';
 import { modelNotOfferedMessage } from './model-allowlist.js';
 import { isCloudflareLimitsEnabled } from './ai-gateway-billing/config.js';
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, getOperateSessionErrorCode, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
 import {
   WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, recoverWidgetState, widgetEventsFrom,
   type WidgetStateMachine, type WidgetStateSnapshot,
@@ -174,6 +174,39 @@ export async function holdsSharedConfiguration(
   }
   if (scopes.size > 1) throw new Error(SHARED_CONFIGURATION_AMBIGUOUS);
   return holds;
+}
+
+// Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names; see the note above.
+type PresentationCompanyAccountStub = Required<Pick<GatekeeperUser, "presentationCompany">>;
+
+/**
+ * The company a person's presentation state belongs to (FAC-88), from their own connected accounts
+ * of `vendorId` (the deployment's SHARED_CONFIGURATION_GATEKEEPER), never from a caller. Expired
+ * credentials still say which company an account is in, so they count: an expiry must not drop the
+ * page. "" when the deployment names no vendor (it then belongs to one company, FAC-160) or no
+ * account speaks for one; accounts in several companies are their own partition, the same in any
+ * order. Throws when an account can't answer, since the company is then unknown.
+ */
+export async function presentationCompanyOf(
+    records: Iterable<ConnectedAccountRecord>, vendorId: string | null,
+): Promise<string> {
+  if (!vendorId) return "";
+  let companies = new Set<string>();
+  for (let record of records) {
+    if (record.vendorId !== vendorId) continue;
+    let company: string | null;
+    try {
+      company = await (record.account as unknown as PresentationCompanyAccountStub).presentationCompany();
+    } catch (err) {
+      logger.warn("presentation company could not be read", {
+        event: "presentation.company.read.failed", vendorId, accountId: record.id, error: err,
+      });
+      throw Object.assign(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.companyUnavailable), { cause: err });
+    }
+    if (typeof company === "string" && company !== "") companies.add(company);
+  }
+  // JSON keeps the parts apart whatever they contain, so no set of companies reads as another.
+  return companies.size <= 1 ? [...companies].join("") : JSON.stringify([...companies].toSorted());
 }
 
 // Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names, by a console
@@ -446,6 +479,16 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // The operate session's page as of its latest event, with that event. Always the replay of
       // `operateEvents` (applyOperateEvent), maintained by dispatchOperateEvent().
       operatePage: <OperateSessionUpdate>{ seq: 0, state: INITIAL_OPERATE_PAGE },
+
+      // The company the operate page and widget states belong to (FAC-88; presentationCompanyOf),
+      // or null before it was first recorded. #enterPresentationCompany() drops both when it changes.
+      presentationCompany: <string | null>null,
+      // Raised each time the company changes, so state held outside this object (an operate session
+      // connection's session-persisted widget states) can tell it belongs to the former company.
+      presentationEpoch: 0,
+      // The seq of the latest companyChanged entry: entries before it are the former company's, kept
+      // in `operateEvents` but never listed again (listOperateEvents, listOperateSubjectEvents).
+      presentationFloorSeq: 0,
     }
   });
 }
@@ -1198,8 +1241,62 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return { seq, state: { ...filled, console, subject: filled.board?.boardRef ?? null } };
   }
 
+  /**
+   * Reads which company the person works in now (presentationCompanyOf over their own connected
+   * accounts). Tests replace it to stand in for those accounts. An instance field, so never
+   * callable through a stub: no caller can name the company.
+   */
+  presentationCompanyReader = (): Promise<string> =>
+    presentationCompanyOf(this.#connectedAccountRecords(), getSharedConfigurationGatekeeper(this.env));
+
+  /**
+   * Every read or write of the operate page or of a widget state comes through here first (FAC-88).
+   * When the person's company differs from the one their presentation state belongs to, that state
+   * is dropped before anything reads it: every widget state is deleted, and the page returns to its
+   * initial state through a `companyChanged` entry, below which the log is never listed again.
+   * Switching back restores nothing. The first company recorded keeps what is there. Refuses with
+   * `companyUnavailable` when the company can't be told, rather than show state that may be another's.
+   */
+  async #enterPresentationCompany(): Promise<void> {
+    let company: string;
+    try {
+      company = await this.presentationCompanyReader();
+    } catch (err) {
+      if (getOperateSessionErrorCode(err) === OPERATE_SESSION_ERROR_CODES.companyUnavailable) throw err;
+      throw Object.assign(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.companyUnavailable), { cause: err });
+    }
+    // Synchronous from here: no other request interleaves between the comparison and the reset,
+    // and the caller's own read or write follows with no await either.
+    let stored = this.storage.presentationCompany.get();
+    if (stored === company) return;
+    this.storage.presentationCompany.put(company);
+    if (stored === null) return;
+    // The keys first, so nothing is deleted while the listing is still being read.
+    let widgetKeys = Array.from(this.storage.widgetStates.list(), widget => widget.key);
+    for (let key of widgetKeys) this.storage.widgetStates.delete(key);
+    let record: OperateEventRecord = {
+      seq: this.storage.operatePage.get().seq + 1, event: { type: "companyChanged" }, actor: "person", at: new Date(),
+    };
+    this.storage.operateEvents.put(record);
+    this.storage.presentationFloorSeq.put(record.seq);
+    this.storage.presentationEpoch.put(this.storage.presentationEpoch.get() + 1);
+    this.storage.operatePage.put({ seq: record.seq, state: INITIAL_OPERATE_PAGE, record });
+  }
+
+  /**
+   * A number that rises each time the person's company changes, after moving to the current one
+   * (see #enterPresentationCompany). Presentation state kept outside this object, such as an
+   * operate session connection's session-persisted widget states, is the former company's once it
+   * differs.
+   */
+  async presentationEpoch(): Promise<number> {
+    await this.#enterPresentationCompany();
+    return this.storage.presentationEpoch.get();
+  }
+
   /** The session's current page. */
   async getOperatePage(): Promise<OperateSessionSnapshot> {
+    await this.#enterPresentationCompany();
     return this.#operatePage();
   }
 
@@ -1265,6 +1362,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * machine still declares it, else its initial state. Reads nothing of the operate page.
    */
   async readWidgetState(key: string, machine: WidgetStateMachine): Promise<WidgetStateSnapshot> {
+    await this.#enterPresentationCompany();
     return this.#widgetState(key, machine);
   }
 
@@ -1281,6 +1379,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async transitionWidgetState(key: string, machine: WidgetStateMachine, event: string,
                               expectedSeq: number): Promise<WidgetStateSnapshot> {
+    await this.#enterPresentationCompany();
     // One synchronous read, check and write: no await, so no other request interleaves.
     let current = this.#widgetState(key, machine);
     if (expectedSeq !== current.seq) {
@@ -1323,6 +1422,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
         (event.type === "navigateFlow" || event.type === "backFlow" || event.type === "setFlowPageState")) {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
     }
+    // Only the kernel resets a page for a company change (#enterPresentationCompany), whoever asks.
+    if (event.type === "companyChanged") {
+      throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+    }
+    // A write lands only on the current company's page: a client holding the former company's
+    // page writes at a seq that is no longer current, and is refused as a conflict.
+    await this.#enterPresentationCompany();
     let current = this.#operatePage();
     if (expectedSeq !== null && expectedSeq !== current.seq) {
       throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.conflict);
@@ -1371,6 +1477,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /** See OperateSession.subscribe(). */
   async subscribeOperateSession(subscriber: RpcStub<(update: OperateSessionUpdate) => void>)
       : Promise<RpcStub<{}>> {
+    await this.#enterPresentationCompany();
     subscriber = subscriber.dup();  // keep stub after return
     let page = this.storage.operatePage;
     let disposed = false;
@@ -1401,10 +1508,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /** See OperateSession.listEvents(). */
   async listOperateEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]> {
+    await this.#enterPresentationCompany();
     let count = Math.max(0, Math.min(Math.floor(limit), MAX_OPERATE_EVENTS_PAGE));
     if (count === 0) return [];
+    // Never below the current company's first entry (presentationFloorSeq).
+    let floor = this.storage.presentationFloorSeq.get();
     return [...this.storage.operateEvents.list({
-      startAfter: operateEventKey(Math.max(0, Math.floor(afterSeq))),
+      startAfter: operateEventKey(Math.max(0, Math.floor(afterSeq), floor - 1)),
       limit: count,
     })];
   }
@@ -1417,7 +1527,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    */
   async listOperateSubjectEvents(subject: string, beforeSeq: number | null)
       : Promise<{ events: OperateEventRecord[]; nextBeforeSeq: number | null }> {
+    await this.#enterPresentationCompany();
+    // Never below the current company's first entry (presentationFloorSeq).
+    let floor = this.storage.presentationFloorSeq.get();
     let scanned = [...this.storage.operateEvents.list({
+      start: operateEventKey(floor),
       end: beforeSeq === null ? undefined : operateEventKey(Math.max(0, Math.floor(beforeSeq))),
       reverse: true,
       limit: MAX_OPERATE_EVENTS_PAGE + 1,

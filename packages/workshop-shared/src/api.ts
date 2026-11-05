@@ -712,6 +712,12 @@ export const OPERATE_SESSION_ERROR_CODES = {
    * `flowPageUnavailable`, it names no page and no workspace.
    */
   flowNavigationFailed: "OPERATE_SESSION_FLOW_NAVIGATION_FAILED",
+  /**
+   * The company the person works in couldn't be told from their connected accounts just now
+   * (FAC-88), so their page and widget states weren't read or written: they belong to one company,
+   * and a guess could show another's. Transient: try again. It names no company.
+   */
+  companyUnavailable: "OPERATE_SESSION_COMPANY_UNAVAILABLE",
 } as const;
 
 /** An expected `OperateSession.dispatch()` failure code. */
@@ -737,6 +743,8 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
       "There is no other person with that id here to hand this over to.",
   [OPERATE_SESSION_ERROR_CODES.flowUnavailable]:
       "That flow is not offered by the console you have open, and is not one of your own flows.",
+  [OPERATE_SESSION_ERROR_CODES.companyUnavailable]:
+      "Couldn't check which company you're working in just now. Try again.",
 });
 
 /** Creates an `OperateSession.dispatch()` failure with a machine-readable code. */

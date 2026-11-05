@@ -2,6 +2,8 @@
 title: Operate mode
 design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md
 covers:
+  - packages/workshop-backend/__tests__/personal-state-partition.test.ts
+  - packages/integration-tests/__tests__/operate-company-switch.test.ts
   - packages/workshop-backend/src/console-widget-index.ts
   - packages/workshop-backend/__tests__/console-widget-index.test.ts
   - packages/integration-tests/__tests__/operate-console-widget-index.test.ts
@@ -581,6 +583,48 @@ A widget may declare its own local states and transitions (FAC-86, [workspaces a
   - `workshop-shared/src/widget-state.test.ts`: parsing, its refusals, transitions and recovery.
   - `__tests__/widget-state.test.ts`: transitions leave the operate page and its log untouched, page events leave the widget alone, the refusals and their codes, recovery for the person, and a fresh start for another person and another revision.
   - `__tests__/console-tool-surfaces.test.ts`: the freeze, the candidate surface, an invalid `states.json` refused, and the console-tools switch.
+
+### Personal presentation state, by person and company
+
+FAC-88. A person's presentation state is theirs alone, and it belongs to the company they work in. Business records stay canonical and shared: they are never copied into this state.
+
+- **What it covers.** Everything here lives in the person's own user DO (`idFromName` of their InferOS identity), so it is never shared between people:
+  - **the operate page:** its selection (`focus`, `board` with its `issueId`), the console run, and a flow's position (FAC-87: `index`, `history`, `pageState`);
+  - **the page's event log;**
+  - **person-persisted widget states** (`widgetStates`).
+  
+  Session-persisted widget states live only on one operate session connection (`WidgetStateMemory` in `OperateSessionImpl`).
+- **Selecting whose state is read.** No RPC takes a person id. A widget reference (`OperateWidgetRef`) names a console and an install, so the same reference read by another person gives that person's own state. The page holds references (a board's `boardRef`, an issue id), never an entity, so every read of the record goes to InferOps through the reader's own connection.
+- **The company.** It comes from the person's own connected accounts of the vendor `SHARED_CONFIGURATION_GATEKEEPER` names, and never from a caller:
+  - **How it's read.** `presentationCompanyOf` in `user.ts` asks each account's `GatekeeperUser.presentationCompany()`. For InferOps that is the tenant id of the session stored at connect, read without a request, and null for a session `INFEROPS_COMPANY` doesn't admit.
+  - **Expired credentials** still count, so an expiry doesn't drop the page.
+  - **Several companies:** accounts in several companies form one combined partition of their own.
+  - **No vendor set** (local development, wrappers): the deployment has one partition, since it belongs to one company (FAC-160).
+  - **Can't be told:** any account that can't answer refuses the read or write with `OPERATE_SESSION_COMPANY_UNAVAILABLE`, rather than show state that may be another company's.
+- **A company switch.** Every user-DO method that reads or writes the page or a widget state runs `#enterPresentationCompany()` first: `getOperatePage`, `dispatchOperateEvent`, `subscribeOperateSession`, `listOperateEvents`, `listOperateSubjectEvents`, `readWidgetState`, `transitionWidgetState` and `presentationEpoch`. That covers the person's, the operate agent's and a handover's paths. When the company differs from the recorded one, in one synchronous step:
+  - every stored widget state is deleted;
+  - a kernel-only `companyChanged` event returns the page to `INITIAL_OPERATE_PAGE`;
+  - `presentationFloorSeq` moves to that event, so earlier entries are kept in storage but never listed again;
+  - `presentationEpoch` rises, which makes an open connection drop its session widget states.
+  
+  A client still holding the old page writes at a stale seq and is refused as a conflict. A dispatched `companyChanged` is refused (`invalidEvent`). The first company recorded keeps whatever is there.
+- **The policy is reset, never restore.** Switching back to a former company starts afresh too. Connecting an account in a company, or disconnecting the last one, also changes the company, and the state resets the same way.
+- **A republish.** Its policy is unchanged and is now stated as the reset policy:
+  - **Widgets** run a new frozen install at the new revision, so every widget starts again at `initial` (see [Widget local states](#widget-local-states)).
+  - **A running flow** keeps its pinned revision. The runner says "This console has changed since the flow started…" and the person exits and starts it again, at its first page.
+- **Tests.**
+  - `__tests__/personal-state-partition.test.ts`:
+    - two people in one company, whose page, flow and widget moves leave each other's alone;
+    - B reading A's widget reference gets B's own;
+    - one person switching companies and back, including an agent's write and a stale write;
+    - a company that can't be told, and a dispatched `companyChanged`;
+    - `presentationCompanyOf`.
+  - `integration-tests/__tests__/operate-company-switch.test.ts`: the real gatekeeper and connect flow. Alice selects an issue in acme, signs in to InferOps as a person of another company, sees only `companyChanged`, has a write at acme's seq refused, and starts afresh back in acme. Bob, in acme throughout, is untouched.
+  - `integration-tests/__tests__/operate-two-person-conflict.test.ts`: after Alice's approved transition commits, Bob's next read through his own board shows it, and his page log is still only his own `openBoard`.
+- **Not covered.**
+  - The operate session's own workspace (`operateSessionWorkspaceId`: the operate chat and its history) is kept across a company switch.
+  - A handover from a person of another company is not refused here.
+  - A person's own unshared workspaces are theirs in any company.
 
 ### Callable widget tools
 

@@ -431,6 +431,16 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     }
   }
 
+  /** The company the account says its person works in (FAC-88), or its failure message as `{ failed }`. */
+  async presentationCompany(props: AccountProps): Promise<string | null | { failed: string }> {
+    const account = this.#account(props) as unknown as Required<Pick<GatekeeperUser, "presentationCompany">>;
+    try {
+      return await account.presentationCompany();
+    } catch (error) {
+      return { failed: String(error instanceof Error ? error.message : error) };
+    }
+  }
+
   /** The resource URL patterns the account offers now. */
   async supportedPatterns(props: AccountProps): Promise<string[]> {
     return (await this.#account(props).getSupportedResources()).map(r => r.urlPattern);

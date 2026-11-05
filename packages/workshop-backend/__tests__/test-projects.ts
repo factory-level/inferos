@@ -105,6 +105,7 @@ export const BACKEND: readonly string[] = [
   "operate-agui.test.ts",
   "operate-flow-start.test.ts",
   "widget-state.test.ts",
+  "personal-state-partition.test.ts",
   "agent-calls.test.ts",
   "agent-tracing.test.ts",
   "authorize-observation-flags.test.ts",

@@ -197,6 +197,13 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `__tests__/account.test.ts` ("shared configuration authority") covers the request, an Operator,
   an Admin in a second workspace, another company's deployment and its own, a malformed setting, a
   refused workspace, an outage and malformed answers, and an account with no person.
+- **Presentation company (FAC-88).** `InferOpsAccount.presentationCompany()` names the company the
+  Workshop keeps the person's operate page and widget states for (see
+  [Operate mode](operate-mode.md#personal-presentation-state-by-person-and-company)): the stored
+  session's tenant id, lowercased, read without a request to InferOps. It is null without a
+  connected person or for a session `INFEROPS_COMPANY` doesn't admit, and a malformed
+  `INFEROPS_COMPANY` throws. `__tests__/account.test.ts` ("the company the person works in")
+  covers it.
 - **Widget index (FAC-11 slice 2).** `InferOpsAccount.widgetIndexWorkspaces()` lists the
   connected person's workspaces where `configuration:publish` holds, asked as
   `holdsSharedConfiguration` asks, in identity order. `registerWidget(workspaceId, entry)` and
