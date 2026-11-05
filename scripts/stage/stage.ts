@@ -23,10 +23,10 @@
 //   CF_ACCESS_CLIENT_ID/_SECRET           optional Access service token for the post-deploy smoke
 //   INFEROPS_EDGE_SECRET                  optional, the InferOps gatekeeper's InferLab edge header
 
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseEnv } from "node:util";
 import { resolveBinEntry } from "../bin-entry.ts";
@@ -65,9 +65,11 @@ export interface StageArgs {
   allowDestructiveMigrations: boolean;
   skipSmoke: boolean;
   confirm: string | undefined;
+  inferopsSha: string | undefined;
 }
 
 const USAGE = "Usage: stage.ts <config|deploy|delete> <stage | --wrapper <dir>> [--dry-run] [--allow-dirty] " +
+  "[--inferops-sha <full-sha>] " +
   "[--allow-destructive-migrations] [--skip-smoke] [--confirm <hostname>]";
 const GATEKEEPER_CONCURRENCY = 8;
 
@@ -79,7 +81,7 @@ export function parseStageArgs(argv: readonly string[]): StageArgs {
   const rest = named ? more : argv.slice(1);
   const args: StageArgs = {
     command: command as Command, stage: named ? first : "", wrapper: undefined, dryRun: false, allowDirty: false,
-    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined,
+    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined, inferopsSha: undefined,
   };
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
@@ -89,6 +91,7 @@ export function parseStageArgs(argv: readonly string[]): StageArgs {
     else if (arg === "--skip-smoke") args.skipSmoke = true;
     else if (arg === "--confirm" && rest[i + 1]) args.confirm = rest[++i];
     else if (arg === "--wrapper" && rest[i + 1]) args.wrapper = rest[++i];
+    else if (arg === "--inferops-sha" && rest[i + 1]) args.inferopsSha = rest[++i];
     else throw new Error(`unknown argument: ${arg}\n${USAGE}`);
   }
   if (Boolean(args.stage) === Boolean(args.wrapper)) throw new Error(`name a stage or --wrapper <dir>, not both or neither\n${USAGE}`);
@@ -377,12 +380,12 @@ async function assertBehindAccess(stage: StageDefinition): Promise<void> {
   }
 }
 
-async function smoke(prepared: Prepared): Promise<void> {
+async function smoke(prepared: Prepared): Promise<unknown | null> {
   const clientId = process.env.CF_ACCESS_CLIENT_ID;
   const clientSecret = process.env.CF_ACCESS_CLIENT_SECRET;
   if (!clientId || !clientSecret) {
     console.log("CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET unset: skipping the authenticated smoke");
-    return;
+    return null;
   }
   const report = await runSmoke({
     baseUrl: new URL(`https://${prepared.stage.hostname}/`),
@@ -394,6 +397,39 @@ async function smoke(prepared: Prepared): Promise<void> {
   });
   console.log(JSON.stringify(report, null, 2));
   if (!report.ok) throw new Error("the post-deploy smoke failed");
+  return report;
+}
+
+/** Resolve the InferOps revision this stage will bind to and fail closed on incompatible history. */
+async function checkedInferOpsRevision(prepared: Prepared, args: StageArgs): Promise<{ sha: string; pin: string }> {
+  const contract = JSON.parse(readFileSync(join(ROOT, "custom-gatekeepers/gatekeeper-inferops/connection.json"), "utf8")) as {
+    compatibility?: { provider?: { revision?: unknown } };
+  };
+  const pin = contract.compatibility?.provider?.revision;
+  if (typeof pin !== "string" || !/^[a-f0-9]{40}$/.test(pin)) throw new Error("InferOps connection.json has no full provider revision pin");
+  let sha = args.inferopsSha;
+  if (sha !== undefined && !/^[a-f0-9]{40}$/.test(sha)) throw new Error("--inferops-sha must be a full 40-character commit SHA");
+  if (!sha) {
+    const headers: Record<string, string> = process.env.INFEROPS_EDGE_SECRET ? { "x-inferos-edge": process.env.INFEROPS_EDGE_SECRET } : {};
+    try {
+      const response = await smokeRequest(new URL("/status", prepared.stage.inferops.baseUrl), { headers, timeoutMs: 10_000 });
+      const body = JSON.parse(response.body) as Record<string, unknown>;
+      const candidate = body.gitSha ?? body.revision ?? body.sha;
+      if (response.status === 200 && typeof candidate === "string" && /^[a-f0-9]{40}$/.test(candidate)) sha = candidate;
+    } catch { /* Explicit fallback is required until InferOps P1 publishes a SHA. */ }
+  }
+  if (!sha) throw new Error("InferOps /status did not report a full git SHA; retry with --inferops-sha <full-sha>");
+  const common = execFileSync("git", ["-C", ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim();
+  const inferopsRoot = process.env.INFEROPS_REPO ?? join(dirname(dirname(common)), "inferops");
+  const exists = spawnSync("git", ["-C", inferopsRoot, "cat-file", "-e", `${sha}^{commit}`], { stdio: "ignore" });
+  if (exists.status !== 0) throw new Error(`InferOps checkout does not contain reported revision ${sha.slice(0, 12)}; set INFEROPS_REPO to a checkout with it`);
+  const ancestor = spawnSync("git", ["-C", inferopsRoot, "merge-base", "--is-ancestor", pin, sha], { stdio: "ignore" });
+  if (ancestor.status !== 0) throw new Error(`InferOps ${sha.slice(0, 12)} is not a known descendant of gatekeeper pin ${pin.slice(0, 12)}; refusing stage deploy`);
+  const schemaSource = JSON.parse(readFileSync(join(ROOT, "scripts/consumer/project-board.schema.json"), "utf8")) as { source?: { revision?: string } };
+  if (schemaSource.source?.revision !== pin) throw new Error("project-board.schema.json source revision differs from the InferOps gatekeeper pin; regenerate and review the schema");
+  const drift = spawnSync("git", ["-C", inferopsRoot, "diff", "--quiet", `${pin}..${sha}`, "--", "domain/ts/project/shared/board.dto.ts"], { stdio: "ignore" });
+  if (drift.status !== 0) throw new Error(`InferOps board DTO changed after pin ${pin.slice(0, 12)}; regenerate the board schema and update the reviewed pin before deploying`);
+  return { sha, pin };
 }
 
 async function deploy(args: StageArgs): Promise<void> {
@@ -422,6 +458,8 @@ async function deploy(args: StageArgs): Promise<void> {
       : "the working tree is dirty; commit first, or pass --allow-dirty to deploy it anyway");
   }
 
+  const inferops = await checkedInferOpsRevision(prepared, args);
+
   if (prepared.wrapperRoot) {
     await assertOwnership(stage, packages);
     await claim(stage);
@@ -449,7 +487,14 @@ async function deploy(args: StageArgs): Promise<void> {
 
   console.log(`\nstage "${stageName}" is deployed at https://${stage.hostname}`);
   await assertBehindAccess(stage);
-  if (!args.skipSmoke) await smoke(prepared);
+  const smokeResult = args.skipSmoke ? { skipped: true, reason: "--skip-smoke" } : await smoke(prepared);
+  console.log(JSON.stringify({ deployRecord: {
+    inferosSha: tree.sha,
+    configDigest: stageConfigDigest(configs),
+    inferopsSha: inferops.sha,
+    inferopsPin: inferops.pin,
+    smoke: smokeResult ?? { skipped: true, reason: "Access service token not configured" },
+  } }, null, 2));
 }
 
 /**

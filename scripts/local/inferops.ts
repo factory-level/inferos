@@ -444,8 +444,9 @@ function resolveCheckout(options: BackendOptions, deps: BackendDeps): ResolvedCh
 async function healthy(apiUrl: string, deps: BackendDeps): Promise<boolean> {
   try {
     const response = await deps.fetchImpl(`${apiUrl}/health/ready`, { redirect: "manual", signal: AbortSignal.timeout(3_000) });
-    await response.body?.cancel();
-    return response.status === 200;
+    const body = await response.json().catch(() => null) as { status?: unknown } | null;
+    const state = body && typeof body === "object" ? body.status : undefined;
+    return response.status === 200 && (state === undefined || (typeof state === "string" && /^(?:ok|up|ready)$/.test(state)));
   } catch {
     return false;
   }

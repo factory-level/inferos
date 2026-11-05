@@ -279,15 +279,16 @@ test("destructive Durable Object migrations are found; the committed ones have n
 test("the CLI parses its flags and refuses anything else", () => {
   assert.deepEqual(parseStageArgs(["deploy", "dev", "--dry-run", "--allow-dirty"]), {
     command: "deploy", stage: "dev", wrapper: undefined, dryRun: true, allowDirty: true,
-    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined,
+    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined, inferopsSha: undefined,
   });
   assert.deepEqual(parseStageArgs(["deploy", "--wrapper", "/w", "--dry-run"]), {
     command: "deploy", stage: "", wrapper: "/w", dryRun: true, allowDirty: false,
-    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined,
+    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined, inferopsSha: undefined,
   });
   assert.throws(() => parseStageArgs(["deploy", "dev", "--wrapper", "/w"]), /not both or neither/);
   assert.throws(() => parseStageArgs(["deploy", "--wrapper", "/w", "--allow-dirty"]), /clean tree/);
   assert.equal(parseStageArgs(["delete", "prod", "--confirm", "os.factorylevel.dev"]).confirm, "os.factorylevel.dev");
+  assert.equal(parseStageArgs(["deploy", "dev", "--inferops-sha", "a".repeat(40)]).inferopsSha, "a".repeat(40));
   assert.throws(() => parseStageArgs(["deploy"]), /Usage/);
   assert.throws(() => parseStageArgs(["deploy", "dev", "--force"]), /unknown argument: --force/);
 });

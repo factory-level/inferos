@@ -27,6 +27,8 @@ const behaviour = {
   redirectOrigin: "self" as "self" | "other",
   /** The app shell's Cross-Origin-Opener-Policy, as the frontend's `_headers` sets it, or none. */
   openerPolicy: "same-origin" as string | null,
+  /** The bound InferOps gatekeeper's sanitized readiness response. */
+  inferopsReady: true,
 };
 const seen: { path: string; method: string; headers: IncomingMessage["headers"] }[] = [];
 
@@ -51,6 +53,12 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
     const authorize = new URL("https://provider.test/authorize");
     authorize.searchParams.set("redirect_uri", `${origin}/gatekeeper/inferops/oauth`);
     res.writeHead(302, { location: authorize.href }).end();
+    return;
+  }
+  if (path === "/gatekeeper/inferops/health/ready") {
+    const checks = behaviour.inferopsReady ? [{ name: "database", status: "ok" }] : [{ name: "database", status: "down" }];
+    res.writeHead(behaviour.inferopsReady ? 200 : 503, { "content-type": "application/json" })
+      .end(JSON.stringify({ status: behaviour.inferopsReady ? "ok" : "down", checks }));
     return;
   }
   if (path.startsWith("/gatekeeper/inferops/")) {
@@ -111,13 +119,25 @@ describe("runSmoke against a fake deployment", () => {
     const report = await runSmoke(options({ connectUrls: [connectUrl] }));
     assert.equal(report.ok, true, JSON.stringify(report, null, 2));
     assert.deepEqual(report.checks.map(c => c.name),
-      ["app-shell", "opener-policy", "api", "gatekeeper:inferops", "oauth:inferops"]);
+      ["app-shell", "opener-policy", "api", "gatekeeper:inferops", "inferops-readiness", "oauth:inferops"]);
     assert.equal(checkNamed(report, "api").status, 101);
+    assert.equal(checkNamed(report, "inferops-readiness").ok, true);
     assert.ok(seen.every(r => r.method === "GET"));
     // The handshake named the deployment's own origin, which the Workshop requires under Access.
     assert.equal(seen.find(r => r.path === "/api")?.headers.origin, base.origin);
     // The bearer connect URL never appears in the report.
     assert.ok(!JSON.stringify(report).includes("attempt-nonce"));
+  });
+
+  it("reports the failed InferOps component from its readiness endpoint", async () => {
+    behaviour.inferopsReady = false;
+    try {
+      const report = await runSmoke(options());
+      assert.equal(report.ok, false);
+      assert.match(checkNamed(report, "inferops-readiness").detail, /database/);
+    } finally {
+      behaviour.inferopsReady = true;
+    }
   });
 
   it("accepts the Workshop's auth refusal on /api, and fails a 404 or a 5xx there", async () => {

@@ -363,7 +363,7 @@ test("stage-probe without a stage FAILs and names the variable", async () => {
 
 const LOOPBACK_ENV = { PATH: "/bin", FACTORY_STAGE_URL: "http://127.0.0.1:8797", GROKBOT_PERSONA_USER: "grokbot-owner", GROKBOT_OPERATE_USER: "grokbot-operate", FACTORY_INFEROPS_URL: "http://127.0.0.1:8980" };
 const LOOPBACK_ANSWERS = { 8797: 200, "8980/health/ready": 200, "8980/auth/public-config": 200 };
-const STUB = { "8980/health/ready": { status: "ok" }, "8980/auth/public-config": { mode: "stub" } };
+const STUB = { "8980/health/ready": { status: "ok" }, "8980/auth/public-config": { mode: "stub" }, "8797/gatekeeper/inferops/health/ready": { status: "ok", checks: [{ name: "database", status: "ok" }] } };
 
 test("a loopback stage: persona names only, InferOS and its connected InferOps healthy, InferOps in stub auth", async () => {
   const root = tempRoot();
@@ -427,7 +427,10 @@ function remoteStage(mode: string | null, wrong: "302" | "403" | "200" = "302") 
     if (url.hostname !== "dev-os.example.test") return undefined;
     const id = headers["CF-Access-Client-Id"];
     const secret = headers["CF-Access-Client-Secret"];
-    if (id === "id-value-123" && secret === "secret-value-456") return new Response("<html>", { status: 200 });
+    if (id === "id-value-123" && secret === "secret-value-456") {
+      if (url.pathname === "/gatekeeper/inferops/health/ready") return new Response(JSON.stringify({ status: "ok", checks: [{ name: "database", status: "ok" }] }), { status: 200 });
+      return new Response("<html>", { status: 200 });
+    }
     if (id && wrong === "403") return new Response("Forbidden", { status: 403 });
     if (id && wrong === "200") return new Response("<html>", { status: 200 });
     return new Response(null, { status: 302, headers: { location: REMOTE_LOGIN } });
@@ -456,7 +459,7 @@ test("a remote stage in stub auth: Access redirect, token 200, wrong token redir
     assert.match(ready.headline, /READY stage:access: unauthenticated GET \/ is redirected to Cloudflare Access \(team.cloudflareaccess.com\)/);
     assert.match(ready.headline, /READY stage:access-refused: GET \/ with a wrong service-token secret is refused \(302 to Cloudflare Access, team.cloudflareaccess.com\)/);
     assert.match(ready.headline, /READY smoke-credentials: remote stage \(InferLab auth stub: persona ids, no password\), present \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET, GROKBOT_PERSONA_USER, GROKBOT_OPERATE_USER$/m);
-    assert.match(ready.headline, /READY stage:inferops: https:\/\/inferlab.example.test\/health\/ready answered 200; auth mode stub/);
+    assert.match(ready.headline, /READY stage:inferops: https:\/\/dev-os.example.test\/gatekeeper\/inferops\/health\/ready answered 200; auth mode stub/);
     assert.equal(fake.launches.length, 0);
     const text = JSON.stringify(ready.report) + ready.headline;
     for (const value of ["id-value-123", "secret-value-456"]) assert.ok(!text.includes(value), value);
@@ -511,11 +514,11 @@ test("persona variables are a credentials FAIL in every sandbox but stage-probe"
   }
 });
 
-test("stage-smoke runs the smoke only when doctor stage-probe is READY, and reports only its verdict lines", async () => {
+test("stage-smoke runs the InferOps readiness smoke only when doctor stage-probe is READY", async () => {
   const root = tempRoot();
   // The scripted smoke ships with the factory CI graph; this checkout runs it only when the file exists.
-  mkdirSync(join(root, "scripts", "ci"), { recursive: true });
-  writeFileSync(join(root, "scripts", "ci", "stage-smoke.ts"), "");
+    mkdirSync(join(root, "scripts", "preview"), { recursive: true });
+    writeFileSync(join(root, "scripts", "preview", "smoke.ts"), "");
   try {
     const { GROKBOT_OPERATE_USER: _operate, ...noOperate } = LOOPBACK_ENV;
     const blocked = fakeDeps(root, { env: noOperate, answers: LOOPBACK_ANSWERS, bodies: STUB });
@@ -524,16 +527,16 @@ test("stage-smoke runs the smoke only when doctor stage-probe is READY, and repo
     assert.equal(blocked.runInCalls.length, 0);
     assert.match(refused.headline, /the smoke did not run/);
 
-    const output = "noise with grokbot-owner\n[stage-smoke] PASS owner.applied: moved\n[factory] stage-smoke: PASS (evidence /e)\n";
+    const output = JSON.stringify({ ok: true, checks: [{ name: "inferops-readiness", ok: true }] });
     for (const exitCode of [0, 1]) {
       const fake = fakeDeps(root, { env: { ...LOOPBACK_ENV, FACTORY_STAGE_URL: "http://127.0.0.1:1" }, answers: { ...LOOPBACK_ANSWERS, 1: 200 }, bodies: STUB, runIn: () => ({ exitCode, stdout: output, stderr: "" }) });
       const result = await runFactory(["stage-smoke", "--stage-url", "http://127.0.0.1:8797", "--json"], fake.deps);
       assert.equal(result.exitCode, exitCode, result.headline);
       assert.equal(fake.runInCalls.length, 1);
-      assert.match(fake.runInCalls[0]!.argv.at(-1)!, /scripts\/ci\/stage-smoke\.ts$/);
+      assert.ok(fake.runInCalls[0]!.argv.some(arg => /scripts\/preview\/smoke\.ts$/.test(arg)));
+      assert.ok(fake.runInCalls[0]!.argv.includes("--gatekeeper"));
       assert.equal(fake.runInCalls[0]!.env.FACTORY_STAGE_URL, "http://127.0.0.1:8797", "--stage-url wins over the environment");
-      assert.deepEqual((result.report.smoke as { lines: string[] }).lines, ["[stage-smoke] PASS owner.applied: moved", "[factory] stage-smoke: PASS (evidence /e)"]);
-      assert.ok(!result.headline.includes("grokbot-owner"));
+      assert.deepEqual((result.report.smoke as { report: unknown }).report, { ok: true, checks: [{ name: "inferops-readiness", ok: true }] });
     }
     assert.equal((await runFactory(["stage-smoke", "dev"], blocked.deps)).exitCode, 2);
   } finally {
@@ -952,13 +955,13 @@ test("up dev runs the pinned backend through the lifecycle, records it, and down
 });
 
 
-test("stage-smoke reports the scripted smoke as absent when the factory CI graph is not in this checkout", async () => {
+test("stage-smoke reports the readiness smoke as absent when its script is not in this checkout", async () => {
   const root = tempRoot();
   try {
     const fake = fakeDeps(root, { env: LOOPBACK_ENV, answers: LOOPBACK_ANSWERS, bodies: STUB });
     const result = await runFactory(["stage-smoke", "--json"], fake.deps);
     assert.equal(result.exitCode, 1);
-    assert.match(String(result.report.error), /stage-smoke\.ts.*not in this checkout/);
+    assert.match(String(result.report.error), /smoke\.ts.*not in this checkout/);
     assert.equal(fake.runInCalls.length, 0, "nothing was run");
   } finally {
     rmSync(root, { recursive: true, force: true });

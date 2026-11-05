@@ -377,6 +377,21 @@ export async function runSmoke(options: SmokeOptions): Promise<SmokeReport> {
     await check(`gatekeeper:${name}`, async () =>
       classifyGatekeeper(name, await send(at(`/gatekeeper/${name}/`)), shellBody));
   }
+  if (options.gatekeepers.includes("inferops")) {
+    await check("inferops-readiness", async () => {
+      const response = await send(at("/gatekeeper/inferops/health/ready"));
+      let body: { status?: unknown; checks?: unknown } | null = null;
+      try { body = JSON.parse(response.body) as { status?: unknown; checks?: unknown }; } catch { /* reported below */ }
+      const down = Array.isArray(body?.checks) ? body.checks.flatMap(item => {
+        if (!item || typeof item !== "object") return [];
+        const check = item as { name?: unknown; status?: unknown };
+        return typeof check.name === "string" && check.status !== "ok" ? [check.name] : [];
+      }) : [];
+      const ok = response.status === 200 && body?.status === "ok";
+      return { name: "inferops-readiness", ok, status: response.status,
+        detail: ok ? "InferOps readiness is ok" : `InferOps readiness failed${down.length ? `: ${down.join(", ")}` : ` (HTTP ${response.status})`}` };
+    });
+  }
   if (options.connectUrls.length === 0) {
     checks.push({
       name: "oauth", ok: true, skipped: true,

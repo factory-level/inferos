@@ -223,6 +223,27 @@ const OPTION_LIMIT = 100;
 /** HTTP serves only the InferLab sign-in legs; everything else is RPC. */
 export default {
   async fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname.endsWith("/health/ready")) {
+      const endpoint = inferOpsApiEndpoint(env);
+      if (!endpoint) return Response.json({ status: "down", checks: [{ name: "inferops-config", status: "down" }] }, { status: 503 });
+      try {
+        const response = await inferLabFetch(env)(`${endpoint.baseUrl}/health/ready`, {
+          headers: { accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(5_000),
+        });
+        const body = await response.json().catch(() => null) as { status?: unknown; checks?: unknown } | null;
+        const ready = response.status === 200 && body?.status === "ok";
+        const checks = Array.isArray(body?.checks) ? body.checks.flatMap((item) => {
+          if (!item || typeof item !== "object") return [];
+          const check = item as { name?: unknown; status?: unknown };
+          return typeof check.name === "string" && typeof check.status === "string"
+            ? [{ name: check.name, status: check.status }] : [];
+        }) : [];
+        return Response.json({ status: ready ? "ok" : "down", checks }, { status: ready ? 200 : 503 });
+      } catch {
+        return Response.json({ status: "down", checks: [{ name: "inferops-api", status: "unreachable" }] }, { status: 503 });
+      }
+    }
     const response = await handleInferLabLogin(request, env, ctx.exports.InferLabLogin);
     return response ?? new Response("Not Found", { status: 404 });
   },
