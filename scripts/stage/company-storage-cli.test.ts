@@ -111,6 +111,29 @@ test("exports a seeded company through the real bundle and runtime, and a rerun 
     second.gadgetState.workspaces[0].gadgets[0].entries[0].value, "each export salts afresh");
 });
 
+// The wrapper's own build runs after the manifest is checked and before the runtime opens its state,
+// so a build that swaps a checked path is a writer racing the export, deterministically.
+for (const { label, swap } of [
+  { label: "stateDirectory", swap: (dir: string, sibling: string) =>
+    `mv ${dir}/.wrangler/state ${dir}/.wrangler/state-checked && ln -s ${sibling}/.wrangler/state ${dir}/.wrangler/state` },
+  { label: "workerConfig", swap: (dir: string, sibling: string) =>
+    `mv ${dir}/wrangler.jsonc ${dir}/wrangler-checked.jsonc && ln -s ${sibling}/wrangler.jsonc ${dir}/wrangler.jsonc` },
+]) {
+  test(`a ${label} swapped for a symlink after the check is refused, and nothing starts`, () => {
+    const sibling = wrapper(`sibling-of-${label}`);
+    writeFileSync(join(sibling, ".wrangler", "state", "marker"), "sibling state");
+    const dir = join(scratch, `swapped-${label}`);
+    wrapper(`swapped-${label}`, swap(dir, sibling));
+    const run = exportLocal(dir, "export");
+    assert.equal(run.status, 1, run.stdout);
+    assert.match(run.stderr, new RegExp(`${label} changed since it was checked.*nothing was started`, "s"));
+    assert.doesNotMatch(run.stdout, /"exported"/);
+    assert.ok(!existsSync(run.outputDirectory), "nothing was written");
+    // The runtime never opened the sibling's state: Miniflare would have created its directories there.
+    assert.deepEqual(readdirSync(join(sibling, ".wrangler", "state")), ["marker"]);
+  });
+}
+
 test("a hung start fails within --timeout-ms and leaves nothing running", () => {
   // A build command no other test or stack runs, so finding it afterwards means it leaked.
   const marker = `fac162-hung-start-${process.pid}`;

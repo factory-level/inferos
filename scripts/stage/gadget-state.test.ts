@@ -2,7 +2,7 @@
 // the export allow-list. The fixtures are written by a real Miniflare, as facets of a Durable Object
 // in the Overseer's layout, so the reader is proven against workerd's own on-disk format.
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -208,6 +208,26 @@ test("a second company's gadget entries never appear, though it has the same blu
   await assert.rejects(exportGadgetState({ durableObjectDirectory: doDirectory(a.state),
     workspaces: new Map([[b.workspace, [{ id: 3, facet: "gadget3", blueprintId: "vote-tracker" }]]]),
     allowList: ALLOW_LIST, salt: "fixed-test-salt", scratchDirectory: scratch }), /no persisted state/);
+});
+
+test("a symlink among the files it reads is refused, never followed", async () => {
+  const { a, b } = await seeded();
+  const facetFile = `${a.workspace}.1.sqlite`;
+  for (const replaced of [`${a.workspace}.sqlite`, `${a.workspace}.facets`, facetFile, `${facetFile}-wal`]) {
+    const directory = join(scratch, `linked-${replaced}`);
+    cpSync(doDirectory(a.state), directory, { recursive: true });
+    rmSync(join(directory, replaced), { force: true });
+    // Company B's object database, standing in for any file outside this company's state.
+    symlinkSync(join(doDirectory(b.state), `${b.workspace}.sqlite`), join(directory, replaced));
+    await assert.rejects(exportGadgetState({ durableObjectDirectory: directory, workspaces: gadgetsOfA(a.workspace),
+      allowList: ALLOW_LIST, salt: "fixed-test-salt", scratchDirectory: scratch }),
+      new RegExp(`${replaced.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} is a symbolic link`), replaced);
+  }
+  // The directory itself, too.
+  const linkedDirectory = join(scratch, "linked-directory");
+  symlinkSync(doDirectory(a.state), linkedDirectory, "dir");
+  await assert.rejects(exportGadgetState({ durableObjectDirectory: linkedDirectory, workspaces: gadgetsOfA(a.workspace),
+    allowList: ALLOW_LIST, salt: "fixed-test-salt", scratchDirectory: scratch }), /is a symbolic link/);
 });
 
 test("reading leaves the company's state byte-for-byte unchanged and cleans up its copies", async () => {

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,8 +9,8 @@ import { waitForMiniflareReady } from "./miniflare-readiness.ts";
 import { GADGET_VALUE_RULES, type GadgetStateAllowList } from "./gadget-state.ts";
 import { runInProcessGroup, stopWithParent } from "./process-group.ts";
 import {
-  containedRealPath, credentialResource, exportCompanyStorage, httpStatusReader, purgeLocalCompany, type CompanyStorageBindings,
-  type KeyValueStore, type ObjectStore, type StorageResourceNames,
+  credentialResource, exportCompanyStorage, httpStatusReader, pinContainedPath, purgeLocalCompany, verifyPinnedPath,
+  type CompanyStorageBindings, type KeyValueStore, type ObjectStore, type PinnedPath, type StorageResourceNames,
 } from "./company-storage.ts";
 
 interface LocalManifest {
@@ -57,6 +57,7 @@ Gadget storage is exported only for keys resources.exportGadgetState allow-lists
 every other key is listed by name. export-local runs in its own process group and is killed,
 with everything it started, after --timeout-ms (default 300000).
 Manifest contains only local wrapper paths and resource names. A real stage has no apply command.
+Its paths are checked by real path and re-checked before each use; don't change the wrapper while it runs.
 Set INFEROPS_OFFBOARDING_TOKEN to an internal InferOps bearer only for purge-local --apply.
 `;
 
@@ -80,8 +81,13 @@ function args(argv: string[]): { command: string; manifest?: string; apply: bool
   return { command, manifest: resolve(manifest), apply, timeoutMs };
 }
 
-function readManifest(path: string): LocalManifest {
-  const manifest = JSON.parse(readFileSync(path, "utf8")) as LocalManifest;
+/** A manifest whose paths are real paths, each pinned as it was checked and re-checked before use. */
+interface CheckedManifest extends LocalManifest {
+  pins: { stateDirectory: PinnedPath; workerConfig: PinnedPath };
+}
+
+function readManifest(path: string): CheckedManifest {
+  const manifest = JSON.parse(readFileSync(path, "utf8")) as CheckedManifest;
   if (!/^[0-9a-f-]{36}$/i.test(manifest.tenantId) || !manifest.resourcePrefix ||
       !/[/:_-]$/.test(manifest.resourcePrefix) ||
       !manifest.inferopsBaseUrl || !manifest.wrapperRoot || !manifest.stateDirectory ||
@@ -89,10 +95,15 @@ function readManifest(path: string): LocalManifest {
       !Array.isArray(manifest.resources.kv) || !Array.isArray(manifest.resources.r2)) {
     throw new Error("Malformed local company storage manifest");
   }
-  // Checked and used by real path, so a symbolic link can't lead into another wrapper's state.
-  manifest.stateDirectory = containedRealPath(manifest.wrapperRoot, manifest.stateDirectory, "stateDirectory");
-  manifest.workerConfig = containedRealPath(manifest.wrapperRoot, manifest.workerConfig, "workerConfig");
-  manifest.wrapperRoot = realpathSync(manifest.wrapperRoot);
+  // Checked and used by real path, so a symbolic link can't lead into another wrapper's state, and
+  // pinned, so a path changed after this check is refused at its re-check before each use.
+  manifest.pins = {
+    stateDirectory: pinContainedPath(manifest.wrapperRoot, manifest.stateDirectory, "stateDirectory"),
+    workerConfig: pinContainedPath(manifest.wrapperRoot, manifest.workerConfig, "workerConfig"),
+  };
+  manifest.stateDirectory = manifest.pins.stateDirectory.path;
+  manifest.workerConfig = manifest.pins.workerConfig.path;
+  manifest.wrapperRoot = manifest.pins.stateDirectory.root;
   if ([...manifest.resources.kv, ...manifest.resources.r2].some(resource => !resource.binding || !resource.name)) {
     throw new Error("Every local resource needs a binding and a resource name");
   }
@@ -140,7 +151,10 @@ async function disposeBounded(mf: Miniflare): Promise<void> {
   });
 }
 
-async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Miniflare; bindings: CompanyStorageBindings; cleanup: () => void }> {
+async function openLocalBindings(manifest: CheckedManifest): Promise<{ mf: Miniflare; bindings: CompanyStorageBindings; cleanup: () => void }> {
+  const { pins } = manifest;
+  verifyPinnedPath(pins.stateDirectory);
+  verifyPinnedPath(pins.workerConfig);
   const bundleDirectory = mkdtempSync(join(tmpdir(), "inferos-company-storage-"));
   try {
     // Bounded on its own, for a clear error; the process group bounds anything it leaves behind.
@@ -151,6 +165,9 @@ async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Minifla
     rmSync(bundleDirectory, { recursive: true, force: true });
     throw new Error(`Wrangler could not bundle the local wrapper without deploying: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
   }
+  // The wrapper's own build has just run: re-check the config before Wrangler reads it again.
+  try { verifyPinnedPath(pins.workerConfig); }
+  catch (error) { rmSync(bundleDirectory, { recursive: true, force: true }); throw error; }
   const { workerOptions, externalWorkers } = unstable_getMiniflareWorkerOptions(manifest.workerConfig);
   const main = join(bundleDirectory, "index.js");
   try {
@@ -188,6 +205,8 @@ async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Minifla
     rmSync(bundleDirectory, { recursive: true, force: true });
     throw new Error("Custom Wrangler modulesRules need an explicit Miniflare v5 manifest mapping");
   }
+  try { verifyPinnedPath(pins.stateDirectory); }
+  catch (error) { rmSync(bundleDirectory, { recursive: true, force: true }); throw error; }
   const mf = new Miniflare(convertV4MiniflareOptions({
     workers: [{ ...workerConfig, rootPath: bundleDirectory, scriptPath: main, modules: true }, ...externalWorkers,
       ...(workerName === "workshop-backend" ? [] : [{
@@ -250,6 +269,7 @@ async function openLocalBindings(manifest: LocalManifest): Promise<{ mf: Minifla
       durableObjectDirectory: join(manifest.stateDirectory, "do", `${overseerWorker}-OverseerDurableObject`),
       allowList: manifest.resources.exportGadgetState ?? [],
       scratchDirectory: bundleDirectory,
+      verifyPaths: () => { verifyPinnedPath(pins.stateDirectory); },
     };
     return { mf, bindings: { kv, r2, workspaces, gadgetDurableObjects, gadgetState, closeRuntime },
       cleanup: () => rmSync(bundleDirectory, { recursive: true, force: true }) };
@@ -322,7 +342,7 @@ async function main(argv: string[]): Promise<void> {
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   }
   const token = process.env.INFEROPS_OFFBOARDING_TOKEN ?? "";
-  const result = await purgeLocalCompany({ tenantId: manifest.tenantId, stateDirectory: manifest.stateDirectory,
+  const result = await purgeLocalCompany({ tenantId: manifest.tenantId, stateDirectory: verifyPinnedPath(manifest.pins.stateDirectory),
     wrapperRoot: manifest.wrapperRoot, apply: parsed.apply,
     readStatus: parsed.apply
       ? httpStatusReader(manifest.inferopsBaseUrl, token)

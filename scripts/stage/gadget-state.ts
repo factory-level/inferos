@@ -14,9 +14,9 @@
  *   lists the name as checked; gadget code chooses its own names, so a name is never trusted;
  * - a gadget's SQL tables by row count, named the same way; gatekeeper facets by name, never read.
  */
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, lstatSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { deserialize } from "node:v8";
 
@@ -128,13 +128,25 @@ function applyRule(rule: GadgetValueRule, value: unknown, salt: string): unknown
   }
 }
 
+/**
+ * Whether `path` is there, from `lstat`: a symbolic link, or anything but the kind expected, is
+ * refused, so a link placed among a company's state files can't lead the read elsewhere.
+ */
+function present(path: string, kind: "file" | "directory" = "file"): boolean {
+  const stats = lstatSync(path, { throwIfNoEntry: false });
+  if (!stats) return false;
+  if (stats.isSymbolicLink()) throw new Error(`${basename(path)} is a symbolic link; gadget state is read only from real files (${path})`);
+  if (kind === "file" ? !stats.isFile() : !stats.isDirectory()) throw new Error(`${path} isn't a ${kind}`);
+  return true;
+}
+
 /** Opens a copy of one facet's persisted storage (database, WAL and shared memory) read-only. */
 function withFacetCopy<T>(directory: string, base: string, scratchDirectory: string, read: (db: DatabaseSync) => T): T {
   const copy = mkdtempSync(join(scratchDirectory, "facet-"));
   try {
     for (const suffix of ["", "-wal", "-shm"]) {
       const source = join(directory, `${base}${suffix}`);
-      if (existsSync(source)) copyFileSync(source, join(copy, `${base}${suffix}`));
+      if (present(source)) copyFileSync(source, join(copy, `${base}${suffix}`));
     }
     const db = new DatabaseSync(join(copy, base), { readOnly: true });
     try { return read(db); } finally { db.close(); }
@@ -178,13 +190,15 @@ export async function exportGadgetState({ durableObjectDirectory, workspaces, al
   const checkedByBlueprint = new Map(allowList.map(({ blueprintId, keys, clearNames }) =>
     [blueprintId, new Set([...Object.keys(keys), ...(clearNames ?? [])])]));
   const nothingChecked: ReadonlySet<string> = new Set();
+  // The directory and its `do` parent sit below the checked state directory: neither may be a link.
+  for (const directory of [dirname(durableObjectDirectory), durableObjectDirectory]) present(directory, "directory");
   const result: GadgetStateExport = { salt: "per-export", workspaces: [] };
   for (const [workspaceId, gadgets] of [...workspaces].toSorted(([a], [b]) => a.localeCompare(b))) {
     if (!/^[0-9a-f]{64}$/.test(workspaceId)) throw new Error(`Workspace id ${JSON.stringify(workspaceId)} isn't a Durable Object id`);
     const objectFile = join(durableObjectDirectory, `${workspaceId}.sqlite`);
-    if (!existsSync(objectFile)) throw new Error(`Workspace ${workspaceId} has no persisted state in this company's directory`);
+    if (!present(objectFile)) throw new Error(`Workspace ${workspaceId} has no persisted state in this company's directory`);
     const indexFile = join(durableObjectDirectory, `${workspaceId}.facets`);
-    const facets = existsSync(indexFile) ? parseFacetIndex(readFileSync(indexFile)) : [];
+    const facets = present(indexFile) ? parseFacetIndex(readFileSync(indexFile)) : [];
     const byName = new Map(facets.filter(facet => facet.parent === 0).map(facet => [facet.name, facet]));
     const gadgetFacets = new Set(gadgets.map(gadget => gadget.facet));
 
@@ -199,7 +213,7 @@ export async function exportGadgetState({ durableObjectDirectory, workspaces, al
         sqlTables: [] as { name: string; hashed: boolean; rows: number; reason: string }[] };
       if (facet) {
         const base = `${workspaceId}.${facet.number}.sqlite`;
-        if (!existsSync(join(durableObjectDirectory, base))) throw new Error(`Facet ${gadget.facet} of ${workspaceId} has no storage file`);
+        if (!present(join(durableObjectDirectory, base))) throw new Error(`Facet ${gadget.facet} of ${workspaceId} has no storage file`);
         const { kv, tables } = withFacetCopy(durableObjectDirectory, base, scratchDirectory, readFacet);
         for (const [key, value] of kv) {
           const rule = rules && Object.hasOwn(rules, key) ? rules[key] : undefined;

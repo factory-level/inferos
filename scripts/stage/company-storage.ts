@@ -4,8 +4,8 @@
  * InferOps offboarding check.
  */
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { lstatSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { exportGadgetState, type GadgetStateAllowList, type WorkspaceGadgets } from "./gadget-state.ts";
 
 export interface OffboardingStatus {
@@ -42,7 +42,11 @@ export interface CompanyStorageBindings {
    * Where the company's persisted Overseer state is, and the gadget allow-list. Read after
    * `closeRuntime`, through `exportGadgetState`. Omitted means gadget state isn't exported.
    */
-  gadgetState?: { durableObjectDirectory: string; allowList: GadgetStateAllowList; scratchDirectory: string };
+  gadgetState?: {
+    durableObjectDirectory: string; allowList: GadgetStateAllowList; scratchDirectory: string;
+    /** Runs right before gadget storage is read, after the runtime stops; throws to refuse the read. */
+    verifyPaths?: () => void;
+  };
   /** Stops the local runtime, so its persisted state is complete before gadget state is read. */
   closeRuntime?: () => Promise<void>;
 }
@@ -154,9 +158,12 @@ export async function exportCompanyStorage({
     namespace, ids: ids.toSorted(), note: "not exported: platform and gatekeeper objects, not gadget state",
   }));
   await bindings.closeRuntime?.();
-  const gadgetState = bindings.gadgetState
-    ? await exportGadgetState({ ...bindings.gadgetState, workspaces: workspaceGadgets as WorkspaceGadgets, salt })
-    : null;
+  let gadgetState: Awaited<ReturnType<typeof exportGadgetState>> | null = null;
+  if (bindings.gadgetState) {
+    const { verifyPaths, ...location } = bindings.gadgetState;
+    verifyPaths?.();
+    gadgetState = await exportGadgetState({ ...location, workspaces: workspaceGadgets as WorkspaceGadgets, salt });
+  }
 
   const document = {
     format: "inferos-company-storage-export-v1",
@@ -237,6 +244,55 @@ export function containedRealPath(root: string, candidate: string, label: string
     throw new Error(`${label} passes through a symbolic link; name the real path inside the wrapper`);
   }
   return real;
+}
+
+/** A manifest path checked by `containedRealPath`, with the identity of every part of it at that moment. */
+export interface PinnedPath {
+  readonly label: string;
+  /** The wrapper root's real path. */
+  readonly root: string;
+  /** The checked real path: the only form of it used afterwards. */
+  readonly path: string;
+  /** `dev:ino` of the root and of each component down to the path, from `lstat`. */
+  readonly chain: readonly { readonly path: string; readonly id: string }[];
+}
+
+function identity(path: string): string | undefined {
+  const stats = lstatSync(path, { bigint: true, throwIfNoEntry: false });
+  return stats && !stats.isSymbolicLink() ? `${stats.dev}:${stats.ino}` : undefined;
+}
+
+/** Checks `candidate` as `containedRealPath` does, and records what each part of it is. */
+export function pinContainedPath(root: string, candidate: string, label: string): PinnedPath {
+  const path = containedRealPath(root, candidate, label);
+  const realRoot = realpathSync(root);
+  const chain: { path: string; id: string }[] = [];
+  let at = realRoot;
+  for (const part of ["", ...relative(realRoot, path).split(sep)]) {
+    at = part ? join(at, part) : at;
+    const id = identity(at);
+    if (!id) throw new Error(`${label} changed while it was checked (${at})`);
+    chain.push({ path: at, id });
+  }
+  return { label, root: realRoot, path, chain };
+}
+
+/**
+ * Re-checks a pinned path right before it's used, and returns it. It's refused, before anything
+ * starts, if it no longer resolves to itself inside the root or any part of it is now a different
+ * file or a symbolic link. Node can't hold a directory open across a child's own open (no
+ * `openat`/`O_NOFOLLOW` pinning), so a writer racing the moments after this check is out of scope.
+ */
+export function verifyPinnedPath(pin: PinnedPath): string {
+  const refuse = (detail: string): never => {
+    throw new Error(`${pin.label} changed since it was checked (${detail}); nothing was started`);
+  };
+  let path: string;
+  try { path = containedRealPath(pin.root, pin.path, pin.label); }
+  catch (error) { return refuse(error instanceof Error ? error.message : String(error)); }
+  if (path !== pin.path) refuse(path);
+  for (const part of pin.chain) if (identity(part.path) !== part.id) refuse(part.path);
+  return pin.path;
 }
 
 /** Authoritative gate used by the CLI and its injectable local proof. */
