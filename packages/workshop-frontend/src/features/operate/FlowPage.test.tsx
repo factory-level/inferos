@@ -175,6 +175,26 @@ describe('FlowPage, for a flow that names its pages', () => {
     expect(container.querySelector('[role="alert"]')).toBeNull()
   })
 
+  it('offers to try a move again when the session could not check its page just now, and only then', async () => {
+    onEvent.mockRejectedValueOnce(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.flowNavigationFailed))
+    renderRun({ ...PAGED, index: 1, history: [0], pageState: 'open' })
+    act(() => button('Approve').click())
+    await settle()
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Couldn't move to that page of the flow just now. Try again.")
+    expect(container.querySelector('h1')?.textContent).toBe('Review')
+    act(() => button('Try again').click())
+    await settle()
+    expect(onEvent.mock.calls.map(([event]) => event)).toEqual([
+      { type: 'navigateFlow', to: 'done' }, { type: 'navigateFlow', to: 'done' },
+    ])
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+    // A page that may no longer be opened is not retried: Back or Exit are the ways on.
+    onEvent.mockRejectedValueOnce(createOperateSessionError(OPERATE_SESSION_ERROR_CODES.flowPageUnavailable))
+    act(() => button('Approve').click())
+    await settle()
+    expect([...container.querySelectorAll('button')].some(item => item.textContent?.trim() === 'Try again')).toBe(false)
+  })
+
   it('says any other refusal plainly, without the internal detail', async () => {
     onEvent.mockRejectedValueOnce(new Error('internal: page index 7 of ws1'))
     renderRun(PAGED)

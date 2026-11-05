@@ -3,8 +3,9 @@ import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES } from '@gadget
 /**
  * What a person is told when the operate session refuses a change. A `consoleChanged` refusal has
  * already re-read the saved consoles (see `OperateSessionProvider`), so the page now shows the
- * latest revision and offers to reopen it (see `ConsolePage`). A `flowPageUnavailable` refusal is
- * shown in the session's own words, which name no page and no workspace.
+ * latest revision and offers to reopen it (see `ConsolePage`). A flow's `flowPageUnavailable` and
+ * retryable `flowNavigationFailed` refusals are shown in the session's own words, which name no
+ * page and no workspace.
  */
 export const refusalMessage = (caught: unknown): string => {
   switch (getOperateSessionErrorCode(caught)) {
@@ -15,6 +16,9 @@ export const refusalMessage = (caught: unknown): string => {
     case OPERATE_SESSION_ERROR_CODES.flowPageUnavailable:
       return caught instanceof Error && caught.message !== '' ? caught.message
         : "That page of the flow isn't available to you any more. Go back, or leave the flow."
+    case OPERATE_SESSION_ERROR_CODES.flowNavigationFailed:
+      return caught instanceof Error && caught.message !== '' ? caught.message
+        : "Couldn't move to that page of the flow just now. Try again."
     default:
       return 'That change could not be applied to your session.'
   }

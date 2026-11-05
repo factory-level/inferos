@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { ArrowLeftIcon, ArrowRightIcon, ChatCircleIcon, CheckIcon, XIcon } from '@phosphor-icons/react'
 import { MAX_OPERATE_FLOW_HISTORY, type OperateEvent, type OperateFlowPage, type OperateFlowRun } from '@gadgets/workshop-shared/operate-session'
+import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES } from '@gadgets/workshop-shared/api'
 import { WorkshopButton } from '../../components/WorkshopControls'
 import { FlowScreen, type FlowConsole } from './FlowScreen'
 import { refusalMessage } from './sessionRefusal'
@@ -17,7 +18,8 @@ const pageLabel = (page: OperateFlowPage) => {
  * the person's shows the same step. A flow in order moves by Back and Next. A flow that names its
  * pages offers the current page's routes and Back along the path taken, and shows that path; a
  * route is page navigation only and is never drawn among a screen's widget actions. A refused move
- * leaves the flow where it is and says why, in the session's words.
+ * leaves the flow where it is and says why, in the session's words; one that failed only for now
+ * (`flowNavigationFailed`) can be tried again.
  */
 export const FlowPage = ({ flow, console: shown, chatOpen, onEvent }: {
   flow: OperateFlowRun
@@ -29,12 +31,14 @@ export const FlowPage = ({ flow, console: shown, chatOpen, onEvent }: {
 }) => {
   const scrollRoot = useRef<HTMLElement>(null)
   const [stepTitle, setStepTitle] = useState<string | null>(null)
-  const [refusal, setRefusal] = useState<string | null>(null)
+  // What the session last refused, and the move to try again when the failure was only for now.
+  const [refusal, setRefusal] = useState<{ message: string; retry: OperateEvent | null } | null>(null)
   const send = (event: OperateEvent) => {
     setRefusal(null)
     onEvent(event).catch(caught => {
       console.error('The flow could not move:', caught)
-      setRefusal(refusalMessage(caught))
+      const retryable = getOperateSessionErrorCode(caught) === OPERATE_SESSION_ERROR_CODES.flowNavigationFailed
+      setRefusal({ message: refusalMessage(caught), retry: retryable ? event : null })
     })
   }
   const pages = flow.pages
@@ -110,7 +114,10 @@ export const FlowPage = ({ flow, console: shown, chatOpen, onEvent }: {
           ))}
         </div>}
       </div>}
-      {refusal && <p role="alert" className="m-0 flex-shrink-0 border-b border-kumo-line bg-kumo-danger-tint px-4 py-2 text-[13px] leading-[18px] text-kumo-danger">{refusal}</p>}
+      {refusal && <div className="flex flex-shrink-0 flex-wrap items-center gap-3 border-b border-kumo-line bg-kumo-danger-tint px-4 py-2">
+        <p role="alert" className="m-0 min-w-0 flex-1 text-[13px] leading-[18px] text-kumo-danger">{refusal.message}</p>
+        {refusal.retry && <WorkshopButton onClick={() => send(refusal.retry!)}>Try again</WorkshopButton>}
+      </div>}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <main ref={scrollRoot} className="min-h-0 min-w-0 flex-1 overflow-auto bg-kumo-tint">
           {/* The path's length is part of the key, so a page reached again (a retry) starts afresh. */}
