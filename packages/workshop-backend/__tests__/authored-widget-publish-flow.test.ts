@@ -33,6 +33,8 @@ async function withClient<T>(run: (impl: any, client: Overseer, instance: Overse
       impl.users.get = () => ({
         id: owner,
         whoami: async () => ({id: "owner-profile", name: "Owner"}),
+        operateSessionWorkspaceId: async () => stub.id.toString(),
+        recordSharedGadgetOpen: async () => {},
       });
       const index = new Map<string, string>();
       const versions = new Map<string, {body: Uint8Array, metadata?: Record<string, string>}>();
