@@ -500,9 +500,12 @@ export interface OperateSession extends RpcTarget {
   getWidgetState(ref: OperateWidgetRef): Promise<WidgetStateSnapshot>;
   /**
    * Moves the widget's state by `event` if `expectedSeq` is its current `seq` and its declaration
-   * permits `event` from the current state, and returns the new state. **It never changes the
-   * operate page**: the page's sequence and state stay as they were (connecting a widget event to
-   * the page is an explicitly configured attachment, FAC-87). Rejects, changing nothing, with
+   * permits `event` from the current state, and returns the new state. **It changes the operate
+   * page only through an explicit wire** (FAC-94): when the published page the person is shown
+   * wires `event` on this widget to `navigate`, the page moves there through the person's own
+   * checked dispatch, as a separate operate event, and the snapshot's `navigation` says where and
+   * whether it was shown; an unwired event leaves the page's sequence and state as they were.
+   * Rejects, changing nothing, with
    * `WIDGET_UNKNOWN_EVENT`, `WIDGET_TRANSITION_NOT_PERMITTED` (naming the events the current state
    * accepts), `WIDGET_STATE_CONFLICT` or `WIDGET_HAS_NO_STATES`.
    */
