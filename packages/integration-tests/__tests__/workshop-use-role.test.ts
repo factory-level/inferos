@@ -104,6 +104,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
     (ws: RpcStub<Overseer>) => unknown> = {
   previewAuthoredWidget: ws => ws.previewAuthoredWidget(1, 1),
   exportWorkspaceRecords: ws => ws.exportWorkspaceRecords(),
+  // A console draft is the builder's, and so is what would stop it publishing (FAC-96).
+  validateConsoleDraft: ws => ws.validateConsoleDraft("console"),
   // The workspace's settings are the builder's (FAC-95); operators get a publication's frozen copy.
   getWorkspaceConfiguration: ws => ws.getWorkspaceConfiguration(),
   setWorkspaceConfiguration: ws => ws.setWorkspaceConfiguration("0", { "baseUi.alerts": true }),

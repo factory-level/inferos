@@ -55,7 +55,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type ConsoleDraftProblem, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -14263,6 +14263,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // in one transaction only if the capture still holds (see ConsoleCapture), each widget entry
   // freezing its commit's surfaces and each bound view its spec. Then the published widgets are
   // listed in the deployment's widget index as this person (see #indexConsoleWidgets).
+  // FAC-96: what publishing the draft would refuse, from the same checks, read-only. The draft is
+  // captured and its commits read from git exactly as publishConsole does; nothing is written and
+  // no connection or InferOps read is made.
+  async validateConsoleDraft(id: string): Promise<ConsoleDraftProblem[]> {
+    let store = this.#consoleStore();
+    let draft = store.get(id, "draft");
+    if (!draft) throw new Error("Console not found");
+    let capture = store.capture(id, draft.revision);
+    let commits = await this.impl.readSourceCommits(capture.commitIds);
+    return store.draftProblems(id, draft.revision, commits);
+  }
   async publishConsole(id: string, expectedRevision: string): Promise<OperateConsole> {
     await this.#requireSharedConfiguration("publish", "shared");
     let store = this.#consoleStore();
@@ -16888,6 +16899,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   async publishConsole(_id: string, _expectedRevision: string): Promise<OperateConsole> { this.#deny(); }
+  // A draft is the builder's (FAC-96).
+  async validateConsoleDraft(_id: string): Promise<ConsoleDraftProblem[]> { this.#deny(); }
   async getConsoleBoundViewDraft(_consoleId: string, _revision: string, _entryId: string, _commitId?: string)
       : Promise<Pick<BoundViewDescription, "commitId" | "specText">> { this.#deny(); }
   async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
@@ -17536,6 +17549,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
       : Promise<OperateConsole> { this.#deny(); }
   async deleteConsole(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   async publishConsole(_id: string, _expectedRevision: string): Promise<OperateConsole> { this.#deny(); }
+  // A draft is the builder's (FAC-96).
+  async validateConsoleDraft(_id: string): Promise<ConsoleDraftProblem[]> { this.#deny(); }
   async getConsoleBoundViewDraft(_consoleId: string, _revision: string, _entryId: string, _commitId?: string)
       : Promise<Pick<BoundViewDescription, "commitId" | "specText">> { this.#deny(); }
   async validateArtifact(_gadgetId: WorkpieceId, _kind: ArtifactKind, _pins: ArtifactPin[],
