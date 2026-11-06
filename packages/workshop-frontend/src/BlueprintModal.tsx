@@ -433,7 +433,8 @@ export default function BlueprintModal({ open, onClose, overseer, gadget, metada
 
                 <div className="shrink-0 border-t border-kumo-line px-4 py-4 sm:px-6">
                   {createError && (
-                    <div className="mb-3 flex items-start gap-2 rounded-lg border border-l-2 border-l-kumo-brand border-y-kumo-line border-r-kumo-line bg-kumo-base px-3 py-2 text-[12px] leading-[18px] font-normal tracking-[-0.2px] text-kumo-default">
+                    // The server's words: for an authored widget, the build's refusal is the result.
+                    <div role="alert" className="mb-3 flex items-start gap-2 rounded-lg border border-l-2 border-l-kumo-brand border-y-kumo-line border-r-kumo-line bg-kumo-base px-3 py-2 text-[12px] leading-[18px] font-normal tracking-[-0.2px] text-kumo-default">
                       <Warning size={14} weight="fill" className="mt-0.5 shrink-0 text-kumo-brand" />
                       <span>{createError}</span>
                     </div>

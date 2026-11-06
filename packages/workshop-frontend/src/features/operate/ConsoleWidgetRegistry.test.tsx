@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { ConsoleWidgetEntry } from '@gadgets/workshop-shared/operate-console'
 import { ConsoleWidgetRegistry, type WidgetCandidates } from './ConsoleWidgetRegistry'
+import { setFieldValue } from '../canvas/kumoPopupDoubles'
 
 let container: HTMLDivElement
 let root: Root
@@ -128,4 +129,32 @@ it('says a registered widget whose install is gone, or is no longer a widget, ca
   // While the kernel's answer is still loading, nothing is claimed either way.
   render([registered], undefined, false, { state: 'loading' })
   expect(container.querySelector('[aria-label="Registered widgets"] li')!.textContent).not.toContain('Can\'t be offered')
+})
+
+// FAC-8: one authored widget version, installed twice, is placed as two independent instances.
+it('registers two installs of one widget version as separate entries, each offering only what the kernel declares', () => {
+  const north = { ...install(7, 'Status board', 1, { tools: ['count'] }), blueprintId: 'bp-authored', versionId: 'bp-authored@1' }
+  const south = { ...install(8, 'Status board', 1), blueprintId: 'bp-authored', versionId: 'bp-authored@1' }
+  const first: ConsoleWidgetEntry = { gadgetId: 7, blueprintId: 'bp-authored', version: 1, label: 'North desk', state: 'resettable' }
+  render([first], undefined, false, ready(north, south))
+
+  act(() => (container.querySelector('[role="combobox"]') as HTMLElement).click())
+  const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+  expect(option.map(item => item.textContent)).toEqual([expect.stringContaining('Status board (version 1)')])
+  act(() => option[0]!.click())
+  const name = [...container.querySelectorAll('label')].find(item => item.textContent === 'Name operators see')!
+  act(() => setFieldValue(document.getElementById(name.htmlFor) as HTMLInputElement, 'South desk'))
+  act(() => container.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click())
+  act(() => button('Register widget')!.click())
+  expect(change).toHaveBeenCalledWith([first,
+    { gadgetId: 8, blueprintId: 'bp-authored', version: 1, label: 'South desk', state: 'resettable' }])
+
+  render(change.mock.calls[0]![0], undefined, false, ready(north, south))
+  const rows = [...container.querySelectorAll('[aria-label="Registered widgets"] li')].map(item => item.textContent ?? '')
+  expect(rows[0]).toContain('North desk')
+  expect(rows[0]).toContain('Tools: count')
+  expect(rows[1]).toContain('South desk')
+  expect(rows[1]).toContain('UI')
+  // Nothing the second install's commit doesn't declare is offered for it.
+  expect(rows[1]).not.toContain('Tools')
 })

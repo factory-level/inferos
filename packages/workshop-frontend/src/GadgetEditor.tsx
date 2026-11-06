@@ -66,6 +66,8 @@ import { useWorkspaceOpen } from './useWorkspaceOpen'
 import { useWorkspaceWorkpieces } from './hooks/useWorkspaceWorkpieces'
 import { useResizableSplit } from './hooks/useResizableSplit'
 import { PaneTab } from './PaneTab'
+import { rightTabs, type RightTab } from './editorTabs'
+import { AuthoredWidgetPreview } from './features/authoring/AuthoredWidgetPreview'
 import { reportIssue } from './errorReporting'
 import GadgetExportMenu from './GadgetExportMenu'
 import { MENU_CONTENT, MENU_ITEM, MENU_ITEM_DANGER, MENU_POSITIONER_STYLE } from './components/menuStyles'
@@ -116,8 +118,6 @@ function formatConsoleLogs(logs: BufferedLogEntry[]): string {
 
 // ─── right-panel tabs ─────────────────────────────────────────────────────────
 
-type RightTab = 'app' | 'code' | 'connections'
-
 type WorkspaceView =
   | { mode: 'chat' }
   // `appId` is absent only while lazily migrating the legacy "open" value.
@@ -128,21 +128,6 @@ function formatHeaderCost(cost: number) {
   if (cost === 0) return '$0'
   if (cost < 0.01) return '<$0.01'
   return `$${cost.toFixed(2)}`
-}
-
-// The first tab is named after what the selected workpiece is ("Document" for a gadget built from
-// a document blueprint), falling back to "App" when it declares no format. A worktree has no app
-// and no bindings, so it gets only Code. A workflow has no app, so its first tab shows its triggers.
-function rightTabs(
-  summary: WorkpieceSummary | undefined,
-  outputView: 'app' | 'triggers',
-): { value: RightTab; label: string }[] {
-  if (summary?.type === 'worktree') return [{ value: 'code', label: 'Code' }]
-  return [
-    { value: 'app', label: outputView === 'triggers' ? 'Triggers' : formatOf(summary?.output).noun },
-    { value: 'code', label: 'Code' },
-    { value: 'connections', label: 'Connections' },
-  ]
 }
 
 // How a workpiece is drawn in tabs and labels: a gadget by its format, a worktree as a branch.
@@ -425,7 +410,11 @@ export default function GadgetEditor() {
   // ── workspace kind (operate-mode) ─────────────────────────────────────────────
   // Read from the live metadata, never copied: the kind changes only by an explicit setKind().
   // With the flag off every workspace behaves as an app, exactly as before kinds existed.
-  const operateMode = useUiFeatureFlags().flags['operate-mode']
+  const uiFlags = useUiFeatureFlags().flags
+  const operateMode = uiFlags['operate-mode']
+  // Authored widgets follow the deployment's build flag (AUTHORED_WIDGET_BUILD_ENABLED); off, the
+  // editor is exactly as before.
+  const authoredWidgets = uiFlags['authored-widgets']
   const workspaceKind = operateMode && metadata ? kindOf(metadata) : 'app'
   const outputView = workspaceOutputView(workspaceKind)
 
@@ -673,7 +662,9 @@ export default function GadgetEditor() {
     selectedWorkpieceSummary?.type === 'gadget' ? selectedWorkpieceSummary : undefined
   const selectedGadgetId = selectedGadgetSummary?.id ?? null
   // A worktree has only Code; the chosen tab is remembered for the next gadget.
-  const activeTab: RightTab = selectedWorkpieceSummary?.type === 'worktree' ? 'code' : chosenTab
+  // The build preview exists only while its tab does (see rightTabs); otherwise the app shows.
+  const activeTab: RightTab = selectedWorkpieceSummary?.type === 'worktree' ? 'code'
+    : chosenTab === 'preview' && !(authoredWidgets && outputView === 'app') ? 'app' : chosenTab
 
   // Lazily normalize legacy "open" preferences once the accepted app list is known. Draft apps
   // remain session-only until accepted; at that point this effect persists them automatically.
@@ -1522,6 +1513,15 @@ export default function GadgetEditor() {
                 Code
               </DropdownMenu.Item>
             )}
+            {authoredWidgets && selectedWorkpieceSummary?.type !== 'worktree' && outputView === 'app' && (
+              <DropdownMenu.Item
+                disabled={!selectedGadgetStub}
+                onClick={() => openMobilePane('preview')}
+                className={MENU_ITEM}
+              >
+                Build preview
+              </DropdownMenu.Item>
+            )}
             {selectedWorkpieceSummary?.type !== 'worktree' && (
               <DropdownMenu.Item
                 disabled={!selectedGadgetStub}
@@ -1724,7 +1724,7 @@ export default function GadgetEditor() {
                       onClick={() => setActivityView(tab.value)}
                     />
                   ))
-                  : rightTabs(selectedWorkpieceSummary, outputView).map(tab => (
+                  : rightTabs(selectedWorkpieceSummary, outputView, authoredWidgets).map(tab => (
                     <PaneTab
                       key={tab.value}
                       active={activeTab === tab.value}
@@ -1847,6 +1847,23 @@ export default function GadgetEditor() {
                 </div>
               )}
             </div>
+
+            {activeTab === 'preview' && (
+              <div className="h-full">
+                {overseer && selectedGadgetId !== null ? (
+                  <AuthoredWidgetPreview
+                    key={`${id}/${selectedGadgetId}`}
+                    overseer={overseer.stub}
+                    gadgetId={selectedGadgetId}
+                    chatId={previewChatId}
+                    reloadTrigger={uiReloadTrigger}
+                    onConsoleLog={handleClientConsoleLog}
+                  />
+                ) : (
+                  <NoGadgetPlaceholder height="100%" />
+                )}
+              </div>
+            )}
 
             <div className={activeTab === 'code' ? 'h-full' : 'hidden'}>
               {overseer && selectedWorkpieceSummary ? (
