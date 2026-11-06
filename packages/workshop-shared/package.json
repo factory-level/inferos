@@ -102,6 +102,10 @@
     "./workflow-definition": {
       "types": "./src/workflow-definition.ts",
       "import": "./src/workflow-definition.ts"
+    },
+    "./governed-data": {
+      "types": "./src/governed-data.ts",
+      "import": "./src/governed-data.ts"
     }
   },
   "scripts": {
