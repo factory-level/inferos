@@ -17528,12 +17528,18 @@ export async function invokeWorkflowTrigger(
     let taken = impl.takenInvocations.has(invocation.id);
     store.cancelInvocation(invocation.id);
     if (taken) throw error;
+    // The replaced error stays here, in the log: a fixed refusal carries no `cause`, since RPC
+    // would send it to the invoker along with the words meant to replace it (#374 re-QA).
+    logger.warn("on-request run did not start", { event: "workflow.invoke.not_started", hookId, error });
     let message = error instanceof Error ? error.message : String(error);
     if (/does not implement the method "invoke"|\binvoke is not a function|no such method:? "?invoke\b/i.test(message)) {
-      throw new Error("This trigger can't be run on request.", {cause: error});
+      // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
+      throw new Error("This trigger can't be run on request.");
     }
-    if (message === WORKFLOW_ASSIGNMENTS_DISABLED) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED, {cause: error});
-    throw new Error(RUN_NOT_STARTED, {cause: error});
+    // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
+    if (message === WORKFLOW_ASSIGNMENTS_DISABLED) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+    // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
+    throw new Error(RUN_NOT_STARTED);
   } finally {
     impl.takenInvocations.delete(invocation.id);
   }
