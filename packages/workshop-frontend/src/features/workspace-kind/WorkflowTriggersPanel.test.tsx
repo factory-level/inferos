@@ -99,6 +99,8 @@ async function render(overseer: Partial<Overseer>, gadgets: GadgetSummary[] = []
     getTriggerDefinition: async () => null,
     listTriggerControls: async () => [],
     listCollaborators: async () => [],
+    getTriggerAssignment: async () => null,
+    getGadget: (() => ({ listBindings: async () => [], [Symbol.dispose]: () => {} })) as unknown as Overseer['getGadget'],
     ...overseer,
   }
   await act(async () => {
@@ -242,6 +244,40 @@ describe('a pinned trigger\'s run-on-request control', () => {
   it('shows an unpinned trigger no control', async () => {
     await render({ listHooks: async () => [hook({ id: 7 })], listCollaborators: async () => [BEN_COLLABORATOR] })
     expect(container.querySelector('[aria-label="Run on request"]')).toBeNull()
+    expect(container.querySelector('[aria-label="Runs act as"]')).toBeNull()
+  })
+
+  it("offers a pinned trigger its gadget's connections, once each, and disposes the gadget it read", async () => {
+    const dispose = vi.fn<() => void>()
+    const getGadget = vi.fn<(id: number) => unknown>(() => ({
+      listBindings: async () => [
+        { name: 'BOARD', target: 10, resourceTitle: 'Operations board', vendorId: 'inferops' },
+        { name: 'BOARD_AGAIN', target: 10, resourceTitle: 'Operations board', vendorId: 'inferops' },
+        { name: 'HELPER', target: 3, resourceTitle: 'Helper gadget' },
+      ],
+      [Symbol.dispose]: dispose,
+    }))
+    await render({
+      listHooks: async () => [hook({ id: 7, gadgetId: 0 })], getTriggerDefinition: async () => PIN,
+      getGadget: getGadget as unknown as Overseer['getGadget'],
+    })
+    const section = container.querySelector('[aria-label="Runs act as"]')!
+    expect(getGadget).toHaveBeenCalledWith(0)
+    expect(dispose).toHaveBeenCalledOnce()
+    expect(section.textContent).toContain('Operations board')
+    expect(section.textContent).not.toContain('Helper gadget')
+    expect(section.textContent?.match(/Operations board/g)).toHaveLength(1)
+  })
+
+  it("shows a pinned trigger's assignment and whether its key was given", async () => {
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      getTriggerAssignment: async () => ({
+        hookId: 7, gatekeeperId: 10, credentialRef: '5b2c1d8e-0000-4000-8000-0000000000a1', assignedBy: ADA, assignedAt: new Date(0),
+      }),
+    })
+    expect(container.querySelector('[aria-label="Runs act as"]')?.textContent)
+      .toContain('No key yet: runs are refused until an Admin gives one.')
   })
 
   it('lists recent runs on request with who asked, and shows a refusal in the server\'s words', async () => {

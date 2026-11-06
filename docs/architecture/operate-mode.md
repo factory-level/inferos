@@ -857,6 +857,11 @@ A workflow definition is the reusable description of a workflow (FAC-107, [workf
     - event and control triggers beyond Scheduled Tasks;
   - **The UI** (FAC-102 part 2):
     - **Builders:** the Triggers panel (`WorkflowTriggersPanel`) gives each pinned trigger a "Run on request" editor (`TriggerControlEditor`). It sets the button's label and who may press it, chosen from `listCollaborators` by profile id, through `setTriggerControl`; a refusal shows in the server's words. It also lists the trigger's newest runs on request with who asked (`listWorkflowDeliveries`, the delivery's `invocation`).
+    - **Who runs act as (FAC-102 UI):** beside it, each pinned trigger has a "Runs act as" editor (`TriggerAssignmentEditor`).
+      - **Assigning:** an Admin chooses one of the connections the trigger's gadget binds (`getGadget(...).listBindings()`, connection bindings once each; the stub is disposed after the read) and assigns it (`setTriggerAssignment`), or removes the assignment.
+      - **The key:** once assigned, the service account's key goes in a password field (`autoComplete="off"`) whose value lives only in the field's local state. It is never in props, the URL or anything kept, and is emptied as soon as it is sent, accepted or not (`provisionTriggerCredential`).
+      - **Shown:** who gave the key and when, or "No key yet: runs are refused until an Admin gives one." Refusals show in the server's words.
+      - **Tests:** `TriggerAssignmentEditor.test.tsx` and `WorkflowTriggersPanel.test.tsx`.
     - **Use collaborators:** the use view (`GadgetUseView`) shows `WorkflowRunControls` above the app: the controls `listTriggerControls` returns for them, each only its label as a button. It renders nothing when none lists them, or when the call fails.
     - **What a press shows:** a press calls `invokeTrigger`. An accepted run shows "Run requested, not done yet". FAC-97's `ActionOutcome` has no requested outcome, so an accepted run is its `running` (handed to the trigger, in flight), never `succeeded`. A refusal, a rate refusal's retry time included, shows in the server's own words.
     - **Tests:** `WorkflowTriggersPanel.test.tsx` and `WorkflowRunControls.test.tsx`.
