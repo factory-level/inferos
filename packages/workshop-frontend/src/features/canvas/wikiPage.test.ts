@@ -127,6 +127,22 @@ it('says what each reference names, and names nothing it cannot show', () => {
   }
 })
 
+// FAC-12: a published console's widget, named as InferOps' `knowledge/inferos-widget` declares it.
+it('names a published console widget only in the grammar InferOps declares', () => {
+  const href = 'inferops://acme.kb/knowledge/inferos-widget/ws-7/floor/41?blueprint="tech-finder"&version="2"'
+  expect(parseWikiReference(href)).toEqual({ kind: 'gadget', href, workspaceId: 'ws-7', consoleId: 'floor',
+    sourceGadgetId: 41, blueprintId: 'tech-finder', version: 2 })
+  for (const bad of [
+    'inferops://acme.kb/knowledge/inferos-widget/ws-7/floor?blueprint="x"&version="1"',
+    'inferops://acme.kb/knowledge/inferos-widget/ws-7/floor/41/x?blueprint="x"&version="1"',
+    'inferops://acme.kb/knowledge/inferos-widget/ws-7/floor/g41?blueprint="x"&version="1"',
+    'inferops://acme.kb/knowledge/inferos-widget/ws-7/floor/41?version="1"',
+    'inferops://acme.kb/knowledge/inferos-widget/ws-7/floor/41?blueprint="x"&version="0"',
+    'inferops://acme.kb/knowledge/inferos-widget/ws%207/floor/41?blueprint="x"&version="1"',
+    'inferops://acme/knowledge/inferos-widget/ws-7/floor/41?blueprint="x"&version="1"',
+  ]) expect(parseWikiReference(bad)).toEqual({ kind: 'unsupported', href: bad })
+})
+
 const page = (section: Partial<WikiDocument['sections'][number]> | null): WikiDocument => ({ id: 'd', slug: 'd', title: 'D', body: '', version: 1, masterRole: null, references: [],
   sections: section ? [{ id: 's', tag: 't', body: 'old', version: 3, wikilinks: [], ...section }] : [] })
 

@@ -8,6 +8,7 @@ import type { WikiDocument } from '@inferos/gatekeeper-inferops/src/types'
 import { CanvasBoardWidget } from './CanvasBoardWidget'
 import { useWikiData } from './useWikiData'
 import { WikiAgentText } from './WikiAgentText'
+import { WikiGadgetEmbed } from './WikiGadgetEmbed'
 import { WikiIssueEmbed } from './WikiIssueEmbed'
 import { WikiMarkdown } from './WikiMarkdown'
 import { WikiNavigation } from './WikiNavigation'
@@ -81,6 +82,7 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
       case 'page': return reference.host === host
         ? <Button size="sm" onClick={() => setChosen(reference.slug)}>Open page: {label || reference.slug}</Button>
         : <p className="text-sm text-kumo-subtle">A page of another Wiki, not shown here: <code className="break-all">{href}</code></p>
+      case 'gadget': return <WikiGadgetEmbed reference={reference} label={label} />
       case 'unsupported': return <p className="text-sm text-kumo-subtle">{label || 'Embedded widget'}: this kind of reference is not shown on the canvas. <code className="break-all">{href}</code></p>
     }
   }
