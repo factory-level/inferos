@@ -269,6 +269,32 @@ describe("a requested run across a restart (FAC-112)", () => {
     expect(actions[0]).toMatchObject({ state: "pending", executedAs: { runId: done.run.runId } });
   });
 
+  // Round 2 (review HIGH): the write's own action key is part of what is matched, not only its
+  // description, so a replay proposing the same words for a different action is refused too.
+  it("a replay whose write has the same description but another action key is refused, both kinds", async () => {
+    await withImpl(`run-exec-actionkey-${crypto.randomUUID()}`, impl => {
+      let assigned = admitted(impl, { assigned: true });
+      let systemCaller = { from: "systemRun", hookId: HOOK, deliveryId: assigned.deliveryId };
+      impl.systemRuns.begin(assigned.deliveryId, { hookId: HOOK, gatekeeperId: CONNECTION, credentialRef: REF });
+      impl.startWorkflowRunProposals(assigned.deliveryId);
+      submitted(impl, systemCaller);
+      impl.startWorkflowRunProposals(assigned.deliveryId);
+      expect(() => impl.submitActionNow(CONNECTION, 2, DESCRIPTION, systemCaller)).toThrow("proposed a different write");
+      expect(actionsOf(impl)).toHaveLength(1);
+    });
+    await withImpl(`run-exec-actionkey-gadget-${crypto.randomUUID()}`, impl => {
+      let delivery = admitted(impl);
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: delivery.deliveryId } };
+      impl.workflowDefinitionStore().startRun(delivery.deliveryId);
+      impl.gadgetRuns.begin(delivery.deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(delivery.deliveryId);
+      submitted(impl, caller);
+      impl.startWorkflowRunProposals(delivery.deliveryId);
+      expect(() => impl.submitActionNow(CONNECTION, 2, DESCRIPTION, caller)).toThrow("proposed a different write");
+      expect(actionsOf(impl)).toHaveLength(1);
+    });
+  });
+
   it("assigned, a replay that proposes a different write than before is refused, not recorded", async () => {
     await withImpl(`run-exec-diverge-${crypto.randomUUID()}`, impl => {
       let delivery = admitted(impl, { assigned: true });

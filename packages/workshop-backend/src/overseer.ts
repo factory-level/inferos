@@ -7059,16 +7059,17 @@ class OverseerImpl implements AgentHooks {
   // The place of the next write run `runId` (delivery `deliveryId`) proposes in this attempt
   // (FAC-112), and the action already recorded there, if any. A run that runs again after a restart
   // proposes the same writes in the same order: the write recorded at this place is the answer,
-  // not a second one, and a different write there refuses (fail closed). No place when the run
-  // isn't counting (its attempt didn't start here).
-  #runProposalPlace(runId: string, deliveryId: number, gatekeeperId: number, description: ActionDescription):
-      { proposal?: number; already?: number } {
+  // not a second one, when it is the same write -- the same connection, the gatekeeper's own action
+  // key and the same description -- and any other write there refuses (fail closed). No place when
+  // the run isn't counting (its attempt didn't start here).
+  #runProposalPlace(runId: string, deliveryId: number, gatekeeperId: number, action: number,
+                    description: ActionDescription): { proposal?: number; already?: number } {
     let proposal = this.#workflowRunProposals.get(deliveryId);
     if (proposal === undefined) return {};
     this.#workflowRunProposals.set(deliveryId, proposal + 1);
     let already = this.storage.actions.byRunProposal.get(`${runId}#${proposal}`);
     if (!already) return { proposal };
-    if (already.type === "action" && already.gatekeeperId === gatekeeperId &&
+    if (already.type === "action" && already.gatekeeperId === gatekeeperId && already.action === action &&
         JSON.stringify(already.description) === JSON.stringify(description)) {
       return { proposal, already: already.id };
     }
@@ -7603,7 +7604,7 @@ class OverseerImpl implements AgentHooks {
       if (run.gatekeeperId !== gatekeeperId) throw new Error("This workflow run can't propose actions on that connection.");
       // Both actors, for the audit (FAC-104): who asked for the run, and who it acts as.
       let admitted = this.workflowDefinitionStore().deliveryRun(caller.deliveryId)?.run;
-      let place = admitted ? this.#runProposalPlace(admitted.runId, caller.deliveryId, gatekeeperId, description) : undefined;
+      let place = admitted ? this.#runProposalPlace(admitted.runId, caller.deliveryId, gatekeeperId, action, description) : undefined;
       if (place?.already !== undefined) return place.already;
       let proposal = place?.proposal;
       executedAs = {
@@ -7624,7 +7625,7 @@ class OverseerImpl implements AgentHooks {
       let { hookId, deliveryId } = caller.run;
       let admitted = this.workflowDefinitionStore().deliveryRun(deliveryId)?.run;
       if (!admitted) throw new Error(RUN_REQUESTER_REVOKED);
-      let place = this.#runProposalPlace(admitted.runId, deliveryId, gatekeeperId, description);
+      let place = this.#runProposalPlace(admitted.runId, deliveryId, gatekeeperId, action, description);
       if (place.already !== undefined) return place.already;
       if (place.proposal === undefined) throw new Error(SYSTEM_RUN_ENDED);
       let attempt = this.storage.workflowDeliveries.get(deliveryId)?.execution?.attempts ?? 1;
