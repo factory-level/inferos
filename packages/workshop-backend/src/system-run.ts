@@ -33,7 +33,18 @@ export const ASSIGNED_ACTION_STALE =
   "This action's workflow assignment changed or ended since it was proposed, so it can't be applied. Reject it.";
 
 /** Who an assigned run's proposed action was proposed as: recorded on the action when it is queued. */
-export type AssignedExecution = { hookId: number; deliveryId: number; credentialRef: string };
+export type AssignedExecution = {
+  hookId: number;
+  deliveryId: number;
+  credentialRef: string;
+  /** The run that proposed it (FAC-104): absent on actions recorded before it. */
+  runId?: string;
+  /**
+   * Who asked for that run (FAC-104), the initiator, beside `credentialRef`, the executor: the
+   * person's profile id, or null when the trigger fired it itself. A record, never authority.
+   */
+  requestedBy?: string | null;
+};
 
 /**
  * Why an approved write an assigned run proposed may not apply now, or null when it may (FAC-102

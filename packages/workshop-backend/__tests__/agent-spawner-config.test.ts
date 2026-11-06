@@ -161,6 +161,26 @@ describe("configured agents", () => {
     expect(() => impl.assertSpawnerCallScope(id, { from: "gadget", gadgetId: 100 }))
         .toThrow(/exposes "OTHER" outside gadget 100's available bindings/);
   }));
+
+  // FAC-104: a delegate can't exceed its parent's bounds. Only a gadget, or an agent within that
+  // gadget's live bindings, may start one, and only through a spawner that gadget binds. An
+  // assigned workflow run, a hook firing or a person's session has no gadget scope to delegate.
+  it("refuse a delegate from an assigned workflow run, a hook or a person, and from a gadget that doesn't bind it", () => withOwner(async (client, impl) => {
+    let gk = await client.newAgentSpawnerGatekeeper({ ...CREATED, env: {} });
+    let id = await gk.getId();
+    seedGadget(impl, 100, { SPAWNER: { target: id } });
+    seedGadget(impl, 300, {});
+    for (const caller of [
+      { from: "systemRun", hookId: 3, deliveryId: 41 },
+      { from: "hook" },
+      { from: "user", userId: "u", profileId: "p" },
+    ]) {
+      expect(() => impl.assertSpawnerCallScope(id, caller)).toThrow("Agent spawner has no calling gadget scope.");
+    }
+    expect(() => impl.assertSpawnerCallScope(id, { from: "gadget", gadgetId: 300 }))
+        .toThrow(/outside gadget 300's available bindings/);
+    expect(() => impl.assertSpawnerCallScope(id, { from: "gadget", gadgetId: 100 })).not.toThrow();
+  }));
 });
 
 describe("an agent's instructions in its system prompt", () => {

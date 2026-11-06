@@ -187,6 +187,47 @@ export async function requireWorkflowInvoke(
 }
 
 /**
+ * The refusal at a protected point of an assigned run (FAC-104) when the person who asked for it
+ * may no longer: the work stops, and an approved write stays pending. Fixed words, naming no grant.
+ */
+export const RUN_REQUESTER_REVOKED =
+  "The person who asked for this workflow run can't run it now, so this step didn't happen.";
+
+/**
+ * Re-checks, at a protected execution point of an assigned run (FAC-104: the run's start, which a
+ * delayed delivery reaches long after the request, and each approved write's apply), that the
+ * person who asked for it still may: the trigger's control still lists them; their InferOps
+ * `workflow:invoke` (`requireWorkflowInvoke`), asked again now; and the same company the run was
+ * admitted in (FAC-111's record), so a request can't continue in another company. A run the
+ * trigger fired itself has no person to re-check (its assignment is checked as before). A
+ * delivery a person asked for that has no run record (one older than FAC-111) is refused: there is
+ * no company to compare. Refuses with RUN_REQUESTER_REVOKED.
+ */
+export async function requireRunRequester(
+    impl: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" |
+        "workflowDefinitionStore">,
+    hookId: number, deliveryId: number): Promise<void> {
+  let store = impl.workflowDefinitionStore();
+  let recorded = store.deliveryRun(deliveryId);
+  if (!recorded) throw new Error(RUN_REQUESTER_REVOKED);
+  if (!recorded.invoked && recorded.run?.requester.kind !== "person") return;
+  let run = recorded.run;
+  if (!run || run.requester.kind !== "person") throw new Error(RUN_REQUESTER_REVOKED);
+  let profileId = run.requester.profileId;
+  if (!store.controls(profileId).some(control => control.hookId === hookId)) throw new Error(RUN_REQUESTER_REVOKED);
+  let company: string | null;
+  try {
+    company = await requireWorkflowInvoke(impl, impl.users.idFromName(profileId).toString(), hookId);
+  } catch (error) {
+    logger.warn("run requester re-check refused", {
+      event: "workflow.run.requester_revoked", hookId, runId: run.runId, initiator: `person:${profileId}`, error,
+    });
+    throw new Error(RUN_REQUESTER_REVOKED, { cause: error });
+  }
+  if (company !== run.company) throw new Error(RUN_REQUESTER_REVOKED);
+}
+
+/**
  * The one refusal for a service-account key the Workshop won't relay or the service doesn't accept
  * (FAC-102). Fixed words: nothing of the key or of the service's reason is ever repeated.
  */
@@ -6424,6 +6465,17 @@ class OverseerImpl implements AgentHooks {
     if (record.executedAs) {
       let problem = this.assignedActionProblem(record);
       if (problem) throw new Error(problem);
+      // A queued write is a protected point too (FAC-104): the person who asked for the run must
+      // still be allowed to now, however long ago they asked. The assignment is checked again after.
+      await requireRunRequester(this, record.executedAs.hookId, record.executedAs.deliveryId);
+      logger.info("assigned workflow action applying", {
+        event: "workflow.assigned_action.applying", actionId: record.id, hookId: record.executedAs.hookId,
+        ...(record.executedAs.runId ? { runId: record.executedAs.runId } : {}),
+        initiator: record.executedAs.requestedBy ? `person:${record.executedAs.requestedBy}` : "trigger",
+        executor: `service_account:${record.gatekeeperId}`,
+      });
+      problem = this.assignedActionProblem(record);
+      if (problem) throw new Error(problem);
       assigned = await this.openAssignedActionFacet(record);
       problem = this.assignedActionProblem(record);
       if (problem) {
@@ -6782,8 +6834,22 @@ class OverseerImpl implements AgentHooks {
     };
   }
 
-  /** Runs one admitted delivery of an assigned trigger (FAC-102; see system-run.ts). */
-  runAssignedDelivery(hookId: number, delivery: AssignedDelivery, method: string | null, args: unknown[]): Promise<unknown> {
+  /**
+   * Runs one admitted delivery of an assigned trigger (FAC-102; see system-run.ts), once the person
+   * who asked for it still may (FAC-104, `requireRunRequester`): a delivery that starts later than
+   * its request is a protected point, so a grant revoked meanwhile stops it before it runs.
+   */
+  async runAssignedDelivery(hookId: number, delivery: AssignedDelivery, method: string | null, args: unknown[]): Promise<unknown> {
+    await requireRunRequester(this, hookId, delivery.deliveryId);
+    let recorded = this.workflowDefinitionStore().deliveryRun(delivery.deliveryId);
+    let run = recorded?.run;
+    if (run) {
+      logger.info("assigned workflow run started", {
+        event: "workflow.run.started", hookId, runId: run.runId,
+        initiator: run.requester.kind === "person" ? `person:${run.requester.profileId}` : "trigger",
+        executor: run.executor.kind === "service_account" ? `service_account:${run.executor.gatekeeperId}` : "gadget_bindings",
+      });
+    }
     return runAssignedDelivery(this.#systemRunHost(), hookId, delivery, method, args);
   }
 
@@ -7301,7 +7367,15 @@ class OverseerImpl implements AgentHooks {
     if (caller.from === "systemRun") {
       let run = this.systemRuns.require(caller);
       if (run.gatekeeperId !== gatekeeperId) throw new Error("This workflow run can't propose actions on that connection.");
-      executedAs = { hookId: caller.hookId, deliveryId: caller.deliveryId, credentialRef: run.credentialRef };
+      // Both actors, for the audit (FAC-104): who asked for the run, and who it acts as.
+      let admitted = this.workflowDefinitionStore().deliveryRun(caller.deliveryId)?.run;
+      executedAs = {
+        hookId: caller.hookId, deliveryId: caller.deliveryId, credentialRef: run.credentialRef,
+        ...(admitted ? {
+          runId: admitted.runId,
+          requestedBy: admitted.requester.kind === "person" ? admitted.requester.profileId : null,
+        } : {}),
+      };
     }
 
     let actionId = this.storage.nextActionId.get();
