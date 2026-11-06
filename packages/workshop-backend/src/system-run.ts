@@ -6,6 +6,7 @@
 // connection vendor's system class for the assignment's credential reference: the service account,
 // never a person. Nothing here is reachable from a client, a gadget or an agent; the Overseer wires it.
 
+import { RpcTarget } from "cloudflare:workers";
 import type { Gatekeeper, GatekeeperVendor } from "@gadgets/workshop-shared/gatekeeper";
 import type { TriggerAssignment } from "@gadgets/workshop-shared/workflow-definition";
 
@@ -145,13 +146,20 @@ function assertRunLive(host: SystemRunHost, caller: SystemRunCaller, run: System
  * going, or its hook being deleted makes the next call fail, even through a stub the worker kept.
  */
 export function revocableSession(session: object, assertLive: () => void): object {
-  return new Proxy({}, {
+  // Workers RPC finds no methods on a Proxy over a plain object ("The RPC receiver does not
+  // implement the method"), so, as makeSystemRunCallback does, the target is callable and the
+  // Proxy reports RpcTarget's prototype: every property then reaches the `get` trap below.
+  return new Proxy((() => {}) as unknown as RpcTarget, {
     get(_target, prop) {
       if (typeof prop === "symbol" || prop === "then") return undefined;
+      // Async, so a refused call is that call's rejection, never a throw into the RPC machinery.
       return async (...args: unknown[]) => {
         assertLive();
         return (session as Record<string, (...a: unknown[]) => unknown>)[prop](...args);
       };
+    },
+    getPrototypeOf() {
+      return RpcTarget.prototype;
     },
   });
 }
