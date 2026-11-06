@@ -34,9 +34,11 @@
       "observers": "admission",
       "reads": [
         { "method": "readBoard", "notes": "The bound project's board, pending actions overlaid." },
+        { "method": "readServiceQuery", "notes": "Fixed published service queries scoped to this project; joined-data observations exclude board-only collaborators." },
         { "method": "openIssue", "notes": "Narrows to one issue of the bound project; its read() is an observation." }
       ],
       "writes": [
+        { "method": "comment", "concurrency": "expected-revision", "idempotency": "provider-key", "revert": "never", "notes": "Body and expected head are fingerprinted; sent only when the queued action is applied." },
         { "method": "createIssue", "concurrency": "none", "idempotency": "provider-key", "revert": "never", "notes": "InferOps has no issue delete." },
         { "method": "transition", "concurrency": "expected-revision", "idempotency": "provider-key", "revert": "conditional", "notes": "Reverted only while the issue is still in the state it moved to." },
         { "method": "update", "concurrency": "expected-revision", "idempotency": "provider-key", "revert": "conditional", "notes": "Title and priority revert while the issue is still at the revision the update produced; a description change never reverts." }

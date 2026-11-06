@@ -654,3 +654,22 @@ describe("board discovery", () => {
     expect(log.excluded).toEqual([["observer-1"], []]);
   });
 });
+
+describe("company data service boundary", () => {
+  it("latches a project connection private before attempting joined reads", async () => {
+    const { props, hooks, session } = setup();
+    expect(await failure(session.readServiceQuery("service-jobs"))).toContain("UNAVAILABLE");
+    expect(await hooks.addObserver(props, true)).toContain("private to its owner");
+  });
+  it("stages one fingerprinted comment and refuses a stale head", async () => {
+    const { hooks, session } = setup();
+    const issue = session.openIssue(DEMO_1);
+    const current = await issue.read();
+    expect(await failure(issue.comment("Stale", "999999"))).toContain("STALE_REVISION");
+    await issue.comment("Synthetic comment", current.revision);
+    await issue.comment("Synthetic comment", current.revision);
+    const log = await hooks.log();
+    expect(log.actions).toHaveLength(1);
+    expect(log.actions[0]?.title).toContain("Comment");
+  });
+});

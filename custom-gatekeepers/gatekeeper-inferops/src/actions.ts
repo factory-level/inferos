@@ -112,6 +112,11 @@ export type UpdateAction = ActionBase & {
   appliedRevision?: Revision;
 };
 
+/** A proposed comment on one bound project's issue. */
+export type CommentAction = ActionBase & {
+  kind: "comment"; issueId: string; identifier: string; body: string; expectedRevision: Revision;
+};
+
 /** A proposed hand-off of a software issue to the coding runner. */
 export type DispatchAction = ActionBase & {
   kind: "dispatch";
@@ -196,11 +201,11 @@ export type ProposalApproveAction = ActionBase & {
 
 /** Any recorded action. */
 export type ActionRecord =
-  | TransitionAction | CreateAction | UpdateAction | DispatchAction | CancelRunAction
+  | TransitionAction | CreateAction | UpdateAction | CommentAction | DispatchAction | CancelRunAction
   | SectionUpdateAction | DocumentUpdateAction | ProposalApproveAction;
 
 /** An action a board binding records. */
-export type BoardAction = TransitionAction | CreateAction | UpdateAction;
+export type BoardAction = TransitionAction | CreateAction | UpdateAction | CommentAction;
 
 /** An action a coding-dispatch binding records. */
 export type CodingAction = DispatchAction | CancelRunAction;
@@ -219,6 +224,7 @@ export type StagedAction =
   | Omit<TransitionAction, "actionId" | "status">
   | Omit<CreateAction, "actionId" | "status">
   | Omit<UpdateAction, "actionId" | "status">
+  | Omit<CommentAction, "actionId" | "status">
   | Omit<DispatchAction, "actionId" | "status">
   | Omit<CancelRunAction, "actionId" | "status">
   | Omit<SectionUpdateAction, "actionId" | "status">
@@ -248,6 +254,8 @@ export function requestOf(record: StagedAction | ActionRecord): unknown {
     case "update":
       return { kind: record.kind, issueId: record.issueId, changes: record.changes,
                expectedRevision: record.expectedRevision };
+    case "comment":
+      return { kind: record.kind, issueId: record.issueId, body: record.body, expectedRevision: record.expectedRevision };
     case "dispatch":
       return { kind: record.kind, issueId: record.issueId, action: "code", repoId: record.repoId,
                baseRef: record.baseRef, expectedRevision: record.expectedRevision };

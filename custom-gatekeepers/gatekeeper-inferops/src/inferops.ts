@@ -1,3 +1,4 @@
+import type { ServiceQueryName, ServiceQueryOptions, ServiceQueryPage } from "./types";
 import type { ApprovalEdit, ApprovalProposal } from "@gadgets/workshop-shared/operate-approval";
 // InferOps gatekeeper: scoped project-board reads and approved issue creates, updates and
 // transitions.
@@ -1207,6 +1208,7 @@ class InferOpsProjectConfiguratorUI extends RpcTarget implements InferOpsProject
 const ACTION_PREFIX = "action:";
 /** Observers admitted to a board binding, so its search results can be kept from them. */
 const OBSERVER_PREFIX = "observer:";
+const PRIVATE_SERVICE_QUERY = "private:service-query";
 const NEXT_ACTION_KEY = "nextActionId";
 const INSTANCE_KEY = "instanceId";
 
@@ -1650,7 +1652,14 @@ export class InferOpsProjectGatekeeper
    * which admitting them for this one does not cover.
    */
   async addObserver(id: string, user: Fetcher<GatekeeperUserVerifier>): Promise<void> {
+    const assertShareable = () => {
+      if (this.ctx.storage.kv.get(PRIVATE_SERVICE_QUERY)) {
+        throw new Error("This connection has read joined company records and is private to its owner.");
+      }
+    };
+    assertShareable();
     await admitProjectObserver(this.ctx.props, user);
+    assertShareable();
     this.ctx.storage.kv.put(OBSERVER_PREFIX + id, true);
   }
 
@@ -1752,6 +1761,9 @@ async function applyBoardAction(binding: ProjectBinding, actionId: number,
           const created = await binding.client.createIssue(binding.projectKey, record.issue, key);
           return { ...marked, status: "applied", createdIdentifier: created.identifier } as ActionRecord;
         }
+        case "comment":
+          await binding.client.commentIssue(binding.projectKey, record.issueId, record.body, record.expectedRevision, key);
+          return { ...marked, status: "applied" };
         case "update": {
           const updated = await binding.client.updateIssue(
             binding.projectKey, record.issueId, record.changes, record.expectedRevision, key);
@@ -1775,6 +1787,7 @@ async function revertBoardAction(binding: ProjectBinding, actionId: number):
     return { message: "This change was never applied, so there is nothing to revert." };
   }
   if (isCodingAction(record) || isWikiAction(record)) return { message: "This is not a board action." };
+  if (record.kind === "comment") return { message: "Comments cannot be undone here." };
   if (record.kind === "create") {
     return {
       message: `Creating ${record.createdIdentifier ?? "an issue"} cannot be undone here. ` +
@@ -1862,6 +1875,8 @@ function actionLabel(record: ActionRecord): string {
       return `${record.identifier} → ${record.toStateName}`;
     case "create":
       return `Creating "${plainInline(record.issue.title, 60)}"`;
+    case "comment":
+      return `The comment on ${record.identifier}`;
     case "update":
       return `The update of ${record.identifier}`;
     case "dispatch":
@@ -1945,7 +1960,7 @@ function applyFailureMessage(record: ActionRecord, code: string | null, detail?:
   if (record.kind === "proposal-approve") return proposalFailureMessage(what, code, detail);
   if (isWikiEdit(record)) return wikiFailureMessage(record, what, code);
   const noun = {
-    transition: "move", create: "issue", update: "update", dispatch: "dispatch", cancel: "cancel",
+    transition: "move", create: "issue", update: "update", comment: "comment", dispatch: "dispatch", cancel: "cancel",
   }[record.kind];
   switch (code) {
     case "STALE_REVISION":
@@ -2186,6 +2201,19 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
     this.#queue[Symbol.dispose]();
   }
 
+  async readServiceQuery(name: ServiceQueryName, options?: ServiceQueryOptions): Promise<ServiceQueryPage> {
+    // Latch before awaiting: a concurrently admitted or later observer must not inherit joined data.
+    // Account bindings use their existing prepareWithheld tracker instead.
+    if (typeof this.#binding.scope === "string") this.#binding.kv.put(PRIVATE_SERVICE_QUERY, true);
+    const page = await this.#binding.client.readServiceQuery(this.#binding.projectKey, name, options);
+    // Board observer grants do not cover joined company tables. Withhold this observation from all observers.
+    await this.#binding.observeWithheld(this.#queue, {
+      title: "Read service dashboard",
+      description: `Read ${page.rows.length} rows from published query ${page.name}, version 1.`,
+    });
+    return page;
+  }
+
   async readBoard(): Promise<Board> {
     const board = await this.#binding.board();
     const issues = board.columns.reduce((sum, column) => sum + column.issues.length, 0);
@@ -2307,6 +2335,24 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
       description: `Read issue ${issue.identifier} of project ${this.#binding.projectKey}.`,
     });
     return issue;
+  }
+
+  /** Queue a comment against the exact issue revision; approval performs the native write. */
+  async comment(body: string, expectedRevision: Revision): Promise<void> {
+    if (!body.trim() || body.length > 20_000 || !REVISION.test(expectedRevision)) {
+      fail("INVALID_REQUEST", "A comment of 1–20000 characters and an exact revision are required.");
+    }
+    const binding = this.#binding;
+    const issue = await binding.client.readIssue(binding.projectKey, this.#issueId).catch(hideIssueExistence);
+    if (issue.revision !== expectedRevision) fail("STALE_REVISION", "This issue changed; read it again.");
+    const { actionId, joined } = await binding.stageOnce({ kind: "comment", issueId: this.#issueId,
+      identifier: issue.identifier, body, expectedRevision });
+    if (joined) return;
+    await binding.submit(this.#queue, actionId, {
+      title: sanitizeTitle(`Comment on ${issue.identifier}`),
+      ...binding.description(`Add a comment to ${issue.identifier}.`).verbatim("Comment", body).finish(),
+      implementsRevert: false,
+    });
   }
 
   /**

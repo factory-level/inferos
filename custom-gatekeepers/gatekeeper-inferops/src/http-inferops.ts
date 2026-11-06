@@ -1,3 +1,4 @@
+import { parseServiceQuery, serviceQuerySearch } from "./service-queries";
 // LIVE InferOps data source: `InferOpsClient` over the InferOps HTTP API (the contract in
 // InferOps docs/human/architecture/inferos/inferops-gatekeeper.md). The only module that talks HTTP.
 //
@@ -1383,6 +1384,27 @@ export function openHttpInferOpsClient(
   }
 
   return {
+    async commentIssue(projectKey, issueId, comment, expectedRevision, idempotencyKey) {
+      await beforeSending(async () => {
+        if (!idempotencyKey || !REVISION.test(expectedRevision) || !comment.trim() || comment.length > 20_000) {
+          throw new InferOpsError("INVALID_REQUEST", "A comment, expected revision and idempotency key are required.");
+        }
+        await readIssue(projectKey, issueId);
+      });
+      await request("issue.comment", {
+        method: "POST", path: `/project/issues/${issueId}/comments`,
+        body: { body: comment, kind: "comment", expectedIssueHeadSeq: expectedRevision }, idempotencyKey,
+      });
+    },
+
+    async readServiceQuery(projectKey, name, options) {
+      const query = serviceQuerySearch(name, options);
+      const bound = await project(projectKey);
+      query.set("projectId", bound.id);
+      const body = await request("query.execute", { method: "GET", path: `/object/queries/${name}?${query}` });
+      return parseServiceQuery(body, name, bound.id);
+    },
+
     async listProjects(): Promise<ProjectSummary[]> {
       return (await projects()).map(({ identifier, name }) => ({ identifier, name }));
     },

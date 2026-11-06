@@ -1,0 +1,29 @@
+{
+  "blueprintId": "inferops.service-dashboard",
+  "title": "Service dashboard",
+  "description": "Compose service jobs, permitted status counts and recent activity for one connected project. Includes cursor traversal and governed comments. Needs a live InferOps company data plane.",
+  "output": {
+    "id": "service-dashboard",
+    "noun": "Service dashboard",
+    "plural": "Service dashboards",
+    "icon": "table"
+  },
+  "author": {
+    "type": "user",
+    "name": "InferOS",
+    "id": "agent@inferos.local"
+  },
+  "revision": 1,
+  "created": "2026-11-06T00:00:00.000Z",
+  "version": 1,
+  "lastUpdated": "2026-11-06T00:00:00.000Z",
+  "bindings": {
+    "project": {
+      "type": "gatekeeper",
+      "title": "Service project",
+      "description": "The one service project this dashboard reads. Joined company records remain private to the connected person.",
+      "gatekeeperName": "inferops",
+      "typeUrlPattern": "inferops://*/project/board/*"
+    }
+  }
+}

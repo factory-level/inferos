@@ -102,6 +102,8 @@ export interface Board {
 
 /** Access to one issue, fixed when this capability is created. */
 export interface InferOpsIssueSession {
+  /** Add a comment at the revision read with this issue; stale revisions are refused. */
+  comment(body: string, expectedRevision: Revision): Promise<void>;
   /** Read this issue. Fails if it was removed or access was revoked. */
   read(): Promise<Issue>;
   /**
@@ -157,6 +159,8 @@ export interface IssueActivity {
 
 /** Access to one project, fixed when this capability is created. */
 export interface InferOpsProjectSession {
+  /** Read a published service query for this project. Joined data is private to this connection's owner. */
+  readServiceQuery(name: ServiceQueryName, options?: ServiceQueryOptions): Promise<ServiceQueryPage>;
   /** Read the connected project's complete board. Large-board paging is not part of this version. */
   readBoard(): Promise<Board>;
   /**
@@ -888,3 +892,26 @@ export interface InferOpsWorkflowPolicySession {
   /** The project's current published content-workflow policy, read fresh on every call. */
   readWorkflowPolicy(): Promise<WorkflowPolicyHead>;
 }
+
+/** Published service queries; arbitrary SQL is never accepted. */
+export type ServiceQueryName = "service-jobs" | "service-job-status-counts" | "service-job-recent-activities";
+/** Cursor traversal of the permitted collection, at most 100 rows per call. */
+export interface ServiceQueryOptions { limit?: number; cursor?: string; }
+/** One permitted relation endpoint, with a nonpersonal display label. */
+export interface ServiceRelation { id: string; label: string; }
+/** A service job and the permitted company records related to it. */
+export interface ServiceJob {
+  id: string; identifier: string; title: string; projectId: string; headSeq: string; relatedTruncated: boolean;
+  state: { id: string; name: string; group: string };
+  createdAt: string; updatedAt: string;
+  customers: ServiceRelation[]; sites: ServiceRelation[]; contacts: ServiceRelation[];
+}
+/** A count of permitted jobs in one workflow group. */
+export interface ServiceStatusCount { group: string; count: number; }
+/** One recent activity on a permitted service job. */
+export interface ServiceActivity { id: string; jobId: string; kind: string; body: string | null; createdAt: string; }
+/** A versioned query result. A non-null cursor means there are further rows. */
+export type ServiceQueryPage =
+  | { name: "service-jobs"; version: 1; rows: ServiceJob[]; nextCursor: string | null }
+  | { name: "service-job-status-counts"; version: 1; rows: ServiceStatusCount[]; nextCursor: string | null }
+  | { name: "service-job-recent-activities"; version: 1; rows: ServiceActivity[]; nextCursor: string | null };
