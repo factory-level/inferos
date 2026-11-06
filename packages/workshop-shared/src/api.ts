@@ -32,7 +32,7 @@ import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
-  WorkflowDefinitionSave, WorkflowInvocation,
+  WorkflowDefinitionSave, WorkflowInvocation, RequestedRun,
 } from "./workflow-definition.js";
 import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
 import type {
@@ -2817,6 +2817,15 @@ export interface Overseer extends RpcTarget {
    * Open to build and use sessions; refused in an operate session, and agents hold no Overseer.
    */
   invokeTrigger(hookId: number): Promise<WorkflowInvocation>;
+  /**
+   * What the caller reads of the run their request `invocationId` made (FAC-114; inferos ADR 0012,
+   * proposed): its run id, revision, outcome (`queued`, `running`, `waiting`, `succeeded`, `failed`
+   * or `uncertain`) with its fixed reason, and each write it proposed by action id with that
+   * action's outcome. Null unless the caller is the person who asked, so it can be read after any
+   * reconnect. `uncertain` stays until reconciled. Open to build and use sessions; refused in an
+   * operate session.
+   */
+  getRequestedRun(invocationId: string): Promise<RequestedRun | null>;
 
   /**
    * List this workspace's consoles: one operator role's menu of views over this workspace's
