@@ -66,7 +66,7 @@ export const ConsoleScreenEditor = ({ overseer, gadgets, catalog, onSaved, onCan
       </Select>}
     </div>
     {screen.sections.map((section, index) => <CanvasSectionEditor key={section.id} section={section} busy={saving}
-      first={index === 0} gadgets={gadgets} acceptedGadgets={acceptedGadgets} catalog={catalog} viewTitle={screen.title}
+      first={index === 0} gadgets={gadgets} overseer={overseer} acceptedGadgets={acceptedGadgets} catalog={catalog} viewTitle={screen.title}
       onEdit={edit} onMoveUp={() => void edit([{ type: 'moveSection', sectionId: section.id, index: index - 1 }])} />)}
     {screen.sections.length > 1 && <CanvasMoveWidgetForm sections={screen.sections} gadgets={gadgets} busy={saving} onEdit={edit} />}
     <Button disabled={saving || screen.sections.length >= 12} onClick={() => void edit([{

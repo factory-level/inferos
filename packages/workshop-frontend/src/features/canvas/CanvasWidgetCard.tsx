@@ -1,18 +1,21 @@
 import { Button } from '@cloudflare/kumo'
-import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
+import type { RpcStub } from 'capnweb'
+import type { Overseer, GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasOperation, CanvasSection, CanvasWidget } from '@gadgets/workshop-shared/canvas'
 import { CanvasBoardSummary } from './CanvasBoardSummary'
+import { CanvasDataBindingEditor } from './CanvasDataBindingEditor'
 import { widgetLabel, widgetSpanClass } from './canvasLayout'
 
-export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, onEdit }: {
+export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, overseer, onEdit }: {
   widget: CanvasWidget
   section: CanvasSection
   index: number
   busy: boolean
   gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
+  overseer: RpcStub<Overseer>
   onEdit: (operations: CanvasOperation[]) => Promise<boolean>
 }) => {
-  const configure = (widget: CanvasWidget) => void onEdit([{ type: 'configureWidget', widget }])
+  const configure = (nextWidget: CanvasWidget) => void onEdit([{ type: 'configureWidget', widget: nextWidget }])
   const noun = widget.kind === 'inferos.gadget' ? 'gadget' : widget.kind === 'inferops.wiki' ? 'Wiki' : 'board'
   const label = widgetLabel(widget, gadgets)
   return <article className={`min-w-0 space-y-3 rounded-xl border border-kumo-line bg-kumo-base shadow-md p-4 ${widgetSpanClass(widget.size, section.columns)}`} aria-label={label}>
@@ -37,5 +40,7 @@ export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, onEdit
       <Button size="sm" disabled={busy || index === 0} onClick={() => void onEdit([{ type: 'moveWidget', widgetId: widget.id, sectionId: section.id, index: index - 1 }])}>Move {noun} up</Button>
       <Button size="sm" disabled={busy} onClick={() => void onEdit([{ type: 'removeWidget', widgetId: widget.id }])}>Remove {noun}</Button>
     </div>
+    {widget.kind !== 'inferos.gadget' && <CanvasDataBindingEditor widget={widget} overseer={overseer} busy={busy}
+      onSave={updated => configure(updated)} />}
   </article>
 }
