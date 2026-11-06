@@ -585,6 +585,18 @@ export class WorkspaceWorkflowDefinitionStore {
     return null;
   }
 
+  /**
+   * The deliveries `profileId` asked trigger `hookId` for (FAC-116), newest first, at most `limit`:
+   * only requests that admitted a run.
+   */
+  requestedDeliveries(profileId: string, hookId: number, limit: number): StoredWorkflowDelivery[] {
+    let mine: StoredWorkflowDelivery[] = [];
+    for (let delivery of this.storage.workflowDeliveries.list()) {
+      if (delivery.hookId === hookId && delivery.run && delivery.invocation?.requestedBy === profileId) mine.push(delivery);
+    }
+    return mine.toSorted((a, b) => b.at.getTime() - a.at.getTime() || b.id - a.id).slice(0, limit);
+  }
+
   /** Record delivery `deliveryId`'s result (FAC-114), with run history delivered; unchanged if it's the same. */
   recordResult(deliveryId: number, result: Omit<WorkflowRunResult, "settledAt">): void {
     let delivery = this.storage.workflowDeliveries.get(deliveryId);

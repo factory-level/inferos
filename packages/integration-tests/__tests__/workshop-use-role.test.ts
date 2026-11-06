@@ -93,7 +93,9 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     // (workflow-invocation.test.ts covers both, and that nothing else opens to them).
     "listTriggerControls" | "invokeTrigger" |
     // The person who asked reads their own run's result (FAC-114; workflow-run-results.test.ts).
-    "getRequestedRun";
+    "getRequestedRun" |
+    // And the runs they asked one trigger for, newest first (FAC-116; workflow-requested-runs.test.ts).
+    "listRequestedRuns";
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {

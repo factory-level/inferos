@@ -100,6 +100,7 @@ covers:
   - packages/workshop-shared/src/workflow-definition.ts
   - packages/workshop-backend/src/workflow-definition-store.ts
   - packages/workshop-backend/__tests__/workflow-definitions.test.ts
+  - packages/workshop-backend/__tests__/workflow-requested-runs.test.ts
   - packages/workshop-backend/__tests__/workflow-invocation.test.ts
   - packages/workshop-backend/__tests__/workflow-run-restart.test.ts
   - packages/workshop-backend/__tests__/workflow-assigned-writes.test.ts
@@ -891,6 +892,7 @@ A workflow definition is the reusable description of a workflow (FAC-107, [workf
 
         It is evaluated again as the run ends and whenever one of its writes changes: applied or refused (`applyPendingAction`), rejected (`rejectAction`), or found unknown after a restart (`#recoverInterruptedApplies`), so a run waiting on a write moves on when the write does (R6's re-evaluation). `report` is what the code returned, plain JSON of at most `WORKFLOW_RUN_REPORT_MAX_CHARS` (4096; larger reads `{truncated: true}`), for builders only (`listWorkflowDeliveries`): an assigned run's code runs as its service account.
       - **Read after reconnect.** `getRequestedRun(invocationId)`, on build and use sessions (operate refuses it), returns the run to the person who asked, and null to anyone else: its run id, revision, outcome and fixed reason, and each write it proposed by action id with that action's outcome. No report, no write's text, no copy of anything it wrote. The invocation id `invokeTrigger` returns is the handle.
+      - **The person's runs of a trigger** (FAC-116, built against the proposed ADR 0012). `listRequestedRuns(hookId)`, on build and use sessions (operate refuses it), returns the newest `REQUESTED_RUNS_MAX` (20) runs the caller asked that trigger for, newest first. Each is read exactly as `getRequestedRun` reads it. It holds only the caller's own requests, so a person who closed the page sees their runs' outcomes when they return without holding the invocation ids. Tests: `workflow-requested-runs.test.ts`.
       - **A lost answer is no refusal.** When the gatekeeper's `invoke` fails after the run was taken and queued, `invokeWorkflowTrigger` returns the request (logged `workflow.invoke.answer_lost`): the run is the workspace's own from the queue on.
       - **Destinations.** Run history is the one destination (`WorkflowRunDelivery`, keyed by destination so another can be added without reshaping the record). Chat and canvas destinations are deferred: no product definition of a destination exists yet.
       - **Only requested runs.** A scheduled firing nobody asked for still runs in the Scheduler's call, on the gadget's callback (schedules are FAC-113's).
