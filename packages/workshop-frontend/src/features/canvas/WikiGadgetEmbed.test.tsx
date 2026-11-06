@@ -166,3 +166,20 @@ it('keys each signed-in account apart, and the same account the same way', () =>
   expect(embedViewerKey(a)).not.toBe(embedViewerKey(b))
   expect(embedViewerKey(null)).toBe('anonymous')
 })
+
+// QA on #392: only the target changes, for the same viewer through the same connection, and its
+// resolve hasn't answered yet. The embed shows loading, never the previous target's widget.
+it('shows loading, never the previous widget, when only the target changes and its resolve is pending', async () => {
+  const k = kernel(AVAILABLE)
+  const sameApi = auth
+  await render()
+  expect(shownWith).toHaveBeenLastCalledWith(k.stub)
+  k.workspace.resolveEmbeddedWidget.mockImplementation(() => new Promise<EmbeddedConsoleWidget>(() => {}))
+  shownWith.mockClear()
+  await act(async () => root.render(<WikiGadgetEmbed reference={{ ...reference, consoleId: 'next', href: `${HREF}#next` }} label="Finder" />))
+  await settle()
+  expect(auth).toBe(sameApi)
+  expect(k.workspace.resolveEmbeddedWidget).toHaveBeenLastCalledWith('next', 41)
+  expect(shownWith).not.toHaveBeenCalled()
+  expect(text()).toContain('Loading the widget')
+})
