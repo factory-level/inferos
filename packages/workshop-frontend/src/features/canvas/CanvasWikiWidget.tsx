@@ -14,6 +14,7 @@ import { WikiNavigation } from './WikiNavigation'
 import { WikiPageBody } from './WikiPageBody'
 import { WikiSearch } from './WikiSearch'
 import { WikiSection } from './WikiSection'
+import { FORBIDDEN_READ_BINDING, STALE_WIKI_READ, UNAVAILABLE_READ_BINDING, UNAVAILABLE_WIKI_PAGE, UNAVAILABLE_WIKI_STRUCTURE } from './canvasReadFeedback'
 import type { WikiStructureState } from './wikiData'
 import { authoredBody, bodyEditable, firstNavigationPage, generatedBlock, pageText, parseWikiReference, wikiNavigation } from './wikiPage'
 
@@ -27,7 +28,7 @@ const GeneratedBlock = ({ document, structure, onOpenPage }: {
     return <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Reading the pages this page lists…</p>
   }
   if (structure.status === 'error') {
-    return <p role="alert" className="text-sm text-kumo-danger">Could not read the pages this page lists: {structure.message}</p>
+    return <p role="alert" className="text-sm text-kumo-danger">{UNAVAILABLE_WIKI_STRUCTURE}</p>
   }
   const text = generatedBlock(document, structure.structure)
   return text === null ? null : <section aria-label="Generated page list" className="space-y-2 rounded-lg border border-dashed border-kumo-line p-3">
@@ -108,19 +109,18 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
         Not connected. This workspace has no connection to this Wiki or to its organization's InferOps account. Connect one, for example by asking in the chat, to read it here.
       </p>}
       {list.status === 'disabled' && <p role="status" className="text-sm text-kumo-subtle">
-        {list.message} The connection to this Wiki is kept; it shows the Wiki again once InferOps is turned back on.
+        InferOps is unavailable. The connection to this Wiki is kept; it will appear again when InferOps is available.
       </p>}
       {list.status === 'error' && <div className="space-y-2">
         <p role="alert" className="text-sm text-kumo-danger">
           {list.code === 'UNAUTHORIZED' ? 'Sign in to InferOps again to read this Wiki.'
-            : list.code === 'FORBIDDEN' ? `No access to this Wiki: ${list.message}`
-              : `Could not read the Wiki: ${list.message}`}
+            : list.code === 'FORBIDDEN' ? FORBIDDEN_READ_BINDING : UNAVAILABLE_READ_BINDING}
         </p>
         <Button size="sm" onClick={() => data?.refresh()}>Try again</Button>
       </div>}
-      {failed && <p role="alert" className="mb-2 text-xs text-kumo-danger">Showing the last read; refresh failed: {failed}</p>}
+      {failed && <p role="alert" className="mb-2 text-xs text-kumo-danger">{STALE_WIKI_READ}</p>}
       {list.status === 'ready' && structure.status === 'error' && <p role="alert" className="mb-2 text-xs text-kumo-danger">
-        Could not read how this Wiki is organized, so its pages are shown as a tree: {structure.message}
+        Wiki structure is unavailable; pages are shown as a tree.
       </p>}
       {navigation && (list.status === 'ready' && list.documents.length === 0
         ? <p className="text-sm text-kumo-subtle">This Wiki has no pages you can open.</p>
@@ -138,9 +138,9 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
               The page {slug} is not in this Wiki, or you cannot open it. Choose another page.
             </p>}
             {listed && (!page || page.status === 'loading') && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the page…</p>}
-            {page?.status === 'missing' && <p role="status" className="text-sm text-kumo-subtle">This page has no section you can read, or it was deleted: {page.message}</p>}
+            {page?.status === 'missing' && <p role="status" className="text-sm text-kumo-subtle">This Wiki page is unavailable or was deleted.</p>}
             {page?.status === 'error' && <div className="space-y-2">
-              <p role="alert" className="text-sm text-kumo-danger">Could not read the page: {page.message}</p>
+              <p role="alert" className="text-sm text-kumo-danger">{UNAVAILABLE_WIKI_PAGE}</p>
               <Button size="sm" onClick={() => data?.refresh()}>Try again</Button>
             </div>}
             {document && <>

@@ -1,0 +1,7 @@
+export const INCOMPATIBLE_READ_BINDING = 'This resource type cannot be bound to this widget.'
+export const FORBIDDEN_READ_BINDING = 'You do not have read access to this resource.'
+export const UNAVAILABLE_READ_BINDING = 'This resource is unavailable.'
+export const STALE_BOARD_READ = 'This board may be stale; refresh to try again.'
+export const STALE_WIKI_READ = 'This Wiki may be stale; refresh to try again.'
+export const UNAVAILABLE_WIKI_STRUCTURE = 'Wiki structure is unavailable.'
+export const UNAVAILABLE_WIKI_PAGE = 'This Wiki page is unavailable.'

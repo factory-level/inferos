@@ -5,6 +5,7 @@ import type { Overseer } from '@gadgets/workshop-shared/api'
 import { CANVAS_WIKI_REF, type CanvasDataBinding, type CanvasWidget } from '@gadgets/workshop-shared/canvas'
 import { useBoardData } from './useBoardData'
 import { useWikiData } from './useWikiData'
+import { FORBIDDEN_READ_BINDING, INCOMPATIBLE_READ_BINDING, UNAVAILABLE_READ_BINDING } from './canvasReadFeedback'
 
 type Resource = CanvasDataBinding['resource']
 const RESOURCE_FOR_WIDGET = {
@@ -81,9 +82,9 @@ export const CanvasDataBindingEditor = ({ widget, overseer, busy, onSave }: {
     setResult('checking')
   }
   const messages = {
-    incompatible: 'This resource type cannot be bound to this widget.',
-    unavailable: 'This resource is unavailable.',
-    forbidden: 'You do not have read access to this resource.',
+    incompatible: INCOMPATIBLE_READ_BINDING,
+    unavailable: UNAVAILABLE_READ_BINDING,
+    forbidden: FORBIDDEN_READ_BINDING,
   }
   return <section className="space-y-2" aria-label="Read data binding">
     <h5 className="font-medium text-kumo-default">Read data source</h5>

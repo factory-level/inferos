@@ -82,20 +82,29 @@ it('shows loading, then the board; not connected when no connection covers the r
   expect(container.textContent).toContain('Not connected')
 })
 
-it('reports a failed read with a retry, keeps the last board as stale when a refresh fails, and says when nothing matches the params', async () => {
-  readBoard.mockRejectedValueOnce(new Error('Error: INTERNAL: boom'))
+it('uses fixed read-failure feedback without exposing provider details, including stale refreshes', async () => {
+  readBoard.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: BOARD_SENTINEL initial'))
   await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="card" />)
-  expect(article().querySelector('[role="alert"]')?.textContent).toBe('Could not read the board: boom')
+  expect(article().querySelector('[role="alert"]')?.textContent).toBe('This resource is unavailable.')
+  expect(container.textContent).not.toContain('BOARD_SENTINEL')
   await act(async () => { [...article().querySelectorAll('button')].find(b => b.textContent === 'Try again')!.click(); await settle() })
   expect(readBoard).toHaveBeenCalledTimes(2)
   expect(card('1')).toBeDefined()
-  readBoard.mockRejectedValueOnce(new Error('Error: INTERNAL: later'))
+  readBoard.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: BOARD_SENTINEL stale'))
   await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Refresh board"]')!.click(); await settle() })
   expect(article().textContent).toContain('Refresh failed')
-  expect(article().querySelector('[role="alert"]')?.textContent).toContain('refresh failed: later')
+  expect(article().querySelector('[role="alert"]')?.textContent).toBe('This board may be stale; refresh to try again.')
+  expect(container.textContent).not.toContain('BOARD_SENTINEL')
   expect(card('1')).toBeDefined()
   await render(<CanvasBoardWidget widget={widget({ workflow: 'content' })} overseer={overseer} presentation="card" />)
   expect(container.textContent).toContain('No content states to show')
+})
+
+it('uses fixed forbidden feedback without exposing the provider response', async () => {
+  readBoard.mockRejectedValueOnce(new Error('Error: FORBIDDEN: BOARD_SENTINEL access details'))
+  await render(<CanvasBoardWidget widget={widget()} overseer={overseer} presentation="card" />)
+  expect(article().querySelector('[role="alert"]')?.textContent).toBe('You do not have read access to this resource.')
+  expect(container.textContent).not.toContain('BOARD_SENTINEL')
 })
 
 it('says InferOps is turned off, not that the read failed, and shows the board again once it is on', async () => {
@@ -104,7 +113,7 @@ it('says InferOps is turned off, not that the read failed, and shows the board a
   readBoard.mockRejectedValueOnce(new Error('Error: DISABLED: InferOps is turned off for this deployment.'))
   await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Refresh board"]')!.click(); await settle() })
   const statuses = [...article().querySelectorAll('[role="status"]')].map(s => s.textContent)
-  expect(statuses).toContainEqual(expect.stringContaining('InferOps is turned off for this deployment.'))
+  expect(statuses).toContainEqual(expect.stringContaining('InferOps is unavailable.'))
   expect(article().querySelector('[role="alert"]')).toBeNull()
   expect(article().querySelector('[data-issue-id]')).toBeNull()
   await act(async () => { article().querySelector<HTMLButtonElement>('[aria-label="Refresh board"]')!.click(); await settle() })
