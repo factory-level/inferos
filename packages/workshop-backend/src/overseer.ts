@@ -19,6 +19,7 @@ import {
 import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
+  type QueuedWorkflowRun,
 } from "./workflow-definition-store";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
@@ -186,6 +187,13 @@ export async function requireWorkflowInvoke(
   let [company] = companies;
   return company!;
 }
+
+/**
+ * The refusal at a run's start (FAC-112) when the gadget's code moved on from the commit the run
+ * was admitted for: a run on the gadget's bindings runs only the revision it pinned, never newer code.
+ */
+export const WORKFLOW_RUN_CODE_CHANGED =
+  "The workflow's code changed after this run was asked for, so it didn't run. Ask for it again.";
 
 /**
  * The refusal at a protected point of an assigned run (FAC-104) when the person who asked for it
@@ -1770,6 +1778,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // (FAC-102 follow-up B; see WorkspaceWorkflowDefinitionStore.markAutoRetired).
       workflowTriggerAutoRetired: collection<{ hookId: number; retiredAt: Date }>()({ primaryKey: "hookId" }),
       workflowInvocations: collection<StoredWorkflowInvocation>()({ primaryKey: "id" }),
+      // Runs a person asked for, queued here until they end (FAC-112; see
+      // WorkspaceWorkflowDefinitionStore.queueRun): what the alarm runs, or runs again after a reset.
+      workflowRunQueue: collection<QueuedWorkflowRun>()({ primaryKey: "deliveryId" }),
       // The newest on-request runs, which the run rates count (see workflow-definition-store.ts).
       workflowInvocationLog: collection<StoredWorkflowInvocationRecord>()({ primaryKey: "id" }),
       // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).
@@ -2289,6 +2300,11 @@ class OverseerImpl implements AgentHooks {
   // #agentKeepAliveTime) and lets `alarm()` wait for all agents to finish.
   #runningAgents = new Set<number>();
 
+  // Queued workflow runs (FAC-112) executing in this instance, by delivery id: what the alarm waits
+  // for, and what keeps a run from starting twice here. A reset empties it, so the next alarm runs
+  // each queued run again from its start.
+  #runningWorkflowRuns = new Map<number, Promise<void>>();
+
   // Ambient connections whose getAgentCatalog() answered null, which the contract makes permanent
   // for the connection. Held in memory only: a gatekeeper that gains a catalog in a later version
   // is asked again on the next activation, so every chat converges. Ids are never reused, so an
@@ -2520,8 +2536,16 @@ class OverseerImpl implements AgentHooks {
     let times: number[] = [];
 
     // Outstanding agent work: see #agentKeepAliveTime for why it is set once and held.
-    let hasAgentWork = this.#runningAgents.size > 0 ||
+    let hasAgentWork = this.#runningAgents.size > 0 || this.#runningWorkflowRuns.size > 0 ||
         Array.from(this.storage.pendingAgentCalls.list({ limit: 1 })).length > 0;
+
+    // A queued workflow run not running here yet (FAC-112) is started as soon as possible.
+    for (let queued of this.storage.workflowRunQueue.list()) {
+      if (!this.#runningWorkflowRuns.has(queued.deliveryId)) {
+        times.push(Date.now());
+        break;
+      }
+    }
     if (!hasAgentWork) {
       this.#agentKeepAliveTime = undefined;
     } else {
@@ -2580,11 +2604,12 @@ class OverseerImpl implements AgentHooks {
           this.waitForAllAgentsToComplete(),
           this.drainAllPendingAgentCalls(),
           this.deliverReadyExternalMessageResponses(),
+          this.runQueuedWorkflowRuns(),
         ]);
         for (let result of results) {
           if (result.status === "rejected") throw result.reason;
         }
-      } while (this.#runningAgents.size > 0 || this.#pendingCallDrains.size > 0);
+      } while (this.#runningAgents.size > 0 || this.#pendingCallDrains.size > 0 || this.#runningWorkflowRuns.size > 0);
     } finally {
       this.#inAlarmHandler = false;
       this.#agentKeepAliveTime = undefined;
@@ -6909,6 +6934,80 @@ class OverseerImpl implements AgentHooks {
     // Asked again after the code's load, its last await, then re-read synchronously just before the
     // run registers (FAC-104).
     return runAssignedDelivery(this.#systemRunHost(), hookId, delivery, method, args, requester);
+  }
+
+  /**
+   * Queues the run delivery `deliveryId` admitted for a person (FAC-112), with its firing's one call,
+   * and arms the alarm that runs it. Synchronous: the firing's call returns once the run is recorded
+   * as queued, so nothing of it waits on whoever asked. Refuses as
+   * `WorkspaceWorkflowDefinitionStore.queueRun` does.
+   */
+  queueWorkflowRun(hookId: number, deliveryId: number, method: string | null, args: unknown[]): void {
+    this.workflowDefinitionStore().queueRun(hookId, deliveryId, method, args);
+    this.#updateAlarm();
+  }
+
+  /**
+   * The alarm's part in workflow runs (FAC-112): starts every queued run not already running here,
+   * each from its stored record, and waits for them all. A run queued while these run is started on
+   * the alarm's next pass.
+   */
+  async runQueuedWorkflowRuns(): Promise<void> {
+    for (let queued of this.workflowDefinitionStore().queuedRuns()) {
+      if (this.#runningWorkflowRuns.has(queued.deliveryId)) continue;
+      this.#runningWorkflowRuns.set(queued.deliveryId,
+          this.#executeWorkflowRun(queued).finally(() => this.#runningWorkflowRuns.delete(queued.deliveryId)));
+    }
+    await Promise.all(this.#runningWorkflowRuns.values());
+  }
+
+  /**
+   * The gadget's own hook code for trigger `hookId`, which a run on the gadget's bindings calls
+   * (FAC-112): the stored persistent callback of the live hook. A separate method only so tests can
+   * stand in for a gadget facet.
+   */
+  workflowRunCallback(hookId: number): NativeRpcStub<RpcTarget> {
+    return requireLiveHook(this, hookId).callback;
+  }
+
+  // Runs one queued workflow run (FAC-112) from its delivery alone: the run record's executor
+  // decides how, and nothing the request or a page holds now is read. An assigned run executes as
+  // its service account from its pinned commit (runAssignedDelivery, with FAC-104's re-checks). A
+  // run on the gadget's bindings runs the gadget's code, so it runs only while that code is still
+  // the commit the run pinned: the person is re-checked (FAC-104), the head compared, the local
+  // state re-read synchronously, and then the hook code is called with no await in between. The
+  // outcome is recorded either way; a reset meanwhile leaves the run queued, to run again.
+  async #executeWorkflowRun(queued: QueuedWorkflowRun): Promise<void> {
+    let store = this.workflowDefinitionStore();
+    let delivery = store.startRun(queued.deliveryId);
+    if (!delivery) return;
+    let { hookId, deliveryId, method, args } = queued;
+    let error: string | undefined;
+    try {
+      if (delivery.executedAs) {
+        await this.runAssignedDelivery(hookId,
+            { deliveryId, commitId: delivery.commitId, credentialRef: delivery.executedAs.credentialRef }, method, args);
+      } else {
+        let requester = await requireRunRequester(this, hookId, deliveryId);
+        let record = requireLiveHook(this, hookId);
+        let gadgetId = record.gadgetId ?? this.defaultGadgetId;
+        if (gadgetId === undefined || this.getGadgetHead(gadgetId) !== delivery.commitId) {
+          throw new Error(WORKFLOW_RUN_CODE_CHANGED);
+        }
+        requester.revalidate();
+        let callback = this.workflowRunCallback(hookId) as any;
+        await (method === null
+          ? Reflect.apply(callback, undefined, args)
+          : Reflect.apply(callback[method], callback, args));
+      }
+    } catch (failure) {
+      error = failure instanceof Error ? failure.message : String(failure);
+    }
+    store.endRun(deliveryId, error);
+    let run = delivery.run;
+    let fields = { hookId, deliveryId, ...(run ? { runId: run.runId } : {}), attempts: delivery.execution?.attempts };
+    if (error === undefined) logger.info("workflow run finished", { event: "workflow.run.finished", ...fields });
+    else logger.warn("workflow run failed", { event: "workflow.run.failed", ...fields, error });
   }
 
   // Open the session behind a binding loopback.
@@ -12974,15 +13073,17 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       this.impl.takenInvocations.set(delivery.invocation.id, true);
     }
 
-    // An admitted request for an assigned trigger runs as its service account (FAC-102), in a
-    // run-scoped worker, never through the gadget's own callback and the bindings people connected.
-    if (delivery?.invocation && delivery.executedAs) {
-      let caller: GatekeeperCaller = {from: "systemRun", hookId, deliveryId: delivery.deliveryId};
+    // A delivery a person asked for runs in this workspace, from its stored record (FAC-112): the
+    // firing's one call queues it and returns, and the alarm runs it (OverseerImpl.queueWorkflowRun),
+    // so nothing of the run waits on the caller. An assigned trigger's run executes as its service
+    // account (FAC-102), in a run-scoped worker, never through the gadget's own callback and the
+    // bindings people connected; either kind re-checks the person when it starts (FAC-104).
+    if (delivery?.invocation) {
+      let caller: GatekeeperCaller = delivery.executedAs
+        ? {from: "systemRun", hookId, deliveryId: delivery.deliveryId}
+        : {from: "hook"};
       return {
-        callback: makeSystemRunCallback(this.impl, hookId, {
-          deliveryId: delivery.deliveryId, commitId: delivery.commitId,
-          credentialRef: delivery.executedAs.credentialRef,
-        }),
+        callback: makeQueuedRunCallback(this.impl, hookId, delivery.deliveryId),
         approvalQueue: new ApprovalQueueImpl(this.impl, record.gatekeeperId, caller, hookId),
       };
     }
@@ -12991,10 +13092,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // they are held outside this DO (even across resets -- the stored callback is a persistent
     // stub), so this is what ties them to the firing, per the session contract documented on
     // Gatekeeper.bindHook (workshop-shared/gatekeeper.ts).
-    // A run a person asked for, on the gadget's own bindings, starts at the callback's first call;
-    // that call re-checks the person first (FAC-104). A scheduled firing has nobody to re-check.
+    // A scheduled firing: nobody asked, so there is nobody to re-check.
     return {
-      callback: makeHookFiringCallback(this.impl, hookId, delivery?.invocation ? delivery.deliveryId : undefined),
+      callback: makeHookFiringCallback(this.impl, hookId),
       approvalQueue: new ApprovalQueueImpl(this.impl, record.gatekeeperId, {from: "hook"}, hookId),
     };
   }
@@ -17859,17 +17959,15 @@ function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {
 // firing as independent stubs (the bindHook contract permits hooks to pass and return them) and
 // are not re-checked per call. That is deliberate: the holder is a gatekeeper bound by the session
 // contract, and this is a guard against a stale firing by mistake, not a revocable membrane.
-// The callback startHook returns for an admitted, assigned delivery (FAC-102): any call on it runs
-// the delivery once in its run-scoped worker (OverseerImpl.runAssignedDelivery), as its `WorkflowRun`
-// entrypoint's method of the same name (`run` when the callback itself is called). A second call is
-// refused, so a stored callback is no standing route to the service account.
-function makeSystemRunCallback(impl: OverseerImpl, hookId: number,
-    delivery: {deliveryId: number; commitId: string; credentialRef: string}): NativeRpcStub<RpcTarget> {
-  let used = false;
-  let once = (method: string | null, args: unknown[]) => {
-    if (used) throw new Error("This run already started.");
-    used = true;
-    return impl.runAssignedDelivery(hookId, delivery, method, args);
+// The callback startHook returns for a delivery a person asked for (FAC-112): its one call queues
+// the run in this workspace (OverseerImpl.queueWorkflowRun) and returns, and the workspace's alarm
+// runs it later -- an assigned delivery in its run-scoped worker (FAC-102) as its `WorkflowRun`
+// entrypoint's method of the same name (`run` when the callback itself is called), any other on the
+// gadget's own hook code. A second call is refused, so a stored callback is no standing route to
+// the service account or to another run.
+function makeQueuedRunCallback(impl: OverseerImpl, hookId: number, deliveryId: number): NativeRpcStub<RpcTarget> {
+  let once = (method: string | null, args: unknown[]): void => {
+    impl.queueWorkflowRun(hookId, deliveryId, method, args);
   };
   // TODO: Same workerd bug as makeHookFiringCallback: wrap the Proxy in a stub manually.
   return new NativeRpcStub(new Proxy((() => {}) as unknown as RpcTarget, {
@@ -17886,18 +17984,8 @@ function makeSystemRunCallback(impl: OverseerImpl, hookId: number,
   }));
 }
 
-// `requestedDelivery` names the delivery of a run a person asked for (FAC-104): its first call
-// re-checks that person (requireRunRequester, then its synchronous revalidate right before the
-// call goes through), so a request whose delivery starts after a revocation never runs. Later
-// calls of the same firing don't ask InferOps again, but each re-reads the local state
-// (revalidate) and checks the hook.
-function makeHookFiringCallback(impl: OverseerImpl, hookId: number, requestedDelivery?: number): NativeRpcStub<RpcTarget> {
-  let checked: Promise<RunRequesterCheck> | undefined;
-  const requester = async () => {
-    if (requestedDelivery === undefined) return;
-    checked ??= requireRunRequester(impl, hookId, requestedDelivery);
-    (await checked).revalidate();
-  };
+// A firing no person asked for; a requested run takes makeQueuedRunCallback instead (FAC-112).
+function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcStub<RpcTarget> {
   // The proxy target must be callable for the `apply` trap to ever fire (a Proxy over a
   // non-callable target is itself non-callable), and the bindHook contract allows the bound
   // callback to be a function type, invoked by calling the firing's callback directly. An arrow
@@ -17909,7 +17997,6 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number, requestedDel
     // escaping into the RPC machinery that invokes the function (workerd reports that as
     // uncaught, too).
     async apply(_target, _thisArg, args: unknown[]) {
-      await requester();
       let record = requireLiveHook(impl, hookId);
       return Reflect.apply(record.callback as any, undefined, args);
     },
@@ -17919,7 +18006,6 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number, requestedDel
       // dispositions as getGadgetFacet's proxy over the gadget facet.
       if (typeof prop === "symbol" || prop === "then") return undefined;
       return async (...args: unknown[]) => {
-        await requester();
         let record = requireLiveHook(impl, hookId);
         return Reflect.apply((record.callback as any)[prop], record.callback, args);
       };

@@ -7,7 +7,6 @@ import { RpcStub, RpcTarget } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
 import {
-  RUN_REQUESTER_REVOKED,
   OverseerDurableObject, PROVISION_REFUSED, makeOverseerStorage, provisionWorkflowTriggerCredential,
   TRIGGER_AUTO_RETIRED, WORKFLOW_ASSIGNMENTS_DISABLED, retireAssignmentsUsing, retireTriggerAssignment, retireUnboundAssignments,
   setWorkflowTriggerAssignment,
@@ -330,6 +329,9 @@ function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled
       getGadgetHead: headOf,
       defaultGadgetId: GADGET,
       runAssignedDelivery: runSpy,
+      // FAC-112: a requested firing's call queues the run in the workspace's own store.
+      queueWorkflowRun: (hookId: number, deliveryId: number, method: string | null, args: unknown[]) =>
+        store.queueRun(hookId, deliveryId, method, args),
       storage: {
         boundHooks: { get: () => ({ id: HOOK, enabled: true, vendorId: "scheduler", gatekeeperId: 1, gadgetId: GADGET, callback: gadgetCallback }) },
         gatekeepers: { get: () => undefined },
@@ -340,23 +342,27 @@ function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled
 }
 
 describe("startHook for a trigger with an assignment", () => {
-  it("runs an admitted request as the assignment, once, and never through the gadget's own callback", async () => {
+  // FAC-112: the firing's call queues the run, which the workspace's alarm runs as the assignment
+  // from its record (workflow-run-execution.test.ts); nothing runs in the call itself.
+  it("queues an admitted request as the assignment's run, once, and never through the gadget's own callback", async () => {
     let { store } = pinnedStore();
     let assignment = store.setAssignment(ADA, HOOK, INFEROPS)!;
     let { overseer, gadgetCallback, runSpy } = overseerFor(store);
     let invocation = store.beginInvocation("operator", HOOK);
     let { callback } = await overseer.startHook(HOOK, { invocationId: invocation.id });
-    await expect((callback as any).onSchedule({ runId: "x" })).resolves.toBe("as the service account");
+    await expect((callback as any).onSchedule({ runId: "x" })).resolves.toBeUndefined();
     expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
-    expect(runSpy).toHaveBeenCalledWith(HOOK,
-        expect.objectContaining({ commitId: commit(1), credentialRef: assignment.credentialRef }),
-        "onSchedule", [{ runId: "x" }]);
+    expect(runSpy).not.toHaveBeenCalled();
+    let [queued] = store.queuedRuns();
+    expect(queued).toMatchObject({ hookId: HOOK, method: "onSchedule", args: [{ runId: "x" }] });
+    expect(store.deliveryRun(queued!.deliveryId)?.run?.executor)
+      .toEqual({ kind: "service_account", gatekeeperId: INFEROPS, credentialRef: assignment.credentialRef });
     // A stored callback is no standing route to the service account.
     // Awaited directly (as overseer-hooks.test.ts does): an RPC rejection handled late reads as unhandled.
     let refusal: unknown;
     try { await (callback as any).onSchedule({ runId: "y" }); } catch (error) { refusal = error; }
     expect(String(refusal)).toMatch("This run already started.");
-    expect(runSpy).toHaveBeenCalledTimes(1);
+    expect(store.queuedRuns()).toHaveLength(1);
   });
 
   it("keeps a scheduled firing on the gadget's own callback, as before", async () => {
@@ -369,19 +375,9 @@ describe("startHook for a trigger with an assignment", () => {
     expect(gadgetCallback.onSchedule).toHaveBeenCalled();
   });
 
-  // FAC-104 (r1): a run a person asked for, on the gadget's own bindings, re-checks the person when
-  // it starts; a delivery that starts after they were taken off the control never runs.
-  it("doesn't start an unassigned request whose person was taken off the control before it started", async () => {
-    let { store } = pinnedStore();
-    let { overseer, gadgetCallback, runSpy } = overseerFor(store);
-    let { callback } = await overseer.startHook(HOOK, { invocationId: store.beginInvocation("operator", HOOK).id });
-    store.setControl(ADA, HOOK, { label: "Run", invokers: ["someone-else"] });
-    let refusal: unknown;
-    try { await (callback as any).onSchedule({ runId: "late" }); } catch (error) { refusal = error; }
-    expect(String(refusal)).toContain(RUN_REQUESTER_REVOKED);
-    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
-    expect(runSpy).not.toHaveBeenCalled();
-  });
+  // FAC-104 (r1) and FAC-112: a run a person asked for, on the gadget's own bindings, re-checks the
+  // person when the workspace starts it (workflow-run-execution.test.ts), so a person taken off the
+  // control after asking runs nothing; the firing's call only queues it.
 
   it("leaves a scheduled firing, which no person asked for, unaffected by the control", async () => {
     let { store } = pinnedStore();
@@ -392,13 +388,15 @@ describe("startHook for a trigger with an assignment", () => {
     expect(gadgetCallback.onSchedule).toHaveBeenCalled();
   });
 
-  it("keeps an unassigned trigger's request on the gadget's own callback, as before", async () => {
+  it("queues an unassigned trigger's request for the gadget's own code, which the firing never calls", async () => {
     let { store } = pinnedStore();
     let { overseer, gadgetCallback, runSpy } = overseerFor(store);
     let { callback } = await overseer.startHook(HOOK, { invocationId: store.beginInvocation("operator", HOOK).id });
-    await expect((callback as any).onSchedule({ runId: "r" })).resolves.toBe("gadget's own");
+    await expect((callback as any).onSchedule({ runId: "r" })).resolves.toBeUndefined();
     expect(runSpy).not.toHaveBeenCalled();
-    expect(gadgetCallback.onSchedule).toHaveBeenCalled();
+    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
+    let [queued] = store.queuedRuns();
+    expect(store.deliveryRun(queued!.deliveryId)?.run?.executor).toEqual({ kind: "gadget_bindings" });
   });
 });
 

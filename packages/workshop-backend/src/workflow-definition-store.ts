@@ -19,6 +19,16 @@ export type StoredTriggerPin = WorkflowDefinitionRef & { hookId: number };
 /** A stored delivery, numbered so the oldest can be dropped. */
 export type StoredWorkflowDelivery = WorkflowDefinitionDelivery & { id: number };
 
+/**
+ * A run a person asked for, queued in the workspace that executes it (FAC-112): the firing's one
+ * call (`method`, or the callback itself when null) and its arguments, kept until the run ends. Its
+ * scope and authority are its delivery's `run`, never anything here.
+ */
+export type QueuedWorkflowRun = { deliveryId: number; hookId: number; method: string | null; args: unknown[] };
+
+/** The refusal of a second call on a run that was already queued (FAC-112). */
+export const WORKFLOW_RUN_ALREADY_STARTED = "This run already started.";
+
 /** A trigger's control: who may ask it to run now. Its revision is always the trigger's pin. */
 export type StoredTriggerControl = Required<Omit<TriggerControl, "definition">>;
 
@@ -62,7 +72,8 @@ export class WorkspaceWorkflowDefinitionStore {
       private storage: Pick<OverseerStorage,
           "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
-          "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired">) {}
+          "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired" |
+          "workflowRunQueue">) {}
 
   /** The definitions `viewer` may see: their own in full, and others' published revision only. */
   list(viewer: string): WorkflowDefinition[] {
@@ -499,6 +510,69 @@ export class WorkspaceWorkflowDefinitionStore {
       invoked: delivery.invocation !== undefined,
       ...(delivery.run ? { run: this.run(delivery.run.runId) ?? undefined } : {}),
     };
+  }
+
+  /**
+   * Queue the run delivery `deliveryId` admitted for a person (FAC-112), with the firing's one call:
+   * recorded together with its `execution` (`queued`) in one step, so the run is queued exactly when
+   * its record says so. Refuses a delivery no person asked for, a run already queued or ended
+   * (`WORKFLOW_RUN_ALREADY_STARTED`), and arguments storage can't hold (a function or a stub).
+   */
+  queueRun(hookId: number, deliveryId: number, method: string | null, args: unknown[]): void {
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    if (!delivery?.invocation || !delivery.run || delivery.hookId !== hookId) throw new Error(CANNOT_RUN);
+    if (delivery.execution || this.storage.workflowRunQueue.get(deliveryId)) {
+      throw new Error(WORKFLOW_RUN_ALREADY_STARTED);
+    }
+    try {
+      structuredClone(args);
+    } catch {
+      throw new Error("This run's arguments can't be stored, so it can't run.");
+    }
+    this.durableStorage.transactionSync(() => {
+      this.storage.workflowRunQueue.put({ deliveryId, hookId, method, args });
+      this.storage.workflowDeliveries.put({ ...delivery, execution: { state: "queued", attempts: 0, queuedAt: new Date() } });
+    });
+  }
+
+  /** Every queued run, by delivery (FAC-112): what the workspace still has to run, or to run again. */
+  queuedRuns(): QueuedWorkflowRun[] {
+    return [...this.storage.workflowRunQueue.list()];
+  }
+
+  /**
+   * Mark queued run `deliveryId` started (FAC-112), counting the attempt, and return its delivery,
+   * the run's only starting context. Null, and the run unqueued, when its delivery is gone (dropped
+   * past `MAX_WORKFLOW_DELIVERIES`).
+   */
+  startRun(deliveryId: number): StoredWorkflowDelivery | null {
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    if (!delivery?.execution) {
+      this.storage.workflowRunQueue.delete(deliveryId);
+      return null;
+    }
+    let started: StoredWorkflowDelivery = {
+      ...delivery,
+      execution: { ...delivery.execution, state: "running", attempts: delivery.execution.attempts + 1, startedAt: new Date() },
+    };
+    this.storage.workflowDeliveries.put(started);
+    return started;
+  }
+
+  /** Record queued run `deliveryId` ended (FAC-112), failed with `error`'s words when given, and unqueue it. */
+  endRun(deliveryId: number, error?: string): void {
+    this.durableStorage.transactionSync(() => {
+      this.storage.workflowRunQueue.delete(deliveryId);
+      let delivery = this.storage.workflowDeliveries.get(deliveryId);
+      if (!delivery?.execution) return;
+      this.storage.workflowDeliveries.put({
+        ...delivery,
+        execution: {
+          ...delivery.execution, state: error === undefined ? "finished" : "failed", endedAt: new Date(),
+          ...(error === undefined ? {} : { error: error.slice(0, 500) }),
+        },
+      });
+    });
   }
 
   /** The recorded deliveries of a definition visible to `viewer`, oldest first. */

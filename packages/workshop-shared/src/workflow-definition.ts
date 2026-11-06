@@ -98,6 +98,28 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
    * FAC-111.
    */
   run?: WorkflowRunAuthority;
+  /**
+   * How a run a person asked for is executing (FAC-112): present once its firing queued it in the
+   * workspace, and updated there as the workspace runs it, apart from the call that asked. `run`
+   * beside it never changes.
+   */
+  execution?: WorkflowRunExecution;
+};
+
+/**
+ * Where a run a person asked for stands in the workspace that executes it (FAC-112). `queued`: the
+ * firing recorded it, and nothing of it ran yet. `running`: the workspace started it (`attempts`
+ * times; above 1 when a restart interrupted it and it ran again from its start). `finished` or
+ * `failed`: it ended, with the error's words when it failed. Only this; a run's results, events
+ * and delegates aren't recorded here.
+ */
+export type WorkflowRunExecution = {
+  state: "queued" | "running" | "finished" | "failed";
+  attempts: number;
+  queuedAt: Date;
+  startedAt?: Date;
+  endedAt?: Date;
+  error?: string;
 };
 
 /**
