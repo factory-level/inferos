@@ -269,6 +269,20 @@ describe('a pinned trigger\'s run-on-request control', () => {
     expect(section.textContent?.match(/Operations board/g)).toHaveLength(1)
   })
 
+  it("shows a gadget whose connections can't be read as an error, not as having none", async () => {
+    const dispose = vi.fn<() => void>()
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      getGadget: (() => ({
+        listBindings: async () => { throw new Error('gadget unavailable') }, [Symbol.dispose]: dispose,
+      })) as unknown as Overseer['getGadget'],
+    })
+    const section = container.querySelector('[aria-label="Runs act as"]')!
+    expect(section.querySelector('[role="alert"]')?.textContent).toBe("Couldn't read this trigger's connections.")
+    expect(section.textContent).not.toContain("Bind this trigger's gadget to a connection")
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+
   it("shows a pinned trigger's assignment and whether its key was given", async () => {
     await render({
       listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,

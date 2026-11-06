@@ -82,8 +82,39 @@ const type = async (input: HTMLInputElement, value: string) => {
     input.dispatchEvent(new Event('input', { bubbles: true }))
   })
 }
-const submit = async () => {
-  await act(async () => { keyField().form!.requestSubmit() })
+const pressEnter = async () => {
+  await act(async () => {
+    keyField().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+  })
+}
+
+/**
+ * Whether `secret` appears anywhere React holds for the rendered tree: every fiber's props and
+ * its hooks' state. DOM nodes are skipped, since the input element itself is where the key is
+ * meant to live while it is typed.
+ */
+const reactTreeHolds = (secret: string): boolean => {
+  const rootKey = Object.keys(container).find(k => k.startsWith('__reactContainer$'))!
+  const seen = new Set<unknown>()
+  const holds = (value: unknown, depth: number): boolean => {
+    if (typeof value === 'string') return value.includes(secret)
+    if (value === null || typeof value !== 'object' || depth > 8 || seen.has(value)) return false
+    if (value instanceof Node) return false
+    seen.add(value)
+    return Object.entries(value).some(([k, v]) =>
+      !['return', 'child', 'sibling', 'alternate', '_owner', 'stateNode'].includes(k) && holds(v, depth + 1))
+  }
+  type Fiber = { memoizedProps?: unknown; memoizedState?: unknown; child?: Fiber | null; sibling?: Fiber | null }
+  const visit = (fiber: Fiber | null | undefined): boolean => {
+    for (let f = fiber; f; f = f.sibling) {
+      if (holds(f.memoizedProps, 0) || holds(f.memoizedState, 0) || visit(f.child)) return true
+    }
+    return false
+  }
+  // The container keeps the root fiber it was created with, which may now be the stale alternate;
+  // its FiberRoot (stateNode) points at the committed tree.
+  const hostRoot = (container as unknown as Record<string, { stateNode: { current: Fiber } }>)[rootKey]!
+  return visit(hostRoot.stateNode.current)
 }
 
 describe('TriggerAssignmentEditor', () => {
@@ -109,27 +140,56 @@ describe('TriggerAssignmentEditor', () => {
     expect(container.querySelector('select')).toBeNull()
   })
 
-  it('takes the key in a password field and gives it once, then empties the field', async () => {
-    const provisionTriggerCredential = vi.fn<Overseer['provisionTriggerCredential']>(async () => assignment({ provisionedBy: ADA, provisionedAt: new Date() }))
-    const onChanged = await render(overseerWith({ provisionTriggerCredential }), assignment())
-    expect(keyField().type).toBe('password')
-    expect(keyField().autocomplete).toBe('off')
-    await type(keyField(), KEY)
-    await submit()
-    expect(provisionTriggerCredential).toHaveBeenCalledExactlyOnceWith(1, KEY)
-    expect(keyField().value).toBe('')
-    expect(onChanged).toHaveBeenCalled()
-    expect(container.innerHTML).not.toContain(KEY)
+  it("says the gadget's connections couldn't be read, and retries", async () => {
+    const onChanged = vi.fn<() => void>()
+    await act(async () => {
+      root.render(<TriggerAssignmentEditor overseer={overseerWith({})} hookId={1} assignment={null}
+        connections={null} onChanged={onChanged} />)
+    })
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Couldn't read this trigger's connections.")
+    expect(container.textContent).not.toContain("Bind this trigger's gadget to a connection")
+    await act(async () => { button('Retry').click() })
+    expect(onChanged).toHaveBeenCalledOnce()
   })
 
-  it("empties the field when the key is refused too, and shows the server's words", async () => {
+  it('keeps password managers off the key field, and submits no form', async () => {
+    await render(overseerWith({}), assignment())
+    const field = keyField()
+    expect(field.type).toBe('password')
+    expect(field.autocomplete).toBe('new-password')
+    for (const optOut of ['data-1p-ignore', 'data-lpignore', 'data-bwignore', 'data-keeper-ignore']) {
+      expect(field.getAttribute(optOut)).toBe('true')
+    }
+    expect(container.querySelector('form')).toBeNull()
+    expect(field.form).toBeNull()
+  })
+
+  it('gives the key once from the field alone, never through React state or props, then empties it', async () => {
+    const provisionTriggerCredential = vi.fn<Overseer['provisionTriggerCredential']>(async () => assignment({ provisionedBy: ADA, provisionedAt: new Date() }))
+    const onChanged = await render(overseerWith({ provisionTriggerCredential }), assignment())
+    await type(keyField(), KEY)
+    expect(button('Give key').disabled).toBe(false)
+    // While it is typed, the key is only the DOM input's value.
+    expect(reactTreeHolds(KEY)).toBe(false)
+    await act(async () => { button('Give key').click() })
+    expect(provisionTriggerCredential).toHaveBeenCalledExactlyOnceWith(1, KEY)
+    expect(keyField().value).toBe('')
+    expect(button('Give key').disabled).toBe(true)
+    expect(onChanged).toHaveBeenCalled()
+    expect(container.innerHTML).not.toContain(KEY)
+    expect(reactTreeHolds(KEY)).toBe(false)
+  })
+
+  it("gives it on Enter too, empties the field when it is refused, and shows the server's words", async () => {
     const provisionTriggerCredential = vi.fn<Overseer['provisionTriggerCredential']>(async () => { throw new Error("The key wasn't accepted.") })
     const onChanged = await render(overseerWith({ provisionTriggerCredential }), assignment())
     await type(keyField(), KEY)
-    await submit()
+    await pressEnter()
+    expect(provisionTriggerCredential).toHaveBeenCalledExactlyOnceWith(1, KEY)
     expect(keyField().value).toBe('')
     expect(container.querySelector('[role="alert"]')?.textContent).toBe("The key wasn't accepted.")
     expect(container.innerHTML).not.toContain(KEY)
+    expect(reactTreeHolds(KEY)).toBe(false)
     expect(onChanged).not.toHaveBeenCalled()
   })
 

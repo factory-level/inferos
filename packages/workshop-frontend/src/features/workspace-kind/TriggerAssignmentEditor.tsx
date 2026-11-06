@@ -1,9 +1,9 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { Select } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { TriggerAssignment } from '@gadgets/workshop-shared/workflow-definition'
-import { WorkshopButton, WorkshopInput } from '../../components/WorkshopControls'
+import { WorkshopButton } from '../../components/WorkshopControls'
 
 /** A connection the trigger's gadget binds, which its runs can act through. */
 export type AssignableConnection = { id: number; title: string }
@@ -15,20 +15,26 @@ const errorText = (err: unknown, fallback: string) =>
  * Who one pinned trigger's runs on request act as (FAC-102): a service account in one of the
  * gadget's connections (Overseer.setTriggerAssignment), never the person who asks for a run. Once
  * assigned, an Admin gives that connection the service account's key (provisionTriggerCredential).
- * The key lives only in this field's local state while it is typed: it is never put in props, the
- * URL or anything kept, and the field is emptied as soon as it is sent, whether or not the key was
- * accepted. The editor shows who gave the key and when, never the key. Refusals show in the
- * server's words.
+ *
+ * The key field is uncontrolled: the key is only ever the DOM input's own value while it is typed,
+ * read through a ref when it is sent, never React state, a prop or anything kept, and never the
+ * URL. The field is emptied as it is sent, whether or not the key is accepted. As defence in depth
+ * against password managers saving it, the field asks for a new password, carries the managers'
+ * opt-outs, and sits in no `<form>`, so nothing is ever submitted natively; Enter and the button
+ * send it. The editor shows who gave the key and when, never the key. Refusals show in the
+ * server's words. `connections` is null when the gadget's connections couldn't be read.
  */
 export const TriggerAssignmentEditor = ({ overseer, hookId, assignment, connections, onChanged }: {
   overseer: RpcStub<Overseer>
   hookId: number
   assignment: TriggerAssignment | null
-  connections: readonly AssignableConnection[]
+  connections: readonly AssignableConnection[] | null
   onChanged: () => void
 }) => {
-  const [choice, setChoice] = useState<number | null>(connections[0]?.id ?? null)
-  const [key, setKey] = useState('')
+  const [choice, setChoice] = useState<number | null>(connections?.[0]?.id ?? null)
+  const keyField = useRef<HTMLInputElement>(null)
+  // Whether the field holds anything, for the button; never the key itself.
+  const [hasKey, setHasKey] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -46,14 +52,17 @@ export const TriggerAssignmentEditor = ({ overseer, hookId, assignment, connecti
   }
 
   const giveKey = async () => {
-    const typed = key
+    const field = keyField.current
+    if (!field?.value || busy) return
+    const typed = field.value
     // Emptied before the call returns, so the key isn't left on screen whatever happens.
-    setKey('')
+    field.value = ''
+    setHasKey(false)
     await run(() => overseer.provisionTriggerCredential(hookId, typed), "The key wasn't accepted.")
   }
 
   const assigned = assignment
-    ? connections.find(c => c.id === assignment.gatekeeperId)?.title ?? 'A connection no longer bound'
+    ? connections?.find(c => c.id === assignment.gatekeeperId)?.title ?? 'A connection no longer bound'
     : null
 
   return (
@@ -69,29 +78,43 @@ export const TriggerAssignmentEditor = ({ overseer, hookId, assignment, connecti
               ? `Key given by ${assignment.provisionedBy.name} on ${new Date(assignment.provisionedAt).toLocaleString()}.`
               : 'No key yet: runs are refused until an Admin gives one.'}
           </p>
-          <form
-            className="flex gap-2"
-            onSubmit={e => {
-              e.preventDefault()
-              if (key) void giveKey()
-            }}
-          >
-            <WorkshopInput
+          <div className="flex gap-2">
+            {/* A plain input, so the key never travels as a prop; styled as WorkshopInput. */}
+            <input
+              ref={keyField}
               aria-label="Service account key"
               type="password"
-              autoComplete="off"
+              name="trigger-service-account-key"
+              autoComplete="new-password"
+              spellCheck={false}
+              data-1p-ignore="true"
+              data-lpignore="true"
+              data-bwignore="true"
+              data-keeper-ignore="true"
               placeholder={assignment.provisionedAt ? 'Replace the key' : 'Paste the key'}
-              value={key}
-              onChange={e => setKey(e.target.value)}
-              className="w-full"
+              onChange={e => setHasKey(e.currentTarget.value !== '')}
+              onKeyDown={e => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  void giveKey()
+                }
+              }}
+              className="!h-9 w-full rounded-md border-0 bg-kumo-control px-3 text-[13px] leading-[18px] font-normal tracking-[-0.25px] text-kumo-default placeholder:text-kumo-inactive shadow-none ring-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring"
             />
-            <WorkshopButton type="submit" disabled={busy || !key}>Give key</WorkshopButton>
-          </form>
+            <WorkshopButton disabled={busy || !hasKey} onClick={() => void giveKey()}>Give key</WorkshopButton>
+          </div>
           <div className="flex justify-end">
             <WorkshopButton disabled={busy} onClick={() => run(() => overseer.setTriggerAssignment(hookId, null),
               "Couldn't remove the assignment.")}>Remove</WorkshopButton>
           </div>
         </>
+      ) : connections === null ? (
+        <div className="flex items-center justify-between gap-2">
+          <p role="alert" className="m-0 text-[12px] leading-4 text-kumo-danger">
+            Couldn't read this trigger's connections.
+          </p>
+          <WorkshopButton onClick={onChanged}>Retry</WorkshopButton>
+        </div>
       ) : connections.length === 0 ? (
         <p className="m-0 text-[12px] leading-4 text-kumo-subtle">
           Bind this trigger's gadget to a connection to run it as a service account.

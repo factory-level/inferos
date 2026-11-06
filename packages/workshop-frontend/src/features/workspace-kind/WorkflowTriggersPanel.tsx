@@ -39,7 +39,7 @@ type Loaded =
       // Each pinned hook's service-account assignment, by hook id; absent when it has none.
       assignments: ReadonlyMap<number, TriggerAssignment>
       // The connections each pinned hook's gadget binds, which an assignment can choose, by hook id.
-      connections: ReadonlyMap<number, AssignableConnection[]>
+      connections: ReadonlyMap<number, AssignableConnection[] | null>
     }
 
 // The definition revision a trigger could run: the published one for the gadget it wakes.
@@ -53,8 +53,9 @@ const publishedFor = (definitions: readonly WorkflowDefinition[], gadgetId: numb
   })
 
 // The connections a trigger's gadget binds, once each, for choosing who its runs act as. The server
-// checks the choice; a gadget that can't be read offers none rather than failing the panel.
-const connectionsOf = async (overseer: RpcStub<Overseer>, gadgetId: number): Promise<AssignableConnection[]> => {
+// checks the choice. A gadget that can't be read gives null, which the editor shows as an error
+// with a retry, rather than as having no connections or failing the whole panel.
+const connectionsOf = async (overseer: RpcStub<Overseer>, gadgetId: number): Promise<AssignableConnection[] | null> => {
   const gadget = overseer.getGadget(gadgetId)
   try {
     const bindings = await gadget.listBindings()
@@ -64,7 +65,7 @@ const connectionsOf = async (overseer: RpcStub<Overseer>, gadgetId: number): Pro
     }
     return [...seen.values()]
   } catch {
-    return []
+    return null
   } finally {
     gadget[Symbol.dispose]()
   }
@@ -275,7 +276,7 @@ export const WorkflowTriggersPanel = ({
                         overseer={overseer}
                         hookId={hook.id}
                         assignment={loaded.assignments.get(hook.id) ?? null}
-                        connections={loaded.connections.get(hook.id) ?? []}
+                        connections={loaded.connections.get(hook.id) ?? null}
                         onChanged={() => setReloadTick(t => t + 1)}
                       />
                     )}
