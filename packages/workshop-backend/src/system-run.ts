@@ -223,9 +223,12 @@ export function revocableSession(session: object, assertLive: () => void): objec
  * `systemRun` caller. No `GADGET`, `GIT` or other binding is there, and the worker has no outbound
  * network, so no person's token is reachable and nothing falls back to one. Calls the code's
  * `WorkflowRun` entrypoint: `method` on it, or `run` when the firing calls the callback itself.
+ * `revalidate` is the caller's synchronous re-check, run after the last await and immediately before
+ * the run registers (FAC-104); it throws to refuse.
  */
 export async function runAssignedDelivery(host: SystemRunHost, hookId: number, delivery: AssignedDelivery,
-                                          method: string | null, args: unknown[]): Promise<unknown> {
+                                          method: string | null, args: unknown[],
+                                          revalidate: () => void = () => {}): Promise<unknown> {
   let assignment = host.assignmentOf(hookId);
   if (!assignment || assignment.credentialRef !== delivery.credentialRef) throw new Error(SYSTEM_RUN_ASSIGNMENT_CHANGED);
   if (host.systemRuns.has(delivery.deliveryId)) throw new Error("This run already started.");
@@ -241,6 +244,9 @@ export async function runAssignedDelivery(host: SystemRunHost, hookId: number, d
   let modules = await host.readModules(delivery.commitId);
   // Re-checked after the await: an assignment changed meanwhile never runs on the old one.
   if (host.assignmentOf(hookId)?.credentialRef !== delivery.credentialRef) throw new Error(SYSTEM_RUN_ASSIGNMENT_CHANGED);
+  // The caller's own synchronous re-check (FAC-104: the requester's local authority), here, after
+  // the last await and before the run registers, so nothing can change between it and the start.
+  revalidate();
   host.systemRuns.begin(delivery.deliveryId,
       { hookId, gatekeeperId: assignment.gatekeeperId, credentialRef: assignment.credentialRef });
   try {

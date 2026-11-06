@@ -7,6 +7,7 @@ import { RpcStub, RpcTarget } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
 import {
+  RUN_REQUESTER_REVOKED,
   OverseerDurableObject, PROVISION_REFUSED, makeOverseerStorage, provisionWorkflowTriggerCredential,
   TRIGGER_AUTO_RETIRED, WORKFLOW_ASSIGNMENTS_DISABLED, retireAssignmentsUsing, retireTriggerAssignment, retireUnboundAssignments,
   setWorkflowTriggerAssignment,
@@ -172,6 +173,17 @@ describe("a run's sessions", () => {
     await expect(openSystemRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, CALLER)).rejects.toThrow(SYSTEM_RUN_ENDED);
   });
 
+  // FAC-104: the caller's synchronous re-check runs after the run's last await (the module read)
+  // and before the run registers, so a refusal there starts nothing.
+  it("refuse to start when the caller's re-check refuses after the module read", async () => {
+    let made = host();
+    let refusal = await runAssignedDelivery(made.h, HOOK, DELIVERY, null, [], () => { throw new Error("revoked meanwhile"); })
+        .then(() => "started", (e: Error) => e.message);
+    expect(refusal).toBe("revoked meanwhile");
+    expect(made.h.systemRuns.has(DELIVERY.deliveryId)).toBe(false);
+    expect(made.sessions).toEqual([]);
+  });
+
   it("refuse another connection, a gadget, git, another delivery and another hook", async () => {
     let made = host();
     let attempts: string[] = [];
@@ -292,6 +304,7 @@ function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled
       ...(assignmentsEnabled ? { WORKFLOW_ASSIGNMENTS_ENABLED: "true" } : {}),
     },
     impl: {
+      env: {},
       takenInvocations,
       assertGatekeeperUsable: () => {},
       getSharingManager: async () => ({ getEffectiveRole: () => undefined }),
@@ -336,6 +349,29 @@ describe("startHook for a trigger with an assignment", () => {
     let { callback } = await overseer.startHook(HOOK);
     await expect((callback as any).onSchedule({ runId: "s" })).resolves.toBe("gadget's own");
     expect(runSpy).not.toHaveBeenCalled();
+    expect(gadgetCallback.onSchedule).toHaveBeenCalled();
+  });
+
+  // FAC-104 (r1): a run a person asked for, on the gadget's own bindings, re-checks the person when
+  // it starts; a delivery that starts after they were taken off the control never runs.
+  it("doesn't start an unassigned request whose person was taken off the control before it started", async () => {
+    let { store } = pinnedStore();
+    let { overseer, gadgetCallback, runSpy } = overseerFor(store);
+    let { callback } = await overseer.startHook(HOOK, { invocationId: store.beginInvocation("operator", HOOK).id });
+    store.setControl(ADA, HOOK, { label: "Run", invokers: ["someone-else"] });
+    let refusal: unknown;
+    try { await (callback as any).onSchedule({ runId: "late" }); } catch (error) { refusal = error; }
+    expect(String(refusal)).toContain(RUN_REQUESTER_REVOKED);
+    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
+    expect(runSpy).not.toHaveBeenCalled();
+  });
+
+  it("leaves a scheduled firing, which no person asked for, unaffected by the control", async () => {
+    let { store } = pinnedStore();
+    let { overseer, gadgetCallback } = overseerFor(store);
+    let { callback } = await overseer.startHook(HOOK);
+    store.setControl(ADA, HOOK, { label: "Run", invokers: ["someone-else"] });
+    await expect((callback as any).onSchedule({ runId: "s2" })).resolves.toBe("gadget's own");
     expect(gadgetCallback.onSchedule).toHaveBeenCalled();
   });
 

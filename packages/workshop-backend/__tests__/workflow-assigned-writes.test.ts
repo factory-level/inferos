@@ -46,6 +46,9 @@ async function inAssigned(name: string, fn: (impl: any, opened: Opened[], apply:
     // run acts as the assignment. Written as the store writes it, so the apply can re-check it.
     impl.storage.workflowTriggerPins.put({ hookId: HOOK, definitionId: "def", revision: 1 });
     impl.storage.workflowTriggerControls.put({ hookId: HOOK, label: "Run", invokers: [PERSON], configuredBy: ADA, configuredAt: new Date(0) });
+    // The assignment the run acts as, and the live hook: what the requester's re-check re-reads.
+    impl.storage.workflowTriggerAssignments.put({ hookId: HOOK, gatekeeperId: CONNECTION, credentialRef: REF, assignedBy: ADA, assignedAt: new Date(0) });
+    impl.storage.boundHooks = { get: (id: number) => (id === HOOK ? { id: HOOK, gadgetId: 1, enabled: true } : undefined), list: () => [] };
     impl.storage.workflowDeliveries.put({
       id: DELIVERY, hookId: HOOK, definitionId: "def", revision: 1, commitId: "c".repeat(40), at: new Date(0),
       invocation: { id: "inv", requestedBy: PERSON }, executedAs: { credentialRef: REF },
@@ -153,7 +156,7 @@ describe("an assigned run's write, approved by a person", () => {
  * (as requireWorkflowInvoke does): the hook's gadget binds the assigned connection, and the
  * person's user object answers `answer`.
  */
-function askingInferOps(impl: any, answer: () => { holds: boolean; company: string | null }) {
+function askingInferOps(impl: any, answer: () => { holds: boolean; company: string | null } | Promise<{ holds: boolean; company: string | null }>) {
   impl.env = { ...impl.env, SHARED_CONFIGURATION_GATEKEEPER: "inferops" };
   impl.storage.boundHooks = { get: (id: number) => (id === HOOK ? { id: HOOK, gadgetId: 1, enabled: true } : undefined) };
   impl.getGadgetRecord = () => ({});
@@ -240,6 +243,77 @@ describe("a delayed run, re-checked when it starts (FAC-104)", () => {
       expect(await refusalOf(() => impl.runAssignedDelivery(HOOK, { deliveryId: DELIVERY, commitId: "c".repeat(40), credentialRef: REF }, null, [])))
         .toContain(RUN_REQUESTER_REVOKED);
       // Refused before the run was registered: nothing of it is running.
+      expect(() => impl.systemRuns.require({ from: "systemRun", hookId: HOOK, deliveryId: DELIVERY })).toThrow();
+    });
+  });
+});
+
+// FAC-104 round 1 (review HIGH): the person's answer is awaited, so local authority can change
+// while it's pending. It is re-read synchronously right before the work: a change meanwhile refuses.
+describe("local authority changed while the person's answer was pending (FAC-104)", () => {
+  /** An answer that stays pending until released, and a promise of the moment it was asked. */
+  function deferredAnswer() {
+    let release!: (answer: { holds: boolean; company: string | null }) => void;
+    let pending = new Promise<{ holds: boolean; company: string | null }>(resolve => { release = resolve; });
+    return { pending, release };
+  }
+  const admittedIn = (impl: any) => {
+    let stored = impl.storage.workflowDeliveries.get(DELIVERY);
+    impl.storage.workflowDeliveries.put({ ...stored, run: { ...stored.run, company: COMPANY } });
+  };
+  const offTheControl = (impl: any) =>
+    impl.storage.workflowTriggerControls.put({ hookId: HOOK, label: "Run", invokers: ["someone-else"], configuredBy: ADA, configuredAt: new Date(0) });
+
+  it("refuses the apply when the person is taken off the control meanwhile", async () => {
+    await inAssigned("fac104-race-control", async (impl, opened, apply) => {
+      let record = await proposeAsRun(impl);
+      admittedIn(impl);
+      let answer = deferredAnswer();
+      let asked = askingInferOps(impl, () => answer.pending);
+      let applying = refusalOf(() => impl.applyPendingAction(record, ADA, false));
+      await vi.waitFor(() => expect(asked).toHaveLength(1));
+      offTheControl(impl);
+      answer.release({ holds: true, company: COMPANY });
+      expect(await applying).toContain(RUN_REQUESTER_REVOKED);
+      expect(apply).not.toHaveBeenCalled();
+      expect(opened.every(entry => entry.closed)).toBe(true);
+      expect(impl.storage.actions.get(record.id).state).toBe("pending");
+    });
+  });
+
+  it("refuses the apply when the assignment changes meanwhile", async () => {
+    await inAssigned("fac104-race-assignment", async (impl, opened, apply) => {
+      let record = await proposeAsRun(impl);
+      admittedIn(impl);
+      let answer = deferredAnswer();
+      let asked = askingInferOps(impl, () => answer.pending);
+      // The liveness check reads the real assignment here, so a change is seen by both checks.
+      impl.assignedActionProblem = (r: any) =>
+        impl.workflowDefinitionStore().assignmentOf(HOOK)?.credentialRef === r.executedAs.credentialRef ? null
+          : "This action's workflow assignment changed or ended since it was proposed, so it can't be applied. Reject it.";
+      impl.storage.workflowTriggerAssignments.put({ hookId: HOOK, gatekeeperId: CONNECTION, credentialRef: REF, assignedBy: ADA, assignedAt: new Date(0) });
+      let applying = refusalOf(() => impl.applyPendingAction(record, ADA, false));
+      await vi.waitFor(() => expect(asked).toHaveLength(1));
+      impl.storage.workflowTriggerAssignments.put({ hookId: HOOK, gatekeeperId: CONNECTION, credentialRef: "another-ref", assignedBy: ADA, assignedAt: new Date(0) });
+      answer.release({ holds: true, company: COMPANY });
+      expect(await applying).toMatch(/can't run it now|changed or ended/);
+      expect(apply).not.toHaveBeenCalled();
+      expect(impl.storage.actions.get(record.id).state).toBe("pending");
+    });
+  });
+
+  it("doesn't start a delayed run when the person is taken off the control meanwhile", async () => {
+    await inAssigned("fac104-race-start", async impl => {
+      admittedIn(impl);
+      impl.storage.workflowTriggerAssignments.put({ hookId: HOOK, gatekeeperId: CONNECTION, credentialRef: REF, assignedBy: ADA, assignedAt: new Date(0) });
+      impl.systemRuns.end(DELIVERY);
+      let answer = deferredAnswer();
+      let asked = askingInferOps(impl, () => answer.pending);
+      let starting = refusalOf(() => impl.runAssignedDelivery(HOOK, { deliveryId: DELIVERY, commitId: "c".repeat(40), credentialRef: REF }, null, []));
+      await vi.waitFor(() => expect(asked).toHaveLength(1));
+      offTheControl(impl);
+      answer.release({ holds: true, company: COMPANY });
+      expect(await starting).toContain(RUN_REQUESTER_REVOKED);
       expect(() => impl.systemRuns.require({ from: "systemRun", hookId: HOOK, deliveryId: DELIVERY })).toThrow();
     });
   });
