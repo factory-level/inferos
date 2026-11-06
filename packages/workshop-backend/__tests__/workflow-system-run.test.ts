@@ -3,6 +3,7 @@
 // run-scoped worker whose only bindings reach the assigned connection, and that connection's
 // sessions open on its vendor's system class for the assignment, never a person's facet. Nothing
 // falls back: anything else a run asks for is refused, and a session outlives no run.
+import { RpcStub, RpcTarget } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
 import {
@@ -11,7 +12,7 @@ import {
 } from "../src/overseer.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SYSTEM_RUN_ENDED, SYSTEM_RUN_UNSUPPORTED, SYSTEM_RUN_WRONG_CONNECTION,
-  SystemRunRegistry, openSystemRunSession, runAssignedDelivery, systemGatekeeperFacetName,
+  SystemRunRegistry, openSystemRunSession, revocableSession, runAssignedDelivery, systemGatekeeperFacetName,
   type SystemRunCaller, type SystemRunHost,
 } from "../src/system-run.js";
 import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
@@ -755,5 +756,22 @@ describe("#374 round 4: every route that removes the assigned binding retires th
     let made = assignedWithRun();
     made.raw.storage.boundHooks = { get: () => undefined };
     await expectRetired(made);
+  });
+});
+
+// QA on the real runtime (#374): a run's binding is the session wrapper behind a native RPC stub,
+// and Workers RPC must find its methods; the unit fakes above never cross RPC.
+describe("a run's session over real Workers RPC", () => {
+  it("serves the session's methods through a native RPC stub, checking the run is live on every call", async () => {
+    let live = true;
+    let session = { readBoard: async () => ({ issues: 3 }), createIssue: async (input: { title: string }) => input.title };
+    let stub = new RpcStub(revocableSession(session, () => { if (!live) throw new Error(SYSTEM_RUN_ENDED); }) as RpcTarget) as unknown as
+        { readBoard(): Promise<{ issues: number }>; createIssue(input: { title: string }): Promise<string> };
+    expect(await stub.readBoard()).toEqual({ issues: 3 });
+    expect(await stub.createIssue({ title: "Refund 42" })).toBe("Refund 42");
+    live = false;
+    let refused: unknown;
+    try { await stub.readBoard(); } catch (error) { refused = error; }
+    expect(String(refused)).toContain(SYSTEM_RUN_ENDED);
   });
 });

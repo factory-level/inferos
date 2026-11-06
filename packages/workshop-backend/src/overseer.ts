@@ -17482,7 +17482,9 @@ export async function invokeWorkflowTrigger(
   } catch (error) {
     store.cancelInvocation(invocation.id);
     let message = error instanceof Error ? error.message : String(error);
-    if (/does not implement|is not a function|undefined is not|no such method/i.test(message)) {
+    // Only the gatekeeper lacking `invoke` itself means it can't run on request. Any other failure,
+    // a run's own binding call included, is the run's, and surfaces with its cause.
+    if (/does not implement the method "invoke"|\binvoke is not a function|no such method:? "?invoke\b/i.test(message)) {
       throw new Error("This trigger can't be run on request.", {cause: error});
     }
     throw error;
