@@ -7,7 +7,7 @@ import type { ServiceQueryName, ServiceQueryOptions, ServiceQueryPage } from "./
 import type {
   Board, Issue, IssueActivity, IssueActivityEntry, IssueChanges, Priority, Project, Repo, Revision, Run, TableTargetKind,
   WikiDocumentNode, WikiProposal, WikiProposalFreshness, WikiProposalSource, WikiProposalState,
-  WikiStructure,
+  WikiSearchHit, WikiStructure,
 } from "./types";
 import type { WorkflowHeadRecord } from "./workflow-policy";
 
@@ -153,6 +153,21 @@ export type WikiDocumentHead = Pick<WikiDocumentNode, "id" | "slug" | "title"> &
 
 /** The Wiki's structure as InferOps reports it, with page ids lowercased. */
 export type WikiStructureRecord = WikiStructure;
+
+/** One InferOS Blueprint widget version as `publishWidgetDefinition` lists it. */
+export type WidgetDefinitionWrite = {
+  /** The Blueprint's id. */
+  sourceId: string;
+  /** The Blueprint version, from 1. */
+  sourceVersion: number;
+  /** The widget's name, 1 to 120 characters. */
+  title: string;
+  /** What the widget is for, 1 to 2000 characters. */
+  purpose: string;
+};
+
+/** One `knowledge.search` hit as InferOps returns it, without its `score` (decision 5). */
+export type WikiSearchRecord = Omit<WikiSearchHit, "pending">;
 
 /** What a body edit sends: the page's new markdown. */
 export type WikiPageChanges = { body: string };
@@ -384,6 +399,15 @@ export interface InferOpsClient {
   readDocumentText(documentId: string): Promise<string | null>;
 
   /**
+   * `knowledge.search` (`GET /knowledge/search`, `query` and `limit` only): the sections the account
+   * can read that best match `query`, best first, at most `limit`. InferOps applies its row rules
+   * and the InferMind lens before choosing candidates. An empty list means no readable match; a
+   * search that could not run (a timeout, an outage, an InferOps without the route, a rate limit)
+   * fails with UNAVAILABLE, never an empty list. The caller has already validated both arguments.
+   */
+  searchWiki(query: string, limit: number): Promise<WikiSearchRecord[]>;
+
+  /**
    * Replace a page's body (InferMind `knowledge:write`), compare-and-swap on the page version: a
    * page not at `expectedVersion` fails with STALE_REVISION, even when it already holds this body,
    * except that a retry under the same `idempotencyKey` is replayed when the page is exactly one
@@ -460,6 +484,21 @@ export interface InferOpsClient {
    * A refusal of the question itself (no grant in the workspace, 403 or 404) is false.
    */
   holdsPermission(permission: string): Promise<boolean>;
+
+  /**
+   * Lists one published widget version in the client's own workspace, for the account's whole
+   * company, as InferOps' `widget.publish` (FAC-11): a pointer to the InferOS Blueprint version, its
+   * title and purpose, and nothing else. Writing the same version again replaces it, so a retry is
+   * one definition. InferOps refuses an account without `configuration:publish` there (FORBIDDEN).
+   */
+  publishWidgetDefinition(entry: WidgetDefinitionWrite): Promise<void>;
+
+  /**
+   * Removes one widget version's listing from the client's own workspace, as InferOps'
+   * `widget.withdraw`: true when InferOps removed one, false when there was none to remove.
+   * Refused as `publishWidgetDefinition` is.
+   */
+  withdrawWidgetDefinition(sourceId: string, sourceVersion: number): Promise<boolean>;
 
   /**
    * The published content-workflow policy head of the project with key `projectKey`, as InferOps'

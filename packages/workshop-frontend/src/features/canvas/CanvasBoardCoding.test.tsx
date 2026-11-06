@@ -152,9 +152,9 @@ it('says why a dispatch was refused: allowlist, an active run, a stale revision,
   expect(await refuse(`FORBIDDEN: Repository ${REPO} is not on this deployment's coding allowlist.`))
     .toBe(`Not dispatched: Repository ${REPO} is not on this deployment's coding allowlist.`)
   expect(await refuse('RUN_ACTIVE: DEMO-1 already has a running run. Follow it or cancel it first.'))
-    .toBe('DEMO-1 already has a queued or running run, or a dispatch awaiting approval. Follow it or cancel it first.')
+    .toBe('DEMO-1 already has a queued or running run, or a dispatch awaiting approval. Follow it or cancel it first. The server said: DEMO-1 already has a running run. Follow it or cancel it first.')
   expect(await refuse('STALE_REVISION: DEMO-1 is at revision 8, not 7. Read it again.'))
-    .toBe('DEMO-1 changed in InferOps since the board loaded. The board was re-read; try again.')
+    .toBe('DEMO-1 changed in InferOps since the board loaded. The board was re-read; try again. The server said: DEMO-1 is at revision 8, not 7. Read it again.')
   expect(await refuse('DISABLED: Coding dispatch is turned off for this deployment.'))
     .toBe('Coding dispatch is turned off for this deployment.')
   // A refusal is never shown as queued.

@@ -1,5 +1,5 @@
 import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type CanvasContent, type CanvasDefinition, type CanvasOperation } from "@gadgets/workshop-shared/canvas";
-import { canvasDefinitionFromPage, canvasPageFromDefinition, parseCanvasPage, parseCanvasWorkspacePages, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import { applyCanvasPageOperations, canvasDefinitionFromPage, canvasDefinitionProjection, canvasPageFromDefinition, parseCanvasPage, parseCanvasWorkspacePages, type CanvasPage, type CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
 import { readCanvasCatalog } from "./canvas-catalog";
 import type { OverseerStorage } from "./overseer";
 
@@ -12,6 +12,35 @@ export interface StoredCanvasPage {
   page: CanvasPage;
   /** The revision of the `canvases` row this page replaces while the two agree. */
   basedOnRevision: string;
+}
+
+/**
+ * One saved canvas as a version 1 reader sees it: its row, or, while a nested page replaces that row,
+ * the page's projection (`canvasDefinitionProjection`). Every reader of `sections` goes through
+ * this, so a nested save is never shown as the layout it replaced (FAC-83). The row is returned as
+ * stored, unparsed, as the console store has always read it; the canvas store parses its own reads.
+ * A console publication (FAC-89) reads the page itself (`currentPage`), never this projection.
+ */
+export function readCanvasDefinition(storage: Pick<OverseerStorage, "canvases" | "canvasPages">, id: string): CanvasDefinition | null {
+  const row = storage.canvases.get(id);
+  if (!row) return null;
+  const nested = nestedPage(storage, row);
+  return nested ? canvasDefinitionProjection(nested) : row;
+}
+
+/**
+ * The page a `canvases` row currently stands for: its nested page while that page is based on the
+ * row's revision, otherwise the row by conversion. What the store's page reads and a console
+ * publication (FAC-89) both read. Reads never write.
+ */
+export function currentPage(storage: Pick<OverseerStorage, "canvasPages">, row: CanvasDefinition): CanvasPage {
+  return nestedPage(storage, row) ?? canvasPageFromDefinition(row);
+}
+
+/** The nested page that currently replaces `row`, if any: one based on the row's revision. */
+export function nestedPage(storage: Pick<OverseerStorage, "canvasPages">, row: Pick<CanvasDefinition, "id" | "revision">): CanvasPage | null {
+  const stored = storage.canvasPages.get(row.id);
+  return stored?.basedOnRevision === row.revision ? parseCanvasPage(stored.page) : null;
 }
 
 /**
@@ -31,13 +60,21 @@ export class WorkspaceCanvasStore {
     }
   }
 
+  /** Every canvas as a version 1 reader sees it (`readCanvasDefinition`). */
   list(): CanvasDefinition[] {
     this.#requireEnabled();
-    return Array.from(this.storage.canvases.list(), parseCanvasDefinition);
+    return Array.from(this.storage.canvases.list(), row => parseCanvasDefinition(readCanvasDefinition(this.storage, parseCanvasDefinition(row).id)));
   }
 
+  /** One canvas as a version 1 reader sees it (`readCanvasDefinition`). */
   get(id: string): CanvasDefinition | null {
     this.#requireEnabled();
+    const value = readCanvasDefinition(this.storage, id);
+    return value ? parseCanvasDefinition(value) : null;
+  }
+
+  /** The stored version 1 row itself, which writers check revisions against. */
+  #row(id: string): CanvasDefinition | null {
     const value = this.storage.canvases.get(id);
     return value ? parseCanvasDefinition(value) : null;
   }
@@ -60,7 +97,7 @@ export class WorkspaceCanvasStore {
   edit(id: string, expectedRevision: string, operations: CanvasOperation[]): CanvasDefinition {
     this.#requireEnabled();
     return this.durableStorage.transactionSync(() => {
-      const current = this.get(id);
+      const current = this.#row(id);
       if (!current) throw new Error("Canvas not found");
       if (this.#nestedPage(current)) throw new Error("This page has nested objects, which this editor can't change");
       const updated = applyCanvasOperations(current, expectedRevision, operations, readCanvasCatalog(this.env).widgetKinds);
@@ -72,7 +109,7 @@ export class WorkspaceCanvasStore {
   delete(id: string, expectedRevision: string): void {
     this.#requireEnabled();
     this.durableStorage.transactionSync(() => {
-      const current = this.get(id);
+      const current = this.#row(id);
       if (!current) throw new Error("Canvas not found");
       const nested = this.#nestedPage(current);
       const revision = nested?.revision ?? current.revision;
@@ -84,58 +121,74 @@ export class WorkspaceCanvasStore {
 
   /** The nested page that currently replaces this row, if any. */
   #nestedPage(row: CanvasDefinition): CanvasPage | null {
-    const stored = this.storage.canvasPages.get(row.id);
-    return stored?.basedOnRevision === row.revision ? parseCanvasPage(stored.page) : null;
+    return nestedPage(this.storage, row);
   }
 
-  /** One page by ID: its nested page, or its version 1 row by conversion. Reads never write. */
+  /** One page by ID: its nested page, or its version 1 row by conversion (see `currentPage`). Reads never write. */
   getPage(id: string): CanvasPage | null {
-    const row = this.get(id);
-    if (!row) return null;
-    return this.#nestedPage(row) ?? canvasPageFromDefinition(row);
+    this.#requireEnabled();
+    // The raw row: `get` shows a nested page's projection, whose revision is the page's.
+    const row = this.#row(id);
+    return row ? currentPage(this.storage, row) : null;
   }
 
   /** Every page of this workspace. Reads never write. */
   listPages(): CanvasPage[] {
     this.#requireEnabled();
-    return Array.from(this.storage.canvases.list(), row => {
-      const parsed = parseCanvasDefinition(row);
-      return this.#nestedPage(parsed) ?? canvasPageFromDefinition(parsed);
+    return Array.from(this.storage.canvases.list(), row => currentPage(this.storage, parseCanvasDefinition(row)));
+  }
+
+  /**
+   * Apply typed page operations at the expected revision and save the result (FAC-83). A stale
+   * revision throws `CanvasConflictError` and writes nothing, so newer work is never overwritten.
+   */
+  editPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): CanvasPage {
+    this.#requireEnabled();
+    return this.durableStorage.transactionSync(() => {
+      const current = this.getPage(id);
+      if (!current) throw new Error("Canvas not found");
+      if (current.revision !== expectedRevision) throw new CanvasConflictError(current.revision);
+      return this.#save(applyCanvasPageOperations(current, operations), expectedRevision);
     });
   }
 
   /**
    * Save a page at a new revision. A page version 1 can hold goes in its `canvases` row, and any
-   * other goes beside that row, leaving it as it was. The page must already exist. Nothing calls
-   * this outside tests until readers understand nested pages (FAC-83).
+   * other goes beside that row, leaving it as it was; version 1 readers see its projection
+   * (`readCanvasDefinition`). The page must already exist.
    */
   savePage(value: unknown, expectedRevision: string): CanvasPage {
     this.#requireEnabled();
     const page = parseCanvasPage(value);
-    return this.durableStorage.transactionSync(() => {
-      const row = this.get(page.id);
-      if (!row) throw new Error("Canvas not found");
-      const stored = this.storage.canvasPages.get(page.id);
-      if (stored && stored.basedOnRevision !== row.revision) {
-        throw new Error("This page was edited on an earlier version, and its nested copy is kept. Choose which to keep first");
-      }
-      const current = this.#nestedPage(row) ?? canvasPageFromDefinition(row);
-      if (current.revision !== expectedRevision) throw new CanvasConflictError(current.revision);
-      // An unchanged widget stays when the catalog narrows; a new one, or a new kind under its ID, is held to it.
-      const existing = new Map(current.nodes.flatMap(node => node.nodeType === "widget" ? [[node.id, node.kind] as const] : []));
-      const { widgetKinds } = readCanvasCatalog(this.env);
-      const disallowed = page.nodes.find(node => node.nodeType === "widget" && existing.get(node.id) !== node.kind && !widgetKinds.includes(node.kind));
-      if (disallowed?.nodeType === "widget") throw new Error(`Widget kind ${disallowed.kind} is not enabled for this installation`);
-      const updated: CanvasPage = { ...page, revision: (BigInt(current.revision) + 1n).toString() };
-      parseCanvasWorkspacePages([updated, ...this.listPages().filter(other => other.id !== page.id)]);
-      const definition = canvasDefinitionFromPage(updated);
-      if (definition) {
-        this.storage.canvases.put(definition);
-        this.storage.canvasPages.delete(page.id);
-      } else {
-        this.storage.canvasPages.put({ page: updated, basedOnRevision: row.revision });
-      }
-      return updated;
-    });
+    return this.durableStorage.transactionSync(() => this.#save(page, expectedRevision));
+  }
+
+  /** The body of `savePage`, for a caller already inside a transaction. */
+  #save(page: CanvasPage, expectedRevision: string): CanvasPage {
+    const row = this.#row(page.id);
+    if (!row) throw new Error("Canvas not found");
+    const stored = this.storage.canvasPages.get(page.id);
+    if (stored && stored.basedOnRevision !== row.revision) {
+      throw new Error("This page was edited on an earlier version, and its nested copy is kept. Choose which to keep first");
+    }
+    const current = this.#nestedPage(row) ?? canvasPageFromDefinition(row);
+    if (current.revision !== expectedRevision) throw new CanvasConflictError(current.revision);
+    // An unchanged widget stays when the catalog narrows; a new one, or a new kind under its ID, is held to it.
+    const existing = new Map(current.nodes.flatMap(node => node.nodeType === "widget" ? [[node.id, node.kind] as const] : []));
+    const { widgetKinds } = readCanvasCatalog(this.env);
+    const disallowed = page.nodes.find(node => node.nodeType === "widget" && existing.get(node.id) !== node.kind && !widgetKinds.includes(node.kind));
+    if (disallowed?.nodeType === "widget") throw new Error(`Widget kind ${disallowed.kind} is not enabled for this installation`);
+    const updated: CanvasPage = { ...page, revision: (BigInt(current.revision) + 1n).toString() };
+    parseCanvasWorkspacePages([updated, ...this.listPages().filter(other => other.id !== page.id)]);
+    // Refused unless version 1 readers can be shown it, so no saved page can break `list()`.
+    canvasDefinitionProjection(updated);
+    const definition = canvasDefinitionFromPage(updated);
+    if (definition) {
+      this.storage.canvases.put(definition);
+      this.storage.canvasPages.delete(page.id);
+    } else {
+      this.storage.canvasPages.put({ page: updated, basedOnRevision: row.revision });
+    }
+    return updated;
   }
 }

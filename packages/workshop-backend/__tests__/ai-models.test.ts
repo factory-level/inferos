@@ -864,3 +864,36 @@ describe("PDF attachment bridging", () => {
     }));
   }, 15000);
 });
+
+describe("getModel under MODEL_ALLOWLIST (FAC-152)", () => {
+  const bounded = (overrides: Partial<Cloudflare.Env> = {}) =>
+    env({ MODEL_ALLOWLIST: "claude-haiku-5-5", ...overrides });
+  const platformRouted = (model: string): AiModelConfig => ({ provider: "anthropic", model, apiToken: "" });
+
+  it("refuses an unlisted model on the platform gateway, whatever the stored record says", () => {
+    expect(() => getModel(bounded(), platformRouted("claude-opus-5-5"), INITIATOR))
+        .toThrow("This environment doesn't offer the model \"claude-opus-5-5\". Choose one it offers.");
+    expect(() => getModel(bounded(), platformRouted("Claude-Haiku-5-5"), INITIATOR)).toThrow("doesn't offer");
+    expect(() => getModel(bounded(), { ...platformRouted("claude-haiku-5-5"), provider: "openai" }, INITIATOR))
+        .toThrow("doesn't offer");
+  });
+
+  it("routes a listed model through the platform gateway as before", () => {
+    const handle = getModel(bounded(), platformRouted("claude-haiku-5-5"), INITIATOR);
+    expect(handle.model.id).toBe("claude-haiku-5-5");
+    expect(handle.model.baseUrl).toContain("/platform-gateway/anthropic");
+  });
+
+  it("keeps the platform's quick model", () => {
+    const handle = getModel(bounded({ CF_AI_GATEWAY_PROVIDERS: "anthropic,cloudflare" }), WORKERS_AI_CONFIG, INITIATOR);
+    expect(handle.model.id).toBe(WORKERS_AI_CONFIG.model);
+  });
+
+  it("leaves a person's own key and their own gateway alone", () => {
+    const own = getModel(bounded(), { ...platformRouted("claude-opus-5-5"), apiToken: "sk-own-test-key", billing: "api-key" }, INITIATOR);
+    expect(own.model.id).toBe("claude-opus-5-5");
+    const byok = getModel(bounded(), platformRouted("claude-opus-5-5"), INITIATOR,
+        { userGateway: { accountId: "their-account", apiKey: "their-gateway-key" } });
+    expect(byok.model.baseUrl).toContain("their-account");
+  });
+});

@@ -82,15 +82,27 @@ const allDenied = (calls: object) =>
 type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" |
     "subscribeToWorkpieces" | "getGadget" | "listActions" | "subscribeToActions" |
     "subscribeToConsoleLogs" | "listConsoles" | "listCanvases" | "getCanvas" | "getConsole" |
-    "getConsoleScreen" | "getConsoleWidget" |
+    "getConsoleScreen" | "getConsolePage" | "getConsoleWidget" |
+    // An app a published console places, at the commit it published (FAC-89 part 2, operate-console-apps.test.ts).
+    "getConsoleApp" |
+    // A published widget's frozen local states, checked as getConsoleWidget is (FAC-86, widget-state.test.ts).
+    "getConsoleWidgetStates" |
     // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
-    "listWorkflowDefinitions";
+    "listWorkflowDefinitions" |
+    // A use collaborator listed on a trigger's control may run it, and sees only those controls
+    // (workflow-invocation.test.ts covers both, and that nothing else opens to them).
+    "listTriggerControls" | "invokeTrigger";
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {
+  previewAuthoredWidget: ws => ws.previewAuthoredWidget(1, 1),
+  exportWorkspaceRecords: ws => ws.exportWorkspaceRecords(),
   createCanvas: ws => ws.createCanvas({ title: "View", sections: [] }),
   editCanvas: ws => ws.editCanvas("view", "0", [{ type: "rename", title: "New" }]),
   deleteCanvas: ws => ws.deleteCanvas("view", "0"),
+  // The nested page is the builder's (FAC-83): a non-builder can neither read nor edit it.
+  getCanvasPage: ws => ws.getCanvasPage("view"),
+  editCanvasPage: ws => ws.editCanvasPage("view", "0", [{ type: "renamePage", title: "New" }]),
   listFlows: ws => ws.listFlows(),
   createFlow: ws => ws.createFlow({ title: "Flow", steps: ["view"] }),
   replaceFlow: ws => ws.replaceFlow("flow", "0", { title: "Flow", steps: ["view"] }),
@@ -100,8 +112,17 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
+  setTriggerControl: ws => ws.setTriggerControl(1, null),
+  // Choosing what a trigger's runs execute as is building, and Admin-only (FAC-102).
+  setTriggerAssignment: ws => ws.setTriggerAssignment(1, null),
+  getTriggerAssignment: ws => ws.getTriggerAssignment(1),
+  provisionTriggerCredential: ws => ws.provisionTriggerCredential(1, "not-a-key"),
   createConsole: ws => ws.createConsole({ title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   listConsoleWidgetCandidates: ws => ws.listConsoleWidgetCandidates(),
+  // The widget index is read and written by a builder's own publication only (FAC-11).
+  getConsoleWidgetIndex: ws => ws.getConsoleWidgetIndex("console"),
+  listConsoleWidgetIndexWorkspaces: ws => ws.listConsoleWidgetIndexWorkspaces(),
+  setConsoleWidgetIndexTarget: ws => ws.setConsoleWidgetIndexTarget("console", null),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
   deleteConsole: ws => ws.deleteConsole("console", "0"),
   publishConsole: ws => ws.publishConsole("console", "0"),

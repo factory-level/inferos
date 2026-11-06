@@ -11,6 +11,23 @@ Nothing here is deployed on its own. The Workshop backend's `scripts/build-bundl
 imports `src/` to generate the gitignored `src/generated/bundled-blueprints.ts` it compiles the
 archives into, and `pnpm import:bundled-blueprint` (the same package) writes into `blueprints/`.
 
+### Authored widget compiler
+
+The Node-only `@gadgets/bundled-blueprints/authoring-compiler` entry compiles an in-memory file map
+with `client.tsx`, optional local `.tsx` modules, and `.css` files into one self-contained client
+module. It uses a server-owned React/Refine dependency allow-list and rejects authored manifests,
+unsupported paths or syntax, dynamic imports, unapproved packages, and CSS network or external asset
+references. Refine telemetry is forcibly disabled in the compiled app. The denied-global checks
+give authors early feedback; they are not a security boundary. The runtime boundary is the Gadget
+frame and its content policy, which the later editor/runtime slice must enforce. The compiler does
+not execute authored code or write source or artifacts to disk.
+
+`compileAuthoredWidget` returns a frozen, content-hashed artifact with source and lock hashes,
+compiler versions, build duration, raw and data-URL-encoded sizes. Callers keep editable source
+separate from artifacts. `compileAuthoredWidgetRevision` returns the previous artifact unchanged
+when a replacement fails, so only a successful result can become the selected revision. This core
+runs in Node and has no Container or deployment dependency.
+
 ## Layout
 
 ```
@@ -32,6 +49,15 @@ __tests__/             the build's own tests
 bindings, blueprint `version`, and bundled `revision`. The build converts these files into the same
 gzip-compressed Yjs `.gadget` representation used by uploaded blueprints and embeds it in the
 generated Worker module. No binary archive is committed.
+
+`blueprint.json` may also name a `kind`, `"app"`, `"widget"` or `"workflow"`: the kind every install
+of it takes, stored with the installed version's content as publishing stores it. Absent means an
+app. Only an app is offered as one of the deployment's standard output formats; a bundled widget or
+workflow is installed and listed among the featured blueprints, never promoted to a format.
+
+A gadget module may import an `.svg` file of its own (`import MARK from "./lib/mark.svg"`): the
+bundle inlines it as the file's text, since the sandboxed iframe can fetch nothing. Declare the
+module with a `.d.ts` (`declare module "*.svg"`), as `inferos-status-widget` does.
 
 ### Libraries
 

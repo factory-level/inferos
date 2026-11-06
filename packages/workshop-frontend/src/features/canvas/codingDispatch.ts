@@ -90,7 +90,7 @@ export class CodingDispatchData {
     this.#forgetSession()
   }
 
-  async #propose(call: (session: RpcStub<InferOpsDispatchSession>) => Promise<void>): Promise<ProposalResult> {
+  async #propose(call: (session: RpcStub<InferOpsDispatchSession>) => Promise<unknown>): Promise<ProposalResult> {
     try {
       const session = await this.#sessionOf()
       if (!session) return NOT_CONNECTED

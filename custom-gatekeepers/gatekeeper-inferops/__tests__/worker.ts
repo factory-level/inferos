@@ -3,9 +3,10 @@
 // gatekeeper as a facet with props, hands it an approval queue that records what it is told, and
 // applies or rejects the actions it collected.
 
+import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
-  ActionApplyFailure, ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  ActionApplied, ActionApplyFailure, ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
@@ -30,7 +31,7 @@ export * from "../src/inferops.js";
 // Vitest's ctx.exports analyzer does not follow `export *`, so the classes reached through
 // ctx.exports are named explicitly.
 export {
-  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsAccountGatekeeper, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
+  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsSystemCredentials, InferOpsAccountGatekeeper, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
   InferOpsWorkflowPolicyGatekeeper,
 } from "../src/inferops.js";
@@ -386,6 +387,10 @@ type ConfiguratorRpc = {
   listProjects(query: string, host: string): Promise<Array<{ value: string }>>;
 };
 
+/** The failure an `applyAction` answer reports, if it reports one. */
+const failureOf = (outcome: void | { failed: ActionApplyFailure } | ActionApplied) =>
+  outcome && "failed" in outcome ? outcome.failed : undefined;
+
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -423,6 +428,26 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       return { ...await account.holdsSharedConfiguration(action) };
     } catch (error) {
       return String(error instanceof Error ? error.message : error);
+    }
+  }
+
+  /** The account's answer to the Workshop's workflow:invoke question (FAC-102), or its failure message. */
+  async holdsWorkflowInvoke(props: AccountProps, resourceUrl: string): Promise<{ holds: boolean; scope: string | null } | string> {
+    const account = this.#account(props) as unknown as Required<Pick<GatekeeperUser, "holdsWorkflowInvoke">>;
+    try {
+      return { ...await account.holdsWorkflowInvoke(resourceUrl) };
+    } catch (error) {
+      return String(error instanceof Error ? error.message : error);
+    }
+  }
+
+  /** The company the account says its person works in (FAC-88), or its failure message as `{ failed }`. */
+  async presentationCompany(props: AccountProps): Promise<string | null | { failed: string }> {
+    const account = this.#account(props) as unknown as Required<Pick<GatekeeperUser, "presentationCompany">>;
+    try {
+      return await account.presentationCompany();
+    } catch (error) {
+      return { failed: String(error instanceof Error ? error.message : error) };
     }
   }
 
@@ -480,6 +505,40 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Whether the account's own `getGatekeeperClassFor` reports `url` as mock data. */
   async mockOf(props: AccountProps, url: string): Promise<boolean> {
     return (await this.#account(props).getGatekeeperClassFor(url)).mock === true;
+  }
+
+  // --- System credentials (FAC-102): the vendor's kernel-only methods, as the Workshop calls them.
+
+  #vendor() {
+    return (this.ctx.exports as unknown as SignInExports).GatekeeperVendor({}) as unknown as
+        Required<Pick<import("../src/inferops.js").GatekeeperVendor,
+          "provisionSystemCredential" | "forgetSystemCredential" | "getSystemGatekeeperClass">>;
+  }
+
+  /** Provisions `key` for `credentialRef` and board `url`; the failure message, or null. */
+  async provisionSystem(credentialRef: string, url: string, key: string): Promise<string | null> {
+    try {
+      await this.#vendor().provisionSystemCredential(credentialRef, { resourceUrl: url }, key);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** Forgets the key stored for `credentialRef`. */
+  async forgetSystem(credentialRef: string): Promise<void> {
+    await this.#vendor().forgetSystemCredential(credentialRef);
+  }
+
+  /** Binds `url` through the vendor's system class for `credentialRef`; the failure message, or null. */
+  async bindSystem(name: string, credentialRef: string, url: string): Promise<string | null> {
+    try {
+      const cls = await this.#vendor().getSystemGatekeeperClass(credentialRef, { resourceUrl: url });
+      this.#minted.set(name, cls as unknown as DurableObjectClass<InferOpsProjectGatekeeper>);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
   }
 
   /** Binds `url` through the account's own `getGatekeeperClassFor`; the failure message, or null. */
@@ -749,7 +808,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action of a bound binding; returns the failure message, or null on success. */
   async applyBound(name: string, actionId: number): Promise<string | null> {
     try {
-      return (await this.#bound(name).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
+      return failureOf(await this.#bound(name).applyAction(actionId, new RpcStub(new TestGitCache())))?.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -808,7 +867,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action of a dispatch binding; returns the failure message, or null on success. */
   async applyDispatch(props: BindingProps, actionId: number): Promise<string | null> {
     try {
-      return (await this.#dispatchGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
+      return failureOf(await this.#dispatchGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -849,7 +908,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action of a Wiki binding; returns the failure message, or null on success. */
   async applyWiki(props: WikiProps, actionId: number): Promise<string | null> {
     try {
-      return (await this.#wikiGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
+      return failureOf(await this.#wikiGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -961,8 +1020,8 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action of an account binding; the failure message, or null once applied. */
   async applyAccount(props: AccountBindingProps, actionId: number): Promise<string | null> {
     try {
-      return (await this.#accountGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))
-        ?.failed.message ?? null;
+      return failureOf(await this.#accountGatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))
+        ?.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -1036,7 +1095,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Apply an action; returns the failure message, or null on success. */
   async apply(props: BindingProps, actionId: number): Promise<string | null> {
     try {
-      return (await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.failed.message ?? null;
+      return failureOf(await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new TestGitCache())))?.message ?? null;
     } catch (error) {
       return messageOf(error);
     }
@@ -1053,10 +1112,20 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       : kind === "dispatch" ? this.#dispatchGatekeeper(props as BindingProps)
       : this.#gatekeeper(props as BindingProps);
     try {
-      return (await gatekeeper.applyAction(actionId, new RpcStub(new TestGitCache())))?.failed ?? null;
+      return failureOf(await gatekeeper.applyAction(actionId, new RpcStub(new TestGitCache()))) ?? null;
     } catch (error) {
       return { thrown: messageOf(error) };
     }
+  }
+
+  /** What a successful apply reported it produced (`{applied: {result}}`), or null when it reported none. */
+  async appliedResult(props: BindingProps | WikiProps, actionId: number,
+                      kind: "board" | "dispatch" | "wiki" = "board"): Promise<ActionResult | null> {
+    const gatekeeper = kind === "wiki" ? this.#wikiGatekeeper(props as WikiProps)
+      : kind === "dispatch" ? this.#dispatchGatekeeper(props as BindingProps)
+      : this.#gatekeeper(props as BindingProps);
+    const outcome = await gatekeeper.applyAction(actionId, new RpcStub(new TestGitCache()));
+    return outcome && "applied" in outcome ? outcome.applied.result : null;
   }
 
   /** Write a raw value into the binding's storage, as an older version might have left it. */

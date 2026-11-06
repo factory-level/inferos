@@ -1,3 +1,5 @@
+import type { ActionResult } from "./action-outcome.js";
+import type { CanvasPage, CanvasPageOperation } from "./canvas-model.js";
 import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-approval";
 // This file defines the API spoken between the Gadgets Workshop service and the front-end UI.
 //
@@ -25,16 +27,21 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
-import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
-import type { WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef, WorkflowDefinitionSave } from "./workflow-definition.js";
+import type {
+  TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
+  TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
+  WorkflowDefinitionSave, WorkflowInvocation,
+} from "./workflow-definition.js";
+import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
   ArtifactPin, ArtifactPublishResult, ArtifactQualification, ArtifactRef, ArtifactRefusal,
   ArtifactRevision,
 } from "./agent-artifact.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
@@ -483,6 +490,24 @@ export interface OperateSession extends RpcTarget {
    */
   dispatch(event: OperateEvent, expectedSeq: number): Promise<OperateSessionSnapshot>;
 
+  /**
+   * This person's state of the console widget `ref` names (FAC-86), following the local states its
+   * published revision froze (`Overseer.getConsoleWidgetStates`, read through the caller's own
+   * access): the stored state when the widget's states persist per person, else its initial state
+   * at the start of this connection. Rejects with `WIDGET_HAS_NO_STATES` for a widget that declares
+   * none, and as `getConsoleWidget` does for a widget the console doesn't offer at that revision.
+   */
+  getWidgetState(ref: OperateWidgetRef): Promise<WidgetStateSnapshot>;
+  /**
+   * Moves the widget's state by `event` if `expectedSeq` is its current `seq` and its declaration
+   * permits `event` from the current state, and returns the new state. **It never changes the
+   * operate page**: the page's sequence and state stay as they were (connecting a widget event to
+   * the page is an explicitly configured attachment, FAC-87). Rejects, changing nothing, with
+   * `WIDGET_UNKNOWN_EVENT`, `WIDGET_TRANSITION_NOT_PERMITTED` (naming the events the current state
+   * accepts), `WIDGET_STATE_CONFLICT` or `WIDGET_HAS_NO_STATES`.
+   */
+  transitionWidget(ref: OperateWidgetRef, event: string, expectedSeq: number): Promise<WidgetStateSnapshot>;
+
   /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
   listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;
 
@@ -677,6 +702,23 @@ export const OPERATE_SESSION_ERROR_CODES = {
   recipientUnavailable: "OPERATE_SESSION_RECIPIENT_UNAVAILABLE",
   /** The flow named is in neither the open published console nor the caller's own flows. */
   flowUnavailable: "OPERATE_SESSION_FLOW_UNAVAILABLE",
+  /**
+   * A flow navigation's destination page is one the caller can no longer open: its screen was
+   * removed, or isn't one their access shows (FAC-87). It names no page and no workspace.
+   */
+  flowPageUnavailable: "OPERATE_SESSION_FLOW_PAGE_UNAVAILABLE",
+  /**
+   * A flow navigation couldn't check its destination page just now (the workspace was unreachable,
+   * or the read failed for another reason), so it didn't move. Transient: try again. Like
+   * `flowPageUnavailable`, it names no page and no workspace.
+   */
+  flowNavigationFailed: "OPERATE_SESSION_FLOW_NAVIGATION_FAILED",
+  /**
+   * The company the person works in couldn't be told from their connected accounts just now
+   * (FAC-88), so their page and widget states weren't read or written: they belong to one company,
+   * and a guess could show another's. Transient: try again. It names no company.
+   */
+  companyUnavailable: "OPERATE_SESSION_COMPANY_UNAVAILABLE",
 } as const;
 
 /** An expected `OperateSession.dispatch()` failure code. */
@@ -691,6 +733,10 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
   [OPERATE_SESSION_ERROR_CODES.consoleChanged]:
       "That view or screen is not part of the console as it is now saved, or the console is no " +
       "longer available to you. Reload the console.",
+  [OPERATE_SESSION_ERROR_CODES.flowPageUnavailable]:
+      "That page of the flow isn't available to you any more. Go back, or leave the flow.",
+  [OPERATE_SESSION_ERROR_CODES.flowNavigationFailed]:
+      "Couldn't move to that page of the flow just now. Try again.",
   [OPERATE_SESSION_ERROR_CODES.boardUnavailable]:
       "That board is not connected for you here, or is no longer available to you. Connect it or " +
       "choose another board.",
@@ -698,6 +744,8 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
       "There is no other person with that id here to hand this over to.",
   [OPERATE_SESSION_ERROR_CODES.flowUnavailable]:
       "That flow is not offered by the console you have open, and is not one of your own flows.",
+  [OPERATE_SESSION_ERROR_CODES.companyUnavailable]:
+      "Couldn't check which company you're working in just now. Try again.",
 });
 
 /** Creates an `OperateSession.dispatch()` failure with a machine-readable code. */
@@ -1967,6 +2015,8 @@ const SUGGESTED_MODEL_CATALOG = {
     "claude-opus-5": {name: "Claude Opus 5", contextWindow: 1000000, hidden: true},
     "claude-sonnet-5": {name: "Claude Sonnet 5", contextWindow: 1000000, hidden: true},
     "claude-haiku-4-5": {name: "Claude Haiku 4.5", contextWindow: 200000},
+    // Not in pi's bundled catalog yet, so both limits are stated here, conservatively.
+    "claude-haiku-5-5": {name: "Claude Haiku 5.5", contextWindow: 200000, outputLimit: 16000},
   },
   "openai": {
     // pi's GPT-6 catalog reports a 272K window, but these models support 1.05M. Use 272K as the
@@ -2144,6 +2194,8 @@ export type BlueprintInstall = {
   version: number;
   /** The kind the pinned version was published as. An upgrade must keep it. */
   kind: WorkspaceKind;
+  /** Present only when this pinned Widget version was compiled from authored client.tsx. */
+  authoredWidgetBuild?: true;
   /**
    * The data contract the pinned version declared (see `BlueprintMetadata.dataContract`). Absent
    * means unknown. An upgrade is allowed only to a version declaring the same contract: a
@@ -2349,6 +2401,14 @@ export type UiBundle = {
   // libraries should be loaded.
 };
 
+/** Compiled authored-widget preview output; measurements contain no source text. */
+export type AuthoredWidgetPreview = {
+  /** Compiled client module returned to the authoring UI. */
+  jsCode: string;
+  /** Bounded compiler measurements for this preview. */
+  measurements: { durationMs: number; clientBytes: number };
+};
+
 /**
  * A git author/committer identity, as recorded in commits in a workspace's git object store.
  * Derived from the committing user's profile: the display name becomes `name` and the profile ID
@@ -2514,6 +2574,19 @@ export type ActionLogEntry = {
    * pending (or later rejected) so its reason and whether it may have happened survive a reload.
    */
   lastAttempt?: ActionAttempt;
+
+  /**
+   * Set while the action is pending with an approved apply in flight, so it reads as running and
+   * not as waiting for a decision (see `actionOutcome`). Absent otherwise.
+   */
+  applying?: true;
+
+  /**
+   * What the provider reported the apply produced (`ActionResult`), such as a created issue's key
+   * or the revision a write produced. Only on an approved action, and only when its gatekeeper
+   * returned one; an approved action without it still applied.
+   */
+  result?: ActionResult;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -2616,6 +2689,10 @@ export type AgentSpawnerBehaviour = Partial<Pick<AgentSpawnerConfig, "displayNam
  * createGadget()/getGadget()).
  */
 export interface Overseer extends RpcTarget {
+  /** Compile one chat's authored-widget draft without changing workspace state; build sessions only. */
+  previewAuthoredWidget(gadgetId: WorkpieceId, chatId: number): Promise<AuthoredWidgetPreview>;
+  /** Export only the declared business collections; available to build/owner sessions only. */
+  exportWorkspaceRecords(): Promise<WorkspaceRecordExport>;
   /**
    * List stored composition definitions in this workspace. Requires both view flags. Build access
    * lists every one; the use role lists only the screens this workspace's published consoles show,
@@ -2635,6 +2712,18 @@ export interface Overseer extends RpcTarget {
   editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition>;
   /** Delete a definition at its expected revision with build access and both flags. Reimport creates a new identity. */
   deleteCanvas(id: string, expectedRevision: string): Promise<void>;
+  /**
+   * Read one canvas as its nested page (ADR 0014): objects, widgets and attachments by stable ID.
+   * Requires build access and both flags. It is the live draft, so the use role and an operate session
+   * are refused: they read only what a console published. A missing canvas reads as null.
+   */
+  getCanvasPage(id: string): Promise<CanvasPage | null>;
+  /**
+   * Compare the page revision and apply typed page operations atomically, with build access and both
+   * flags. A stale revision throws the canvas conflict error and writes nothing. Removing a node
+   * removes only its reference on the page, never a record it names.
+   */
+  editCanvasPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage>;
 
   /**
    * List this workspace's flows: ordered lists of its canvases that an operate session runs one
@@ -2680,6 +2769,53 @@ export interface Overseer extends RpcTarget {
   listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]>;
 
   /**
+   * Let the named people ask pinned trigger `hookId` to run now, or remove its control with null.
+   * The trigger must be pinned to a definition revision. Being listed gives a person that request
+   * and nothing else: no access to the workflow, its bindings or its configuration. Build only; in
+   * a shared workspace it also takes the deployment's `build` authority. Clearing the pin removes
+   * the control.
+   */
+  setTriggerControl(hookId: number, settings: TriggerControlSettings | null): Promise<TriggerControl | null>;
+  /**
+   * The trigger controls the caller may see: all of them with build access, and in a use session
+   * only those listing the caller (each showing only them as invoker). Refused in an operate session.
+   */
+  listTriggerControls(): Promise<TriggerControl[]>;
+  /**
+   * Assign pinned trigger `hookId`'s runs on request to the service account provisioned in one of
+   * its gadget's connections (FAC-102, inferops ADR 0011 S1), or remove the assignment with null.
+   * The connection must be of the vendor the deployment names in `SHARED_CONFIGURATION_GATEKEEPER`.
+   * An assigned trigger's admitted runs load the pinned commit in a fresh worker whose only binding
+   * is that connection, acting as the service account; nothing else of the gadget's reaches it.
+   * Changing or removing it drops runs waiting to start. Build only, and it also takes the
+   * deployment's `publish` authority (interim, until ADR 0011 D1's `workflow:assign` is decided).
+   * Clearing the pin removes it.
+   */
+  setTriggerAssignment(hookId: number, settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null>;
+  /**
+   * Whether assignments are enabled here, and trigger `hookId`'s assignment or null. Disabled
+   * reads as `enabled: false` rather than an error, so the UI can say so. Build only.
+   */
+  getTriggerAssignment(hookId: number): Promise<TriggerAssignmentState>;
+  /**
+   * Give assigned trigger `hookId`'s connection the service account's key (FAC-102), replacing any
+   * given before. The Workshop relays `key` once to the connection's vendor, which checks it with its
+   * service before storing it, and keeps nothing of it: the key is never stored, logged, echoed or
+   * returned here. A key the service doesn't accept is refused in fixed words. Records who gave it
+   * and when. The same authority as `setTriggerAssignment`.
+   */
+  provisionTriggerCredential(hookId: number, key: string): Promise<TriggerAssignment>;
+  /**
+   * Ask pinned trigger `hookId` to run now, as its control allows (inferops ADR 0011 S6). The server
+   * checks that the trigger has a control listing the caller, is enabled and still pinned, and only
+   * then asks the trigger's gatekeeper to deliver it once. The run is the trigger's own: the gadget
+   * at the pinned revision with its configured bindings, never the caller's authority, and nothing
+   * the caller supplies reaches it. Refused for a trigger whose gatekeeper can't run on request.
+   * Open to build and use sessions; refused in an operate session, and agents hold no Overseer.
+   */
+  invokeTrigger(hookId: number): Promise<WorkflowInvocation>;
+
+  /**
    * List this workspace's consoles: one operator role's menu of views over this workspace's
    * screens, opened in an operate session. Needs both view flags, like canvases and flows. Unlike
    * them it is also allowed to the use role and the operate session (read-only), so an operator
@@ -2720,6 +2856,13 @@ export interface Overseer extends RpcTarget {
    */
   getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null>;
   /**
+   * Read the page of a screen of one console (FAC-89): as that console's publication froze it
+   * (nested objects, attachments and frozen widget installs included), or, for its `draft`, which
+   * needs build access, the page the screen stands for now. Null if that revision of the console
+   * doesn't show it. Operators get only what was published: a later save stays draft.
+   */
+  getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null>;
+  /**
    * Open a widget a console offers, as its published revision `revision` offers it: `gadgetId` is
    * that revision's frozen install (see `ConsoleWidgetEntry`). This is how the use role reaches a
    * widget, which `getGadget()` refuses it; the returned capability renders and connects to the
@@ -2729,6 +2872,49 @@ export interface Overseer extends RpcTarget {
    * Denied to the operate session.
    */
   getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
+   * Open an app a console places, as its published revision `revision` fenced it (FAC-89 part 2):
+   * `gadgetId` is the live app, with its own storage and bindings, never a copy (see
+   * `ConsolePublishedApp`). This is how the use role reaches an app a published console places,
+   * which `getGadget()` refuses it. It opens only while the app's current commit is the one
+   * published: once a builder changes the app, this refuses, saying a builder must publish the
+   * console again, and never offers the changed code instead. Every call on the returned capability
+   * checks that again, with the console still published at `revision` and open in the caller's
+   * operate session, so a capability kept from before the change, or from an older revision, stops
+   * working. Refused if the console is not published at `revision` or does not place the app there.
+   * Build access opens the app's mainline as `getGadget()` does, after the same placement check.
+   * Denied to the operate session.
+   */
+  getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
+   * Where console `consoleId` stands in the deployment's widget index (FAC-11): the InferOps
+   * workspace it lists its widgets in, what InferOps answered for each widget its live publication
+   * registers, and any withdrawal still owed; null for a console with none, as while the
+   * deployment names no such service. Publishing and deleting a console write the index as the
+   * person doing it, with their own sign-in. Needs build access.
+   */
+  getConsoleWidgetIndex(consoleId: string): Promise<ConsoleWidgetIndexReport | null>;
+  /**
+   * The InferOps workspaces the caller may list a console's widgets in, asked freshly with their
+   * own sign-in: those where they hold InferOps' shared configuration `publish` permission. Empty
+   * while the deployment names no such service. Needs build access.
+   */
+  listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]>;
+  /**
+   * Sets the InferOps workspace console `consoleId` lists its widgets in, one of
+   * `listConsoleWidgetIndexWorkspaces`, or clears it (null); the next publication writes there, and
+   * nothing moves to another workspace on its own. Refused for a workspace the caller may not list
+   * widgets in. Needs build access and, in a shared workspace, the shared configuration `publish`
+   * permission.
+   */
+  setConsoleWidgetIndexTarget(consoleId: string, workspaceId: string | null): Promise<ConsoleWidgetIndexReport>;
+  /**
+   * The local states (FAC-86) a widget a console offers declares, as published revision
+   * `revision` froze them, or null when it declares none. Checked as `getConsoleWidget` checks
+   * the widget. This is what an operate session's widget state follows; it grants nothing.
+   * Denied to the operate session.
+   */
+  getConsoleWidgetStates(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<WidgetStateMachine | null>;
   /**
    * The spec a builder's preview of draft bound view `entryId` of console `consoleId` at `revision`
    * shows: its source's `view.json` at `commitId`, or else at the source's current commit, read
@@ -3912,6 +4098,40 @@ export type ActionHistoryPage = {
   nextBeforeId?: number;
 };
 
+/**
+ * Portable allow-list of a workspace's declared business records. It intentionally contains no
+ * credentials, arbitrary Durable Object storage, or gadget-owned state. Pages are captured as
+ * console/screen snapshots because the page API is scoped to those references.
+ */
+export type WorkspaceRecordExport = {
+  /** Structural canvas projection; authored titles, targets and widget parameters are withheld. */
+  canvases: {id: string; revision: string; schemaVersion: number; sections: {id: string; columns: 1 | 2 | 3; widgets: {id: string; kind: string; version: number; size: string}[]}[]}[];
+  /** Console-referenced page projection; node labels, attachments, targets and parameters are withheld. */
+  pages: {consoleId: string; screenId: string; source: ConsoleSource; page: {id: string; revision: string; schemaVersion: number; nodeCount: number; widgetCount: number}}[];
+  /** Definition/revision references; titles and owner identity are withheld. */
+  workflowDefinitions: {id: string; revisions: {revision: number; gadgetId: WorkpieceId; commitId: string; savedAt: Date}[]; published: {revision: number; at: Date} | null}[];
+  /** Hook identifiers and pinned definition only; descriptions, URLs and display titles are withheld. */
+  triggers: {hook: {id: number; gatekeeperId: WorkpieceId; gadgetId: WorkpieceId; enabled: boolean}; definition: WorkflowDefinitionRef | null}[];
+  /** Control identifiers and reference only; labels, profile IDs and author identity are withheld. */
+  triggerControls: {hookId: number; definition?: WorkflowDefinitionRef; configuredAt?: Date}[];
+  /** Widget install references; refusal text and declared names are withheld. */
+  widgetRegistry: {gadgetId: WorkpieceId; blueprintId: string; version: number; versionId: string; commitId: string | null; surfaces: {ui: boolean; toolCount: number; stateCount: number} | null}[];
+  /**
+   * Each gadget's id, the name of the Durable Object facet holding its storage, and the blueprint it
+   * was installed from (null when built from scratch). The local company storage export reads that
+   * facet's persisted state and applies its blueprint's allow-list; titles and binding names are withheld.
+   */
+  gadgets: {id: WorkpieceId; facet: string; blueprintId: string | null}[];
+  /** Allow-listed action audit entries; actor identities use opaque IDs without names or emails. */
+  actionLog: {id: number; gatekeeperId?: WorkpieceId; gatekeeper: string | null; method: string | null; outcome: import("./action-outcome.js").ActionOutcome; requestedBy?: {type: "user" | "agent" | "gadget" | "system"; id: string}; requestedAt: Date; decidedBy?: {type: AiChatAuthorInfo["type"]; id: string}; decidedAt?: Date; appliedRevision?: string; createdIdentifier?: string; runId?: string}[];
+  /** Maximum number of newest action entries included in `actionLog`. */
+  actionLogLimit: number;
+  /** True only when more history exists than `actionLogLimit`; consumers must report this. */
+  actionLogTruncated: boolean;
+  /** Fixed reasons for omissions across the collections, safe to show in an exported artifact. */
+  withheld: {canvases: string; pages: string; workflowDefinitions: string; triggers: string; triggerControls: string; widgetRegistry: string; gadgets: string; actionLog: string};
+};
+
 /** Lightweight attribution for a chat participant or configured model. */
 export type AiChatAuthorInfo = {
   /** Original model choice when this author answered as its fallback; retry that choice next turn. */
@@ -4681,14 +4901,17 @@ export type AiToolCall = {
   input: {
     canvasId?: string;
     expectedRevision?: string;
+    /** The written target the call named (`formatCanvasTarget`), if any (FAC-84). */
+    target?: string;
     title?: string;
     templateId?: string;
     /**
-     * The model's operations as sent, each carrying the remaining fields of its `CanvasOperation`
-     * variant. Typed by discriminant only: the canvas engine validates them, and a rejected call is
-     * logged with its input as received.
+     * The model's operations as sent, each carrying the remaining fields of its variant: typed page
+     * operations (`CanvasPageOperation`) since FAC-84, version 1 `CanvasOperation`s in older logs.
+     * Typed by discriminant only: the canvas engine validates them, and a rejected call is logged
+     * with its input as received.
      */
-    operations: {type: CanvasOperation["type"]}[];
+    operations: {type: CanvasOperation["type"] | CanvasPageOperation["type"]}[];
   };
   output?: string;
 } | {

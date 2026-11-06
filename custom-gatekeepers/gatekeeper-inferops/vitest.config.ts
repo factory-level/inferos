@@ -71,6 +71,8 @@ export default defineConfig({
           INFERLAB_LOGIN: { className: "InferLabLogin", useSQLite: true },
           // One per connected account; the tests reach it through the account entrypoints.
           INFEROPS_CREDENTIALS: { className: "InferOpsCredentials", useSQLite: true },
+          // One per system workflow assignment's key (FAC-102); reached through the vendor.
+          INFEROPS_SYSTEM_CREDENTIALS: { className: "InferOpsSystemCredentials", useSQLite: true },
           // A facet carrying props is only reachable through `ctx.facets`, so the tests drive the
           // gatekeeper from a hook Durable Object, as the overseer does in production.
           TEST_HOOKS: { className: "TestHooks", useSQLite: true },

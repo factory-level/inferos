@@ -8,7 +8,9 @@
 //     daily counter is consumed and, once exhausted, the request is blocked.
 
 import { canProceedWithRequest, hasMinimumBalance, LimitWindowKind } from "@gadgets/workshop-shared/limits";
-import { CloudflareUsageInfo } from "@gadgets/workshop-shared/api";
+import type { AiModelConfig, CloudflareUsageInfo } from "@gadgets/workshop-shared/api";
+import { getAiGatewayConfig } from "../../ai-gateway.js";
+import { getDailyAgentTurnCap, modelNotOfferedMessage } from "../../model-allowlist.js";
 import { isCloudflareLimitsEnabled, getMinimumCloudflareBalance } from "../config.js";
 import { getDailyLlmCallLimit } from "./config.js";
 import { getConnectionStatus, resolveConnection, ByokGatewayRouting } from "../cloudflare/connection-service.js";
@@ -19,6 +21,12 @@ export interface UsageCheckResult {
   allowed: boolean;
   /** Guidance/reason when blocked. */
   reason?: string;
+  /**
+   * The chat error code when blocked. Unset means `usage_limit`, which offers adding credits; the
+   * plain daily cap uses `daily_turn_limit`, because there's nothing to top up, and a model the
+   * allowlist doesn't offer uses `model_not_offered`.
+   */
+  errorCode?: "daily_turn_limit" | "model_not_offered";
   /** Whether to serve the request using the user's own gateway/keys rather than the platform's. */
   shouldUseByok: boolean;
   /** Whether the user is within their free-tier limit. */
@@ -64,9 +72,11 @@ function unlimitedResult(): UsageCheckResult {
 export async function checkUsageAndBalance(
   env: Cloudflare.Env,
   userStub: DurableObjectStub<UserDurableObject>,
+  platformModel?: AiModelConfig,
 ): Promise<UsageCheckResult> {
   if (!isCloudflareLimitsEnabled(env)) {
-    return unlimitedResult();
+    // No person's gateway can pay here, so the platform funds the turn.
+    return platformModelRefusal(env, platformModel) ?? checkDailyTurnCap(env, userStub);
   }
 
   const limit = getDailyLlmCallLimit(env);
@@ -87,8 +97,12 @@ export async function checkUsageAndBalance(
     byokRouting = { accountId: conn.accountId, apiKey: conn.accessToken };
   }
 
-  // Connected + funded -> bill their gateway; don't touch the daily free-tier counter.
+  // Connected + funded -> bill their gateway; don't touch the daily free-tier counter. The model
+  // allowlist doesn't apply when there's a route to their gateway; without one, getModel would fall
+  // through to the platform's, so it does.
   if (hasUserToken && hasMinimumBalance(balance, minimumBalance)) {
+    const refusal = byokRouting ? null : platformModelRefusal(env, platformModel);
+    if (refusal) return refusal;
     return {
       allowed: true,
       shouldUseByok: true,
@@ -101,8 +115,11 @@ export async function checkUsageAndBalance(
     };
   }
 
-  // Otherwise draw on the platform free tier. consumeDailyLlmCall() only increments while within
-  // the limit (it no-ops once `used >= limit`), so a blocked request never counts.
+  // Otherwise draw on the platform free tier: a model the allowlist doesn't offer is refused before
+  // anything is counted. consumeDailyLlmCall() only increments while within the limit (it no-ops
+  // once `used >= limit`), so a blocked request never counts.
+  const refusal = platformModelRefusal(env, platformModel);
+  if (refusal) return refusal;
   const quota = await userStub.consumeDailyLlmCall(limit);
 
   const decision = canProceedWithRequest({
@@ -122,6 +139,69 @@ export async function checkUsageAndBalance(
     balance,
     hasUserToken,
     byokRouting: decision.shouldUseByok ? byokRouting : undefined,
+  };
+}
+
+/**
+ * The gate for a turn that draws on the platform's allowance (see drawsOnPlatformAllowance). It's
+ * checkUsageAndBalance with the turn's model, so MODEL_ALLOWLIST applies exactly when the platform
+ * would fund the turn: a gateway-routed model it doesn't offer is refused there, before anything is
+ * counted, with the code `model_not_offered`. A turn routed to the person's own funded gateway is
+ * neither allowlisted nor counted. A connection that can't be resolved counts as no connection, so
+ * the turn is the platform's, and allowlisted.
+ */
+export async function checkPlatformTurn(
+  env: Cloudflare.Env,
+  model: { config: AiModelConfig },
+  userStub: DurableObjectStub<UserDurableObject>,
+): Promise<UsageCheckResult> {
+  return checkUsageAndBalance(env, userStub, model.config);
+}
+
+/**
+ * The refusal for a turn the platform's gateway would fund on a model MODEL_ALLOWLIST doesn't
+ * offer, or null. Only a model with no `billing` rides the platform gateway; one on a person's own
+ * key or plan never does.
+ */
+function platformModelRefusal(env: Cloudflare.Env, config: AiModelConfig | undefined): UsageCheckResult | null {
+  if (!config || config.billing !== undefined) return null;
+  const gateway = getAiGatewayConfig(env);
+  if (!gateway || gateway.offersModel(config)) return null;
+  return {
+    ...unlimitedResult(),
+    allowed: false,
+    reason: modelNotOfferedMessage(config.model),
+    errorCode: "model_not_offered",
+  };
+}
+
+/**
+ * A plain daily cap on agent turns, for deployments such as a test stage where nobody can connect
+ * a Cloudflare account to continue. It shares the user object's daily counter, and a blocked turn
+ * isn't counted. Without a cap it allows everything, as before.
+ */
+async function checkDailyTurnCap(
+  env: Cloudflare.Env,
+  userStub: DurableObjectStub<UserDurableObject>,
+): Promise<UsageCheckResult> {
+  const cap = getDailyAgentTurnCap(env);
+  if (cap === null) return unlimitedResult();
+  const quota = await userStub.consumeDailyLlmCall(cap);
+  return {
+    allowed: quota.withinLimits,
+    ...(quota.withinLimits ? {} : {
+      reason: `This environment allows ${cap} agent turns a day, and they're used up. ` +
+          "They reset at midnight UTC.",
+      errorCode: "daily_turn_limit" as const,
+    }),
+    shouldUseByok: false,
+    withinLimits: quota.withinLimits,
+    remaining: quota.remaining,
+    limit: quota.limit,
+    windowKind: "daily",
+    resetAt: quota.resetAt,
+    balance: null,
+    hasUserToken: false,
   };
 }
 

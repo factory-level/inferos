@@ -565,7 +565,7 @@ describe("a workspace's widget candidates", () => {
     expect(byId.get(visual)).toEqual({
       gadgetId: visual, blueprintId: widget.blueprintId, version: 1,
       versionId: consoleWidgetVersionId({ blueprintId: widget.blueprintId, version: 1 }),
-      commitId: await s.watched.head(visual), surfaces: { ui: true, tools: [] }, refusal: null,
+      commitId: await s.watched.head(visual), surfaces: { ui: true, tools: [], states: null }, refusal: null,
     });
     expect(byId.get(callable)).toMatchObject({ surfaces: { ui: true, tools: ["version"] }, refusal: null });
     expect(byId.get(durableInstall)?.refusal).toMatch(/data contract/);

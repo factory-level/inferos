@@ -53,9 +53,9 @@ import {
   type IssueChanges, type NewIssueRequest, type ProjectSnapshot, type ProjectSummary,
   type RepoRecord, type RunRecord, type WikiDocumentHead, type WikiDocumentRecord,
   type TableColumnRecord, type TableRead, type TableReadOptions, type TableRecordSchema,
-  type TableRowRecord, type TableSummary, type WikiPageChanges, type WikiPageWrite,
+  type TableRowRecord, type TableSummary, type WidgetDefinitionWrite, type WikiPageChanges, type WikiPageWrite,
   type WorkspaceMemberRecord, type WorkspaceMembersRead,
-  type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
+  type WikiSearchRecord, type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
   type WikiProposalRecord, type WikiProposalState, PROPOSAL_APPROVE_REFUSED,
   ActivityWindow, type HistoryEntryRecord,
 } from "./inferops-client";
@@ -407,6 +407,29 @@ function parseSection(value: unknown): WikiSectionRecord {
     version: int(section.version, "section.version"),
   };
 }
+
+/** The longest snippet `knowledge.search` returns, in code points. */
+const SNIPPET_MAX = 300;
+
+/** One `knowledge.search` hit; its `score` is dropped (decision 5), any other extra field ignored. */
+function parseSearchHit(value: unknown): WikiSearchRecord {
+  const hit = record(value, "hit");
+  const snippet = text(hit.snippet, "hit.snippet");
+  if ([...snippet].length > SNIPPET_MAX) throw new Malformed("hit.snippet is longer than the contract allows");
+  return {
+    sectionId: text(hit.sectionId, "hit.sectionId", UUID).toLowerCase(),
+    sectionVersion: int(hit.sectionVersion, "hit.sectionVersion"),
+    tag: text(hit.tag, "hit.tag"),
+    documentId: text(hit.documentId, "hit.documentId", UUID).toLowerCase(),
+    documentSlug: text(hit.documentSlug, "hit.documentSlug"),
+    documentTitle: text(hit.documentTitle, "hit.documentTitle"),
+    snippet,
+  };
+}
+
+/** Why a Wiki search failed when it could not run: never shown as "no results". */
+export const SEARCH_UNAVAILABLE =
+  "InferMind Wiki search is unavailable right now, so this is not an empty result. Try again shortly.";
 
 function parseRepo(value: unknown): RepoRecord {
   const repo = record(value, "repo");
@@ -791,6 +814,40 @@ function restated(error: InferOpsError, code: InferOpsErrorCode, detail: string)
   return new InferOpsError(code, detail, error.facts);
 }
 
+/** What InferOps' refusal of a widget index write says: only `configuration:publish` lists a widget. */
+export const WIDGET_INDEX_FORBIDDEN =
+  "InferOps refused: listing widgets for your company needs the shared configuration publish permission in this workspace.";
+
+// A widget index write's own refusals: a 403 is the permission (any other cause reads the same, so
+// nothing tells them apart); a 400 or 422 is a definition InferOps would not take.
+function widgetIndexFailure(status: number): SendFailure | undefined {
+  if (status === 403) return { code: "FORBIDDEN", detail: WIDGET_INDEX_FORBIDDEN, refusal: true };
+  if (status === 400 || status === 422) {
+    return { code: "INVALID_REQUEST", detail: "InferOps would not take this widget definition.", refusal: true };
+  }
+  return undefined;
+}
+
+// A widget pointer InferOps accepts: an id of 1 to 128 characters and a version from 1.
+function checkWidgetPointer(sourceId: string, sourceVersion: number): void {
+  if (typeof sourceId !== "string" || sourceId.length < 1 || sourceId.length > 128) {
+    throw new InferOpsError("INVALID_REQUEST", "A widget's Blueprint id must be 1 to 128 characters.");
+  }
+  if (!Number.isSafeInteger(sourceVersion) || sourceVersion < 1) {
+    throw new InferOpsError("INVALID_REQUEST", "A widget's Blueprint version must be a positive integer.");
+  }
+}
+
+// A definition InferOps accepts: a pointer as above, a title of 1 to 120 characters and a purpose
+// of 1 to 2000, after trimming, as `widget.publish` checks them.
+function checkWidgetDefinition(entry: WidgetDefinitionWrite): void {
+  checkWidgetPointer(entry.sourceId, entry.sourceVersion);
+  const title = entry.title.trim().length;
+  const purpose = entry.purpose.trim().length;
+  if (title < 1 || title > 120) throw new InferOpsError("INVALID_REQUEST", "A widget's title must be 1 to 120 characters.");
+  if (purpose < 1 || purpose > 2000) throw new InferOpsError("INVALID_REQUEST", "A widget's purpose must be 1 to 2000 characters.");
+}
+
 /** The gatekeeper code for a failed response, from its status and InferOps error code. */
 function failureCode(status: number, code: string | null): InferOpsErrorCode {
   if (status === 401) return "UNAUTHORIZED";
@@ -903,6 +960,50 @@ export async function listWorkspaceSlugs(baseUrl: string, token: string,
     if (!isSlug(slug)) throw new Malformed("workspace.slug is not valid");
     return { workspaceId: text(workspace.id, "workspace.id", UUID).toLowerCase(), slug };
   }));
+}
+
+/** Who a credential acts as in one workspace, as `GET /auth/me` says: the kind of principal and its company. */
+export type CallerPrincipal = { principalType: "user" | "service_account"; tenantId: string };
+
+/**
+ * Who `token` acts as in `workspaceId` (`GET /auth/me`, the workspace lane). Used to check a
+ * service-account key before it is stored (FAC-102): never logs or returns the token. Throws an
+ * `InferOpsError` like every request, `UNAVAILABLE` for a response that does not match.
+ */
+export async function readCallerPrincipal(baseUrl: string, token: string, workspaceId: string,
+                                          fetcher: typeof fetch): Promise<CallerPrincipal> {
+  const operation = "auth.me";
+  let response: Response;
+  try {
+    response = await fetcher(`${baseUrl}/auth/me`, {
+      method: "GET",
+      headers: { accept: "application/json", authorization: `Bearer ${token}`, "x-workspace-id": workspaceId },
+      redirect: "manual",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    logger.warn("InferOps request failed", {
+      event: "http.request.failed", operation, status: 0, code: "UNAVAILABLE", error,
+    });
+    throw new InferOpsError("UNAVAILABLE", FAILURE_DETAIL.UNAVAILABLE);
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+  if (!response.ok || body === undefined) {
+    const code = response.ok ? "UNAVAILABLE" : failureCode(response.status, wireCode(body));
+    logger.warn("InferOps request failed", { event: "http.request.failed", operation, status: response.status, code });
+    throw new InferOpsError(code, FAILURE_DETAIL[code]);
+  }
+  return parsed(operation, body, raw => {
+    const me = record(raw, "me");
+    const principalType = text(me.principalType, "me.principalType");
+    if (principalType !== "user" && principalType !== "service_account") throw new Malformed("me.principalType is not known");
+    return { principalType, tenantId: text(me.tenantId, "me.tenantId", UUID).toLowerCase() };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,7 +1188,7 @@ export async function fetchBoardSnapshot(baseUrl: string, token: string, ref: st
 type SendFailure = { code: InferOpsErrorCode; detail: string; refusal?: true };
 
 type Send = {
-  method: "GET" | "POST" | "PATCH"; path: string; body?: unknown; idempotencyKey?: string;
+  method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE"; path: string; body?: unknown; idempotencyKey?: string;
   /** A successful response may have no body (InferOps' answer for a missing Wiki item). */
   maybeEmpty?: boolean;
   /** Read a failed response before the shared mapping; undefined falls back to it. */
@@ -1644,6 +1745,28 @@ export function openHttpInferOpsClient(
       });
     },
 
+    async searchWiki(query: string, limit: number): Promise<WikiSearchRecord[]> {
+      // `query` and `limit` only: InferOps refuses any other parameter, and its seed size and graph
+      // weight stay at its defaults (decision 4).
+      const params = new URLSearchParams({ query, limit: String(limit) });
+      let body: unknown;
+      try {
+        body = await knowledge("wiki.search", { method: "GET", path: `/knowledge/search?${params}` });
+      } catch (error) {
+        // A 404 is an InferOps without `knowledge.search`; it, a timeout (503 SEARCH_TIMEOUT), a
+        // rate limit (429) and an outage are all "search unavailable", never an empty list.
+        if (error instanceof InferOpsError && (error.code === "NOT_FOUND" || error.code === "UNAVAILABLE")) {
+          throw restated(error, "UNAVAILABLE", SEARCH_UNAVAILABLE);
+        }
+        throw error;
+      }
+      return parsed("wiki.search", body, raw => {
+        const hits = list(record(raw, "response").hits, "hits");
+        if (hits.length > limit) throw new Malformed("more hits than the limit");
+        return hits.map(parseSearchHit);
+      });
+    },
+
     async readStructure(): Promise<WikiStructureRecord> {
       const body = await knowledge("wiki.structure.get", { method: "GET", path: "/knowledge/wiki/structure" });
       return parsed("wiki.structure.get", body, parseStructure);
@@ -1824,6 +1947,33 @@ export function openHttpInferOpsClient(
         if (!decision) throw new Malformed(`decisions has no entry for the permission asked about`);
         return bool(decision.allowed, "decisions.allowed");
       });
+    },
+
+    async publishWidgetDefinition(entry: WidgetDefinitionWrite): Promise<void> {
+      await beforeSending(async () => checkWidgetDefinition(entry));
+      const response = await request("widget.publish", {
+        method: "PUT", path: "/knowledge/widget-definitions",
+        body: { source: "inferos.blueprint", sourceId: entry.sourceId, sourceVersion: entry.sourceVersion,
+                title: entry.title, purpose: entry.purpose, visibility: "company" },
+        failure: widgetIndexFailure,
+      });
+      parsed("widget.publish", response, raw => {
+        const definition = record(raw, "response");
+        if (text(definition.sourceId, "sourceId") !== entry.sourceId ||
+            int(definition.sourceVersion, "sourceVersion") !== entry.sourceVersion) {
+          throw new Malformed("another widget definition was returned");
+        }
+      });
+    },
+
+    async withdrawWidgetDefinition(sourceId: string, sourceVersion: number): Promise<boolean> {
+      await beforeSending(async () => checkWidgetPointer(sourceId, sourceVersion));
+      const response = await request("widget.withdraw", {
+        method: "DELETE",
+        path: `/knowledge/widget-definitions/${encodeURIComponent(sourceId)}/${sourceVersion}`,
+        failure: widgetIndexFailure,
+      });
+      return parsed("widget.withdraw", response, raw => bool(record(raw, "response").withdrawn, "withdrawn"));
     },
 
     async listWorkspaceMembers(workspaceId?: string): Promise<WorkspaceMembersRead> {

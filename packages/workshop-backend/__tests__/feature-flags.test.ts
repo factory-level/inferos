@@ -26,13 +26,14 @@ describe("resolveUiFeatureFlags", () => {
     const env = { FLAGS: { getBooleanValue } };
 
     await expect(resolveUiFeatureFlags(env, TEST_USER_ID)).resolves.toEqual(
-      Object.fromEntries(UI_FEATURE_FLAGS.map((flag) => [flag.key, flag.key !== 'openai-chatgpt-plan-usage'])),
+      Object.fromEntries(UI_FEATURE_FLAGS.map((flag) => [flag.key,
+        flag.key !== 'openai-chatgpt-plan-usage' && flag.key !== 'authored-widgets'])),
     );
-    expect(getBooleanValue).toHaveBeenCalledTimes(UI_FEATURE_FLAGS.length - 1);
-    for (const flag of UI_FEATURE_FLAGS.filter(flag => flag.key !== 'openai-chatgpt-plan-usage')) {
+    expect(getBooleanValue).toHaveBeenCalledTimes(UI_FEATURE_FLAGS.length - 2);
+    for (const featureFlag of UI_FEATURE_FLAGS.filter(item => item.key !== 'openai-chatgpt-plan-usage' && item.key !== 'authored-widgets')) {
       expect(getBooleanValue).toHaveBeenCalledWith(
-        flag.key,
-        flag.default,
+        featureFlag.key,
+        featureFlag.default,
         { userId: TEST_USER_ID },
       );
     }
@@ -43,6 +44,22 @@ describe("resolveUiFeatureFlags", () => {
       OPENAI_ASSISTANT_PLUGIN_SECRET: 'bridge-secret' };
     expect((await resolveUiFeatureFlags(env, TEST_USER_ID))['openai-chatgpt-plan-usage']).toBe(true);
     expect((await resolveUiFeatureFlags({ ...env, ENABLE_OPENAI_ASSISTANT_PLUGIN: undefined }, TEST_USER_ID))['openai-chatgpt-plan-usage']).toBe(false);
+  });
+
+  it("exposes authored-widget builds only when the deployment variable is exactly true", async () => {
+    const getBooleanValue = vi.fn().mockResolvedValue(true);
+    const base = { FLAGS: { getBooleanValue } };
+    expect((await resolveUiFeatureFlags(base, TEST_USER_ID))["authored-widgets"]).toBe(false);
+    expect((await resolveUiFeatureFlags({ ...base, AUTHORED_WIDGET_BUILD_ENABLED: "True" }, TEST_USER_ID))["authored-widgets"]).toBe(false);
+    expect((await resolveUiFeatureFlags({ ...base, AUTHORED_WIDGET_BUILD_ENABLED: "true" }, TEST_USER_ID))["authored-widgets"]).toBe(true);
+    expect(getBooleanValue).not.toHaveBeenCalledWith("authored-widgets", expect.anything(), expect.anything());
+  });
+
+  it("uses the deployment value in DEV without evaluating Flagship", async () => {
+    const getBooleanValue = vi.fn();
+    const flags = { DEV: true, FLAGS: { getBooleanValue }, AUTHORED_WIDGET_BUILD_ENABLED: "true" };
+    expect((await resolveUiFeatureFlags(flags, TEST_USER_ID))["authored-widgets"]).toBe(true);
+    expect(getBooleanValue).not.toHaveBeenCalled();
   });
 
   it("uses a flag default when evaluation throws", async () => {

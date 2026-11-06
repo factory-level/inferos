@@ -27,7 +27,12 @@
 // reused with another payload is refused as stale, like any other stale write. The structure read
 // mirrors InferOps' `getWikiStructure`: live pillars by position, members by title, the root, and
 // the unfiled pages (no Master, in no pillar). Pages are listed by sibling order, then title, and
-// sections in page order. `setInferMindEnabled(false)`
+// sections in page order. Search (`knowledge.search`) is a plain full-text stand-in: a section
+// matches when its body contains every query word (case-insensitive), ranked by how often they
+// occur, ties by section id, with InferOps' snippet shape (at most 300 code points of the markdown
+// source around the first match, matched words in `<b>…</b>`) and no `score`;
+// `setSearchUnavailable(true)` makes it fail as InferOps' 503 `SEARCH_TIMEOUT` does.
+// `setInferMindEnabled(false)`
 // turns the demo workspace into one without InferMind, so every Wiki call fails FORBIDDEN as
 // InferOps' product gate does.
 //
@@ -74,10 +79,14 @@ import {
   type TableReadOptions, type TableRecordSchema, type TableRowRecord, type TableSummary,
   type WikiDocumentHead,
   type WikiDocumentRecord, type WikiPageChanges, type WikiPageWrite, type WikiProposalApproval,
-  type WikiProposalRead, type WikiProposalRecord, type WikiProposalState, type WikiSectionRecord,
+  type WikiProposalRead, type WikiProposalRecord, type WikiProposalState, type WikiSearchRecord,
+  type WikiSectionRecord,
   type WikiStructureRecord, type WorkspaceMembersRead, PROPOSAL_APPROVE_REFUSED,
   type HistoryEntryRecord, toIssueActivity,
 } from "./inferops-client";
+
+/** Why the demo data lists no widget: it has no widget index. */
+const DEMO_NO_WIDGET_INDEX = "The demo data has no widget index.";
 import type { Issue, IssueActivity, Revision, RunResult, RunStatus, WikiProposalSource } from "./types";
 import { composeDocumentText, masterStructureText } from "./wiki";
 import { readWorkflowPolicyAnswer, workflowPolicyNotFound } from "./workflow-policy";
@@ -93,6 +102,7 @@ const IDEMPOTENCY_PREFIX = "idem:";
 // v2 added page bodies, versions, Master roles and pillars; a v1 copy is left unread.
 const WIKI_KEY = "wiki:v2";
 const NO_INFERMIND_KEY = "wiki:no-infermind";
+const SEARCH_DOWN_KEY = "wiki:search-down";
 const PROPOSALS_KEY = "wiki:proposals:v1";
 const PROPOSAL_ROLE_KEY = "wiki:proposal-role";
 const TABLES_KEY = "tables:v1";
@@ -628,6 +638,32 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     });
   }
 
+  /** `knowledge.search` over the demo Wiki; see the header. */
+  async searchWiki(query: string, limit: number): Promise<WikiSearchRecord[]> {
+    const wiki = this.#wiki();
+    if (this.ctx.storage.kv.get<boolean>(SEARCH_DOWN_KEY)) {
+      throw new InferOpsError("UNAVAILABLE", "InferMind Wiki search timed out.");
+    }
+    const words = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])];
+    if (words.length === 0) return [];
+    const byId = new Map(wiki.documents.map(d => [d.id, d]));
+    const matches = wiki.sections.flatMap(section => {
+      const document = byId.get(section.documentId);
+      const lower = section.body.toLowerCase();
+      if (!document || !words.every(word => lower.includes(word))) return [];
+      const count = words.reduce((n, word) => n + lower.split(word).length - 1, 0);
+      return [{ section, document, count }];
+    });
+    return matches
+      .toSorted((a, b) => b.count - a.count || (a.section.id < b.section.id ? -1 : 1))
+      .slice(0, limit)
+      .map(({ section, document }) => ({
+        sectionId: section.id, sectionVersion: section.version, tag: section.tag,
+        documentId: document.id, documentSlug: document.slug, documentTitle: document.title,
+        snippet: mockSnippet(section.body, words),
+      }));
+  }
+
   async updateDocument(documentId: string, changes: WikiPageChanges, expectedVersion: number,
                        idempotencyKey: string): Promise<WikiPageWrite> {
     if (!idempotencyKey) throw new InferOpsError("INVALID_REQUEST", "An idempotency key is required.");
@@ -879,6 +915,12 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
   }
 
   /** Make the demo workspace one with InferMind (the default) or without it. */
+  /** Test and demo control: make Wiki search fail as InferOps does when it times out. */
+  async setSearchUnavailable(unavailable: boolean): Promise<void> {
+    if (unavailable) this.ctx.storage.kv.put(SEARCH_DOWN_KEY, true);
+    else this.ctx.storage.kv.delete(SEARCH_DOWN_KEY);
+  }
+
   async setInferMindEnabled(enabled: boolean): Promise<void> {
     if (enabled) this.ctx.storage.kv.delete(NO_INFERMIND_KEY);
     else this.ctx.storage.kv.put(NO_INFERMIND_KEY, true);
@@ -1040,6 +1082,7 @@ export function openInferOpsClient(
     readDocument: documentId => stub.readDocument(documentId),
     readStructure: () => stub.readStructure(),
     readDocumentText: documentId => stub.readDocumentText(documentId),
+    searchWiki: (query, limit) => stub.searchWiki(query, limit),
     updateDocument: (documentId, changes, expectedVersion, idempotencyKey) =>
       refused(stub.updateDocument(documentId, changes, expectedVersion, idempotencyKey)),
     listSections: documentId => stub.listSections(documentId),
@@ -1058,10 +1101,26 @@ export function openInferOpsClient(
     listWorkspaceMembers: () => stub.listWorkspaceMembers(),
     // The demo data belongs to no company, so its account holds no company permission.
     holdsPermission: async () => false,
+    // The demo data has no widget index: nothing is listed, and nothing claims it was.
+    publishWidgetDefinition: async () => { throw new InferOpsError("UNAVAILABLE", DEMO_NO_WIDGET_INDEX); },
+    withdrawWidgetDefinition: async () => { throw new InferOpsError("UNAVAILABLE", DEMO_NO_WIDGET_INDEX); },
     readWorkflowPolicy: async projectKey => {
       const { projectId, body } = await stub.readWorkflowPolicy(projectKey);
       return readWorkflowPolicyAnswer(body, projectId);
     },
     forget: () => stub.forget(),
   };
+}
+
+/**
+ * At most 300 code points of `body` from a little before the first matched word, with each
+ * occurrence of a matched word wrapped in `<b>…</b>` as `ts_headline` does; the cut may split one.
+ */
+function mockSnippet(body: string, words: string[]): string {
+  const lower = body.toLowerCase();
+  const first = Math.min(...words.map(word => lower.indexOf(word)).filter(i => i >= 0));
+  const start = Math.max(0, first - 40);
+  const pattern = new RegExp(words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"), "giu");
+  const marked = body.slice(start).replace(pattern, word => `<b>${word}</b>`);
+  return [...marked].slice(0, 300).join("");
 }

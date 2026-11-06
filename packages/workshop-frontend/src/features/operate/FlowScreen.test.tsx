@@ -9,6 +9,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
+import type { OperateFlow } from '@gadgets/workshop-shared/operate-flow'
 import type { OperateConsoleRun, OperateFlowRun } from '@gadgets/workshop-shared/operate-session'
 import type { ConsoleEntry } from './consoles'
 import type { SessionWorkspace } from './useSessionWorkspace'
@@ -34,7 +35,8 @@ import { FlowScreen, type FlowConsole } from './FlowScreen'
 const screen = (id: string, title: string): CanvasDefinition => ({ schemaVersion: 1, id, revision: '4', title, sections: [] })
 const STEPS = ['s1', 's2', 's3']
 const RUN: OperateFlowRun = { workspaceId: 'w1', flowId: 'intake', title: 'Intake', steps: STEPS, index: 1 }
-const SNAPSHOT = { id: 'intake', revision: '0', title: 'Intake', steps: STEPS }
+const SNAPSHOT: OperateFlow = { id: 'intake', revision: '0', title: 'Intake', steps: STEPS }
+const PAGES = [{ name: 'start', routes: [{ label: 'Check', to: 'check' }] }, { name: 'check', routes: [{ label: 'Retry', to: 'check' }] }, { name: 'done' }]
 const CONSOLE = (revision: string, flows = [SNAPSHOT], views = STEPS): OperateConsole => {
   const content = { title: 'Intake console', fullChat: 'off' as const, flows: flows.map(flow => flow.id),
     views: views.map(id => ({ id, title: id, type: 'screen' as const, screen: id })) }
@@ -82,7 +84,7 @@ const readNothing = () => {
 it('U-1: draws the published copy from the open console, its frozen widgets and the session board scope', async () => {
   await render(shown())
   expect(doubles.canvas?.definition).toBe(PUBLISHED_COPY)
-  expect(doubles.canvas?.offeredBy).toEqual({ consoleId: 'c1', revision: '3' })
+  expect(doubles.canvas?.offeredBy).toEqual({ consoleId: 'c1', revision: '3', workspaceId: 'w1' })
   expect(doubles.canvas?.resourceScope?.overseer).toBe(SESSION.stub)
   expect(onTitle).toHaveBeenLastCalledWith('Triage (published)')
   expect(alert()).toBeUndefined()
@@ -106,6 +108,7 @@ it.each([
   ['U-4: a newer revision was published', shown({ entry: entry(CONSOLE('4')) })],
   ['U-5: the snapshot has other steps', shown({ entry: entry(CONSOLE('3', [{ ...SNAPSHOT, steps: ['s3', 's2', 's1'] }])) })],
   ['U-5: the snapshot has another title', shown({ entry: entry(CONSOLE('3', [{ ...SNAPSHOT, title: 'Intake v2' }])) })],
+  ['U-5: the snapshot names pages the run did not copy', shown({ entry: entry(CONSOLE('3', [{ ...SNAPSHOT, pages: PAGES }])) })],
 ])('%s: unavailable as changed, reading nothing', async (_name, console) => {
   await render(console)
   expect(alert()).toBe(CHANGED)
@@ -149,5 +152,17 @@ it('U-8: loading while the role, the consoles or the session workspace are unkno
   doubles.opened = { ...doubles.opened, error: new Error('denied') }
   await render(shown())
   expect(alert()).toMatch(/^This step is unavailable/)
+  readNothing()
+})
+
+it('U-9: a run of a flow that names its pages draws the step while the published copy names the same pages, and is changed once they differ', async () => {
+  const paged: OperateFlowRun = { ...RUN, pages: PAGES, history: [0], pageState: null }
+  await render(shown({ entry: entry(CONSOLE('3', [{ ...SNAPSHOT, pages: PAGES }])) }), paged)
+  expect(doubles.canvas?.definition).toBe(PUBLISHED_COPY)
+  doubles.canvas = null
+  const rerouted = [PAGES[0]!, { name: 'check', routes: [{ label: 'Start over', to: 'start' }] }, PAGES[2]!]
+  await render(shown({ entry: entry(CONSOLE('3', [{ ...SNAPSHOT, pages: rerouted }])) }), paged)
+  expect(alert()).toBe(CHANGED)
+  expect(doubles.canvas).toBeNull()
   readNothing()
 })

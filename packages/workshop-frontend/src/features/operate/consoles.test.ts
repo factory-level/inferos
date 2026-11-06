@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { MAX_CONSOLE_WIDGETS, type BoundViewEntry, type ConsoleWidgetEntry, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
 import { SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api'
-import { consoleContentForSave, consoleRefusalMessage } from './consoles'
+import { consoleContentForSave, consoleRefusalMessage, flowLength, startFlowEvent } from './consoles'
 
 const BASE = { title: 'Operations', fullChat: 'default' as const, views: [{ id: 'v1', type: 'screen' as const, title: 'Board', screen: 's1' }] }
 const board = (n: number): HostBoardEntry => ({ kind: 'host-board', id: `hb${n}`, label: `Board ${n}`,
@@ -52,5 +52,22 @@ describe('consoleRefusalMessage', () => {
       .toBe('Console flow "f" names a screen no view shows.')
     expect(consoleRefusalMessage(new Error(SHARED_CONFIGURATION_REFUSED), 'fallback')).toBe(SHARED_CONFIGURATION_REFUSED)
     expect(consoleRefusalMessage(new Error('internal detail'), 'fallback')).toBe('fallback')
+  })
+})
+
+describe('startFlowEvent', () => {
+  const LINEAR = { id: 'f1', revision: '2', title: 'Admission', steps: ['s1', 's2'] }
+  const PAGES = [{ name: 'intake', routes: [{ label: 'Next', to: 'review' }] }, { name: 'review', states: ['open', 'checked'] }]
+
+  it('starts a flow in order with its title and steps only, as before', () => {
+    const event = startFlowEvent('w1', LINEAR)
+    expect(event).toStrictEqual({ type: 'startFlow', workspaceId: 'w1', flowId: 'f1', title: 'Admission', steps: ['s1', 's2'] })
+    expect(flowLength(LINEAR)).toBe('2 steps')
+  })
+
+  it('sends the pages of a flow that names them exactly, so the kernel finds the same definition', () => {
+    expect(startFlowEvent('w1', { ...LINEAR, pages: PAGES })).toStrictEqual(
+      { type: 'startFlow', workspaceId: 'w1', flowId: 'f1', title: 'Admission', steps: ['s1', 's2'], pages: PAGES })
+    expect(flowLength({ ...LINEAR, pages: PAGES })).toBe('2 pages, branching')
   })
 })

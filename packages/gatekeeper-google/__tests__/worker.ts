@@ -1,8 +1,7 @@
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import type {
   ActionDescription, ActionField, ApprovalQueue, GitCache, HookController, HookDescription,
-  ObservationDescription,
-} from "@gadgets/workshop-shared/gatekeeper";
+  ObservationDescription, ActionReceipt } from "@gadgets/workshop-shared/gatekeeper";
 import { TestGitCache } from "./test-git-cache";
 import type { GoogleAccessToken } from "../src/google-api";
 import type { GoogleDocSession, GoogleDocTab } from "../src/docs-types";
@@ -39,10 +38,11 @@ class TestApprovalQueue extends RpcTarget implements ApprovalQueue {
     throw new Error("Unexpected git cache access");
   }
 
-  async submitAction(actionId: number, description: ActionDescription): Promise<void> {
+  async submitAction(actionId: number, description: ActionDescription): Promise<ActionReceipt> {
     this.actionId = actionId;
     this.actionDescription = description.description;
     this.actionFields = description.fields ?? [];
+    return { actionId: `action-${actionId}`, status: async () => ({ outcome: "waiting" }) };
   }
 
   async bindHook<Hook extends RpcTarget>(

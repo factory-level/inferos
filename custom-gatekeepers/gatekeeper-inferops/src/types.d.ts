@@ -1,6 +1,57 @@
 /** A work item's version, encoded as a nonnegative decimal string. */
 export type Revision = string;
 
+/**
+ * Where a write stands. A write can take effect at once or wait for a person's decision, so a
+ * returned write isn't necessarily done; reads show it as done either way.
+ * * waiting: not applied yet; it may still be applied or refused.
+ * * running: being applied now, not done yet.
+ * * succeeded: applied. The only outcome that means the write was done.
+ * * failed: InferOps refused it; it was not applied.
+ * * rejected: it was declined, and was not applied.
+ * * unknown: it may or may not have been applied.
+ */
+export type WriteOutcome = "waiting" | "running" | "succeeded" | "failed" | "rejected" | "unknown";
+
+/** A write's status now. */
+export interface WriteStatus {
+  /** Where it stands. */
+  outcome: WriteOutcome;
+  /** Once succeeded, what InferOps reported it produced, such as a created issue's key or the revision it wrote. */
+  result?: Record<string, string | number | boolean | null>;
+  /**
+   * Once failed or unknown, or waiting again after a refusal that may be retried, why:
+   * * STALE_REVISION: it changed since it was read; read it again first.
+   * * CONFLICT: another change to it hasn't taken effect yet.
+   * * NOT_FOUND: it no longer exists, or can't be reached.
+   * * FORBIDDEN: the change isn't permitted.
+   * * INVALID: the change wasn't accepted as made.
+   * * RATE_LIMITED, UNAVAILABLE: try again later.
+   * * PROVIDER_ERROR: InferOps refused it for another reason.
+   */
+  code?: WriteFailureCode;
+  /** With code, one fixed sentence explaining it. It never contains InferOps' own error text. */
+  reason?: string;
+}
+
+/** Why a write didn't simply succeed (see WriteStatus.code). */
+export type WriteFailureCode =
+  | "STALE_REVISION" | "CONFLICT" | "NOT_FOUND" | "FORBIDDEN" | "INVALID" | "RATE_LIMITED" | "UNAVAILABLE"
+  | "PROVIDER_ERROR";
+
+/**
+ * The receipt a write returns. Only its holder can read the write's status. A write that has
+ * nothing to do (no change, or the same write already waiting) returns null instead.
+ * status() works only while the session that returned the receipt is open: after a reconnect or
+ * restart it fails, and a later outcome has to be read from the board itself.
+ */
+export interface WriteReceipt {
+  /** An id for showing and correlating this write. */
+  readonly actionId: string;
+  /** The write's status now. Call it again later to see whether it was applied. */
+  status(): Promise<WriteStatus>;
+}
+
 /** The work-item workflow that a state or issue belongs to. */
 export type Workflow = "content" | "software" | "service";
 
@@ -113,7 +164,7 @@ export interface InferOpsIssueSession {
    * While an earlier move or update of this issue has not yet taken effect, another fails with
    * CONFLICT. Read again before retrying a stale change.
    */
-  transition(toStateId: string, expectedRevision: Revision): Promise<void>;
+  transition(toStateId: string, expectedRevision: Revision): Promise<WriteReceipt | null>;
   /**
    * Change this issue's title, description or priority. Supply the revision returned by read();
    * a stale version fails with STALE_REVISION. Reads show the new values at once. Values equal to
@@ -121,7 +172,7 @@ export interface InferOpsIssueSession {
    * field fails with INVALID_REQUEST. While an earlier move or update of this issue has not yet
    * taken effect, another fails with CONFLICT.
    */
-  update(changes: IssueChanges, expectedRevision: Revision): Promise<void>;
+  update(changes: IssueChanges, expectedRevision: Revision): Promise<WriteReceipt | null>;
   /**
    * Read what people and agents did on this issue: each field change and comment InferOps
    * recorded, newest first, at most 100 entries, read with the person's own
@@ -171,10 +222,11 @@ export interface InferOpsProjectSession {
   /**
    * Create an issue in this project. readBoard() shows it at once, marked pending "create", until
    * it exists. Proposing the same issue again while that create is still pending (from another
-   * tab, or a retry) joins it and queues nothing new. An empty or overlong field fails with
+   * tab, or a retry) joins it and queues nothing new: that call returns null, and the receipt stays
+   * with whoever proposed it first. An empty or overlong field fails with
    * INVALID_REQUEST; a state outside this project fails with INVALID_STATE.
    */
-  createIssue(issue: NewIssue): Promise<void>;
+  createIssue(issue: NewIssue): Promise<WriteReceipt | null>;
   /**
    * Find boards that match what the person described: its work or purpose, not necessarily its
    * title, key or workspace (1-200 characters). Searches this connection's InferOps workspace and,
@@ -356,7 +408,7 @@ export interface InferOpsDispatchSession {
    * cancelled, NOT_FOUND for an issue outside this project, and INVALID_REQUEST for a malformed
    * repository id, ref or revision, or a repository that is disabled or not in the workspace.
    */
-  dispatch(issueKey: string, target: DispatchTarget, expectedRevision: Revision): Promise<void>;
+  dispatch(issueKey: string, target: DispatchTarget, expectedRevision: Revision): Promise<WriteReceipt | null>;
   /** One run of an issue of this project. A run of another project fails with NOT_FOUND. */
   getRun(runId: string): Promise<Run>;
   /** This project's recent runs, newest first. */
@@ -365,7 +417,7 @@ export interface InferOpsDispatchSession {
    * Stop a queued or running run of this project. A queued run ends cancelled; a running one ends
    * unknown, because its work may be partly done. A finished run fails with CONFLICT.
    */
-  cancel(runId: string): Promise<void>;
+  cancel(runId: string): Promise<WriteReceipt | null>;
 }
 
 /** One page of the Wiki, as listed: where it sits in the page tree, without its content. */
@@ -572,6 +624,34 @@ export interface WikiProposalDetail {
   freshness: WikiProposalFreshness;
 }
 
+/** One ranked match of a Wiki search: a section you can read, with the page it belongs to. */
+export interface WikiSearchHit {
+  /** The matching section's UUID; readDocument() of its page returns it. */
+  sectionId: string;
+  /** The section's version when it was searched; reread the page before quoting or editing it. */
+  sectionVersion: number;
+  /** The section's anchor tag. */
+  tag: string;
+  /** The page's UUID. */
+  documentId: string;
+  /** The page's short name. */
+  documentSlug: string;
+  /** Page title. */
+  documentTitle: string;
+  /**
+   * At most 300 characters of this section's markdown source around the match (its first words
+   * when it matched by meaning only), with matched words wrapped in <b>…</b>. The cut can fall
+   * inside a highlight, and the page's own text can contain <b> too. Treat it as text, never as
+   * HTML.
+   */
+  snippet: string;
+  /**
+   * Set when an edit of this section requested through this connection has not taken effect yet;
+   * the snippet is still the committed text. Absent otherwise.
+   */
+  pending?: "update";
+}
+
 /**
  * The InferMind Wiki of one workspace, fixed when this capability is created. Fails with
  * FORBIDDEN when the workspace is not an InferMind workspace or your InferOps access lacks
@@ -600,20 +680,32 @@ export interface InferOpsWikiSession {
    */
   readDocumentText(slugOrId: string): Promise<string>;
   /**
+   * The sections you can read that best match a text query, best first: at most `limit` (an
+   * integer 1–50, default 20) hits, possibly fewer, equal matches in a stable order. There is no
+   * next page; refine the query to find more. The query is 1–500 characters after trimming;
+   * anything else fails with INVALID_REQUEST. No match, and nothing you can read, are both an
+   * empty list. Matching is English-language full text (plus meaning, where configured). A hit is
+   * a pointer: read the page again before quoting or editing it. Fails with UNAVAILABLE when search
+   * is unavailable (InferOps timed out, is down or has no search) or after 30 searches in a minute
+   * on this connection, never with an empty list; and with FORBIDDEN on a shared deployment
+   * connection that is not your own sign-in.
+   */
+  searchWiki(query: string, options?: { limit?: number }): Promise<WikiSearchHit[]>;
+  /**
    * Replace a page's body. Supply the version readDocument() returned; a page changed since (its
    * body, title or place in the tree) fails with STALE_REVISION. Reads show the new body at once,
    * marked pendingBody. A body equal to the current one does nothing. While an earlier body edit of
    * the page has not taken effect, another fails with CONFLICT. A body over 200000 characters fails
    * with INVALID_REQUEST. Sections are not changed; edit them with updateSection().
    */
-  updateDocumentBody(slugOrId: string, body: string, expectedVersion: number): Promise<void>;
+  updateDocumentBody(slugOrId: string, body: string, expectedVersion: number): Promise<WriteReceipt | null>;
   /**
    * Replace a section's markdown. Supply the version you read it at; a section edited since fails
    * with STALE_REVISION. Reads show the new body at once, marked pending "update". A body equal to
    * the current one does nothing. While an earlier edit of the section has not taken effect,
    * another fails with CONFLICT. A body over 100000 characters fails with INVALID_REQUEST.
    */
-  updateSection(sectionId: string, body: string, expectedVersion: number): Promise<void>;
+  updateSection(sectionId: string, body: string, expectedVersion: number): Promise<WriteReceipt | null>;
   /**
    * Drafted page proposals, newest first (at most 200), optionally only those in one state. Fails
    * with NOT_FOUND when Wiki publishing is off in InferOps.
@@ -636,7 +728,7 @@ export interface InferOpsWikiSession {
    * this capability is shared with collaborators or uses a connection that is not your own sign-in.
    * InferOps refuses an approval by the person who requested the draft or wrote its revision.
    */
-  approveProposal(proposalId: string, proposalHash: string): Promise<void>;
+  approveProposal(proposalId: string, proposalHash: string): Promise<WriteReceipt | null>;
 }
 
 /** One of your own InferOps or InferMind workspaces, as an account connection lists it. */

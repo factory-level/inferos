@@ -137,7 +137,9 @@ export class AutoApprovalDrainer {
     for (let record of pending) {
       if (record.type !== "action") continue;
 
-      let rule = autoApprovalRule(this.storage, roleOf, gatekeeperId, record.description);
+      // A person approves every write an assigned workflow run proposes (FAC-102): a manual gate.
+      let rule = record.caller.from === "systemRun" ? undefined
+          : autoApprovalRule(this.storage, roleOf, gatekeeperId, record.description);
       if (rule === undefined) {
         // A manual gate. Stop rather than skipping ahead to any later auto-eligible action.
         return;

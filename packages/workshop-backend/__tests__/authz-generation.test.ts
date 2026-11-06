@@ -11,8 +11,9 @@
 // facets and the restart's ctx.abort() are the only fakes: a real abort would kill the test DO.
 
 import { describe, expect, it } from "vitest";
-import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
+import { env, RpcStub as NativeRpcStub, RpcTarget as NativeRpcTarget } from "cloudflare:workers";
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
+import { getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES } from "@gadgets/workshop-shared/api";
 import type { OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {
@@ -48,6 +49,9 @@ async function withOverseer(fn: (h: Harness) => Promise<void>, name?: string): P
         deleteGadget: async () => {},
         recordSharedGadgetOpen: async () => {},
         ensureGadgetRegistered: async () => {},
+        // The owner's recorded operate session is this workspace, as claimOperateSessionWorkspace
+        // records it before the session first opens it (FAC-88: Overseer.open checks it).
+        operateSessionWorkspaceId: async () => stub.id.toString(),
       }),
       getByName: (email: string) => ({
         id: { toString: () => `${email}-user-id` },
@@ -275,6 +279,21 @@ const ROWS: Row[] = [
     drive: ({ instance }) => openAsOwner(instance, true),
   },
   {
+    input: "operate session retired (FAC-88, not in the §4.1 table)",
+    // The retired mark, then the access restart it schedules.
+    writes: 2,
+    setup: async ({ instance }) => { await openAsOwner(instance, true); },
+    drive: async ({ instance, aborts }) => {
+      expect(await instance.retireOperateSession(OWNER_USER_ID)).toBe(true);
+      // Idempotent: a second retirement writes nothing more.
+      expect(await instance.retireOperateSession(OWNER_USER_ID)).toBe(true);
+      // Nobody but the owner retires it.
+      expect(await instance.retireOperateSession("someone-else")).toBe(false);
+      await scheduler.wait(150);
+      expect(aborts).toEqual(["This operate session has ended."]);
+    },
+  },
+  {
     input: "workspace deleted (deleteSelf)",
     // deleteSelf's own bump, then the access restart it schedules.
     writes: 2,
@@ -428,5 +447,140 @@ describe("authorization generation", () => {
     }, name);
 
     expect(seen).toEqual([0, 1, 2, 3, 3, 4]);
+  });
+});
+
+// FAC-88: an operate session workspace its owner's company change retired. A capability the owner
+// already holds refuses every call from the moment it is retired (the access restart then drops
+// it), the refusal names nothing, and no later open, the owner's own included, gets it back.
+describe("a retired operate session workspace", () => {
+  const ENDED = "This operate session has ended. Reload to start a new one.";
+
+  it("refuses the owner's held capability: listing, history and running the chat", async () => {
+    await withOverseer(async ({ instance, aborts }) => {
+      let held = await openAsOwner(instance, true);
+      expect(await held.listChats()).toEqual([]);
+      expect(await instance.retireOperateSession(OWNER_USER_ID)).toBe(true);
+      for (let call of [
+        () => held.listChats(),
+        () => held.getChatHistory(1),
+        () => held.newChat("Carry on", null),
+        () => held.sendChatMessage(1, "Carry on", null),
+        () => held.subscribeToChat(new NativeRpcStub({}) as never),
+        () => held.listActions(),
+      ]) {
+        let refusal = await call().then(() => "accepted", (error: unknown) => String((error as Error).message));
+        expect(refusal).toBe(ENDED);
+      }
+      await scheduler.wait(150);
+      expect(aborts).toEqual(["This operate session has ended."]);
+    });
+  });
+
+  // Every stream an operate capability can hold, each ended by the retirement before it returns
+  // (OverseerImpl.closeAllStreams), not left to the access restart.
+  class Recorder extends NativeRpcTarget {
+    calls: string[] = [];
+    released = false;
+    #record(name: string) { this.calls.push(name); }
+    async streamGeneration() { this.#record("streamGeneration"); }
+    async metadata() { this.#record("metadata"); }
+    async deleted() { this.#record("deleted"); }
+    async message() { this.#record("message"); }
+    async changeApplied() { this.#record("changeApplied"); }
+    async entry() { this.#record("entry"); }
+    async removed() { this.#record("removed"); }
+    async ready() { this.#record("ready"); }
+    async init() { this.#record("init"); }
+    async add() { this.#record("add"); }
+    async remove() { this.#record("remove"); }
+    async event() { this.#record("event"); }
+    // Client stubs (Cap'n Web) carry onRpcBroken; a native test stub reaches the target instead.
+    onRpcBroken() {}
+    [Symbol.dispose]() { this.released = true; }
+  }
+  type Held = Awaited<ReturnType<typeof openAsOwner>>;
+  const KINDS: [string, (held: Held, subscriber: NativeRpcStub<Recorder>) => Promise<unknown>][] = [
+    ["chat", (held, subscriber) => held.subscribeToChat(subscriber)],
+    ["actions", (held, subscriber) => held.subscribeToActions(subscriber)],
+    ["workpieces", (held, subscriber) => held.subscribeToWorkpieces(subscriber)],
+    ["presence", (held, subscriber) => held.subscribeToPresence(subscriber)],
+    ["console logs", (held, subscriber) => held.subscribeToConsoleLogs(subscriber)],
+  ];
+
+  for (let [kind, subscribe] of KINDS) {
+    it(`ends an open ${kind} stream before the retirement returns`, async () => {
+      await withOverseer(async ({ impl, instance }) => {
+        let held = await openAsOwner(instance, true);
+        let before = impl.openStreamCount();
+        let recorder = new Recorder();
+        let stub = new NativeRpcStub(recorder);
+        await subscribe(held, stub);
+        stub[Symbol.dispose]();  // the workspace's own reference is now the only one
+        expect(impl.openStreamCount()).toBe(before + 1);
+        await instance.retireOperateSession(OWNER_USER_ID);
+        expect(impl.openStreamCount()).toBe(0);
+        await scheduler.wait(10);  // well inside the restart's 100 ms
+        expect(recorder.released).toBe(true);
+        let delivered = recorder.calls.length;
+        await impl.deliverGadgetLogs(null, [{ timestamp: new Date(), level: "log", message: "after" }] as never);
+        impl.storage.title.put("Renamed after the switch");
+        await scheduler.wait(10);
+        expect(recorder.calls.length).toBe(delivered);
+      });
+    });
+  }
+
+  it("ends an open host-board selection stream before the retirement returns", async () => {
+    await withOverseer(async ({ impl, instance }) => {
+      impl.env = { ...impl.env, INFEROPS_HOST_BOARDS: "true" };
+      await openAsOwner(instance, true);
+      let seen: unknown[] = [];
+      let stub = new NativeRpcStub(async (state: unknown) => { seen.push(state); });
+      await instance.subscribeHostBoardSelection(OWNER_USER_ID, "board-target", stub as never);
+      stub[Symbol.dispose]();
+      expect(impl.openStreamCount()).toBe(1);
+      await instance.retireOperateSession(OWNER_USER_ID);
+      expect(impl.openStreamCount()).toBe(0);
+    });
+  });
+
+  it("ends an open metadata stream before the retirement returns", async () => {
+    await withOverseer(async ({ impl, instance }) => {
+      let held = await openAsOwner(instance, true);
+      let seen: unknown[] = [];
+      let stub = new NativeRpcStub((metadata: unknown) => { seen.push(metadata); });
+      await held.subscribeToMetadata(stub as never);
+      stub[Symbol.dispose]();
+      impl.storage.title.put("Before");
+      await scheduler.wait(10);
+      let delivered = seen.length;
+      expect(delivered).toBeGreaterThan(0);
+      await instance.retireOperateSession(OWNER_USER_ID);
+      expect(impl.openStreamCount()).toBe(0);
+      impl.storage.title.put("After the switch");
+      await scheduler.wait(10);
+      expect(seen.length).toBe(delivered);
+    });
+  });
+
+  it("is never opened again, by its owner or anyone", async () => {
+    await withOverseer(async ({ instance }) => {
+      await openAsOwner(instance, true);
+      await instance.retireOperateSession(OWNER_USER_ID);
+      for (let asOperateSession of [true, false]) {
+        let code = await openAsOwner(instance, asOperateSession).then(() => "opened", getOpenGadgetErrorCode);
+        expect(code).toBe(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+      }
+    });
+  });
+
+  it("is a no-op for anyone but its owner, and for a workspace that isn't an operate session", async () => {
+    await withOverseer(async ({ instance }) => {
+      await openAsOwner(instance);
+      expect(await instance.retireOperateSession(OWNER_USER_ID)).toBe(false);
+      expect(await instance.retireOperateSession("someone-else")).toBe(false);
+      expect(await openAsOwner(instance)).toBeDefined();
+    });
   });
 });

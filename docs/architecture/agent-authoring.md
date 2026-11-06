@@ -3,18 +3,31 @@ title: Reusable native agent authoring
 design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md
 covers:
   - packages/workshop-shared/src/api.ts
+  - packages/workshop-shared/src/feature-flags.ts
   - packages/workshop-shared/src/agent-artifact.ts
   - packages/workshop-backend/src/agent-spawner-binding.d.ts
   - packages/workshop-backend/src/overseer.ts
+  - packages/workshop-backend/src/authored-widget-publication.ts
+  - packages/workshop-backend/src/feature-flags.ts
   - packages/workshop-backend/src/blueprint-archive.ts
+  - packages/workshop-backend/src/authored-widget-build.ts
+  - packages/workshop-backend/src/authored-widget-build-runtime.ts
+  - packages/workshop-backend/src/authored-widget-build-compiler.ts
+  - packages/workshop-backend/src/authored-widget-preflight.ts
+  - packages/workshop-backend/src/authored-widget-validation.ts
+  - packages/workshop-backend/scripts/build-authored-widget-dependencies.ts
   - packages/workshop-backend/src/artifact-store.ts
   - packages/workshop-backend/src/artifact-publisher.ts
   - packages/workshop-backend/src/artifact-publisher-binding.d.ts
   - packages/gatekeeper-scheduler
   - packages/workshop-frontend/src/gatekeeper-modal/AgentSettingsModal.tsx
+  - packages/workshop-frontend/src/features/authoring
+  - packages/workshop-frontend/src/editorTabs.ts
   - packages/gatekeeper-context/src/agent-skill.ts
+  - packages/bundled-blueprints/src/authoring-compiler.ts
+  - packages/bundled-blueprints/__tests__/authoring-compiler.test.ts
   - docs/blueprints.md
-updated: 2026-11-03
+updated: 2026-11-05
 ---
 
 # Reusable native agent authoring
@@ -36,7 +49,57 @@ Current state after the revision-storage slice of [#16](https://github.com/facto
 | `packages/workshop-backend/src/blueprint-archive.ts` | `.gadget` archive format v1 encode and decode. |
 | `packages/gatekeeper-scheduler` | Persistent workspace callbacks. |
 | `packages/gatekeeper-context/src/agent-skill.ts` | Context Library skills advertised to agents. |
+| `packages/bundled-blueprints/src/authoring-compiler.ts` | Node-only compiler for future authored React/Refine widgets; deterministic artifacts and build-time input refusals. |
 | `docs/blueprints.md` | Portable code and binding requirements. |
+
+### Authored widget compiler (FAC-8)
+
+`compileAuthoredWidget()` accepts an in-memory TSX/CSS file map and bundles it with a server-owned
+React/Refine dependency set using esbuild-WASM. The Worker and build Durable Object do not load the
+TypeScript compiler package. Esbuild parses TSX and the virtual filesystem plugin limits imports to
+the reviewed dependency closure; the input validator rejects external CSS references. Refine
+telemetry is forced off in the emitted artifact. Source checks for browser and network globals
+provide author feedback only; they are not a security boundary. The focused
+real-browser proof in `packages/workshop-frontend/src/GadgetUI.request-probes.test.ts` covers
+specific outbound request APIs from the production frame; it does not establish a general egress
+guarantee. Compilation caps source size, file size and file count, and stops waiting for an esbuild
+build after 10 seconds. Source paths are limited to 512 UTF-8 bytes and reject traversal, absolute
+paths, controls, backslashes, and ambiguous Unicode separators or format characters; source size
+is limited to 1 MiB, each file to 256 KiB, and the tree to 100 files. This deadline cannot preempt
+synchronous WASM work; a timed-out build may continue until the Durable Object is reset. The
+build-input hash includes the full transitive
+package/snapshot closure for the pinned dependencies in `pnpm-lock.yaml`, including peer-specific
+snapshots. The compile core remains runner-agnostic; it does not add an editor-time runner or runtime
+egress boundary.
+
+At Blueprint publication, `createBlueprint()` and `updateBlueprint({updateCode: true})` can opt into
+the Worker-side compiler with `AUTHORED_WIDGET_BUILD_ENABLED="true"`; the flag is off unless it is
+exactly `true`. Each build gets an `AuthoredWidgetBuildDurableObject`, but Durable Objects in the
+same Worker may share an isolate, memory and thread. The object lazy-loads the pinned wasm compiler
+and generated dependency closure, then returns only the compiled client module and byte/duration
+measurements. A failed or timed-out build refuses publication before the stored Blueprint record is
+changed. The deadline bounds the caller's wait, not synchronous WASM execution; work may continue
+until a DO reset. Before any file is chosen as a source, every path in the published commit
+must pass the same structural path rule. Only `.tsx` and `.css` files become compiler sources; safe
+auxiliary files are retained unchanged regardless of type (for example `server.ts`, `README.md`,
+`.svg`, `.js`, `.json`, `package.json`, or files with no extension). Auxiliary files are not sent to
+the compiler. Paths ending in a dot or space and directory paths also refuse publication with
+`Invalid source path.` before a build object is allocated. The successful source plus `client.js` is
+stored as a child GitStore commit,
+leaving the editable gadget head unchanged. `build:worker` also runs
+`build-bundled-blueprints.ts`. The closure generator resolves production package conditions to match
+the minified Worker build. The current dry-run bundle is recorded in the FAC-8 #362 PR; Cloudflare
+allows 64 MiB uncompressed per Worker, and the reported gzip size is informational. Per-build CPU
+reporting is not exposed through this Worker runtime path, and deployed memory headroom and continued
+work after timeout remain unmeasured; keep the flag off until those measurements are available.
+
+For a Widget-kind Blueprint, publication validates the compiled child commit after a successful
+authored build, so its generated `client.js` supplies the UI. The missing-server check is waived only
+when that child contains `client.js`, its source commit contains `client.tsx` and no `server.js`, and
+the child itself has no `server.js`. A source with `server.js` still follows the regular Widget
+rules, including the server requirement for `tools.json`. When the build flag is off, the source
+commit is validated with the existing rules unchanged; non-authored Widgets and failed builds do
+not receive the waiver.
 
 ### Native operations available today
 
@@ -144,3 +207,65 @@ Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/
 ## Evidence
 
 See the [source ledger](../wiki/research-sources.md) for sibling repository revisions and official references.
+
+### Authored-widget draft preview
+
+The UI receives the deployment-owned `authored-widgets` flag, resolved from
+`AUTHORED_WIDGET_BUILD_ENABLED` and never from Flagship. `Overseer.previewAuthoredWidget(gadgetId,
+chatId)` is a build-session capability. It materializes pending chat code changes, requires the chat
+to own the gadget's draft, checks every draft path, and compiles only TSX/CSS sources through the
+same isolated build Durable Object used by publication. It returns
+`{jsCode, measurements: {durationMs, clientBytes}}`; it creates no commit, Blueprint record, R2
+object or binding change. Use-role and operate sessions, including agent callers, are denied. A
+disabled flag refuses before reading draft files or allocating a build object. Preview waits at most
+15 seconds and returns no JavaScript larger than 2 MiB. These limits bound the caller and response;
+a timed-out synchronous WASM build may continue until its build object resets.
+
+The shared build checks parse each TSX source before bundling and refuse denied globals, dynamic
+imports, dynamic code loading, `import.meta`, unapproved package imports, invalid syntax and a
+missing default component export. These checks provide early feedback and defense in depth; they
+are not the sandbox boundary. Isolation and the reviewed dependency closure remain the security
+boundary for authored code.
+
+### Authoring UI (FAC-8)
+
+The Workshop shows authoring only while `authored-widgets` is on; with it off, the editor's tabs
+(`rightTabs` in `editorTabs.ts`) and everything else are unchanged. The author edits the widget's
+TSX and CSS in the existing **Code** tab. They are the gadget's own files, in the chat's draft and
+then its commits, so closing and reopening the editor shows the same source, and the compiled
+`client.js` that publication adds lives only in the child commit.
+
+- **Build preview.** With the flag on, a gadget with an app view gets a **Build preview** tab (also in
+  the mobile pane menu). `AuthoredWidgetPreview` calls `previewAuthoredWidget(gadgetId, chatId)` for
+  the chat whose draft changes the selected gadget, and builds again on every code change and on
+  **Rebuild**. Without such a chat it says there is nothing to preview and builds nothing. A refusal
+  (`Invalid source path.`, a compile refusal, a disabled flag) is shown in the server's words with
+  **Try again**; a denial (`Unauthorized: …`) says the viewer can't build a preview and offers no
+  retry. A late answer for a chat or code version no longer shown is ignored.
+- **The frame.** The preview makes no frame of its own: it runs through the existing `GadgetUI`
+  host, given a stand-in client whose UI bundle is the built module and whose connection is a mock
+  server, so the module runs in the same sandboxed Gadget frame and handshake as any gadget UI, React
+  stays inside it, and the frame-producer and message-listener audit in `boundView/static.test.ts`
+  is unchanged. The mock server never reaches `connectToGadget`: every method the widget calls is
+  listed by name under the frame and answers `undefined`. The preview is handed only
+  `previewAuthoredWidget`, so it can't reach a real binding or change any state. The build's
+  duration and size are shown with it.
+- **Register.** A version is registered through the existing blueprint dialog (`BlueprintModal`):
+  `createBlueprint` or `updateBlueprint({updateCode})` runs the publication build, with the gadget's
+  declared connections and their annotations as the binding requirements. A build refusal is the
+  publish result: on Create it is announced as an alert in the server's words and the form stays
+  open; on **Update code** it is an error toast in the server's words.
+- **Place.** Each install of the version (`installBlueprint`) is its own gadget with its own
+  bindings. A console registers each install separately under its own name
+  (`ConsoleWidgetRegistry`), and shows for each only the surfaces the kernel's
+  `listConsoleWidgetCandidates` declares for its commit. Only installs of a **Widget**-kind version
+  are console candidates. Since #371 an authored widget can be registered as one: publication
+  checks the compiled child commit, whose `client.js` is the UI (see "Authored widget compiler (FAC-8)"), so two
+  installs of one version can sit on one console screen as two console widgets. A kind the gadget
+  can't satisfy is still refused in the kernel's words, shown as the publish result. In the
+  authoring workspace the accepted gadget's App tab has no `client.js` to show; Build preview and
+  installs show it.
+
+`AuthoredWidgetPreview.test.tsx`, `editorTabs.test.ts`, `BlueprintModal.test.tsx` and
+`ConsoleWidgetRegistry.test.tsx` cover these. Params and events beyond the declared bindings and
+`tools.json` tools are FAC-11's semantic catalog, not this UI.

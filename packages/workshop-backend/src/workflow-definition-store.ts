@@ -1,9 +1,10 @@
 import type { AiChatAuthorInfo, WorkpieceId } from "@gadgets/workshop-shared/api";
 import {
-  MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKFLOW_DELIVERIES, MAX_WORKSPACE_WORKFLOW_DEFINITIONS,
-  parseWorkflowDefinitionTitle,
-  type WorkflowDefinition, type WorkflowDefinitionDelivery, type WorkflowDefinitionRef,
-  type WorkflowDefinitionRevision, type WorkflowDefinitionSave,
+  MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKFLOW_DELIVERIES, MAX_WORKFLOW_INVOCATIONS,
+  MAX_WORKSPACE_WORKFLOW_DEFINITIONS, TRIGGER_RUNS_PER_INVOKER, TRIGGER_RUNS_PER_TRIGGER,
+  WORKFLOW_INVOCATION_TTL_MS, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
+  type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery, type WorkflowDefinitionRef,
+  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 
@@ -17,6 +18,24 @@ export type StoredTriggerPin = WorkflowDefinitionRef & { hookId: number };
 
 /** A stored delivery, numbered so the oldest can be dropped. */
 export type StoredWorkflowDelivery = WorkflowDefinitionDelivery & { id: number };
+
+/** A trigger's control: who may ask it to run now. Its revision is always the trigger's pin. */
+export type StoredTriggerControl = Required<Omit<TriggerControl, "definition">>;
+
+/** One admitted on-request run, numbered so the oldest can be dropped; what the run rates count. */
+export type StoredWorkflowInvocationRecord = { id: number; hookId: number; requestedBy: string; at: number };
+
+/**
+ * An admitted request to run a trigger, kept until the trigger's gatekeeper delivers it (or the
+ * request to it fails), so a delivery can name only an invocation this workspace minted.
+ */
+export type StoredWorkflowInvocation = WorkflowInvocation & { requestedBy: string };
+
+/** Most admitted requests one trigger may have waiting for delivery. */
+const MAX_WAITING_INVOCATIONS = 20;
+
+/** Refused, without saying which check failed, to anyone a trigger's control doesn't admit. */
+const CANNOT_RUN = "You can't run this trigger.";
 
 /** Refused, without saying whether the definition exists, to anyone it isn't visible to. */
 const NOT_FOUND = "Workflow definition not found.";
@@ -34,7 +53,9 @@ const NOT_FOUND = "Workflow definition not found.";
 export class WorkspaceWorkflowDefinitionStore {
   constructor(private durableStorage: DurableObjectStorage,
       private storage: Pick<OverseerStorage,
-          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId">) {}
+          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId" |
+          "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
+          "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired">) {}
 
   /** The definitions `viewer` may see: their own in full, and others' published revision only. */
   list(viewer: string): WorkflowDefinition[] {
@@ -117,8 +138,13 @@ export class WorkspaceWorkflowDefinitionStore {
   pinTrigger(viewer: string, hookId: number, hookGadgetId: WorkpieceId | null,
              ref: WorkflowDefinitionRef | null): void {
     this.durableStorage.transactionSync(() => {
+      // A waiting request was admitted for the revision pinned then: any pin change drops it.
+      this.#dropInvocations(hookId);
       if (ref === null) {
+        // A control and an assignment run the pinned revision, so they go with the pin.
         this.storage.workflowTriggerPins.delete(hookId);
+        this.storage.workflowTriggerControls.delete(hookId);
+        this.storage.workflowTriggerAssignments.delete(hookId);
         return;
       }
       let view = this.get(viewer, ref.definitionId);
@@ -147,9 +173,28 @@ export class WorkspaceWorkflowDefinitionStore {
    */
   fire(hookId: number, hookGadgetId: WorkpieceId | null,
        headOf: (gadgetId: WorkpieceId) => string | undefined,
-       ownerCanBuild: (profileId: string) => boolean): WorkflowDefinitionDelivery | null {
+       ownerCanBuild: (profileId: string) => boolean,
+       invocationId?: string): (WorkflowDefinitionDelivery & { deliveryId: number }) | null {
+    // A delivery a person asked for names an invocation minted here for this trigger, not yet run;
+    // anything else starts nothing.
+    let invocation = invocationId === undefined ? undefined : this.storage.workflowInvocations.get(invocationId);
+    if (invocationId !== undefined && invocation?.hookId !== hookId) {
+      throw new Error("That run request is unknown or already ran.");
+    }
+    if (invocation && Date.now() - invocation.requestedAt.getTime() > WORKFLOW_INVOCATION_TTL_MS) {
+      this.storage.workflowInvocations.delete(invocation.id);
+      throw new Error("That run request expired. Ask again.");
+    }
     let pin = this.storage.workflowTriggerPins.get(hookId);
-    if (!pin) return null;
+    if (!pin) {
+      if (invocation) throw new Error(CANNOT_RUN);
+      return null;
+    }
+    // A request runs only the revision it was admitted for, never what the pin says now.
+    if (invocation && (invocation.definitionId !== pin.definitionId || invocation.revision !== pin.revision)) {
+      this.storage.workflowInvocations.delete(invocation.id);
+      throw new Error("That run request was for another revision of this workflow. Ask again.");
+    }
     let stored = this.storage.workflowDefinitions.get(pin.definitionId);
     let revision = stored?.revisions.find(r => r.revision === pin.revision);
     if (!stored || !revision) throw new Error("This trigger's workflow definition revision no longer exists.");
@@ -164,14 +209,225 @@ export class WorkspaceWorkflowDefinitionStore {
     return this.durableStorage.transactionSync(() => {
       let id = this.storage.nextWorkflowDeliveryId.get();
       this.storage.nextWorkflowDeliveryId.put(id + 1);
+      // A request runs as the trigger's assigned service account, when it has one (FAC-102).
+      let assignment = invocation ? this.storage.workflowTriggerAssignments.get(hookId) : undefined;
       let delivery: StoredWorkflowDelivery = {
         id, hookId, definitionId: pin.definitionId, revision: pin.revision,
         commitId: revision.source.commitId, at: new Date(),
+        ...(invocation ? { invocation: { id: invocation.id, requestedBy: invocation.requestedBy } } : {}),
+        ...(assignment ? { executedAs: { credentialRef: assignment.credentialRef } } : {}),
       };
+      if (invocation) this.storage.workflowInvocations.delete(invocation.id);
       this.storage.workflowDeliveries.put(delivery);
       if (id >= MAX_WORKFLOW_DELIVERIES) this.storage.workflowDeliveries.delete(id - MAX_WORKFLOW_DELIVERIES);
       let { id: _, ...shown } = delivery;
+      return { ...shown, deliveryId: id };
+    });
+  }
+
+  /**
+   * Assigns trigger `hookId`'s on-request runs to the service account provisioned for a fresh
+   * credential reference in connection `gatekeeperId`, or removes the assignment with null. Only a
+   * pinned trigger can have one. Requests waiting were admitted for the assignment as it was, so
+   * any change drops them. The caller checks the connection (overseer.ts); this keeps the record.
+   */
+  setAssignment(caller: AiChatAuthorInfo, hookId: number, gatekeeperId: number | null): TriggerAssignment | null {
+    return this.durableStorage.transactionSync(() => {
+      this.#dropInvocations(hookId);
+      // An Admin re-assigning or removing it is the action an automatic retirement waits for.
+      this.storage.workflowTriggerAutoRetired.delete(hookId);
+      if (gatekeeperId === null) {
+        this.storage.workflowTriggerAssignments.delete(hookId);
+        return null;
+      }
+      if (!this.storage.workflowTriggerPins.get(hookId)) {
+        throw new Error("Only a trigger pinned to a workflow definition revision can be assigned.");
+      }
+      let stored: TriggerAssignment = {
+        hookId, gatekeeperId, credentialRef: crypto.randomUUID(), assignedBy: caller, assignedAt: new Date(),
+      };
+      this.storage.workflowTriggerAssignments.put(stored);
+      return { ...stored };
+    });
+  }
+
+  /**
+   * Records that `by` gave the service account's key for trigger `hookId`'s assignment, if the
+   * assignment still has `credentialRef` (one changed meanwhile isn't touched). Never the key.
+   */
+  markProvisioned(hookId: number, credentialRef: string, by: AiChatAuthorInfo): TriggerAssignment | null {
+    return this.durableStorage.transactionSync(() => {
+      let stored = this.storage.workflowTriggerAssignments.get(hookId);
+      if (!stored || stored.credentialRef !== credentialRef) return null;
+      let updated: TriggerAssignment = { ...stored, provisionedBy: by, provisionedAt: new Date() };
+      this.storage.workflowTriggerAssignments.put(updated);
+      return { ...updated };
+    });
+  }
+
+  /**
+   * Marks trigger `hookId` as having had its assignment retired automatically (FAC-102 follow-up B,
+   * a refused key that couldn't be forgotten): runs on request are refused while the mark stands,
+   * rather than falling back to the gadget's own connections, until an Admin re-assigns the trigger
+   * or removes its assignment (`setAssignment`, which clears it). A retirement a person chose leaves
+   * no mark.
+   */
+  markAutoRetired(hookId: number): void {
+    this.storage.workflowTriggerAutoRetired.put({ hookId, retiredAt: new Date() });
+  }
+
+  /** Trigger `hookId`'s automatic-retirement mark, or null (see `markAutoRetired`). */
+  autoRetiredOf(hookId: number): { hookId: number; retiredAt: Date } | null {
+    let stored = this.storage.workflowTriggerAutoRetired.get(hookId);
+    return stored ? { ...stored } : null;
+  }
+
+  /** Every assignment. */
+  assignments(): TriggerAssignment[] {
+    return Array.from(this.storage.workflowTriggerAssignments.list(), stored => ({ ...stored }));
+  }
+
+  /** The assignments whose runs use connection `gatekeeperId`. */
+  assignmentsUsing(gatekeeperId: number): TriggerAssignment[] {
+    let found: TriggerAssignment[] = [];
+    for (let stored of this.storage.workflowTriggerAssignments.list()) {
+      if (stored.gatekeeperId === gatekeeperId) found.push({ ...stored });
+    }
+    return found;
+  }
+
+  /** Removes trigger `hookId`'s assignment, dropping runs waiting to start on it. */
+  removeAssignment(hookId: number): void {
+    this.durableStorage.transactionSync(() => {
+      this.#dropInvocations(hookId);
+      this.storage.workflowTriggerAssignments.delete(hookId);
+    });
+  }
+
+  /** The assignment of trigger `hookId`, or null. */
+  assignmentOf(hookId: number): TriggerAssignment | null {
+    let stored = this.storage.workflowTriggerAssignments.get(hookId);
+    return stored ? { ...stored } : null;
+  }
+
+  /**
+   * Sets who may ask trigger `hookId` to run now, or removes its control with null. Only a pinned
+   * trigger can have one. `settings` is checked here and nothing else of it is kept.
+   */
+  setControl(caller: AiChatAuthorInfo, hookId: number, settings: unknown): TriggerControl | null {
+    return this.durableStorage.transactionSync(() => {
+      // Requests waiting were admitted by the control as it was: changing it drops them.
+      this.#dropInvocations(hookId);
+      if (settings === null) {
+        this.storage.workflowTriggerControls.delete(hookId);
+        return null;
+      }
+      let pin = this.storage.workflowTriggerPins.get(hookId);
+      if (!pin) throw new Error("Only a trigger pinned to a workflow definition revision can have a control.");
+      let { label, invokers } = parseTriggerControlSettings(settings);
+      let stored: StoredTriggerControl = { hookId, label, invokers, configuredBy: caller, configuredAt: new Date() };
+      this.storage.workflowTriggerControls.put(stored);
+      return { ...stored, definition: { definitionId: pin.definitionId, revision: pin.revision } };
+    });
+  }
+
+  /**
+   * The controls of pinned triggers: every one for a builder (`viewer` null), or only those listing
+   * `viewer`, each showing `viewer` as its only invoker.
+   */
+  controls(viewer: string | null): TriggerControl[] {
+    let shown: TriggerControl[] = [];
+    for (let control of this.storage.workflowTriggerControls.list()) {
+      let pin = this.storage.workflowTriggerPins.get(control.hookId);
+      if (!pin || (viewer !== null && !control.invokers.includes(viewer))) continue;
+      shown.push(viewer === null
+        ? { ...control, invokers: [...control.invokers], definition: { definitionId: pin.definitionId, revision: pin.revision } }
+        : { hookId: control.hookId, label: control.label });
+    }
+    return shown;
+  }
+
+  /**
+   * Admits `profileId`'s request to run trigger `hookId` now: its control must list them and the
+   * trigger must still be pinned. Mints the invocation, which the trigger's delivery must name
+   * (`fire`). Every refusal reads the same, whether there's no control, no pin or no listing.
+   */
+  beginInvocation(profileId: string, hookId: number): WorkflowInvocation {
+    return this.durableStorage.transactionSync(() => {
+      let control = this.storage.workflowTriggerControls.get(hookId);
+      let pin = this.storage.workflowTriggerPins.get(hookId);
+      if (!control || !pin || !control.invokers.includes(profileId)) throw new Error(CANNOT_RUN);
+      let waiting = 0;
+      for (let invocation of this.storage.workflowInvocations.list()) if (invocation.hookId === hookId) waiting++;
+      if (waiting >= MAX_WAITING_INVOCATIONS) throw new Error("This trigger already has too many runs waiting to start.");
+      let now = Date.now();
+      this.#checkRate(hookId, profileId, now);
+      let logId = this.storage.nextWorkflowInvocationLogId.get();
+      this.storage.nextWorkflowInvocationLogId.put(logId + 1);
+      this.storage.workflowInvocationLog.put({ id: logId, hookId, requestedBy: profileId, at: now });
+      if (logId >= MAX_WORKFLOW_INVOCATIONS) this.storage.workflowInvocationLog.delete(logId - MAX_WORKFLOW_INVOCATIONS);
+      let invocation: StoredWorkflowInvocation = {
+        id: crypto.randomUUID(), hookId, definitionId: pin.definitionId, revision: pin.revision,
+        requestedAt: new Date(now), requestedBy: profileId,
+      };
+      this.storage.workflowInvocations.put(invocation);
+      let { requestedBy: _, ...shown } = invocation;
       return shown;
+    });
+  }
+
+  /** Refuses a run past the per-person or per-trigger rate, saying when one may run again. */
+  #checkRate(hookId: number, profileId: string, now: number): void {
+    let byInvoker: number[] = [];
+    let byTrigger: number[] = [];
+    for (let record of this.storage.workflowInvocationLog.list()) {
+      if (record.hookId !== hookId) continue;
+      if (now - record.at < TRIGGER_RUNS_PER_TRIGGER.windowMs) byTrigger.push(record.at);
+      if (record.requestedBy === profileId && now - record.at < TRIGGER_RUNS_PER_INVOKER.windowMs) byInvoker.push(record.at);
+    }
+    let retry = (times: number[], windowMs: number) => {
+      let minutes = Math.max(1, Math.ceil((Math.min(...times) + windowMs - now) / 60_000));
+      return `Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`;
+    };
+    if (byInvoker.length >= TRIGGER_RUNS_PER_INVOKER.runs) {
+      throw new Error(`You've run this trigger ${TRIGGER_RUNS_PER_INVOKER.runs} times in the last 10 minutes. ` +
+          retry(byInvoker, TRIGGER_RUNS_PER_INVOKER.windowMs));
+    }
+    if (byTrigger.length >= TRIGGER_RUNS_PER_TRIGGER.runs) {
+      throw new Error(`This trigger has run on request ${TRIGGER_RUNS_PER_TRIGGER.runs} times in the last hour. ` +
+          retry(byTrigger, TRIGGER_RUNS_PER_TRIGGER.windowMs));
+    }
+  }
+
+  #dropInvocations(hookId: number): void {
+    for (let invocation of this.storage.workflowInvocations.list()) {
+      if (invocation.hookId === hookId) this.storage.workflowInvocations.delete(invocation.id);
+    }
+  }
+
+  /**
+   * Whether invocation `id` is still waiting: minted, and neither consumed by a delivery nor dropped
+   * by a pin, control or assignment change, nor cancelled. It doesn't say which of those happened.
+   */
+  isWaiting(id: string): boolean {
+    return this.storage.workflowInvocations.get(id) !== undefined;
+  }
+
+  /** Forgets an invocation the trigger's gatekeeper didn't take, so it can never start a run. */
+  cancelInvocation(id: string): void {
+    this.storage.workflowInvocations.delete(id);
+  }
+
+  /** Forgets trigger `hookId`'s pin, control, assignment and waiting invocations (its hook is gone). */
+  forgetTrigger(hookId: number): void {
+    this.durableStorage.transactionSync(() => {
+      this.storage.workflowTriggerPins.delete(hookId);
+      this.storage.workflowTriggerControls.delete(hookId);
+      this.storage.workflowTriggerAssignments.delete(hookId);
+      this.storage.workflowTriggerAutoRetired.delete(hookId);
+      for (let invocation of this.storage.workflowInvocations.list()) {
+        if (invocation.hookId === hookId) this.storage.workflowInvocations.delete(invocation.id);
+      }
     });
   }
 

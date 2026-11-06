@@ -60,6 +60,31 @@ it('reads a page once, reports a missing one, and drops everything read when acc
   data.dispose()
 })
 
+it.each(['UNAUTHORIZED', 'FORBIDDEN'])('clears all cached Wiki content and edit state after %s', async code => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  data.openPage('handbook')
+  data.openPage('ops/incident-response')
+  await flush()
+  const section = sectionOf(data, 'handbook', 's1')
+  await data.proposeEdit('handbook', section, 'Private section draft text')
+  await data.proposeBodyEdit(pageOf(data, 'ops/incident-response'), 'Private body draft text')
+  expect(data.snapshot.edits.size).toBeGreaterThan(0)
+  expect(data.snapshot.bodyEdits.size).toBeGreaterThan(0)
+
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error(`Error: ${code}: access was revoked`))
+  data.refresh()
+  await flush()
+
+  expect(data.snapshot.list).toMatchObject({ status: 'error', code })
+  expect(data.snapshot.pages.size).toBe(0)
+  expect(data.snapshot.edits.size).toBe(0)
+  expect(data.snapshot.bodyEdits.size).toBe(0)
+  expect(JSON.stringify(data.snapshot)).not.toContain('Private section draft text')
+  expect(JSON.stringify(data.snapshot)).not.toContain('Private body draft text')
+  data.dispose()
+})
+
 it('keeps InferOps being turned off apart from lost access, and a removed connection as unbound', async () => {
   const data = new WikiData(overseer, WIKI)
   await flush()
@@ -176,6 +201,86 @@ it('reads the agent text through the same connection, and disposes the session w
   await flush()
   expect(wiki.session.dispose).toHaveBeenCalledTimes(1)
   expect(await data.readAgentText('handbook')).toMatchObject({ ok: false, code: 'NOT_CONNECTED' })
+})
+
+it('drops cached Wiki pages and edits when a secondary text read is denied', async () => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  data.openPage('handbook')
+  await flush()
+  pageOf(data, 'handbook')
+  await data.proposeEdit('handbook', sectionOf(data, 'handbook', 's1'), 'Pending text')
+  await data.proposeBodyEdit(pageOf(data, 'handbook'), 'Pending body')
+  expect(data.snapshot.edits.size).toBe(1)
+  expect(data.snapshot.bodyEdits.size).toBe(1)
+
+  wiki.session.readDocumentText.mockRejectedValueOnce(new Error('Error: FORBIDDEN: Wiki access was revoked.'))
+  expect(await data.readAgentText('handbook')).toEqual({ ok: false, code: 'FORBIDDEN', message: 'Wiki access was revoked.' })
+  expect(data.snapshot.list).toEqual({ status: 'error', code: 'FORBIDDEN', message: 'Wiki access was revoked.' })
+  expect(data.snapshot.pages.size).toBe(0)
+  expect(data.snapshot.edits.size).toBe(0)
+  expect(data.snapshot.bodyEdits.size).toBe(0)
+  data.dispose()
+})
+
+it('drops cached Wiki data when search loses access', async () => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  data.openPage('handbook')
+  await flush()
+  expect(data.snapshot.pages.size).toBe(1)
+
+  wiki.session.searchWiki.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: Sign in to InferOps again.'))
+  expect(await data.search('team')).toMatchObject({ ok: false, code: 'UNAUTHORIZED' })
+  expect(data.snapshot.list).toMatchObject({ status: 'error', code: 'UNAUTHORIZED' })
+  expect(data.snapshot.pages.size).toBe(0)
+  data.dispose()
+})
+
+it('drops a successful search result that finishes after another read revokes access', async () => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  data.openPage('handbook')
+  await flush()
+  const hits = await wiki.session.searchWiki('team')
+  let resolveSearch!: (result: typeof hits) => void
+  const searchResult = new Promise<typeof hits>(resolve => { resolveSearch = resolve })
+  wiki.session.searchWiki.mockImplementationOnce(() => searchResult)
+
+  const search = data.search('team')
+  await flush()
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: Sign in to InferOps again.'))
+  data.refresh()
+  await flush()
+  resolveSearch(hits)
+
+  await expect(search).resolves.toMatchObject({ ok: false, code: 'NOT_CONNECTED' })
+  expect(data.snapshot.list).toMatchObject({ status: 'error', code: 'UNAUTHORIZED' })
+  expect(data.snapshot.pages.size).toBe(0)
+  data.dispose()
+})
+
+it('drops a successful agent-text result that finishes after another read revokes access', async () => {
+  wiki = fakeWiki(organizedWiki())
+  const data = new WikiData(overseer, WIKI)
+  data.openPage('handbook')
+  await flush()
+  const text = await wiki.session.readDocumentText('handbook')
+  let resolveText!: (result: typeof text) => void
+  const textResult = new Promise<typeof text>(resolve => { resolveText = resolve })
+  wiki.session.readDocumentText.mockImplementationOnce(() => textResult)
+
+  const read = data.readAgentText('handbook')
+  await flush()
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: Sign in to InferOps again.'))
+  data.refresh()
+  await flush()
+  resolveText(text)
+
+  await expect(read).resolves.toMatchObject({ ok: false, code: 'NOT_CONNECTED' })
+  expect(data.snapshot.list).toMatchObject({ status: 'error', code: 'UNAUTHORIZED' })
+  expect(data.snapshot.pages.size).toBe(0)
+  data.dispose()
 })
 
 it('reads the structure beside the page list, states its failure apart from the list, and re-reads it on refresh', async () => {

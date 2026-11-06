@@ -69,6 +69,7 @@ export const fakeWiki = (seed: { pages?: StoredPage[]; structure?: WikiStructure
   let structure = seed.structure ?? EMPTY_STRUCTURE
   const edits = new Map<string, { body: string; expectedVersion: number }>()
   const bodyEdits = new Map<string, { body: string; expectedVersion: number }>()
+  let searchDown = false
   const shown = (section: StoredSection): WikiSection => {
     const edit = edits.get(section.id)
     const live = edit !== undefined && edit.expectedVersion === section.version
@@ -100,15 +101,29 @@ export const fakeWiki = (seed: { pages?: StoredPage[]; structure?: WikiStructure
     updateDocumentBody: vi.fn<InferOpsWikiSession['updateDocumentBody']>(async (slugOrId, body, expectedVersion) => {
       const { head, body: current, pendingBody } = page(slugOrId)
       if (head.version !== expectedVersion) fail('STALE_REVISION', `Page ${head.slug} is at version ${head.version}, not ${expectedVersion}. Read it again.`)
-      if (current === body) return
+      if (current === body) return null
       if (pendingBody) fail('CONFLICT', `Page ${head.slug} already has a body edit that has not taken effect yet.`)
       bodyEdits.set(head.id, { body, expectedVersion })
+      return null
     }),
     updateSection: vi.fn<InferOpsWikiSession['updateSection']>(async (id, body, expectedVersion) => {
       const stored = sections.find(s => s.id === id) ?? fail('NOT_FOUND', 'No such section in this Wiki.')
       if (stored.version !== expectedVersion) fail('STALE_REVISION', `Section ${stored.tag} is at version ${stored.version}, not ${expectedVersion}. Read it again.`)
       if (edits.get(id)?.expectedVersion === stored.version) fail('CONFLICT', `Section ${stored.tag} already has an edit that has not taken effect yet.`)
       edits.set(id, { body, expectedVersion })
+      return null
+    }),
+    // The gatekeeper's answer shape: every query word in the section body, no score; `searchDown`
+    // fails it as a search that could not run.
+    searchWiki: vi.fn<InferOpsWikiSession['searchWiki']>(async query => {
+      if (searchDown) fail('UNAVAILABLE', 'InferMind Wiki search is unavailable right now, so this is not an empty result. Try again shortly.')
+      const words = query.toLowerCase().split(/\s+/).filter(Boolean)
+      return sections.filter(s => words.every(w => s.body.toLowerCase().includes(w))).flatMap(s => {
+        const head = documents.find(d => d.id === s.documentId)
+        return head ? [{ sectionId: s.id, sectionVersion: s.version, tag: s.tag, documentId: head.id, documentSlug: head.slug,
+          documentTitle: head.title, snippet: s.body.replace(new RegExp(words.join('|'), 'gi'), m => `<b>${m}</b>`),
+          ...(edits.get(s.id)?.expectedVersion === s.version ? { pending: 'update' as const } : {}) }] : []
+      })
     }),
     dispose: vi.fn<() => void>(),
     [Symbol.dispose]() { session.dispose() },
@@ -136,5 +151,7 @@ export const fakeWiki = (seed: { pages?: StoredPage[]; structure?: WikiStructure
       documents = next.map(node => ({ body: '', version: 1, masterRole: null, ...documents.find(d => d.id === node.id), ...node }))
     },
     setStructure: (next: WikiStructure) => { structure = next },
+    /** Make every search fail as one that could not run. */
+    setSearchDown: (down: boolean) => { searchDown = down },
   }
 }

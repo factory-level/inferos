@@ -105,9 +105,10 @@ import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeepe
 import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gatekeeper-kit/observers";
 import { createLogger } from "@gadgets/observability/logger";
 import type {
-  AccountDescription, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
+  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
+  WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
@@ -122,9 +123,11 @@ import {
   BOARD_WRITES, CheckRefused, PROPOSAL_APPROVE, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
 } from "./apply-attempts";
 import {
-  WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, openHttpInferOpsClient, tableNotFound,
+  WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, listWorkspaceSlugs, openHttpInferOpsClient,
+  readCallerPrincipal, tableNotFound,
   type BoardSnapshotAnswer, type InferOpsAuthority, type InferOpsEndpoint,
 } from "./http-inferops";
+import { CREDENTIAL_REF, InferOpsSystemCredentials } from "./system-credentials";
 import { inferLabFetch } from "./edge-header";
 import type {
   HostBoardConnectionFence, HostBoardFence, HostBoardRead, HostBoardReader,
@@ -138,7 +141,9 @@ import {
   assertCodingWorkbenchEnabled, assertRepoAllowlisted, codingRepoAllowlist, codingWorkbenchEnabled,
   whileCodingWorkbenchEnabled,
 } from "./coding-workbench";
-import { InferOpsCredentials, type InferOpsWorkspace, type WorkspaceProduct } from "./inferops-credentials";
+import {
+  InferOpsCredentials, WIKI_SEARCHES_PER_MINUTE, type InferOpsWorkspace, type WorkspaceProduct,
+} from "./inferops-credentials";
 import {
   assertTablesEnabled, describeTable, projectRows, tableReadOptions, tablesEnabled, whileTablesEnabled,
 } from "./table";
@@ -163,7 +168,7 @@ import {
   buildBoard, livePendingChange, orderStates, simulateIssue, type Pending,
 } from "./simulation";
 import {
-  fingerprintOf, isCodingAction, isIssueChange, isWikiAction, isWikiEdit, matchesFingerprint, readAction,
+  appliedResult, fingerprintOf, isCodingAction, isIssueChange, isWikiAction, isWikiEdit, matchesFingerprint, readAction,
   sortedSources, type ActionRecord, type ActionScope, type CancelRunAction, type FingerprintScope, type CreateAction, type DispatchAction,
   type DocumentUpdateAction, type ProposalApproveAction, type SectionUpdateAction, type StagedAction,
   type StoredFailure, type UpdateAction, type WikiEditAction,
@@ -182,7 +187,7 @@ import type {
   InferOpsWorkflowPolicySession, Issue, IssueActivity, IssueChanges, ListRecordsOptions, NewIssue, Repo,
   WorkflowPolicyHead, WorkspaceMembers,
   Revision, Run, TableDescription, TableRecord, WikiDocument,
-  WikiDocumentNode, WikiProposal, WikiProposalDetail, WikiProposalState, WikiSection, WikiStructure,
+  WikiDocumentNode, WikiProposal, WikiProposalDetail, WikiProposalState, WikiSearchHit, WikiSection, WikiStructure,
 } from "./types";
 import type { NewIssueRequest, WikiSectionRecord } from "./inferops-client";
 import TYPES_CODE from "./types.txt";
@@ -194,7 +199,7 @@ import MEMBERS_CONFIGURATOR_HTML from "./generated/members-ui.txt";
 import WORKFLOW_CONFIGURATOR_HTML from "./generated/workflow-ui.txt";
 import ACCOUNT_CONFIGURATOR_HTML from "./generated/account-ui.txt";
 
-export { InferLabLogin, InferOpsCredentials, MockInferOps };
+export { InferLabLogin, InferOpsCredentials, InferOpsSystemCredentials, MockInferOps };
 
 const VENDOR_ID = "inferops";
 
@@ -221,6 +226,27 @@ const OPTION_LIMIT = 100;
 /** HTTP serves only the InferLab sign-in legs; everything else is RPC. */
 export default {
   async fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname.endsWith("/health/ready")) {
+      const endpoint = inferOpsApiEndpoint(env);
+      if (!endpoint) return Response.json({ status: "down", checks: [{ name: "inferops-config", status: "down" }] }, { status: 503 });
+      try {
+        const response = await inferLabFetch(env)(`${endpoint.baseUrl}/health/ready`, {
+          headers: { accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(5_000),
+        });
+        const body = await response.json().catch(() => null) as { status?: unknown; checks?: unknown } | null;
+        const ready = response.status === 200 && (body?.status === "ok" || body?.status === "degraded");
+        const checks = Array.isArray(body?.checks) ? body.checks.flatMap((item) => {
+          if (!item || typeof item !== "object") return [];
+          const check = item as { name?: unknown; status?: unknown };
+          return typeof check.name === "string" && typeof check.status === "string"
+            ? [{ name: check.name, status: check.status }] : [];
+        }) : [];
+        return Response.json({ status: ready ? body?.status : "down", checks }, { status: ready ? 200 : 503 });
+      } catch {
+        return Response.json({ status: "down", checks: [{ name: "inferops-api", status: "unreachable" }] }, { status: 503 });
+      }
+    }
     const response = await handleInferLabLogin(request, env, ctx.exports.InferLabLogin);
     return response ?? new Response("Not Found", { status: 404 });
   },
@@ -235,10 +261,18 @@ export default {
  * account was minted by a sign-in or a connect that proved it. Auto-provisioned accounts carry no
  * identity.
  */
-type AccountProps = { accountId: string; email?: string; connected?: boolean };
+type AccountProps = {
+  accountId: string; email?: string; connected?: boolean;
+  /**
+   * Set only on a configured system workflow's binding (FAC-102, `getSystemGatekeeperClass`): the
+   * Workshop's assignment reference whose stored service-account key the binding acts as. Such a
+   * binding never reaches a person's token, the stopgap connection or the mock.
+   */
+  systemCredentialRef?: string;
+};
 
 /** What `clientFor` needs to know about an account. */
-type AccountRef = Pick<AccountProps, "accountId" | "connected">;
+type AccountRef = Pick<AccountProps, "accountId" | "connected" | "systemCredentialRef">;
 
 /**
  * One project-board binding, fixed when the Workshop mints it. `host` is the URL's
@@ -281,7 +315,55 @@ type AccountGatekeeperProps = AccountRef & { tenant: string };
 type ExportsWithStores = {
   MockInferOps: DurableObjectNamespace<MockInferOps>;
   InferOpsCredentials: DurableObjectNamespace<InferOpsCredentials>;
+  InferOpsSystemCredentials: DurableObjectNamespace<InferOpsSystemCredentials>;
 };
+
+function systemCredentialsOf(exports: ExportsWithStores, credentialRef: string) {
+  return exports.InferOpsSystemCredentials.get(exports.InferOpsSystemCredentials.idFromName(credentialRef));
+}
+
+/** What a system run's call is refused with when nothing usable is provisioned for it (FAC-102). */
+const NO_SYSTEM_CREDENTIAL = "No service account is provisioned for this workflow's runs.";
+
+/** What a system session says when InferOps refuses the service-account key (FAC-102 follow-up C). */
+const SYSTEM_KEY_REFUSED = "The assignment's service-account key was refused. An Admin needs to assign it again.";
+
+/**
+ * The refusal for a service-account key InferOps rejected: still an `UNAUTHORIZED` InferOpsError,
+ * so every mapping by code is unchanged, but worded for the assignment and named plainly, so the
+ * message a run or an approver sees carries no `InferOpsError:` prefix.
+ */
+function systemKeyRefused(cause: InferOpsError): InferOpsError {
+  const refused = new InferOpsError("UNAUTHORIZED", SYSTEM_KEY_REFUSED, cause.facts);
+  refused.name = "Error";
+  return refused;
+}
+
+/**
+ * A system workflow run's client (FAC-102): its authority is the service-account key stored for
+ * `credentialRef`, read per request, and only for the `host` it was checked for. Nothing provisioned
+ * is UNAUTHORIZED; there is no fallback to anyone's token, the stopgap or the mock. InferOps refusing
+ * the key (revoked) fails the call as any refused credential does.
+ */
+function systemClient(env: Cloudflare.Env, exports: ExportsWithStores, credentialRef: string, host: string): InferOpsClient {
+  const endpoint = inferOpsApiEndpoint(env);
+  if (!endpoint || host === DEMO_HOST) throw new InferOpsError("UNAUTHORIZED", NO_SYSTEM_CREDENTIAL);
+  return openHttpInferOpsClient({
+    ...endpoint,
+    async authorize(operation) {
+      const authority = await systemCredentialsOf(exports, credentialRef).authority(host);
+      if (!authority) throw new InferOpsError("UNAUTHORIZED", NO_SYSTEM_CREDENTIAL);
+      try {
+        return await operation(authority);
+      } catch (error) {
+        // A refused service-account key is the assignment's to fix, not a person's to reconnect
+        // (FAC-102 follow-up C): named as such, without the person-oriented hint or a class name.
+        if (error instanceof InferOpsError && error.code === "UNAUTHORIZED") throw systemKeyRefused(error);
+        throw error;
+      }
+    },
+  }, inferLabFetch(env));
+}
 
 function credentialsOf(exports: ExportsWithStores, accountId: string) {
   return exports.InferOpsCredentials.get(exports.InferOpsCredentials.idFromName(accountId));
@@ -403,6 +485,8 @@ function openClientFor(
   env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
   workspaceId?: string,
 ): InferOpsClient {
+  // A system run's binding acts only as its stored service account (FAC-102), never anything below.
+  if (account.systemCredentialRef !== undefined) return systemClient(env, exports, account.systemCredentialRef, host);
   const mock = () => openInferOpsClient(exports.MockInferOps, { accountId: account.accountId, host });
   if (host === DEMO_HOST) return mock();
   if (account.connected) {
@@ -696,7 +780,77 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
   async getTypeScriptTypes(): Promise<string> {
     return TYPES_CODE;
   }
+
+  /**
+   * Check `key` and store it as the service account for `credentialRef` (FAC-102), replacing any
+   * stored before (a rotation). Kernel-only: the Workshop relays an Admin's key once and keeps
+   * nothing of it. Before storing, InferOps itself must say the key is a service account in this
+   * deployment's company (`auth.me`) with the board host's workspace among its own
+   * (`GET /workspaces`). Any refusal is the one fixed `KEY_NOT_ACCEPTED`, never saying why or
+   * repeating the key, which is never logged or returned. Boards only.
+   */
+  async provisionSystemCredential(credentialRef: string, connection: { resourceUrl: string }, key: string): Promise<void> {
+    if (!CREDENTIAL_REF.test(credentialRef) || typeof key !== "string" || !key) throw new Error(KEY_NOT_ACCEPTED);
+    const endpoint = inferOpsApiEndpoint(this.env);
+    const company = deploymentCompany(this.env);
+    let host: string;
+    try {
+      host = parseProjectBoardUrl(connection.resourceUrl).host;
+    } catch {
+      throw new Error(KEY_NOT_ACCEPTED);
+    }
+    const labels = parseHost(host);
+    if (!endpoint || !company || !labels) throw new Error(KEY_NOT_ACCEPTED);
+    let checked: { workspaceId: string; tenantId: string };
+    try {
+      const fetcher = inferLabFetch(this.env);
+      const workspace = (await listWorkspaceSlugs(endpoint.baseUrl, key, fetcher)).find(w => w.slug === labels.workspace);
+      if (!workspace) throw new Error("workspace");
+      const me = await readCallerPrincipal(endpoint.baseUrl, key, workspace.workspaceId, fetcher);
+      if (me.principalType !== "service_account" || !companyAdmits(company, me.tenantId)) throw new Error("principal");
+      checked = { workspaceId: workspace.workspaceId, tenantId: me.tenantId };
+    } catch {
+      logger.warn("system credential not accepted", { event: "system_credential.refused" });
+      throw new Error(KEY_NOT_ACCEPTED);
+    }
+    const stored = await systemCredentialsOf(this.ctx.exports, credentialRef).store({
+      key, workspaceId: checked.workspaceId, host, tenantId: checked.tenantId, provisionedAt: Date.now(),
+    });
+    // The reference was retired while the key was being checked (#375 round 2): nothing was kept.
+    if (!stored) {
+      logger.warn("system credential not stored for a retired reference", { event: "system_credential.retired" });
+      throw new Error(KEY_NOT_ACCEPTED);
+    }
+  }
+
+  /**
+   * Delete the key stored for `credentialRef`, if any, and retire the reference so that no later
+   * store lands for it (FAC-102, #375 round 2). Kernel-only.
+   */
+  async forgetSystemCredential(credentialRef: string): Promise<void> {
+    if (!CREDENTIAL_REF.test(credentialRef)) return;
+    await systemCredentialsOf(this.ctx.exports, credentialRef).forget();
+  }
+
+  /**
+   * The class a configured system workflow's run binds through for `credentialRef` (FAC-102): the
+   * project-board gatekeeper for `connection.resourceUrl`, acting only as the key stored for the
+   * reference. Its props carry the reference, never the key. Boards only; other resources refuse.
+   */
+  @skipRpcValidation()
+  async getSystemGatekeeperClass(credentialRef: string, connection: { resourceUrl: string }):
+      Promise<DurableObjectClass<Gatekeeper<any>>> {
+    if (!CREDENTIAL_REF.test(credentialRef)) throw new Error(NO_SYSTEM_CREDENTIAL);
+    const { host, projectKey } = parseProjectBoardUrl(connection.resourceUrl);
+    const props: ProjectGatekeeperProps = {
+      accountId: `system:${credentialRef}`, connected: false, systemCredentialRef: credentialRef, host, projectKey,
+    };
+    return this.ctx.exports.InferOpsProjectGatekeeper({ props }) as unknown as DurableObjectClass<Gatekeeper<any>>;
+  }
 }
+
+/** The one refusal for a service-account key this gatekeeper won't store (FAC-102). */
+const KEY_NOT_ACCEPTED = "The key wasn't accepted.";
 
 // ---------------------------------------------------------------------------
 // Account
@@ -1066,8 +1220,47 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
    * than guessing. Workspaces granted since the person connected count after they reconnect.
    */
   async holdsSharedConfiguration(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer> {
+    if (action !== "build" && action !== "publish") return { holds: false, scope: null };
+    return this.#holdsInCompany(`configuration:${action}`);
+  }
+
+  /**
+   * Whether the connected person may ask a configured system workflow to run against the board
+   * `resourceUrl` names: InferOps' `workflow:invoke` (FAC-102; a person's `member`, `admin` or
+   * `owner` grant holds it, a grant deny removes it, a service account never does), asked in that
+   * board's own InferOps workspace only (the manager, 2026-11-05). The workspace is the board host's,
+   * among the person's own InferOps memberships: an InferMind workspace, another workspace, a host
+   * that isn't theirs or a reference that isn't a board answers no, asking nothing. The company
+   * scope and its refusals are `holdsSharedConfiguration`'s; unlike it, no other workspace's grant
+   * counts.
+   */
+  async holdsWorkflowInvoke(resourceUrl: string): Promise<SharedConfigurationAnswer> {
+    const endpoint = inferOpsApiEndpoint(this.env);
+    if (!this.ctx.props.connected || !endpoint) return { holds: false, scope: null };
+    const company = deploymentCompany(this.env);
+    if (!company) throw new InferOpsError("UNAVAILABLE", COMPANY_MISCONFIGURED);
+    const identity = await this.#credentials().identity();
+    if (!identity?.tenantId || !companyAdmits(company, identity.tenantId)) return { holds: false, scope: null };
+    const scope = identity.tenantId.toLowerCase();
+    let host: string;
+    try {
+      host = parseProjectBoardUrl(resourceUrl).host;
+    } catch {
+      return { holds: false, scope };
+    }
+    const labels = parseHost(host);
+    const workspaceId = labels ? await this.#credentials().resolveWorkspace(labels.workspace, "inferops") : null;
+    if (!workspaceId) return { holds: false, scope };
+    const client = whileInferOpsEnabled(this.env, () =>
+      accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
+    return { holds: await client.holdsPermission("workflow:invoke"), scope };
+  }
+
+  // The person's own answer to one InferOps permission, in this deployment's company (see
+  // holdsSharedConfiguration). `permission` is one of the fixed names above, never a caller's.
+  async #holdsInCompany(permission: "configuration:build" | "configuration:publish"):
+      Promise<SharedConfigurationAnswer> {
     const nothing = { holds: false, scope: null };
-    if (action !== "build" && action !== "publish") return nothing;
     const endpoint = inferOpsApiEndpoint(this.env);
     if (!this.ctx.props.connected || !endpoint) return nothing;
     const company = deploymentCompany(this.env);
@@ -1078,9 +1271,97 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     for (const { workspaceId } of identity.workspaces) {
       const client = whileInferOpsEnabled(this.env, () =>
         accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
-      if (await client.holdsPermission(`configuration:${action}`)) return { holds: true, scope };
+      if (await client.holdsPermission(permission)) return { holds: true, scope };
     }
     return { holds: false, scope };
+  }
+
+  /**
+   * The company the connected person works in here (FAC-88): their session's tenant id, as
+   * `holdsSharedConfiguration` scopes its answer, read from the identity stored at connect without
+   * asking InferOps anything. Null for an account without a connected person (demo data, a
+   * sign-in) and for a session in a company `INFEROPS_COMPANY` doesn't admit; a malformed
+   * `INFEROPS_COMPANY` throws, so the Workshop refuses rather than guessing.
+   */
+  async presentationCompany(): Promise<string | null> {
+    if (!this.ctx.props.connected) return null;
+    const company = deploymentCompany(this.env);
+    if (!company) throw new InferOpsError("UNAVAILABLE", COMPANY_MISCONFIGURED);
+    const identity = await this.#credentials().identity();
+    if (!identity?.tenantId || !companyAdmits(company, identity.tenantId)) return null;
+    return identity.tenantId.toLowerCase();
+  }
+
+  /**
+   * The workspaces in which the connected person may list widgets for their company: each of their
+   * workspaces where InferOps' `configuration:publish` holds, asked with their own token, in the
+   * order their identity lists them (FAC-11). Nothing for an account without a connected person, or
+   * a session in another company than `INFEROPS_COMPANY` names, as `holdsSharedConfiguration`.
+   */
+  async widgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> {
+    const identity = await this.#widgetIndexIdentity();
+    if (!identity) return [];
+    const found: WidgetIndexWorkspace[] = [];
+    for (const { workspaceId, workspaceName } of identity.workspaces) {
+      if (await this.#widgetIndexClient(identity.endpoint, workspaceId).holdsPermission("configuration:publish")) {
+        found.push({ workspaceId, name: workspaceName });
+      }
+    }
+    return found;
+  }
+
+  /** Lists one widget version in the person's own workspace `workspaceId`: `widget.publish`. */
+  async registerWidget(workspaceId: string, entry: WidgetIndexEntry): Promise<WidgetIndexOutcome> {
+    return this.#widgetIndexWrite(workspaceId, async client => {
+      await client.publishWidgetDefinition(entry);
+      return { status: "applied" };
+    });
+  }
+
+  /** Removes one widget version's listing from the person's own workspace: `widget.withdraw`. */
+  async withdrawWidget(workspaceId: string, sourceId: string, sourceVersion: number): Promise<WidgetIndexOutcome> {
+    return this.#widgetIndexWrite(workspaceId, async client => ({
+      status: "applied", removed: await client.withdrawWidgetDefinition(sourceId, sourceVersion),
+    }));
+  }
+
+  // The connected person's identity and the API endpoint, when this account can write the widget
+  // index at all: a connected person (never the stopgap bearer, a demo account or a sign-in) of the
+  // deployment's company.
+  async #widgetIndexIdentity() {
+    const endpoint = inferOpsApiEndpoint(this.env);
+    if (!this.ctx.props.connected || !endpoint) return null;
+    const company = deploymentCompany(this.env);
+    if (!company) throw new InferOpsError("UNAVAILABLE", COMPANY_MISCONFIGURED);
+    const identity = await this.#credentials().identity();
+    if (!identity?.tenantId || !companyAdmits(company, identity.tenantId)) return null;
+    return { endpoint, workspaces: identity.workspaces };
+  }
+
+  #widgetIndexClient(endpoint: NonNullable<ReturnType<typeof inferOpsApiEndpoint>>, workspaceId: string) {
+    return whileInferOpsEnabled(this.env, () =>
+      accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
+  }
+
+  // One widget index write as the connected person in `workspaceId`, which must be one of theirs,
+  // answered as InferOps answered: a refusal in the gatekeeper's own words for it, never a success.
+  async #widgetIndexWrite(workspaceId: string,
+      write: (client: InferOpsClient) => Promise<WidgetIndexOutcome>): Promise<WidgetIndexOutcome> {
+    const identity = await this.#widgetIndexIdentity();
+    if (!identity) return { status: "refused", reason: WIDGET_INDEX_NO_SIGN_IN };
+    if (!identity.workspaces.some(w => w.workspaceId === workspaceId)) {
+      return { status: "refused", reason: "That InferOps workspace isn't one of yours." };
+    }
+    try {
+      return await write(this.#widgetIndexClient(identity.endpoint, workspaceId));
+    } catch (error) {
+      const code = inferOpsErrorCode(error);
+      const reason = error instanceof InferOpsError ? error.detail : "InferOps couldn't be reached.";
+      if (code === "FORBIDDEN" || code === "INVALID_REQUEST" || code === "NOT_FOUND" || code === "UNAUTHORIZED") {
+        return { status: "refused", reason };
+      }
+      return { status: "unavailable", reason };
+    }
   }
 
   /** No grantable resource types, so nothing to authorize and no URL to return. */
@@ -1094,6 +1375,9 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     return this.ctx.exports.InferOpsVerifier({ props: this.ctx.props });
   }
 }
+
+/** Why an account lists no widget: only a person's own InferOps sign-in may (FAC-11). */
+const WIDGET_INDEX_NO_SIGN_IN = "Sign in to InferOps as yourself to list this console's widgets for your company.";
 
 /** The verifier surface `addObserver` relies on; the overseer only hands it back to this vendor. */
 export interface InferOpsVerifierApi extends GatekeeperUserVerifier {
@@ -1271,6 +1555,11 @@ type BindingParts = {
    * composed text). Unless given: excluding every current collaborator, through `observe`.
    */
   withhold?: (queue: RpcStub<ApprovalQueue>, description: ObservationDescription) => Promise<void>;
+  /**
+   * A Wiki's search throttle: null when a search may run, else the seconds until one may. Per
+   * connected account, across all its bindings (`InferOpsCredentials.admitWikiSearch`).
+   */
+  admitSearch?: () => Promise<number | null>;
 };
 
 /**
@@ -1405,7 +1694,7 @@ class ActionBinding {
     fields: Partial<LogFields>;
     check?: () => Promise<void> | void;
     send: (marked: ActionRecord) => Promise<ActionRecord>;
-  }): Promise<void | { failed: ActionApplyFailure }> {
+  }): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     const { policy, fields } = options;
     if (record.status === "failed") {
       const stored = record.attempts?.failure;
@@ -1437,6 +1726,7 @@ class ActionBinding {
     }
     this.putAction(applied);
     logger.info(`${record.kind} applied`, { event: `${record.kind}.applied`, ...fields });
+    return { applied: { result: appliedResult(applied) } };
   }
 
   /** Store that `record`'s write is about to be sent, before it is (see `ApplyAttempts`). */
@@ -1473,11 +1763,14 @@ class ActionBinding {
     return { ...failure, retryable };
   }
 
-  /** Submit a staged action; if it was not submitted, forget it so it is no longer simulated. */
+  /**
+   * Submit a staged action and return its receipt (FAC-97), which the write hands to its caller;
+   * if it was not submitted, forget it so it is no longer simulated.
+   */
   async submit(queue: RpcStub<ApprovalQueue>, actionId: number,
-               description: Parameters<ApprovalQueue["submitAction"]>[1]): Promise<void> {
+               description: Parameters<ApprovalQueue["submitAction"]>[1]): Promise<Receipt> {
     try {
-      await queue.submitAction(actionId, description);
+      return await queue.submitAction(actionId, description);
     } catch (error) {
       // Not submitted (unless an auto-approval already applied it), so stop simulating it.
       if (this.action(actionId)?.status === "pending") this.deleteAction(actionId);
@@ -1485,6 +1778,9 @@ class ActionBinding {
     }
   }
 }
+
+/** A write's receipt as the approval queue returns it over RPC, handed on to the caller. */
+type Receipt = Awaited<ReturnType<RpcStub<ApprovalQueue>["submitAction"]>>;
 
 /** One InferOps workspace `findBoards` searches: its host and a data source in it. */
 type DiscoverySource = { host: string; client: InferOpsClient };
@@ -1545,11 +1841,12 @@ export class InferOpsProjectGatekeeper
     extends DurableObject<Cloudflare.Env, ProjectGatekeeperProps>
     implements Gatekeeper<InferOpsProjectSession>, HostBoardReader, HostBoardConnectionFence {
   #binding(): ProjectBinding {
-    const { accountId, connected, host, workspaceId } = this.ctx.props;
+    const { accountId, connected, systemCredentialRef, host, workspaceId } = this.ctx.props;
     const kv = this.ctx.storage.kv;
     return new ProjectBinding(this.ctx.props, {
       store: new ActionStore(kv),
-      client: clientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId),
+      // A system workflow's binding (FAC-102) keeps its reference, so it acts only as that account.
+      client: clientFor(this.env, this.ctx.exports, { accountId, connected, systemCredentialRef }, host, workspaceId),
       observers: () => admittedObservers(kv),
     }, () => otherWorkspacesOf(this.env, this.ctx.exports, this.ctx.props));
   }
@@ -1677,7 +1974,7 @@ export class InferOpsProjectGatekeeper
    * `cache` is unused: no git objects are involved.
    */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
-      Promise<void | { failed: ActionApplyFailure }> {
+      Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     return applyBoardAction(this.#binding(), actionId);
   }
 
@@ -1735,10 +2032,10 @@ function rejectPending(binding: ActionBinding, actionId: number): void {
  * reached InferOps is unknown.
  */
 async function applyBoardAction(binding: ProjectBinding, actionId: number,
-                                check?: () => Promise<void>): Promise<void | { failed: ActionApplyFailure }> {
+                                check?: () => Promise<void>): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
   const record = binding.action(actionId);
   if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
-  if (record.status === "applied") return;
+  if (record.status === "applied") return { applied: { result: appliedResult(record) } };
   if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
   if (isCodingAction(record) || isWikiAction(record)) {
     throw new Error(`InferOps action ${actionId} is not a board action.`);
@@ -1754,9 +2051,11 @@ async function applyBoardAction(binding: ProjectBinding, actionId: number,
     async send(marked) {
       switch (record.kind) {
         case "transition":
-          await binding.client.transition(
+        {
+          const moved = await binding.client.transition(
             binding.projectKey, record.issueId, record.toStateId, record.expectedRevision, key);
-          return { ...marked, status: "applied" };
+          return { ...marked, status: "applied", appliedRevision: moved.revision } as ActionRecord;
+        }
         case "create": {
           const created = await binding.client.createIssue(binding.projectKey, record.issue, key);
           return { ...marked, status: "applied", createdIdentifier: created.identifier } as ActionRecord;
@@ -2014,6 +2313,7 @@ function proposalFailureMessage(what: string, code: string | null, detail: strin
   }
   switch (code) {
     case "UNAUTHORIZED":
+      if (detail === SYSTEM_KEY_REFUSED) return `${what} was not applied: ${detail}`;
       return `${what} was not applied: InferOps rejected this connection's credential. Reconnect InferOps.`;
     case "DISABLED":
       return `${what} was not applied: InferOps is turned off for this deployment. It can be ` +
@@ -2269,7 +2569,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
    * column the approver saw. The workflow is the state's, named only when it is `content`
    * (InferOps' default is `software`).
    */
-  async createIssue(issue: NewIssue): Promise<void> {
+  async createIssue(issue: NewIssue): Promise<Receipt | null> {
     const title = validTitle(issue.title);
     checkDescription(issue.description);
     const binding = this.#binding;
@@ -2294,7 +2594,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
     // first is pending joins it rather than queueing a second issue. Edits and moves need no
     // such step, since a pending change to an issue already refuses another (`refuseIfPending`).
     const { actionId, joined } = await binding.stageOnce({ kind: "create", issue: request, stateName: state.name });
-    if (joined) return;
+    if (joined) return null;
     const description = binding.description(
       `Create an issue in InferOps project ${binding.projectKey}.`)
       .inline("Project", binding.projectKey)
@@ -2303,7 +2603,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
       .inline("Workflow", state.workflow)
       .inline("Priority", request.priority ?? "none");
     if (request.description) description.verbatim("Description", request.description);
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Create issue: ${title}`),
       ...description.finish(),
       implementsRevert: false,
@@ -2404,7 +2704,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
     return { snapshot, stored, issue, refuseIfPending };
   }
 
-  async transition(toStateId: string, expectedRevision: Revision): Promise<void> {
+  async transition(toStateId: string, expectedRevision: Revision): Promise<Receipt | null> {
     const binding = this.#binding;
     const { snapshot, issue, refuseIfPending } = await this.#current(expectedRevision);
     const target = snapshot.states.find(s => s.id === toStateId);
@@ -2413,7 +2713,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
       fail("WORKFLOW_MISMATCH",
         `${issue.identifier} is a ${issue.workflow} issue; "${target.name}" is a ${target.workflow} state.`);
     }
-    if (issue.stateId === toStateId) return;
+    if (issue.stateId === toStateId) return null;
     refuseIfPending();
 
     const from = snapshot.states.find(s => s.id === issue.stateId);
@@ -2435,7 +2735,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
       .inline("To", target.name)
       .inline("Expected revision", expectedRevision)
       .finish();
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Move ${issue.identifier} to ${target.name}`),
       ...rendered,
       implementsRevert: true,
@@ -2447,7 +2747,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
    * part of `Issue`, so a supplied one is always sent. The previous title and priority are
    * recorded for revert; a description change makes the action not revertible.
    */
-  async update(changes: IssueChanges, expectedRevision: Revision): Promise<void> {
+  async update(changes: IssueChanges, expectedRevision: Revision): Promise<Receipt | null> {
     const title = changes.title === undefined ? undefined : validTitle(changes.title);
     checkDescription(changes.description);
     const binding = this.#binding;
@@ -2460,7 +2760,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
         ? { priority: changes.priority } : {}),
     };
     const named = (["title", "description", "priority"] as const).filter(f => sent[f] !== undefined);
-    if (named.length === 0) return;
+    if (named.length === 0) return null;
     refuseIfPending();
 
     const previous = {
@@ -2490,7 +2790,7 @@ class IssueSessionImpl extends RpcTarget implements InferOpsIssueSession {
     if (sent.description === null) description.prose("The description is cleared.");
     else if (sent.description !== undefined) description.verbatim("New description", sent.description);
     description.inline("Expected revision", expectedRevision);
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Update ${issue.identifier}: ${named.join(", ")}`),
       ...description.finish(),
       implementsRevert: sent.description === undefined,
@@ -2567,11 +2867,11 @@ export class InferOpsDispatchGatekeeper
    * may have reached InferOps no later apply sends it again.
    */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
-      Promise<void | { failed: ActionApplyFailure }> {
+      Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     const binding = this.#binding();
     const record = binding.action(actionId);
     if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
-    if (record.status === "applied") return;
+    if (record.status === "applied") return { applied: { result: appliedResult(record) } };
     if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
     if (!isCodingAction(record)) throw new Error(`InferOps action ${actionId} is not a coding action.`);
     const fields = { projectKey: binding.projectKey, action: actionId };
@@ -2719,7 +3019,7 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
    * checked, so a dispatch InferOps would refuse is not proposed. None of it is an observation: the
    * approval shows what was read.
    */
-  async dispatch(issueKey: string, target: DispatchTarget, expectedRevision: Revision): Promise<void> {
+  async dispatch(issueKey: string, target: DispatchTarget, expectedRevision: Revision): Promise<Receipt | null> {
     const binding = this.#binding;
     assertCodingWorkbenchEnabled(this.#env);
     if (!REVISION.test(expectedRevision)) {
@@ -2779,7 +3079,7 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
       .inline("Base ref", target.baseRef ?? `${repo.defaultBaseRef} (default)`)
       .inline("Expected revision", expectedRevision)
       .finish();
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Dispatch ${issue.identifier} to ${repo.slug}`),
       ...description,
       implementsRevert: false,
@@ -2788,12 +3088,12 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
   }
 
   /** A cancel already pending for the run makes this a no-op. */
-  async cancel(runId: string): Promise<void> {
+  async cancel(runId: string): Promise<Receipt | null> {
     if (runId.startsWith(PROVISIONAL_RUN)) fail("NOT_FOUND", "No such run in this project.");
     const binding = this.#binding;
     const run = await binding.client.readRun(binding.projectKey, runId).catch(hideRunExistence);
     if (!ACTIVE_RUN.has(run.status)) fail("CONFLICT", `The run of ${run.issueIdentifier} is already ${run.status}.`);
-    if (binding.codingPending().cancels.some(c => c.runId === run.id)) return;
+    if (binding.codingPending().cancels.some(c => c.runId === run.id)) return null;
 
     const actionId = await binding.stage({ kind: "cancel", runId: run.id, identifier: run.issueIdentifier });
     const description = buildDescription(
@@ -2804,7 +3104,7 @@ class DispatchSessionImpl extends RpcTarget implements InferOpsDispatchSession {
       .inline("Run", run.id)
       .inline("Status", run.status)
       .finish();
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Cancel the ${run.status} run of ${run.issueIdentifier}`),
       ...description,
       implementsRevert: false,
@@ -2833,8 +3133,28 @@ const MAX_PAGE_BODY = 200_000;
  * `target` is its scope, as for a project binding.
  */
 class WikiBinding extends ActionBinding {
+  readonly #admitSearch: BindingParts["admitSearch"];
+
   constructor(readonly target: WikiGatekeeperProps, parts: BindingParts) {
     super(parts, WIKI_SCOPE);
+    this.#admitSearch = parts.admitSearch;
+  }
+
+  /**
+   * Refuse a search this binding may not run: on the deployment's shared connection, which is no
+   * one's own sign-in (FORBIDDEN), or past the account's throttle (UNAVAILABLE, saying when to
+   * retry, distinct from an outage).
+   */
+  async admitSearch(): Promise<void> {
+    if (!this.target.connected && this.host !== DEMO_HOST) {
+      throw new InferOpsError("FORBIDDEN", SEARCH_NEEDS_OWN_SIGN_IN);
+    }
+    const retryAfter = await this.#admitSearch?.();
+    if (retryAfter != null) {
+      throw new InferOpsError("UNAVAILABLE",
+        `Too many Wiki searches on this connection: at most ${WIKI_SEARCHES_PER_MINUTE} a minute. ` +
+        `Try again in ${retryAfter} second${retryAfter === 1 ? "" : "s"}.`);
+    }
   }
 
   get host(): string {
@@ -2910,6 +3230,10 @@ const APPROVE_NOT_SHARED =
   "owner's InferOps sign-in. Approve from an unshared gadget.";
 
 /** Why the stopgap connection cannot approve a proposal (see `WikiBinding.approvalRefusal`). */
+/** Why the deployment's shared connection never searches a Wiki (contract: per-person identity). */
+const SEARCH_NEEDS_OWN_SIGN_IN =
+  "Searching the InferMind Wiki needs your own InferLab sign-in: this connection is shared.";
+
 const APPROVE_NEEDS_OWN_SIGN_IN =
   "Approving a Wiki proposal needs your own InferLab sign-in: this connection is shared and " +
   "approves as no one.";
@@ -2960,6 +3284,7 @@ export class InferOpsWikiGatekeeper
       store: new ActionStore(kv),
       client: clientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId),
       observers: () => admittedObservers(kv),
+      admitSearch: () => credentialsOf(this.ctx.exports, accountId).admitWikiSearch(),
     });
   }
 
@@ -3014,7 +3339,7 @@ export class InferOpsWikiGatekeeper
 
   /** See `applyWikiAction`. */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
-      Promise<void | { failed: ActionApplyFailure }> {
+      Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     return applyWikiAction(this.#binding(), actionId);
   }
 
@@ -3039,10 +3364,10 @@ export class InferOpsWikiGatekeeper
  * `applyApproval`.
  */
 async function applyWikiAction(binding: WikiBinding, actionId: number, check?: () => Promise<void>):
-    Promise<void | { failed: ActionApplyFailure }> {
+    Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
   const record = binding.action(actionId);
   if (!record) throw new Error(`Unknown InferOps action ${actionId}.`);
-  if (record.status === "applied") return;
+  if (record.status === "applied") return { applied: { result: appliedResult(record) } };
   if (record.status === "reverted") throw new Error(`InferOps action ${actionId} was reverted.`);
   if (!isWikiAction(record)) throw new Error(`InferOps action ${actionId} is not a Wiki action.`);
   const fields = { host: binding.host, action: actionId };
@@ -3070,7 +3395,7 @@ async function applyWikiAction(binding: WikiBinding, actionId: number, check?: (
  */
 async function applyApproval(binding: WikiBinding, record: ProposalApproveAction, fields: Partial<LogFields>,
                              check?: () => Promise<void>):
-    Promise<void | { failed: ActionApplyFailure }> {
+    Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
   return binding.applyOnce(record, {
     policy: PROPOSAL_APPROVE, fields,
     check: async () => {
@@ -3329,6 +3654,42 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     return text;
   }
 
+  /**
+   * `knowledge.search` for this Wiki's workspace, as this connection's own sign-in: only `query`
+   * and `limit` are sent, so no argument can widen the scope, and InferOps applies the person's row
+   * rules and lens before choosing candidates. Hits are passed on without `score`, a section with
+   * an edit pending here marked `pending: "update"` (its snippet still the committed text). A
+   * search that could not run is UNAVAILABLE, never an empty list.
+   *
+   * The answer reflects the owner's lens, which admitting a collaborator for the Wiki does not
+   * cover, so every collaborator is excluded from it. The observation keeps the query's first 100
+   * characters and the hits' page and section references, never their snippets (decision 8).
+   */
+  async searchWiki(query: string, options?: { limit?: number }): Promise<WikiSearchHit[]> {
+    const trimmed = typeof query === "string" ? query.trim() : "";
+    if (!trimmed || [...trimmed].length > 500) {
+      fail("INVALID_REQUEST", "query must be 1 to 500 characters after trimming.");
+    }
+    const limit = options?.limit ?? 20;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+      fail("INVALID_REQUEST", "limit must be a whole number from 1 to 50.");
+    }
+    const binding = this.#binding;
+    await binding.admitSearch();
+    const records = await binding.client.searchWiki(trimmed, limit);
+    const pending = new Set(binding.pendingEdits().flatMap(e => e.kind === "section-update" ? [e.sectionId] : []));
+    const hits: WikiSearchHit[] = records.map(hit => pending.has(hit.sectionId) ? { ...hit, pending: "update" } : hit);
+    const asked = [...trimmed].length > 100 ? `${[...trimmed].slice(0, 100).join("")}…` : trimmed;
+    const found = hits.map(hit => `${plainInline(hit.tag, 80)} in ${plainInline(hit.documentSlug, 80)}`);
+    await binding.observeWithheld(this.#queue, {
+      title: "Searched the InferMind Wiki",
+      description: `Searched the InferMind Wiki of ${binding.host} for "${plainInline(asked, 120)}": ` +
+        (found.length === 0 ? "no readable match." :
+          `${found.length} section${found.length === 1 ? "" : "s"}: ${found.join(", ")}.`),
+    });
+    return hits;
+  }
+
   /** The page shown, with its pending edits, as InferOps' page contract composes it (wiki.ts). */
   async #composedText(page: ShownPage): Promise<string> {
     const { head, body, sections, structure } = page;
@@ -3352,7 +3713,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
    * the one shown (nothing to do) and a live pending body edit (CONFLICT). Not an observation: the
    * approval shows what was read.
    */
-  async updateDocumentBody(slugOrId: string, body: string, expectedVersion: number): Promise<void> {
+  async updateDocumentBody(slugOrId: string, body: string, expectedVersion: number): Promise<Receipt | null> {
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
       fail("INVALID_REQUEST", "expectedVersion must be the version readDocument() returned.");
     }
@@ -3367,7 +3728,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
         `Page ${head.slug} is at version ${head.version}, not ${expectedVersion}. Read it again.`);
     }
     const live = binding.liveBodyEdit(head);
-    if ((live?.body ?? head.body) === body) return;
+    if ((live?.body ?? head.body) === body) return null;
     if (live) failBodyConflict(head.slug);
     const actionId = await binding.stage({
       kind: "document-update", documentId: head.id, documentTitle: head.title, body, expectedVersion,
@@ -3381,7 +3742,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       if (error instanceof AlreadyProposed) return null;
       throw error;
     });
-    if (actionId === null) return;
+    if (actionId === null) return null;
     const description = binding.description(
       `Replace the body of one page of the InferMind Wiki of ${binding.host}. InferOps applies it ` +
       `only if the page is still at the version below when approved. Its sections are not changed.`)
@@ -3390,7 +3751,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       .verbatim("Current text", head.body)
       .verbatim("New text", body)
       .finish();
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Edit Wiki page ${head.title}`),
       ...description,
       implementsRevert: true,
@@ -3403,7 +3764,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
    * pending edit (CONFLICT), and a body equal to the one shown (nothing to do). The section's page
    * is read for the approval's title. Not an observation: the approval shows what was read.
    */
-  async updateSection(sectionId: string, body: string, expectedVersion: number): Promise<void> {
+  async updateSection(sectionId: string, body: string, expectedVersion: number): Promise<Receipt | null> {
     if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0) {
       fail("INVALID_REQUEST", "expectedVersion must be the version readDocument() returned.");
     }
@@ -3418,7 +3779,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
         `Section ${stored.tag} is at version ${stored.version}, not ${expectedVersion}. Read it again.`);
     }
     const live = binding.liveEdit(stored);
-    if ((live?.body ?? stored.body) === body) return;
+    if ((live?.body ?? stored.body) === body) return null;
     if (live) failSectionConflict(stored.tag);
     const head = await binding.client.readDocument(stored.documentId).catch(hideDocumentExistence);
     const actionId = await binding.stage({
@@ -3433,7 +3794,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       if (error instanceof AlreadyProposed) return null;
       throw error;
     });
-    if (actionId === null) return;
+    if (actionId === null) return null;
     const description = binding.description(
       `Replace the markdown of one section of the InferMind Wiki of ${binding.host}. It is applied ` +
       `only if the section is still at the version below when approved.`)
@@ -3443,7 +3804,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       .verbatim("Current text", stored.body)
       .verbatim("New text", body)
       .finish();
-    await binding.submit(this.#queue, actionId, {
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Edit Wiki section ${stored.tag} of ${head.title}`),
       ...description,
       implementsRevert: true,
@@ -3497,7 +3858,7 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
    * an observation: the approval shows what was read. Self-approval is InferOps' to refuse, at
    * apply, against the account holder who sends it.
    */
-  async approveProposal(proposalId: string, proposalHash: string): Promise<void> {
+  async approveProposal(proposalId: string, proposalHash: string): Promise<Receipt | null> {
     if (!UUID.test(proposalId)) fail("NOT_FOUND", PROPOSAL_NOT_FOUND);
     if (!SHA256_HEX.test(proposalHash)) {
       fail("INVALID_REQUEST", "proposalHash must be the proposalHash readProposal() returned.");
@@ -3542,8 +3903,8 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
       if (error instanceof AlreadyProposed) return null;
       throw error;
     });
-    if (actionId === null) return;
-    await binding.submit(this.#queue, actionId, {
+    if (actionId === null) return null;
+    return binding.submit(this.#queue, actionId, {
       title: sanitizeTitle(`Approve Wiki proposal: ${proposal.title}`),
       ...description,
       implementsRevert: false,
@@ -3760,6 +4121,7 @@ export class InferOpsAccountGatekeeper
       observers: () => this.#tracker.observerIds(),
       observe: (queue, description) => this.#observeSet(queue, key, description),
       withhold: (queue, description) => this.#observeWithheld(queue, description),
+      admitSearch: () => credentialsOf(this.ctx.exports, this.#account().accountId).admitWikiSearch(),
       account: { scope, label: scopeLabel(scope) },
     };
   }
@@ -3947,7 +4309,7 @@ export class InferOpsAccountGatekeeper
    * target) and the workspace check of `#routed`.
    */
   async applyAction(actionId: number, _cache: RpcStub<GitCache>):
-      Promise<void | { failed: ActionApplyFailure }> {
+      Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
     const routed = this.#routed(actionId);
     if (!routed) throw new Error(`Unknown InferOps action ${actionId}.`);
     return routed.kind === "board"

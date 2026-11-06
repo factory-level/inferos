@@ -144,6 +144,9 @@ export async function generateBundledBlueprintsModule(
         version,
         lastUpdated,
         bindings,
+        // The archive says what it is, as a published version's would: the republish check reads
+        // it, and the installer stores it with the content (see BundledBlueprint.kind).
+        ...(manifest.kind !== undefined ? {kind: manifest.kind} : {}),
       };
       let content = buildContent(sourceFiles, name);
       bytes = serializeArchive(metadata, content, name);
@@ -172,7 +175,7 @@ export async function generateBundledBlueprintsModule(
 // is rebuilt into archives; legacy BUNDLED_BLUEPRINTS_DIR archives are copied as-is. Built from
 // ${builtFrom}.
 
-import type { AiChatAuthorInfo, BlueprintOutput } from "@gadgets/workshop-shared/api";
+import type { AiChatAuthorInfo, BlueprintOutput, WorkspaceKind } from "@gadgets/workshop-shared/api";
 
 // One bundled blueprint: how to present it, and the archive that says what it does. The build
 // validates the source manifest and files before constructing the archive.
@@ -182,6 +185,10 @@ export type BundledBlueprint = {
   description: string;
   output: BlueprintOutput;
   author: AiChatAuthorInfo;
+
+  // The kind every install takes; absent means an app. Stored with the installed version's content,
+  // where an install reads it.
+  kind?: WorkspaceKind;
 
   // Bumped when the archive changes, to trigger a reinstall on deployments already holding an
   // older copy. Everything else here is covered by the install fingerprint.

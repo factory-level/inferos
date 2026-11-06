@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  deployTargetProblem, parseDeployTargets, parseKvNamespaceList, retryWhileDnsPending,
+  deployTargetProblem, parseDeployTargets, parseKvNamespaceList, retryWhileDnsPending, STAGE_DELETE_DISCLOSURE,
 } from "./stage-resources.ts";
 
 test("parseKvNamespaceList finds the array after Wrangler's banner and refuses duplicate titles", () => {
@@ -16,6 +16,11 @@ test("parseKvNamespaceList finds the array after Wrangler's banner and refuses d
   assert.throws(() => parseKvNamespaceList(JSON.stringify([{ id: "1", title: "x" }, { id: "2", title: "x" }])),
       /two KV namespaces are titled "x"/);
   assert.throws(() => parseKvNamespaceList("not logged in"), /no JSON array/);
+});
+
+test("stage deletion disclosure matches what worker deletion keeps and destroys", () => {
+  assert.equal(STAGE_DELETE_DISCLOSURE,
+      "Worker deletion destroys this stage's Durable Object storage, including every workspace. Only the listed KV namespaces and R2 buckets are retained.");
 });
 
 test("parseDeployTargets reads the deploy entries of an output file", () => {

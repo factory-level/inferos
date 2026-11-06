@@ -2,7 +2,7 @@ import { expect, it } from 'vitest'
 import type { Board, Issue, State } from '@inferos/gatekeeper-inferops/src/types'
 import type { PendingMove } from './boardData'
 import type { BoardActivityItem } from './boardActivity'
-import { advanceDecisions, isOverdue, moveTargets, sortIssues, startDecisions } from './kanbanBoard'
+import { advanceDecisions, isOverdue, moveTargets, proposalErrorText, sortIssues, startDecisions } from './kanbanBoard'
 
 const state = (id: string, workflow: State['workflow'] = 'software', group: State['group'] = 'started'): State =>
   ({ id, name: id, group, position: 0, workflow })
@@ -68,4 +68,11 @@ it('decides a provisional card by the logged action that creates its title', () 
   expect(dropped.decisions).toEqual([])
   expect(advanceDecisions(dropped.tracker, gone, [], [logged(6, 'applied', { creates: 'Write docs' })]).decisions)
     .toEqual([{ change: { kind: 'create', title: 'Write docs' }, outcome: 'applied', actionId: 6 }])
+})
+
+// FAC-97: a stale revision keeps InferOps' own words beside the hint, never only the client's text.
+it('keeps the server\'s words for a stale revision', () => {
+  const text = proposalErrorText({ ok: false, code: 'STALE_REVISION', message: 'Revision 3 is stale; ENG-2 is at 4.' })
+  expect(text).toContain('refresh and try again')
+  expect(text).toContain('Revision 3 is stale; ENG-2 is at 4.')
 })

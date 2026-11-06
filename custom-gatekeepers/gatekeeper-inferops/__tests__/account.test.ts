@@ -131,6 +131,10 @@ class FakeInferLab {
    * InferOps refuses the question in, and how it answers otherwise.
    */
   configurationAdmin = new Set<string>();
+  /** `auth.me`: the tokens that are service-account keys, and the company each is in (FAC-102). */
+  serviceKeys = new Map<string, string>();
+  /** `auth.permissions`: the workspaces whose grant allows `workflow:invoke` (FAC-102). */
+  workflowInvokers = new Set<string>();
   /** The company InferLab reports the session in. */
   tenantId = "t1";
   permissionsRefused = new Set<string>();
@@ -283,6 +287,18 @@ class FakeInferLab {
       return new Response(null, { status: 204 });
     }
     const workspaceId = headers.get("x-workspace-id");
+    if (url.pathname === "/auth/me") {
+      // Who the credential is: a service account's key, or a person's token.
+      if (!token || !this.access.has(token) || !workspaceId) {
+        return Response.json({ error: { code: "UNAUTHORIZED", message: "bad token" } }, { status: 401 });
+      }
+      const serviceTenant = this.serviceKeys.get(token);
+      return Response.json({
+        principalType: serviceTenant ? "service_account" : "user",
+        tenantId: serviceTenant ?? "c0000000-0000-4000-8000-00000000000c",
+        workspaceId, role: "member",
+      });
+    }
     if (url.pathname === "/workspaces") {
       // The principal lane: a valid token, no workspace header.
       this.workspaceLists++;
@@ -365,7 +381,8 @@ class FakeInferLab {
       if (!workspaceId || !this.memberships.has(workspaceId) || this.permissionsRefused.has(workspaceId)) {
         return Response.json({ error: { code: "FORBIDDEN", message: "No grant in this workspace" } }, { status: 403 });
       }
-      const allowed = permission.startsWith("configuration:") && this.configurationAdmin.has(workspaceId);
+      const allowed = permission.startsWith("configuration:") ? this.configurationAdmin.has(workspaceId)
+        : permission === "workflow:invoke" ? this.workflowInvokers.has(workspaceId) : false;
       return Response.json({
         workspaceId, role: allowed ? "admin" : "member", assumed: false,
         primaryRole: allowed ? "admin" : "operator", roleAllows: [], roleDenies: [], deniedPermissions: [],
@@ -1919,5 +1936,225 @@ describe("shared configuration authority", () => {
     expect(await hooks().holdsSharedConfiguration(
       { accountId: "00000000-0000-4000-8000-0000000000ff", connected: false }, "build")).toEqual(answer(false, null));
     expect(asked().length).toBe(before);
+  });
+});
+
+const permissionQuestions = () => inferlab.apiCalls.filter(c => c.path.startsWith("/auth/permissions"));
+const invokeAnswer = (holds: boolean, scope: string | null) => ({ holds, scope });
+
+describe("workflow:invoke authority (FAC-102)", () => {
+  // The workflow's board: its connection's target InferOps workspace is acme.operations (OPS).
+  const OPS_BOARD = BOARD_URL;
+
+  it("asks exactly workflow:invoke, with the person's own token, in the board's workspace only", async () => {
+    inferlab.workspaces.push({ workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
+    inferlab.memberships.add(SALES);
+    inferlab.workflowInvokers.add(OPS);
+    const account = await connect("operator with invoke");
+    expect(await hooks().holdsWorkflowInvoke(account, OPS_BOARD)).toEqual(invokeAnswer(true, "t1"));
+    expect(permissionQuestions().map(c => [c.method, c.path, c.workspaceId])).toEqual([
+      ["GET", "/auth/permissions?permissions=workflow%3Ainvoke", OPS],
+    ]);
+    expect(permissionQuestions().every(c => c.issuer === inferlab.test)).toBe(true);
+    // Holding it is no Admin authority.
+    expect(await hooks().holdsSharedConfiguration(account, "build")).toEqual(invokeAnswer(false, "t1"));
+  });
+
+  it("refuses on a deny in the board's workspace, whatever an InferMind or other workspace grant says (QA 3d)", async () => {
+    inferlab.workspaces.push({ workspaceId: MIND, workspaceName: "Mind", product: "infermind" },
+                            { workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
+    inferlab.memberships.add(MIND);
+    inferlab.memberships.add(SALES);
+    inferlab.workflowInvokers.add(MIND);
+    inferlab.workflowInvokers.add(SALES);
+    const account = await connect("denied in operations");
+    expect(await hooks().holdsWorkflowInvoke(account, OPS_BOARD)).toEqual(invokeAnswer(false, "t1"));
+    expect(permissionQuestions().map(c => c.workspaceId)).toEqual([OPS]);
+  });
+
+  it("refuses, asking nothing, a board in a workspace that isn't one of the person's InferOps workspaces", async () => {
+    inferlab.workspaces.push({ workspaceId: MIND, workspaceName: "Mind", product: "infermind" });
+    inferlab.memberships.add(MIND);
+    inferlab.workflowInvokers.add(MIND);
+    const account = await connect("knowledge only");
+    const before = permissionQuestions().length;
+    for (const url of ["inferops://acme.mind/project/board/DEMO", "inferops://acme.sales/project/board/DEMO", "not a board"]) {
+      expect(await hooks().holdsWorkflowInvoke(account, url)).toEqual(invokeAnswer(false, "t1"));
+    }
+    expect(permissionQuestions().length).toBe(before);
+  });
+
+  it("fails rather than guessing on an outage or an answer about another permission", async () => {
+    const account = await connect("unsure invoker");
+    inferlab.permissionsAnswer = () => new Response("down", { status: 502 });
+    expect(typeof await hooks().holdsWorkflowInvoke(account, OPS_BOARD)).toBe("string");
+    inferlab.permissionsAnswer = () => Response.json({
+      decisions: [{ permission: "configuration:build", allowed: true, reason: "role-allow" }],
+    });
+    expect(typeof await hooks().holdsWorkflowInvoke(account, OPS_BOARD)).toBe("string");
+  });
+
+  it("answers for nothing without a connected person, and asks nobody", async () => {
+    const before = permissionQuestions().length;
+    expect(await hooks().holdsWorkflowInvoke(
+      { accountId: "00000000-0000-4000-8000-0000000000fe", connected: false }, OPS_BOARD)).toEqual(invokeAnswer(false, null));
+    expect(permissionQuestions().length).toBe(before);
+  });
+
+  it("leaves shared configuration as it was: a yes from any workspace of the company (FAC-44)", async () => {
+    inferlab.workspaces.push({ workspaceId: SALES, workspaceName: "Sales", product: "inferops" });
+    inferlab.memberships.add(SALES);
+    inferlab.configurationAdmin.add(SALES);
+    const account = await connect("admin in sales");
+    expect(await hooks().holdsSharedConfiguration(account, "publish")).toEqual(invokeAnswer(true, "t1"));
+  });
+});
+
+describe("the company the person works in (FAC-88)", () => {
+  const COMPANY_A = "a0000000-0000-4000-8000-00000000000a";
+  const COMPANY_B = "b0000000-0000-4000-8000-00000000000b";
+  const vars = env as unknown as { INFEROPS_COMPANY?: string };
+  afterEach(() => { delete vars.INFEROPS_COMPANY; });
+
+  it("is the session's company, read without asking InferOps", async () => {
+    inferlab.tenantId = COMPANY_A.toUpperCase();
+    const account = await connect("presentation company");
+    const before = inferlab.apiCalls.length;
+    expect(await hooks().presentationCompany(account)).toBe(COMPANY_A);
+    expect(inferlab.apiCalls.length).toBe(before);
+  });
+
+  it("is none for another company's session, or without a connected person", async () => {
+    inferlab.tenantId = COMPANY_A;
+    const account = await connect("other company");
+    vars.INFEROPS_COMPANY = COMPANY_B;
+    expect(await hooks().presentationCompany(account)).toBeNull();
+    vars.INFEROPS_COMPANY = COMPANY_A;
+    expect(await hooks().presentationCompany(account)).toBe(COMPANY_A);
+    expect(await hooks().presentationCompany(
+      { accountId: "00000000-0000-4000-8000-0000000000fe", connected: false })).toBeNull();
+  });
+
+  it("fails on a malformed INFEROPS_COMPANY instead of answering", async () => {
+    const account = await connect("presentation misconfigured");
+    vars.INFEROPS_COMPANY = "acme";
+    expect(await hooks().presentationCompany(account)).toHaveProperty("failed");
+  });
+});
+
+describe("system credentials (FAC-102)", () => {
+  const REF = "5b2c1d8e-0000-4000-8000-0000000000a1";
+  const COMPANY = "a0000000-0000-4000-8000-00000000000a";
+  const KEY = "iex_test_system_key_for_the_refund_workflow";
+  const vars = env as unknown as { INFEROPS_COMPANY?: string };
+  afterEach(() => { delete vars.INFEROPS_COMPANY; });
+  const serviceKey = (key = KEY) => { inferlab.access.add(key); inferlab.serviceKeys.set(key, COMPANY); return key; };
+  /** Reads the board through the system class for REF, returning "" or the failure. */
+  const systemRead = async (name: string, url = BOARD_URL, ref = REF) => {
+    expect(await hooks().bindSystem(name, ref, url)).toBeNull();
+    return failure((await hooks().startBoundSession(name)).readBoard());
+  };
+
+  it("checks a service account's key with InferOps, stores it, and reads as it, never as anyone else", async () => {
+    serviceKey();
+    expect(await hooks().provisionSystem(REF, BOARD_URL, KEY)).toBeNull();
+    expect(await systemRead("system-ok")).toBe("");
+    expect(lastApiCall()).toMatchObject({ token: KEY, workspaceId: OPS });
+  });
+
+  it("refuses a person's token, an unknown key, a key outside the board's workspace and another company's account, in fixed words", async () => {
+    // A reference nothing was ever provisioned for: each Durable Object outlives a test.
+    const FRESH = "5b2c1d8e-0000-4000-8000-0000000000a2";
+    const person = "person_access_token";
+    inferlab.access.add(person);
+    const outsider = serviceKey("iex_test_outsider_key");
+    // A person's own token lists the workspace, but isn't a service account.
+    const refusals = [
+      await hooks().provisionSystem(FRESH, BOARD_URL, person),
+      await hooks().provisionSystem(FRESH, BOARD_URL, "iex_unknown_key"),
+    ];
+    // A service account that can't see the board's workspace.
+    const slugs = new Map(inferlab.slugs);
+    inferlab.slugs.clear();
+    refusals.push(await hooks().provisionSystem(FRESH, BOARD_URL, outsider));
+    for (const [id, slug] of slugs) inferlab.slugs.set(id, slug);
+    serviceKey();
+    vars.INFEROPS_COMPANY = "b0000000-0000-4000-8000-00000000000b";
+    refusals.push(await hooks().provisionSystem(FRESH, BOARD_URL, KEY));
+    expect(refusals).toEqual(Array(4).fill("The key wasn't accepted."));
+    // Nothing was stored, so a run has no authority at all.
+    expect(await systemRead("system-none", BOARD_URL, FRESH)).toContain("No service account is provisioned");
+  });
+
+  it("serves only the board host the key was checked for", async () => {
+    serviceKey();
+    expect(await hooks().provisionSystem(REF, BOARD_URL, KEY)).toBeNull();
+    expect(await systemRead("system-other", "inferops://acme.sales/project/board/DEMO"))
+      .toContain("No service account is provisioned");
+  });
+
+  it("rotates on a second provisioning and is gone once forgotten", async () => {
+    serviceKey();
+    const rotated = serviceKey("iex_test_rotated_key");
+    expect(await hooks().provisionSystem(REF, BOARD_URL, KEY)).toBeNull();
+    expect(await hooks().provisionSystem(REF, BOARD_URL, rotated)).toBeNull();
+    expect(await systemRead("system-rotated")).toBe("");
+    expect(lastApiCall().token).toBe(rotated);
+    await hooks().forgetSystem(REF);
+    expect(await systemRead("system-forgotten")).toContain("No service account is provisioned");
+  });
+
+  // FAC-102 follow-up C: a refused service-account key is named as such, with no person-oriented
+  // reconnect hint and no class-name prefix.
+  it("names a refused service-account key as the assignment's, not a person's connection", async () => {
+    const REFUSED = "5b2c1d8e-0000-4000-8000-0000000000a6";
+    serviceKey();
+    expect(await hooks().provisionSystem(REFUSED, BOARD_URL, KEY)).toBeNull();
+    inferlab.access.delete(KEY);
+    const refused = await systemRead("system-key-refused", BOARD_URL, REFUSED);
+    expect(refused).toContain("The assignment's service-account key was refused. An Admin needs to assign it again.");
+    expect(refused).not.toContain("Reconnect InferOps");
+    expect(refused).not.toContain("InferOpsError");
+  });
+
+  it("fails a run's call once InferOps revokes the key, and falls back to nothing", async () => {
+    // REF was forgotten above, and a forgotten reference never stores again.
+    const REVOKED = "5b2c1d8e-0000-4000-8000-0000000000a3";
+    serviceKey();
+    expect(await hooks().provisionSystem(REVOKED, BOARD_URL, KEY)).toBeNull();
+    inferlab.access.delete(KEY);
+    const before = inferlab.apiCalls.length;
+    expect(await systemRead("system-revoked", BOARD_URL, REVOKED)).not.toBe("");
+    expect(inferlab.apiCalls.slice(before).every(call => call.token === KEY)).toBe(true);
+  });
+
+  // #375 round 2: the Workshop forgets a reference when it retires the assignment, and that can
+  // reach here before a provisioning still checking the key stores it. A store after the forget
+  // must not land, whatever the order the two arrive in.
+  // #375 round 3: a store and a forget for one reference, issued together in either order, never
+  // leave a key behind once the forget has returned.
+  it("never keeps a key past a forget issued at the same time as a store, in either order", async () => {
+    type Credentials = { store: (c: unknown) => Promise<boolean>; forget: () => Promise<void>; authority: (h: string) => Promise<unknown> };
+    const ns = (env as unknown as { INFEROPS_SYSTEM_CREDENTIALS: DurableObjectNamespace }).INFEROPS_SYSTEM_CREDENTIALS;
+    const credential = { key: KEY, workspaceId: OPS, host: "acme.operations", tenantId: COMPANY, provisionedAt: 0 };
+    for (let round = 0; round < 20; round++) {
+      const stub = ns.get(ns.newUniqueId()) as unknown as Credentials;
+      const [stored] = round % 2 === 0
+        ? await Promise.all([stub.store(credential), stub.forget()])
+        : (await Promise.all([stub.forget(), stub.store(credential)])).toReversed() as [boolean, void];
+      expect(await stub.authority("acme.operations")).toBeNull();
+      // Whichever ran first, a later store is refused.
+      expect(await stub.store(credential)).toBe(false);
+      expect(typeof stored).toBe("boolean");
+    }
+  });
+
+  it("never stores a key for a reference once it is forgotten, even a store that arrives late", async () => {
+    const RETIRED = "5b2c1d8e-0000-4000-8000-0000000000a5";
+    serviceKey();
+    expect(await hooks().provisionSystem(RETIRED, BOARD_URL, KEY)).toBeNull();
+    await hooks().forgetSystem(RETIRED);
+    expect(await hooks().provisionSystem(RETIRED, BOARD_URL, KEY)).toBe("The key wasn't accepted.");
+    expect(await systemRead("system-retired", BOARD_URL, RETIRED)).toContain("No service account is provisioned");
   });
 });

@@ -1,14 +1,29 @@
 import type { ActionApprovalCorrelation, OperateApprovalRequest, OperateApprovalSnapshot } from "@gadgets/workshop-shared/operate-approval";
 import { approvalCorrelation, approvalSnapshot, validateApprovalRequest } from "./operate-approval";
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
+import type { CanvasPage, CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
-import type { WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef, WorkflowDefinitionSave } from "@gadgets/workshop-shared/workflow-definition";
-import { WorkspaceWorkflowDefinitionStore, type StoredTriggerPin, type StoredWorkflowDefinition, type StoredWorkflowDelivery } from "./workflow-definition-store";
+import type {
+  TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
+  TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
+  WorkflowDefinitionSave, WorkflowInvocation,
+} from "@gadgets/workshop-shared/workflow-definition";
+import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import {
+  SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
+  systemGatekeeperFacetName, type AssignedDelivery, type AssignedExecution, type SystemRunHost,
+} from "./system-run.js";
+import {
+  WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
+  type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
+} from "./workflow-definition-store";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
+import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
+import { WIDGET_STATES_FILE, parseWidgetStates, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
 import {
   GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
   isGadgetModule,
@@ -34,15 +49,16 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreens, type ConsoleSource, type ConsoleWidgetCandidate, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplyFailure, type SharedConfigurationAction } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
+import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -81,13 +97,16 @@ import { chatChangeStatuses, foldProposedChanges, type ChangeBatch } from "./age
 import { ambientGatekeeperMode } from "./provisioning-policy";
 import { blueprintSnapshotFiles, blueprintVersionKeys, blueprintVersionMetadata, checkDataContract, listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, readBlueprintVersionBindings, sanitizeBlueprintOutput, writeBlueprintVersionBindings } from "./blueprint-archive";
 import { assertUpgradeCompatible, createBlueprintBindings, readBlueprintVersionToInstall } from "./blueprint-install";
+import { compileAuthoredWidgetPublication, compileAuthoredWidgetSources, MAX_AUTHORED_WIDGET_PREVIEW_BYTES, type AuthoredWidgetBuildNamespace } from "./authored-widget-publication.js";
+import { isValidAuthoredWidgetCommitPath } from "./authored-widget-path.js";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
 import type { AgentSpawnerBinding, CallableAgent, SpawnCallableOptions } from "./agent-spawner-binding";
 import { recordAnalytics } from "./analytics";
 import { reportIssue } from "@gadgets/observability/error-reporting";
 import type { ProductAnalyticsConnectionType, ProductAnalyticsGadgetInput } from "./analytics";
-import { checkUsageAndBalance } from "./ai-gateway-billing/limits/usage-checker";
+import { checkPlatformTurn } from "./ai-gateway-billing/limits/usage-checker";
+import { drawsOnPlatformAllowance, modelBindingRefusal } from "./model-allowlist";
 import { normalizeAgentCatalog } from "./agent-catalog";
 import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection-service";
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank,
@@ -118,6 +137,82 @@ import {
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
 
+/** The refusal when the invoker's own InferOps grant doesn't include `workflow:invoke` (FAC-102). */
+export const WORKFLOW_INVOKE_REFUSED =
+  "You don't have permission to run workflows here. Ask an Admin for it.";
+
+/**
+ * Refuses unless the deployment's shared-configuration authority says the user may ask trigger
+ * `hookId`'s workflow to run (FAC-102, InferOps' `workflow:invoke`, inferops ADR 0011 D3), asked
+ * freshly through their own connected account in the workspace of each connection of that vendor the
+ * trigger's gadget binds, read from the connection's own record, never from the request; every one
+ * must say yes, and a workflow with none is refused, since nothing scopes the question (the manager,
+ * 2026-11-05). Where the deployment names no such authority there is nothing to ask, as for shared
+ * configuration. It admits nothing alone: the trigger's own control must list the person too.
+ */
+export async function requireWorkflowInvoke(
+    workspace: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
+    userId: string, hookId: number): Promise<void> {
+  let vendorId = getSharedConfigurationGatekeeper(workspace.env);
+  if (!vendorId) return;
+  let hook = workspace.storage.boundHooks.get(hookId);
+  let gadgetId = hook ? hook.gadgetId ?? workspace.defaultGadgetId : undefined;
+  let boards = new Set<string>();
+  if (gadgetId !== undefined) {
+    for (let [, edge] of workspace.visibleBindings(workspace.getGadgetRecord(gadgetId))) {
+      let record = workspace.storage.gatekeepers.get(edge.target);
+      let spec = record?.creationSpec;
+      if (gatekeeperVendorId(record) === vendorId && spec && "resourceUrl" in spec && typeof spec.resourceUrl === "string") {
+        boards.add(spec.resourceUrl);
+      }
+    }
+  }
+  if (boards.size === 0) throw new Error(WORKFLOW_INVOKE_REFUSED);
+  let user = workspace.users.get(workspace.users.idFromString(userId));
+  for (let resourceUrl of boards) {
+    if (!(await user.holdsWorkflowInvoke(resourceUrl))) throw new Error(WORKFLOW_INVOKE_REFUSED);
+  }
+}
+
+/**
+ * The one refusal for a service-account key the Workshop won't relay or the service doesn't accept
+ * (FAC-102). Fixed words: nothing of the key or of the service's reason is ever repeated.
+ */
+export const PROVISION_REFUSED = "The key wasn't accepted.";
+
+export { WORKFLOW_ASSIGNMENTS_DISABLED };
+
+/**
+ * The refusal for a run on request of a trigger whose assignment was retired automatically
+ * (FAC-102 follow-up B), until an Admin re-assigns it or removes the assignment.
+ */
+const ASSIGNED_ACTION_UNREACHABLE =
+  "This action's connection can't act as its workflow's service account now, so it wasn't applied.";
+
+export const TRIGGER_AUTO_RETIRED =
+  "This trigger's service-account assignment was retired automatically. An Admin needs to assign it again or remove it.";
+
+/**
+ * Whether workflow trigger assignments are on (`WORKFLOW_ASSIGNMENTS_ENABLED === "true"`): off by
+ * default, and to stay off on every deployment until the fail-closed follow-up merges (the manager,
+ * 2026-11-06). The server decides; the UI only reflects it.
+ */
+export function workflowAssignmentsEnabled(env: { WORKFLOW_ASSIGNMENTS_ENABLED?: string }): boolean {
+  return env.WORKFLOW_ASSIGNMENTS_ENABLED === "true";
+}
+
+/** The fixed refusal when a request failed before its delivery took it, for any other reason. */
+const RUN_NOT_STARTED = "This trigger couldn't be run just now.";
+
+/** Longest service-account key relayed for provisioning. */
+const MAX_PROVISIONED_KEY_LENGTH = 1024;
+
+// The resource a gatekeeper connection serves, from its own record.
+function gatekeeperResourceUrl(record: GatekeeperRecord | undefined): string | undefined {
+  let spec = record?.creationSpec;
+  return spec && "resourceUrl" in spec && typeof spec.resourceUrl === "string" ? spec.resourceUrl : undefined;
+}
+
 /**
  * Refuses unless the deployment's shared-configuration authority says the user may `action`,
  * asked freshly through their own connected account. `scope: "shared"` asks only while the
@@ -138,6 +233,91 @@ export async function requireSharedConfiguration(
   if (!(await user.holdsSharedConfiguration(action))) {
     throw new Error(SHARED_CONFIGURATION_REFUSED);
   }
+}
+
+// --- Canvas writes ---
+//
+// Every write to a workspace's saved canvases, whether a person's builder controls make it or the
+// agent's canvas tools do (FAC-84), goes through these functions and then the store's own revision
+// check and validation. There is no other write path, and none of them publishes: a published
+// console keeps its frozen copy until a person publishes it again. Only the `build` check differs
+// by writer (see `CanvasWriter`).
+
+/**
+ * Who makes a canvas write. A person at the builder's controls (`session`) writes in a session that
+ * FAC-44 checked for `build` when it opened, and canvas drafts aren't re-checked in an open session
+ * (operate-mode.md, Shared configuration). The agent (`agent`) writes as its turn's initiator, whose
+ * turn needn't come from an open session (a spawned agent's has none), so its `build` is asked
+ * freshly at every write. `userId` is the writer's user DO id.
+ */
+export type CanvasWriter = { kind: "session" | "agent"; userId: string };
+
+/** Refuse an agent writer without `build` in a shared workspace; a session writer was checked at open. */
+async function requireCanvasWriter(workspace: CanvasWorkspace, writer: CanvasWriter): Promise<void> {
+  if (writer.kind === "agent") await requireSharedConfiguration(workspace, writer.userId, "build", "shared");
+}
+
+/** What the canvas writes need of a workspace. */
+export type CanvasWorkspace = Parameters<typeof requireSharedConfiguration>[0] & {
+  ownerId?: string;
+  ctx: { storage: DurableObjectStorage };
+  storage: ReturnType<typeof makeOverseerStorage>;
+};
+
+/** The workspace's canvas store, refused once the workspace is deleted. */
+export function workspaceCanvasStore(workspace: CanvasWorkspace): WorkspaceCanvasStore {
+  if (!workspace.ownerId) throw new Error("Workspace has been deleted.");
+  return new WorkspaceCanvasStore(workspace.ctx.storage, workspace.storage, workspace.env);
+}
+
+/** Create a canvas as `writer`. */
+export async function createCanvasAs(workspace: CanvasWorkspace, writer: CanvasWriter,
+                                     content: CanvasContent): Promise<CanvasDefinition> {
+  await requireCanvasWriter(workspace, writer);
+  return workspaceCanvasStore(workspace).create(content);
+}
+
+/** Apply version 1 operations as `writer` (the builder's flat edits and undo). */
+export async function editCanvasAs(workspace: CanvasWorkspace, writer: CanvasWriter, id: string,
+                                   expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition> {
+  await requireCanvasWriter(workspace, writer);
+  return workspaceCanvasStore(workspace).edit(id, expectedRevision, operations);
+}
+
+/** Apply typed page operations (FAC-83) at the expected revision as `writer`. */
+export async function editCanvasPageAs(workspace: CanvasWorkspace, writer: CanvasWriter, id: string,
+                                       expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage> {
+  await requireCanvasWriter(workspace, writer);
+  return workspaceCanvasStore(workspace).editPage(id, expectedRevision, operations);
+}
+
+/** Delete a canvas at the expected revision as `writer`. */
+export async function deleteCanvasAs(workspace: CanvasWorkspace, writer: CanvasWriter, id: string,
+                                     expectedRevision: string): Promise<void> {
+  await requireCanvasWriter(workspace, writer);
+  workspaceCanvasStore(workspace).delete(id, expectedRevision);
+}
+
+/**
+ * The agent's canvas tools' access, or null while saved canvases are off. It writes as the turn's
+ * initiator through the functions above, the controls' own, as an `agent` writer, so `build` is
+ * checked at every write; user DOs are named by user identifier, as `listAvailableBlueprints`
+ * resolves them.
+ */
+export function agentCanvasAccess(workspace: CanvasWorkspace): AgentCanvasAccess | null {
+  if (workspace.env.COMPOSABLE_VIEWS !== "true" || workspace.env.DURABLE_VIEWS !== "true") return null;
+  let writer = (initiator: AiChatAuthorInfo): CanvasWriter =>
+    ({ kind: "agent", userId: workspace.users.idFromName(initiator.id).toString() });
+  return {
+    catalog: readCanvasCatalog(workspace.env),
+    listPages: () => workspaceCanvasStore(workspace).listPages(),
+    create: async (initiator, content) => {
+      let created = await createCanvasAs(workspace, writer(initiator), content);
+      return workspaceCanvasStore(workspace).getPage(created.id)!;
+    },
+    editPage: (initiator, id, expectedRevision, operations) =>
+      editCanvasPageAs(workspace, writer(initiator), id, expectedRevision, operations),
+  };
 }
 
 let CODE_MODE_HARNESS =
@@ -748,6 +928,8 @@ function connectionTypeFromCreationSpec(
 type BlueprintGadgetRecord = {
   id: string;
   metadata: BlueprintMetadata;
+  /** Set only for a version compiled from an authored Widget client.tsx. */
+  authoredWidgetBuild?: true;
 
   // Which gadget this blueprint exports. If omitted, use `defaultGadgetId`.
   gadgetId?: WorkpieceId;
@@ -843,6 +1025,43 @@ const BUILTIN_TOOL_GATEKEEPER_ID = -1;
 // How many audited host-board reads an operate session workspace keeps (see host-boards.ts).
 const HOST_BOARD_READS_KEPT = 1000;
 
+/**
+ * The name of the Durable Object facet that holds a gadget's storage: `gadget` for the workspace's
+ * default gadget, `gadget<id>` for any other. The local company storage export reads facets by this
+ * name, so it must stay the one definition.
+ */
+export function gadgetFacetNameFor(defaultGadgetId: WorkpieceId | undefined, id: WorkpieceId): string {
+  return defaultGadgetId === id ? "gadget" : `gadget${id}`;
+}
+
+async function opaqueExportActorId(id: string, exportSalt: string, personal = false): Promise<string> {
+  // User and gadget author ids identify people, even when they are not email-shaped. Hash them
+  // deterministically so repeated actors remain linkable within this export, while the random
+  // salt prevents correlation across exports. Also hash email-shaped ids for other actor types.
+  if (!personal && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) return id;
+  let digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${exportSalt}:${id}`)));
+  return `sha256:${digest.toHex()}`;
+}
+
+async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt: string)
+    : Promise<{type: "user" | "agent" | "gadget" | "system"; id: string} | undefined> {
+  if (!caller) return undefined;
+  switch (caller.from) {
+    case "agent":
+    case "user":
+      return caller.chatId === undefined ? undefined : {
+        type: caller.from,
+        id: await opaqueExportActorId(`chat:${caller.chatId}`, exportSalt, true),
+      };
+    case "gadget":
+      return caller.gadgetId === undefined ? undefined : {type: "gadget", id: String(caller.gadgetId)};
+    case "hook":
+      return {type: "system", id: "hook"};
+    case "systemRun":
+      return {type: "system", id: `systemRun:${caller.hookId}`};
+  }
+}
+
 export type ActionRecord = {
   id: number,
   gatekeeperId: WorkpieceId;
@@ -878,6 +1097,15 @@ export type ActionRecord = {
   applyStartedAt?: Date;
   /** One explicit AG-UI conversation, persisted with its existing action rather than a second queue. */
   aguiApproval?: ActionApprovalCorrelation;
+  /** What the provider reported the apply produced (see ActionLogEntry.result); set only on approval. */
+  result?: ActionResult;
+  /**
+   * Set when an assigned workflow run proposed it (FAC-102 follow-up A): the trigger, the run's
+   * delivery and the assignment's credential reference. It applies, once a person approves it, as
+   * the service account through a short-lived session on that run's own system facet, and only
+   * while that assignment still holds (see openAssignedActionFacet).
+   */
+  executedAs?: AssignedExecution;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1190,7 +1418,8 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   // Only the kind of caller leaves the server, never its chat or gadget id. Records persisted
   // before callers were tracked have no `caller`, so their entries carry no `requestedBy`.
   const from = (record.caller as GatekeeperCaller | undefined)?.from;
-  const requestedBy = from === "user" ? "person" : from;
+  // A trigger's assigned run (FAC-102) is the trigger's automation, like any other hook firing.
+  const requestedBy = from === "user" ? "person" : from === "systemRun" ? "hook" : from;
 
   switch (record.type) {
     case "observation":
@@ -1220,6 +1449,8 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         resolvedBy: record.resolvedBy,
         autoApproved: record.autoApproved,
         ...(record.lastAttempt ? {lastAttempt: record.lastAttempt} : {}),
+        ...(record.state === "pending" && record.applyStartedAt ? {applying: true as const} : {}),
+        ...(record.state === "approved" && record.result ? {result: record.result} : {}),
       };
     case "bindHook":
       return {
@@ -1353,6 +1584,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Set, never cleared, when the session first opens it; from then on every open is the
       // owner's, through OperateOverseerInterface, and its chats run with the operate tool set.
       operateSession: false,
+      // Whether its owner's company change retired this operate session workspace (FAC-88; see
+      // retireOperateSession). Set, never cleared: from then on nothing opens it, every held
+      // operate capability refuses, and no agent turn runs or resumes in it.
+      operateSessionRetired: false,
 
       // If present, this gadget was migrated from version zero, when a workspace had only one
       // gadget. Many stored records that normally contain a `gadgetId` might be missing it; they
@@ -1391,6 +1626,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       // The next workflow-definition delivery number (see workflow-definition-store.ts).
       nextWorkflowDeliveryId: 0,
+      // The next on-request run record number (see workflow-definition-store.ts).
+      nextWorkflowInvocationLogId: 0,
       nextChatId: 0,
       nextHookId: 0,
       nextAgentCallId: 0,
@@ -1430,6 +1667,17 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       workflowDefinitions: collection<StoredWorkflowDefinition>()({ primaryKey: "id" }),
       workflowTriggerPins: collection<StoredTriggerPin>()({ primaryKey: "hookId" }),
       workflowDeliveries: collection<StoredWorkflowDelivery>()({ primaryKey: "id" }),
+      // Who may ask a pinned trigger to run now, and the requests admitted but not yet delivered
+      // (FAC-102; see workflow-definition-store.ts).
+      workflowTriggerControls: collection<StoredTriggerControl>()({ primaryKey: "hookId" }),
+      // Which service account an assigned trigger's on-request runs execute as (FAC-102).
+      workflowTriggerAssignments: collection<TriggerAssignment>()({ primaryKey: "hookId" }),
+      // Triggers whose assignment was retired automatically, refused on request until an Admin acts
+      // (FAC-102 follow-up B; see WorkspaceWorkflowDefinitionStore.markAutoRetired).
+      workflowTriggerAutoRetired: collection<{ hookId: number; retiredAt: Date }>()({ primaryKey: "hookId" }),
+      workflowInvocations: collection<StoredWorkflowInvocation>()({ primaryKey: "id" }),
+      // The newest on-request runs, which the run rates count (see workflow-definition-store.ts).
+      workflowInvocationLog: collection<StoredWorkflowInvocationRecord>()({ primaryKey: "id" }),
       // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).
       consoles: collection<OperateConsole>()({ primaryKey: "id" }),
       // Each published console's screens as they were when it was published, keyed
@@ -1437,6 +1685,12 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       consoleScreens: collection<ConsoleScreenSnapshot>()({
         primaryKey: record => consoleScreenKey(record.consoleId, record.screenId),
       }),
+      // Each console's place in the deployment's widget index (FAC-11; see console-widget-index.ts),
+      // by console id; a deleted console's is kept while one of its withdrawals is pending.
+      consoleWidgetIndex: collection<ConsoleWidgetIndexRecord>()({ primaryKey: "consoleId" }),
+      // Withdrawals the widget index still owes, for the whole workspace (a deleted console's
+      // included), retried on the next publication or delete and by the alarm.
+      widgetIndexOwed: collection<OwedWithdrawal>()({ primaryKey: "key" }),
       // An operate session workspace's host-board selections, by target; its selection requests,
       // by request key (settled ones kept as tombstones); and its audited reads (see host-boards.ts).
       hostBoardSelections: collection<HostBoardSelectionRecord>()({ primaryKey: "target" }),
@@ -1763,6 +2017,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
   watchAuthzSingleton(typed, typed.containsRestrictedData);
   watchAuthzSingleton(typed, typed.ownerInvitesOnly);
   watchAuthzSingleton(typed, typed.operateSession);
+  watchAuthzSingleton(typed, typed.operateSessionRetired);
   return typed;
 }
 
@@ -1893,6 +2148,8 @@ function consoleToolFailure(reason: string): ConsoleToolOutcome {
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
+  /** Test seam; production uses this Worker's exported build Durable Object. */
+  authoredWidgetBuildNamespace?: AuthoredWidgetBuildNamespace;
 
   // Identifies this DO instance. Sent to chat subscribers so they can detect a full server
   // restart (see AiChatSubscriber.streamGeneration). A timestamp suffices since a DO won't
@@ -2076,12 +2333,18 @@ class OverseerImpl implements AgentHooks {
     subscriber = subscriber.dup();
     let token = {};
     this.#presenceSubscribers.set(token, subscriber);
+    // Ended with every other stream by a retirement (FAC-88; trackStream).
+    let stream = this.trackStream(() => remove());
+    let remove = () => {
+      stream.untrack();
+      this.#removePresenceSubscriber(token);
+    };
     let snapshot = [...this.#presence.keys()].map(id => this.#toParticipant(id));
-    subscriber.init(snapshot).catch(() => this.#removePresenceSubscriber(token));
-    subscriber.onRpcBroken(() => this.#removePresenceSubscriber(token));
+    subscriber.init(snapshot).catch(remove);
+    subscriber.onRpcBroken(remove);
     // @ts-expect-error Bugs in native RPC types make this not work currently.
     return new NativeRpcStub<{}>({
-      [Symbol.dispose]: () => this.#removePresenceSubscriber(token),
+      [Symbol.dispose]: remove,
     });
   }
 
@@ -2185,6 +2448,11 @@ class OverseerImpl implements AgentHooks {
       times.push(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
     }
 
+    // Owed widget index withdrawals, each until its alarm tries run out (see console-widget-index.ts).
+    for (let owed of this.storage.widgetIndexOwed.list()) {
+      if (owed.attempts < OWED_RETRY_CAP) times.push(owed.nextAttemptAt);
+    }
+
     // Tool facets left pending: retried until each is deleted (see ToolLane.nextSweepTime).
     let toolSweepTime = this.toolLane.nextSweepTime();
     if (toolSweepTime !== undefined) {
@@ -2212,6 +2480,7 @@ class OverseerImpl implements AgentHooks {
     this.#inAlarmHandler = true;
     try {
       this.toolLane.sweep();
+      await this.#retryDueWidgetWithdrawals();
       do {
         let results = await Promise.allSettled([
           this.waitForAllAgentsToComplete(),
@@ -2227,6 +2496,43 @@ class OverseerImpl implements AgentHooks {
       this.#agentKeepAliveTime = undefined;
       this.#updateAlarm();
     }
+  }
+
+  // The alarm's part in the widget index: each owed withdrawal that is due and has tries left is
+  // tried as the person whose publication or delete owed it, with their own sign-in. One that
+  // can't be is kept, with its reason, for the next try or the next publication or delete.
+  async #retryDueWidgetWithdrawals(): Promise<void> {
+    if (!getSharedConfigurationGatekeeper(this.env)) return;
+    let now = Date.now();
+    let due = [...this.storage.widgetIndexOwed.list()].filter(owed => owed.attempts < OWED_RETRY_CAP && owed.nextAttemptAt <= now);
+    if (due.length === 0) return;
+    let byUser = new Map<string, OwedWithdrawal[]>();
+    for (let owed of due) byUser.set(owed.userId, [...byUser.get(owed.userId) ?? [], owed]);
+    for (let [userId, owed] of byUser) {
+      let user = this.users.get(this.users.idFromString(userId));
+      let result = await retryOwedWithdrawals(owed, this.publishedWidgetVersions(), {
+        workspaces: () => user.widgetIndexWorkspaces(),
+        withdraw: (accountId, workspaceId, sourceId, sourceVersion) => user.withdrawWidget(accountId, workspaceId, sourceId, sourceVersion),
+      }, now);
+      this.storeOwedWithdrawals(result);
+    }
+  }
+
+  /** Every widget version a published console of this workspace lists. */
+  publishedWidgetVersions(exceptConsoleId?: string): Set<string> {
+    let versions = new Set<string>();
+    for (let stored of this.storage.consoles.list()) {
+      if (stored.id === exceptConsoleId) continue;
+      for (let entry of stored.published?.content.widgets ?? []) versions.add(consoleWidgetVersionId(entry));
+    }
+    return versions;
+  }
+
+  /** Records a retry of owed withdrawals: cleared ones go, kept ones are stored; reschedules the alarm. */
+  storeOwedWithdrawals(result: { cleared: string[]; kept: OwedWithdrawal[] }): void {
+    for (let key of result.cleared) this.storage.widgetIndexOwed.delete(key);
+    for (let owed of result.kept) this.storage.widgetIndexOwed.put(owed);
+    this.#updateAlarm();
   }
 
   #deleteExternalMessageResponseDeliveryRecord(record: ExternalMessageRecord): void {
@@ -2394,6 +2700,19 @@ class OverseerImpl implements AgentHooks {
   // any blocked event is delivered) so that if we were called at the start of the alarm handler,
   // it'll recognize that agents are running and wait for them.
   #resumeInterruptedAgents(): void {
+    // A retired operate session workspace (FAC-88) resumes nothing: its turns were started for a
+    // company the owner no longer works in. Dropping their records leaves the chats to the
+    // compatibility pass below, which reports each as interrupted, and no pending call is drained.
+    if (this.storage.operateSessionRetired.get()) {
+      for (let record of Array.from(this.storage.activeAgents.list())) this.storage.activeAgents.delete(record.chatId);
+      for (let thread of Array.from(this.storage.chatMeta.list())) {
+        if (!thread.activeAgent) continue;
+        this.postAgentErrorMessage(thread.id, thread.activeAgent, "Agent stopped: this operate session has ended.");
+        delete thread.activeAgent;
+        this.storage.chatMeta.put(thread);
+      }
+      return;
+    }
     for (let record of Array.from(this.storage.activeAgents.list())) {
       // Register the running agent immediately (see above), and create the LiveChatContext
       // synchronously, so that cancellations are immediately respected.
@@ -2699,7 +3018,7 @@ class OverseerImpl implements AgentHooks {
   // keeps the legacy name "gadget"; all others get `gadget${id}` (collision-free with
   // `gatekeeper${id}` thanks to the shared workpiece counter).
   gadgetFacetName(id: WorkpieceId): string {
-    return this.defaultGadgetId === id ? "gadget" : `gadget${id}`;
+    return gadgetFacetNameFor(this.defaultGadgetId, id);
   }
 
   // Resolve an agent tool's optional workpiece reference. Absent means the workspace's default
@@ -3211,10 +3530,21 @@ class OverseerImpl implements AgentHooks {
   // blueprintPublishRefusals): a widget on any violation, since what a console registers must be
   // the widget its files make; an app or workflow only on a view.json or tools.json. A widget's
   // view.json and tools.json are classified from their strict UTF-8 text.
-  async assertPublishableKind(kind: WorkspaceKind | undefined, commitId: string): Promise<void> {
+  async assertPublishableKind(kind: WorkspaceKind | undefined, commitId: string,
+      authoredSourceCommitId?: string): Promise<void> {
     kind ??= DEFAULT_WORKSPACE_KIND;
     let files = await this.#classifiedFiles(kind, commitId);
-    let refusals = blueprintPublishRefusals(kind, classifyGadgetFiles(kind, files).violations);
+    let violations = classifyGadgetFiles(kind, files).violations;
+    if (kind === "widget" && authoredSourceCommitId !== undefined &&
+        files.has("client.js") && !files.has("server.js")) {
+      let sourcePaths = new Set(await this.gitStore.readCommitPaths(authoredSourceCommitId));
+      // Only a successful authored build can supply the UI; widgets with server source or
+      // callable tools still have to provide the server module as usual.
+      if (sourcePaths.has("client.tsx") && !sourcePaths.has("server.js")) {
+        violations = violations.filter(({code}) => code !== "missingServer");
+      }
+    }
+    let refusals = blueprintPublishRefusals(kind, violations);
     if (refusals.length > 0) {
       let article = kind === "app" ? "an" : "a";
       throw new Error(`This gadget cannot be published as ${article} ${kind}: ` +
@@ -3248,9 +3578,23 @@ class OverseerImpl implements AgentHooks {
       let files = await this.#classifiedFiles("widget", commitId);
       let classification = classifyGadgetFiles("widget", files);
       let callable = classification.class === "callableTools" || classification.class === "callableCombined";
+      // A widget's local states (FAC-86), read only when its commit declares them; a states.json
+      // that doesn't parse refuses the widget rather than this read (consoleWidgetRefusal).
+      let states: WidgetStateMachine | null = null;
+      let statesProblem: string | null = null;
+      if (files.has(WIDGET_STATES_FILE)) {
+        try {
+          let text = await this.gitStore.readCommitBlob(commitId, WIDGET_STATES_FILE, "text");
+          if (text === null) statesProblem = "states.json is missing.";
+          else states = parseWidgetStates(text);
+        } catch (error) {
+          statesProblem = error instanceof BlobTextError ? "states.json is not UTF-8 text."
+              : error instanceof Error ? error.message : String(error);
+        }
+      }
       commits.set(commitId, { classification,
         viewText: classification.class === "viewOnly" ? files.get(GADGET_VIEW_FILE) ?? null : null,
-        tools: callable ? parseWidgetTools(files.get(GADGET_TOOLS_FILE)!) : null });
+        tools: callable ? parseWidgetTools(files.get(GADGET_TOOLS_FILE)!) : null, states, statesProblem });
     }
     return commits;
   }
@@ -3268,7 +3612,8 @@ class OverseerImpl implements AgentHooks {
         await this.removeWorkpiece(record.id);
       }
     }
-    for (let gadget of this.storage.gadgets.list()) {
+    // Buffer the records first: bumpVersion reads other lists, which would invalidate the cursor.
+    for (let gadget of Array.from(this.storage.gadgets.list())) {
       if (gadget.type !== "gadget") continue;  // worktrees have no binding edges
       let removed = false;
       for (let [name, edge] of Object.entries(gadget.bindings)) {
@@ -3292,7 +3637,8 @@ class OverseerImpl implements AgentHooks {
       await record.controller.disable();
     }
     this.storage.boundHooks.delete(record.id);
-    this.storage.workflowTriggerPins.delete(record.id);
+    retireTriggerAssignment(this, record.id);
+    this.workflowDefinitionStore().forgetTrigger(record.id);
 
     stampBindHookAction(this.storage, record.actionId, false, {clearHookId: true});
   }
@@ -3388,9 +3734,12 @@ class OverseerImpl implements AgentHooks {
     let unsubscribe = () => {
       if (disposed) return;
       disposed = true;
+      stream.untrack();
       gadgets.unsubscribe(dbSubscriber);
       subscriber[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; trackStream).
+    let stream = this.trackStream(unsubscribe);
 
     // Whether the record is published to this subscriber (see above for what is withheld).
     let published = (record: WorkpieceRecord): boolean =>
@@ -5416,7 +5765,8 @@ class OverseerImpl implements AgentHooks {
     let doomed = this.listPendingGadgets(chatId).filter(gadget =>
         gadget.pending!.sequence !== undefined && gadget.pending!.sequence >= revertFrom);
     let doomedIds = new Set(doomed.map(gadget => gadget.id));
-    for (let gadget of this.storage.gadgets.list()) {
+    // Buffer the records first: bumpVersion reads other lists, which would invalidate the cursor.
+    for (let gadget of Array.from(this.storage.gadgets.list())) {
       if (gadget.type !== "gadget" || doomedIds.has(gadget.id)) continue;
       let removed = false;
       for (let [name, edge] of Object.entries(gadget.bindings)) {
@@ -5915,6 +6265,47 @@ class OverseerImpl implements AgentHooks {
 
   // `cls` is for the one caller that has the class in hand but has deliberately not published the
   // record yet (`addGatekeeper`); everyone else resolves it from the record.
+  /**
+   * Why `record`, an assigned run's action, may not apply now, or null (FAC-102 follow-up A; see
+   * assignedActionProblem in system-run.ts): assignments on, the same assignment on the same
+   * connection, and that connection still bound to the trigger's live gadget.
+   */
+  assignedActionProblem(record: ActionRecord & {type: "action"}): string | null {
+    return assignedActionProblem(this.#systemRunHost(), record.executedAs!, record.gatekeeperId,
+        workflowAssignmentsEnabled(this.env));
+  }
+
+  /**
+   * A short-lived session as the service account `record`'s run acted as (FAC-102 follow-up A):
+   * the connection vendor's system class for the assignment's credential reference, on the run's
+   * own facet (`systemgatekeeper-<ref>-<delivery>`), whose storage still holds the action after the
+   * run ended. `close` aborts the facet; call it once the apply or rejection returns. Callers check
+   * the assignment first (assignedActionProblem) where acting as it matters.
+   */
+  async openAssignedActionFacet(record: ActionRecord & {type: "action"}):
+      Promise<{facet: Fetcher<Gatekeeper<any>>; close(): void}> {
+    let executedAs = record.executedAs!;
+    let connection = this.storage.gatekeepers.get(record.gatekeeperId);
+    let vendorId = gatekeeperVendorId(connection);
+    let resourceUrl = gatekeeperResourceUrl(connection);
+    let vendor = vendorId === undefined ? undefined : buildGatekeeperVendorMap(this.env).get(vendorId) as unknown as
+        Pick<GatekeeperVendor, "getSystemGatekeeperClass"> | undefined;
+    if (!vendor?.getSystemGatekeeperClass || resourceUrl === undefined) throw new Error(ASSIGNED_ACTION_UNREACHABLE);
+    let cls: DurableObjectClass<Gatekeeper<any>>;
+    try {
+      cls = await vendor.getSystemGatekeeperClass(executedAs.credentialRef, {resourceUrl});
+    } catch (error) {
+      logger.warn("assigned action's system class unavailable", {
+        event: "workflow.assigned_action.unreachable", hookId: executedAs.hookId, error,
+      });
+      // oxlint-disable-next-line eslint/preserve-caught-error -- the vendor's reason stays in the log.
+      throw new Error(ASSIGNED_ACTION_UNREACHABLE);
+    }
+    let name = systemGatekeeperFacetName(executedAs.credentialRef, executedAs.deliveryId);
+    let facet = this.ctx.facets.get(name, async () => ({class: cls})) as Fetcher<Gatekeeper<any>>;
+    return {facet, close: () => this.ctx.facets.abort(name, new Error("The action's decision finished."))};
+  }
+
   getGatekeeperFacet(id: number, cls?: GatekeeperClass): Fetcher<Gatekeeper<any>> {
     return this.ctx.facets.get(`gatekeeper${id}`, async () => {
       let resolved = cls ?? this.storage.gatekeepers.get(id)?.class;
@@ -6013,7 +6404,22 @@ class OverseerImpl implements AgentHooks {
     if (last && last.retryable !== true) {
       throw new Error(`${NOT_RETRYABLE_MESSAGE} ${last.message}`);
     }
-    let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
+    // An assigned run's action applies as its service account, on a short-lived session over the
+    // run's own system facet, which holds the action; never the connection's own facet, which never
+    // saw it. Refused, with nothing sent and the action left pending, unless the assignment that
+    // proposed it still holds; checked again once the session is open (FAC-102 follow-up A).
+    let assigned: {facet: Fetcher<Gatekeeper<any>>; close(): void} | undefined;
+    if (record.executedAs) {
+      let problem = this.assignedActionProblem(record);
+      if (problem) throw new Error(problem);
+      assigned = await this.openAssignedActionFacet(record);
+      problem = this.assignedActionProblem(record);
+      if (problem) {
+        assigned.close();
+        throw new Error(problem);
+      }
+    }
+    let gatekeeper = assigned?.facet ?? this.getGatekeeperFacet(record.gatekeeperId);
     // An artifact publisher publishes as the person approving (see publishApprovedArtifact); an
     // auto-approval never publishes, since no person approved it.
     let approvingKey = `${record.gatekeeperId}:${record.action}`;
@@ -6032,7 +6438,7 @@ class OverseerImpl implements AgentHooks {
       started.applyStartedAt = new Date();
       this.storage.actions.put(started);
     }
-    let result: void | {failed: ActionApplyFailure};
+    let result: void | {failed: ActionApplyFailure} | ActionApplied;
     try {
       result = await gatekeeper.applyAction(record.action,
           new GitCacheImpl(this.gitCache, record.gatekeeperId, record.id));
@@ -6046,8 +6452,9 @@ class OverseerImpl implements AgentHooks {
       throw error;
     } finally {
       this.#approvingPublishers.delete(approvingKey);
+      assigned?.close();
     }
-    if (result?.failed) {
+    if (result && "failed" in result) {
       this.#recordUnsuccessfulApply(record, result.failed, resolvedBy, autoApproved);
       throw new Error(result.failed.message);
     }
@@ -6056,6 +6463,12 @@ class OverseerImpl implements AgentHooks {
     if (applied?.type === "action") Object.assign(record, applied);
     delete record.applyStartedAt;
     delete record.lastAttempt;
+    // The provider's own account of what it produced, kept only within ACTION_RESULT_LIMITS: one
+    // out of bounds is dropped (the action still applied), never stored or shown truncated.
+    const reported = result && "applied" in result ? result.applied?.result : undefined;
+    const problem = reported === undefined ? null : actionResultProblem(reported);
+    if (reported !== undefined && problem === null) record.result = reported;
+    else if (problem !== null) logger.warn("dropped an action result out of bounds", { event: "action.result.dropped", error: problem });
     record.state = "approved";
     record.appliedAt = new Date();
     record.resolvedBy = resolvedBy;
@@ -6251,10 +6664,13 @@ class OverseerImpl implements AgentHooks {
     // deliberately not awaited -- parking the teardown behind a gatekeeper round trip would keep
     // the connection's data flowing into the gadget for as long as that call took (or forever, if
     // it hangs), with the record gone and nobody verified against it.
+    // Every assignment whose runs use this connection goes too, wherever its hook is hosted (#374 round 3).
+    retireAssignmentsUsing(this, id);
     for (let hook of Array.from(this.storage.boundHooks.list())) {
       if (hook.gatekeeperId !== id) continue;
       this.storage.boundHooks.delete(hook.id);
-      this.storage.workflowTriggerPins.delete(hook.id);
+      retireTriggerAssignment(this, hook.id);
+      this.workflowDefinitionStore().forgetTrigger(hook.id);
       stampBindHookAction(this.storage, hook.actionId, false, {clearHookId: true});
       if (hook.enabled) {
         this.ctx.waitUntil(hook.controller.disable().catch(error => {
@@ -6311,8 +6727,58 @@ class OverseerImpl implements AgentHooks {
     return config;
   }
 
+  /** The admitted, assigned runs in flight (FAC-102; see system-run.ts). */
+  systemRuns = new SystemRunRegistry();
+
+  /**
+   * Invocations a delivery has taken while their `invokeTrigger` call is still waiting (#374):
+   * startHook adds one as `fire` consumes it, and invokeWorkflowTrigger reads and removes it to
+   * tell the run's own failure from a request that never started. In memory: both happen within
+   * the one call, which a reset ends anyway.
+   */
+  takenInvocations = new Map<string, boolean>();
+
+  // What system-run.ts needs of this workspace, bound to it.
+  #systemRunHost(): SystemRunHost {
+    return {
+      systemRuns: this.systemRuns,
+      assignmentOf: hookId => this.workflowDefinitionStore().assignmentOf(hookId),
+      liveHookGadget: hookId => {
+        let gadgetId = requireLiveHook(this, hookId).gadgetId ?? this.defaultGadgetId;
+        if (gadgetId === undefined) throw new Error("This trigger wakes no gadget.");
+        return gadgetId;
+      },
+      bindingsOf: gadgetId => this.visibleBindings(this.getGadgetRecord(gadgetId)),
+      makeLoopback: (gatekeeperId, caller) => this.makeBindingLoopback({type: "gatekeeper", id: gatekeeperId}, caller),
+      readModules: async commitId => {
+        let modules: Record<string, string> = {};
+        for (let [file, content] of await this.gitStore.readCommitFiles(commitId)) {
+          if (isGadgetModule(file)) modules[file] = content;
+        }
+        return modules;
+      },
+      loadWorker: code => this.env.LOADER.load({compatibilityDate: "2026-02-01", ...code, globalOutbound: null}),
+      vendorIdOf: gatekeeperId => gatekeeperVendorId(this.storage.gatekeepers.get(gatekeeperId)),
+      resourceUrlOf: gatekeeperId => gatekeeperResourceUrl(this.storage.gatekeepers.get(gatekeeperId)),
+      vendor: vendorId => buildGatekeeperVendorMap(this.env).get(vendorId) as unknown as
+          Pick<GatekeeperVendor, "getSystemGatekeeperClass"> | undefined,
+      facet: (name, cls) => this.ctx.facets.get(name, async () => ({class: cls})) as Fetcher<Gatekeeper<any>>,
+      openSession: (gatekeeperId, facet, caller) => this.openGatekeeperSession(gatekeeperId, facet, caller),
+      // A stub over the revocable wrapper, so every call the worker makes re-enters it here.
+      wrapSession: wrapper => new NativeRpcStub(wrapper as RpcTarget),
+      abortFacet: name => this.ctx.facets.abort(name, new Error("The workflow run ended.")),
+    };
+  }
+
+  /** Runs one admitted delivery of an assigned trigger (FAC-102; see system-run.ts). */
+  runAssignedDelivery(hookId: number, delivery: AssignedDelivery, method: string | null, args: unknown[]): Promise<unknown> {
+    return runAssignedDelivery(this.#systemRunHost(), hookId, delivery, method, args);
+  }
+
   // Open the session behind a binding loopback.
   startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
+    // A run-scoped worker's binding: only the assigned connection's system session (FAC-102).
+    if (caller.from === "systemRun") return openSystemRunSession(this.#systemRunHost(), target, caller);
     // Before every case, so a tainted chat's agent reaches no gadget, worktree, git or
     // non-allowlisted gatekeeper code, whenever the mark landed (see chat-taint.ts).
     if (caller.from === "agent") this.#assertUsableWhileTainted(caller.chatId, target);
@@ -6471,7 +6937,8 @@ class OverseerImpl implements AgentHooks {
     try {
       if (caller.from === "agent") {
         this.#getOrCreateCapturedActions(caller.chatId).actions.push(actionId);
-      } else if (caller.from !== "hook" && caller.chatId !== undefined && this.ownerId) {
+      } else if (caller.from !== "hook" && caller.from !== "systemRun" && caller.chatId !== undefined &&
+                 this.ownerId) {
         let owner = this.users.get(this.users.idFromString(this.ownerId));
         let userMeta = await owner.getChatContext(null);
         this.addChatMessages(caller.chatId, this.gadgetAuthorFor(userMeta.profile),
@@ -6781,10 +7248,11 @@ class OverseerImpl implements AgentHooks {
   }
 
   // Synchronous journal write for callers already inside a storage transaction. A caller resolves
-  // the enabler roles first (resolveEnablerRoles), or no auto-approval rule can fire here.
+  // the enabler roles first (resolveEnablerRoles), or no auto-approval rule can fire here. Returns
+  // the journal id it minted, which only an `ActionReceiptImpl` hands out (as a capability).
   submitActionNow(gatekeeperId: number, action: number,
                      description: ActionDescription, caller: GatekeeperCaller)
-      : void {
+      : number {
     // An in-flight facet RPC can outlive removeGatekeeper, and a pending action on a removed
     // connection could never be approved or rejected (both dereference the facet).
     let gatekeeper = this.storage.gatekeepers.get(gatekeeperId);
@@ -6815,6 +7283,15 @@ class OverseerImpl implements AgentHooks {
       this.gitCache.verifyPushAncestry(gatekeeperId, description.pushedCommits);
     }
 
+    // An assigned run's action is recorded with who the run acts as, so its apply can act as that
+    // service account later (FAC-102 follow-up A). Only from a run still running on this connection.
+    let executedAs: AssignedExecution | undefined;
+    if (caller.from === "systemRun") {
+      let run = this.systemRuns.require(caller);
+      if (run.gatekeeperId !== gatekeeperId) throw new Error("This workflow run can't propose actions on that connection.");
+      executedAs = { hookId: caller.hookId, deliveryId: caller.deliveryId, credentialRef: run.credentialRef };
+    }
+
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
 
@@ -6828,7 +7305,8 @@ class OverseerImpl implements AgentHooks {
       createdAt: new Date(),
       state: "pending",
       type: "action",
-      description
+      description,
+      ...(executedAs ? { executedAs } : {}),
     };
 
     // The marking walk stamps the verified push closure "pending push" -- the read grant that
@@ -6845,7 +7323,8 @@ class OverseerImpl implements AgentHooks {
     // Same auto-approval gate the drainer uses, named because awaitDecision uses it too. The drain
     // is deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
     let roleOf = this.enablerRoles();
-    let willAutoApprove =
+    // A person approves every write an assigned run proposes; no rule approves it (FAC-102).
+    let willAutoApprove = caller.from !== "systemRun" &&
         autoApprovalRule(this.storage, roleOf, gatekeeperId, description) !== undefined;
     if (!willAutoApprove) this.traceAgentActionApproval(record, "requested");
 
@@ -6862,6 +7341,7 @@ class OverseerImpl implements AgentHooks {
     if (willAutoApprove) {
       this.ctx.waitUntil(this.drainAutoApprovals(gatekeeperId));
     }
+    return actionId;
   }
 
   async bindHook<Hook extends RpcTarget>(
@@ -7121,6 +7601,9 @@ class OverseerImpl implements AgentHooks {
   // no merge can change (see assertNotFrozen), so a Build edit doesn't cut off the operators using
   // a published console's widgets; binding changes pass the one gadget they touched so that
   // renaming a binding on gadget A doesn't restart gadget B. Explicit ids are always restarted.
+  // It reads storage lists (the gadgets, and the trigger assignments it retires), so a caller must
+  // never call it while iterating a storage list lazily: only one kv.list() cursor can be open, and
+  // a new one invalidates it. Buffer the list with Array.from first.
   bumpVersion(affectedGadgetIds?: WorkpieceId[]): number {
     let codeVersion = this.storage.codeVersion.get() + 1;
     this.storage.codeVersion.put(codeVersion);
@@ -7132,6 +7615,9 @@ class OverseerImpl implements AgentHooks {
       this.ctx.facets.abort(this.gadgetFacetName(id),
           new Error("Gadget restarted due to code update."));
     }
+    // Every change to binding edges comes through here: an assignment whose connection is no
+    // longer bound is retired now, with its running deliveries' facets (#374 round 4).
+    retireUnboundAssignments(this);
     this.bumpLastActive();
     return codeVersion;
   }
@@ -8103,6 +8589,17 @@ class OverseerImpl implements AgentHooks {
              initiator: AiChatAuthorInfo, initiatorUserId: string,
              callbackInitiated: boolean = false,
              keepAlive: boolean = false): void {
+    // No turn starts in a retired operate session workspace (FAC-88), however it was asked for (a
+    // held capability before the restart, or the alarm draining a pending agent call after it).
+    if (this.storage.operateSessionRetired.get()) {
+      let meta = this.storage.chatMeta.get(chatId);
+      if (meta?.activeAgent) {
+        this.postAgentErrorMessage(chatId, meta.activeAgent, "Agent stopped: this operate session has ended.");
+        delete meta.activeAgent;
+        this.storage.chatMeta.put(meta);
+      }
+      return;
+    }
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -8170,17 +8667,19 @@ class OverseerImpl implements AgentHooks {
 
         // Enforce the optional free-tier usage limit before starting the turn, and resolve whether
         // it bills the owner's own gateway.
-        // When the Cloudflare limits flow is disabled, checkUsageAndBalance() always allows.
+        // checkPlatformTurn() first refuses, uncounted, a gateway model MODEL_ALLOWLIST doesn't
+        // offer. When the Cloudflare limits flow is disabled, it then allows everything unless
+        // DAILY_AGENT_TURN_LIMIT sets a plain daily cap.
         // (This runs inside the try so the `finally` below still clears the active-agent state and
         // emits a stream "clear" — otherwise the UI would spin forever on a block.)
         let byokRouting: UserGatewayRouting | undefined;
-        if (this.ownerId && aiModel.config.billing === undefined) {
+        if (this.ownerId && drawsOnPlatformAllowance(this.env, aiModel)) {
           let ownerStub = this.users.get(this.users.idFromString(this.ownerId));
-          let usage = await checkUsageAndBalance(this.env, ownerStub);
+          let usage = await checkPlatformTurn(this.env, aiModel, ownerStub);
           if (!usage.allowed) {
-            turn.setErrorType("usage_limit");
+            turn.setErrorType(usage.errorCode ?? "usage_limit");
             this.postAgentErrorMessage(chatId, aiModel.profile,
-                usage.reason ?? "Usage limit reached.", "usage_limit");
+                usage.reason ?? "Usage limit reached.", usage.errorCode ?? "usage_limit");
             turnLogger.debug("agent run finished", {
               event: "agent.run.finished", outcome: "usage_limit",
               durationMs: Date.now() - startedAt,
@@ -9398,6 +9897,59 @@ class OverseerImpl implements AgentHooks {
     throw new Error("This gadget has no code to publish. Accept some code first.");
   }
 
+  /** Compile an authored widget into a child commit when the opt-in feature flag is enabled. */
+  async compileAuthoredWidgetCommit(sourceCommitId: string): Promise<string> {
+    return compileAuthoredWidgetPublication({
+      enabled: this.env.AUTHORED_WIDGET_BUILD_ENABLED === "true",
+      sourceCommitId,
+      gitStore: this.gitStore,
+      builds: this.ctx.exports.AuthoredWidgetBuildDurableObject,
+      author: () => this.#ownerCommitIdentity(),
+      onFailure: durationMs => {
+        this.logger.warn("authored widget publication build refused", {
+          event: "authored_widget.publication.build_refused",
+          durationMs,
+          outcome: "error",
+        });
+      },
+    });
+  }
+
+  /** Compile an authored-widget chat draft without persisting its output. */
+  async previewAuthoredWidget(gadgetId: WorkpieceId, chatId: number): Promise<AuthoredWidgetPreview> {
+    if (this.env.AUTHORED_WIDGET_BUILD_ENABLED !== "true") {
+      throw new Error("Authored widget preview is disabled.");
+    }
+    this.checkChatExistsAndMaterializeChanges(chatId);
+    let meta = this.getChatMetaOrThrow(chatId);
+    let gadget = this.storage.gadgets.get(gadgetId);
+    if (gadget?.type !== "gadget" || !this.chatDocOwnsGadget(meta, gadgetId)) {
+      throw new Error("This chat has no authored widget draft.");
+    }
+    let files = await this.readGadgetFiles(gadgetId, chatId);
+    for (let path of files.keys()) {
+      if (!isValidAuthoredWidgetCommitPath(path)) throw new Error("Invalid source path.");
+    }
+    let sources = Object.fromEntries([...files].filter(([path]) =>
+      path.endsWith(".tsx") || path.endsWith(".css")));
+    let result = await compileAuthoredWidgetSources({
+      sources,
+      builds: this.authoredWidgetBuildNamespace ?? this.ctx.exports.AuthoredWidgetBuildDurableObject,
+      maxOutputBytes: MAX_AUTHORED_WIDGET_PREVIEW_BYTES,
+      onFailure: durationMs => {
+        this.logger.warn("authored widget preview build refused", {
+          event: "authored_widget.preview.build_refused",
+          durationMs,
+          outcome: "error",
+        });
+      },
+    });
+    return {
+      jsCode: result.clientJs,
+      measurements: { durationMs: result.durationMs, clientBytes: result.clientBytes },
+    };
+  }
+
   // Create a minimal Yjs doc snapshot (no edit history) of the given commit's files, for a
   // blueprint archive. Returns a gzip-compressed Yjs V2 encoded state update. The snapshot
   // always uses the unnamed root "" (the canonical archive root), regardless of which root holds
@@ -9448,7 +10000,8 @@ class OverseerImpl implements AgentHooks {
       await this.env.BLUEPRINT_CONTENT.put(
         `${record.id}/${record.metadata.version}`,
         codeSnapshot,
-        { customMetadata: blueprintVersionMetadata(record.metadata.kind, record.metadata.dataContract) },
+        { customMetadata: blueprintVersionMetadata(record.metadata.kind, record.metadata.dataContract,
+          record.authoredWidgetBuild === true) },
       );
     }
 
@@ -9992,6 +10545,63 @@ class OverseerImpl implements AgentHooks {
     return this.storage.operateSession.get();
   }
 
+  /** Whether this operate session workspace was retired by its owner's company change (FAC-88). */
+  isRetiredOperateSession(): boolean {
+    return this.storage.operateSessionRetired.get();
+  }
+
+  /**
+   * Retires this operate session workspace (FAC-88): marks it, which raises the authorization
+   * generation; cancels every agent turn running here; and schedules the access restart, which
+   * drops every connection, held capability and subscription within about 100 ms. Until then each
+   * OperateOverseerInterface call refuses on the mark, and after it nothing opens the workspace or
+   * resumes a turn in it (#resumeInterruptedAgents). Idempotent.
+   */
+  retireOperateSession(): void {
+    if (this.storage.operateSessionRetired.get()) return;
+    this.storage.operateSessionRetired.put(true);
+    // Every open stream ends before this returns: nothing more reaches any subscriber, whatever
+    // the workspace writes from here on (see trackStream).
+    this.closeAllStreams();
+    for (let chatId of Array.from(this.#liveChats.keys())) this.cancelAgent(chatId);
+    void this.scheduleAccessRestart("This operate session has ended.");
+  }
+
+  // Every subscription this workspace delivers to, by the closer that ends it (FAC-88). Each
+  // subscribe site registers its own unsubscribe here (trackStream) and removes it when it ends, so
+  // a retirement can end every one synchronously instead of waiting for the access restart.
+  #openStreams = new Set<() => void>();
+
+  /**
+   * Registers `close`, a subscription's own idempotent unsubscribe, so closeAllStreams() can end
+   * it. The subscription calls the returned `untrack` when it ends by itself.
+   */
+  trackStream(close: () => void): { untrack(): void } {
+    this.#openStreams.add(close);
+    return { untrack: () => { this.#openStreams.delete(close); } };
+  }
+
+  /**
+   * Ends every open subscription synchronously: each one's storage subscribers are removed and its
+   * subscriber stub disposed, so no later write or delivery reaches it. Used by a retirement.
+   */
+  closeAllStreams(): void {
+    let closers = Array.from(this.#openStreams);
+    this.#openStreams.clear();
+    for (let close of closers) {
+      try {
+        close();
+      } catch (err) {
+        this.logger.warn("a subscription failed to close", { event: "subscription.close.failed", error: err });
+      }
+    }
+  }
+
+  /** How many subscriptions are open (see trackStream), for tests. */
+  openStreamCount(): number {
+    return this.#openStreams.size;
+  }
+
   isConsoleToolTainted(chatId: number): boolean {
     return isConsoleToolTainted(this.storage, chatId);
   }
@@ -10316,15 +10926,23 @@ class OverseerImpl implements AgentHooks {
   // bindings the blueprint's code expects the agent to wire up, for instantiation as a new gadget
   // by the agent's createGadget tool. Blueprint ids are bearer capabilities (like blueprint share
   // links), so possession of the id is sufficient to read it. Throws agent-readable errors.
-  getCanvasAccess(): AgentCanvasAccess | null {
-    if (this.env.COMPOSABLE_VIEWS !== "true" || this.env.DURABLE_VIEWS !== "true") return null;
-    let store = new WorkspaceCanvasStore(this.ctx.storage, this.storage, this.env);
-    return {
-      catalog: readCanvasCatalog(this.env),
-      list: () => store.list(),
-      create: content => store.create(content),
-      edit: (id, expectedRevision, operations) => store.edit(id, expectedRevision, operations),
-    };
+  getCanvasAccess(): AgentCanvasAccess | null { return agentCanvasAccess(this); }
+
+  // Canvas writes, for the builder's controls: see the module-level `createCanvasAs` and siblings.
+  canvasStore(): WorkspaceCanvasStore { return workspaceCanvasStore(this); }
+  createCanvasAs(writer: CanvasWriter, content: CanvasContent): Promise<CanvasDefinition> {
+    return createCanvasAs(this, writer, content);
+  }
+  editCanvasAs(writer: CanvasWriter, id: string, expectedRevision: string,
+               operations: CanvasOperation[]): Promise<CanvasDefinition> {
+    return editCanvasAs(this, writer, id, expectedRevision, operations);
+  }
+  editCanvasPageAs(writer: CanvasWriter, id: string, expectedRevision: string,
+                   operations: CanvasPageOperation[]): Promise<CanvasPage> {
+    return editCanvasPageAs(this, writer, id, expectedRevision, operations);
+  }
+  deleteCanvasAs(writer: CanvasWriter, id: string, expectedRevision: string): Promise<void> {
+    return deleteCanvasAs(this, writer, id, expectedRevision);
   }
 
   async fetchBlueprint(blueprintId: string)
@@ -10424,10 +11042,16 @@ class OverseerImpl implements AgentHooks {
     this.#tailSubscribers.add(sub);
 
     let self = this;
+    let ended = false;
     function unsubscribe() {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       self.#tailSubscribers.delete(sub);
       sub[Symbol.dispose]();
     }
+    // Ended with every other stream by a retirement (FAC-88; trackStream).
+    let stream = this.trackStream(unsubscribe);
 
     // @ts-expect-error Bugs in native RPC types make this not work currently.
     return new NativeRpcStub<{}>({
@@ -11037,6 +11661,27 @@ class OverseerImpl implements AgentHooks {
   }
 
   /** This workspace's workflow definitions, their trigger pins and deliveries. */
+  /** See retireTriggerAssignment. */
+  retireTriggerAssignment(hookId: number): void {
+    retireTriggerAssignment(this, hookId);
+  }
+
+  /** See provisionWorkflowTriggerCredential. */
+  provisionTriggerCredential(caller: AiChatAuthorInfo, hookId: number, key: string): Promise<TriggerAssignment> {
+    return provisionWorkflowTriggerCredential(this, caller, hookId, key);
+  }
+
+  /** See setWorkflowTriggerAssignment. */
+  setTriggerAssignment(caller: AiChatAuthorInfo, hookId: number, settings: TriggerAssignmentSettings | null)
+      : TriggerAssignment | null {
+    return setWorkflowTriggerAssignment(this, caller, hookId, settings);
+  }
+
+  /** See invokeWorkflowTrigger. */
+  async invokeTrigger(userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
+    return invokeWorkflowTrigger(this, userId, profileId, hookId);
+  }
+
   workflowDefinitionStore(): WorkspaceWorkflowDefinitionStore {
     return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage);
   }
@@ -11610,6 +12255,20 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return this.impl.outputsSnapshot();
   }
 
+  /**
+   * Retires this workspace as `ownerId`'s operate session (FAC-88; OverseerImpl.retireOperateSession).
+   * Reached only by the owner's user DO, from Worker code holding the namespace, when their company
+   * changes. True once nothing held here can act for the owner: retired now or before, or never
+   * opened (so nothing was ever handed out, and open() refuses it from now on). False for anyone
+   * but the owner, or for a workspace that isn't an operate session.
+   */
+  async retireOperateSession(ownerId: string): Promise<boolean> {
+    if (!this.impl.ownerId) return true;
+    if (this.impl.ownerId !== ownerId || !this.impl.storage.operateSession.get()) return false;
+    this.impl.retireOperateSession();
+    return true;
+  }
+
   // The host-board kernel path (server.ts OperateSessionImpl). Reached only by Worker code holding
   // the namespace, never by a client, and only for the owner's own operate session workspace.
   #hostBoardDesk(ownerId: string): HostBoardDesk {
@@ -11650,10 +12309,16 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // Kept past this call, which would otherwise dispose the stub when it returns.
     let kept = (subscriber as unknown as NativeRpcStub<typeof subscriber>).dup();
     deliver = kept as unknown as typeof subscriber;
+    let ended = false;
     let end = () => {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       unsubscribe();
       kept[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(end);
     return { snapshot, subscription: new HostBoardSubscriptionImpl(end) };
   }
 
@@ -11735,6 +12400,18 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let operateSession = this.impl.storage.operateSession.get();
     if (operateSession && !isOwner) {
       throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+    }
+    // Nor does its owner open it once it is no longer their recorded operate session: a company
+    // change retires it (FAC-88), and its chat stays with the company it was held in.
+    // A retired one (its mark is set by retireOperateSession) is refused without asking anyone.
+    if (operateSession && this.impl.isRetiredOperateSession()) {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+    }
+    if (operateSession && isOwner) {
+      let owner = this.impl.users.get(this.impl.users.idFromString(userId));
+      if (await owner.operateSessionWorkspaceId() !== this.ctx.id.toString() || this.impl.isRetiredOperateSession()) {
+        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+      }
     }
 
     // Cache the owner's profileId in memory when the owner opens.
@@ -11852,7 +12529,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let client = new OverseerClientInterface(
         this.impl, profileId, userId, isOwner, notifyClosed.dup(),
         ensureCapsules);
-    return operateSession ? new OperateOverseerInterface(client) : client;
+    return operateSession ? new OperateOverseerInterface(client, () => this.impl.isRetiredOperateSession()) : client;
   }
 
   #getExternalChat(externalChatKey: string): ExternalChatRecord | undefined {
@@ -12105,7 +12782,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return new NativeRpcStub(this.impl.getGadgetHookEntrypoint(id));
   }
 
-  async startHook(hookId: number): Promise<{
+  async startHook(hookId: number, request?: HookInvocation): Promise<{
     callback: NativeRpcStub<RpcTarget>, approvalQueue: ApprovalQueue
   }> {
     let record = requireLiveHook(this.impl, hookId);
@@ -12130,9 +12807,41 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
 
     // A trigger pinned to a workflow definition revision fires only that revision's code, and the
     // firing is recorded with it (workflow-definition-store.ts); it never falls back to another.
-    this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
+    // A delivery a person asked for (invokeTrigger) names the invocation admitted for it; the store
+    // accepts only that, once, and records who asked as a claim beside the run.
+    let invocationId = typeof request?.invocationId === "string" ? request.invocationId : undefined;
+    // Assignments off (FAC-102): a request for a trigger assigned before never runs, neither as the
+    // service account nor on the gadget's own callback, and is refused before it is taken.
+    if (invocationId !== undefined && !workflowAssignmentsEnabled(this.env) &&
+        this.impl.workflowDefinitionStore().assignmentOf(hookId)) {
+      throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+    }
+    // An assignment retired automatically refuses requests until an Admin acts (follow-up B).
+    if (invocationId !== undefined && this.impl.workflowDefinitionStore().autoRetiredOf(hookId)) {
+      throw new Error(TRIGGER_AUTO_RETIRED);
+    }
+    let delivery = this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
         gadgetId => this.impl.getGadgetHead(gadgetId),
-        profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build");
+        profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build",
+        invocationId);
+    // The request is taken: from here a failure is the run's own (invokeWorkflowTrigger).
+    // Only for an invokeTrigger call still waiting on it: a late delivery leaves nothing behind.
+    if (delivery?.invocation && this.impl.takenInvocations.has(delivery.invocation.id)) {
+      this.impl.takenInvocations.set(delivery.invocation.id, true);
+    }
+
+    // An admitted request for an assigned trigger runs as its service account (FAC-102), in a
+    // run-scoped worker, never through the gadget's own callback and the bindings people connected.
+    if (delivery?.invocation && delivery.executedAs) {
+      let caller: GatekeeperCaller = {from: "systemRun", hookId, deliveryId: delivery.deliveryId};
+      return {
+        callback: makeSystemRunCallback(this.impl, hookId, {
+          deliveryId: delivery.deliveryId, commitId: delivery.commitId,
+          credentialRef: delivery.executedAs.credentialRef,
+        }),
+        approvalQueue: new ApprovalQueueImpl(this.impl, record.gatekeeperId, caller, hookId),
+      };
+    }
 
     // Both returned capabilities revalidate the hook per call rather than trusting this moment:
     // they are held outside this DO (even across resets -- the stored callback is a persistent
@@ -12329,6 +13038,13 @@ type GatekeeperCaller = {
   chatId?: number;
 } | {
   from: "hook";
+} | {
+  // An admitted, assigned run of a pinned trigger (FAC-102): the run-scoped worker's only binding
+  // carries this, set server-side in its loopback props, so no gadget, agent or client can claim it.
+  // Its sessions act as the trigger's assigned service account (see runAssignedDelivery).
+  from: "systemRun";
+  hookId: number;
+  deliveryId: number;
 };
 
 type GatekeeperLoopbackProps = {
@@ -12427,15 +13143,17 @@ type GatekeeperHookLoopbackProps = {
 export class GatekeeperHookLoopback
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperHookLoopbackProps>
     implements HookInitiator<RpcTarget> {
-  startHook(): Promise<
+  startHook(request?: HookInvocation): Promise<
       {callback: NativeRpcStub<RpcTarget>, approvalQueue: NativeRpcStub<ApprovalQueue>}> {
     let ns = this.ctx.exports.OverseerDurableObject;
     let overseer: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(this.ctx.props.overseerId));
 
-    // Get an ApprovalQueue for this hook invocation from the overseer.
+    // Get an ApprovalQueue for this hook invocation from the overseer. Only the invocation id is
+    // passed on; the overseer decides whether it names a request it admitted for this hook.
+    let invocation = typeof request?.invocationId === "string" ? {invocationId: request.invocationId} : undefined;
     // @ts-ignore seems the RPC types aren't working here
-    return overseer.startHook(this.ctx.props.hookId);
+    return overseer.startHook(this.ctx.props.hookId, invocation);
   }
 }
 
@@ -12638,13 +13356,172 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return new WorkspaceCanvasStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
   }
 
+  async previewAuthoredWidget(gadgetId: WorkpieceId, chatId: number): Promise<AuthoredWidgetPreview> {
+    return this.impl.previewAuthoredWidget(gadgetId, chatId);
+  }
+
+  async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> {
+    const ACTION_LOG_EXPORT_LIMIT = 500;
+    let canvases = (await this.listCanvases()).map(canvas => ({
+      id: canvas.id,
+      revision: canvas.revision,
+      schemaVersion: canvas.schemaVersion,
+      sections: canvas.sections.map(section => ({
+        id: section.id,
+        columns: section.columns,
+        widgets: section.widgets.map(widget => ({id: widget.id, kind: widget.kind, version: widget.version, size: widget.size})),
+      })),
+    }));
+    let consoles = await this.listConsoles();
+    let pages: WorkspaceRecordExport["pages"] = [];
+    for (let console of consoles) {
+      let screens: {source: ConsoleSource; ids: string[]}[] = [
+        {source: "draft", ids: console.views.flatMap(view => view.type === "screen" ? [view.screen] : view.screens)},
+      ];
+      if (console.published) {
+        let publishedScreens = console.published.screens?.map(screen => screen.id)
+            ?? console.published.content.views.flatMap(view => view.type === "screen" ? [view.screen] : view.screens);
+        screens.push({source: "published", ids: publishedScreens});
+      }
+      for (let {source, ids} of screens) {
+        for (let screenId of new Set(ids)) {
+          let page = await this.getConsolePage(console.id, screenId, source);
+          if (page) pages.push({consoleId: console.id, screenId, source, page: {
+            id: page.id,
+            revision: page.revision,
+            schemaVersion: page.schemaVersion,
+            nodeCount: page.nodes.length,
+            widgetCount: page.nodes.filter(node => node.nodeType === "widget").length,
+          }});
+        }
+      }
+    }
+
+    let actionLog: WorkspaceRecordExport["actionLog"] = [];
+    let beforeId: number | undefined;
+    let actionLogTruncated = false;
+    let actorIdSalt = crypto.getRandomValues(new Uint8Array(16)).toHex();
+    while (actionLog.length < ACTION_LOG_EXPORT_LIMIT) {
+      let page = await this.listActions({beforeId});
+      let room = ACTION_LOG_EXPORT_LIMIT - actionLog.length;
+      actionLogTruncated ||= page.entries.length > room;
+      for (let entry of page.entries.slice(0, room)) {
+        let action = entry.type === "action" ? entry : undefined;
+        let decidedBy = action?.resolvedBy;
+        let result = action?.result;
+        let storedRecord = this.impl.storage.actions.get(entry.id);
+        let gatekeeper = entry.gatekeeperId === undefined ? undefined : this.impl.storage.gatekeepers.get(entry.gatekeeperId);
+        actionLog.push({
+          id: entry.id,
+          gatekeeperId: entry.gatekeeperId,
+          gatekeeper: gatekeeperVendorId(gatekeeper) ?? null,
+          method: action?.description.actionKind?.tag ?? null,
+          outcome: action ? actionOutcome(action) : "unknown",
+          requestedBy: await exportRequester(storedRecord?.caller, actorIdSalt),
+          requestedAt: entry.createdAt,
+          decidedBy: decidedBy ? {
+            type: decidedBy.type,
+            id: await opaqueExportActorId(
+              decidedBy.id,
+              actorIdSalt,
+              decidedBy.type === "user" || decidedBy.type === "gadget",
+            ),
+          } : undefined,
+          decidedAt: action?.appliedAt ?? action?.lastAttempt?.at,
+          appliedRevision: typeof result?.appliedRevision === "string" && /^(0|[1-9][0-9]*)$/.test(result.appliedRevision)
+            ? result.appliedRevision : undefined,
+          createdIdentifier: typeof result?.createdIdentifier === "string" && /^[A-Z][A-Z0-9]{0,15}-[0-9]+$/.test(result.createdIdentifier)
+            ? result.createdIdentifier : undefined,
+          runId: typeof result?.runId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.runId)
+            ? result.runId : undefined,
+        });
+      }
+      beforeId = page.nextBeforeId;
+      if (actionLog.length >= ACTION_LOG_EXPORT_LIMIT) {
+        actionLogTruncated ||= beforeId !== undefined;
+        break;
+      }
+      if (actionLogTruncated || beforeId === undefined) break;
+    }
+
+    let workflowDefinitions = (await this.listWorkflowDefinitions()).map(definition => ({
+      id: definition.id,
+      revisions: definition.revisions.map(revision => ({
+        revision: revision.revision,
+        gadgetId: revision.source.gadgetId,
+        commitId: revision.source.commitId,
+        savedAt: revision.savedAt,
+      })),
+      published: definition.published ? {revision: definition.published.revision, at: definition.published.at} : null,
+    }));
+    let triggers = await Promise.all((await this.listHooks()).map(async hook => ({
+      hook: {id: hook.id, gatekeeperId: hook.gatekeeperId, gadgetId: hook.gadgetId, enabled: hook.enabled},
+      definition: await this.getTriggerDefinition(hook.id),
+    })));
+    let triggerControls = (await this.listTriggerControls()).map(control => ({
+      hookId: control.hookId,
+      definition: control.definition,
+      configuredAt: control.configuredAt,
+    }));
+    let widgetRegistry = (await this.listConsoleWidgetCandidates()).map(widget => ({
+      gadgetId: widget.gadgetId,
+      blueprintId: widget.blueprintId,
+      version: widget.version,
+      versionId: widget.versionId,
+      commitId: widget.commitId,
+      surfaces: widget.surfaces ? {ui: widget.surfaces.ui, toolCount: widget.surfaces.tools.length,
+        stateCount: widget.surfaces.states?.length ?? 0} : null,
+    }));
+
+    let defaultGadgetId = this.impl.storage.defaultGadgetId.get();
+    let gadgets = [...this.impl.storage.gadgets.list()]
+        .filter((record): record is GadgetRecord => record.type === "gadget")
+        .map(record => ({id: record.id, facet: gadgetFacetNameFor(defaultGadgetId, record.id),
+          blueprintId: record.installedFrom?.blueprintId ?? null}))
+        .toSorted((a, b) => Number(a.id) - Number(b.id));
+
+    return {
+      canvases,
+      pages,
+      workflowDefinitions,
+      triggers,
+      triggerControls,
+      widgetRegistry,
+      gadgets,
+      actionLog,
+      actionLogLimit: ACTION_LOG_EXPORT_LIMIT,
+      actionLogTruncated,
+      withheld: {
+        canvases: "Authored titles, target references, and widget parameters may contain user text or secrets.",
+        pages: "Node titles, attachment text and effects, targets, and widget parameters may contain user text or secrets.",
+        workflowDefinitions: "Titles and owner identity are user-authored or personal data.",
+        triggers: "Hook descriptions, resource titles, and URLs are provider-controlled text and routing metadata.",
+        triggerControls: "Labels and invoker/profile identity are user-authored or personal data.",
+        widgetRegistry: "Refusal text and tool/state names are arbitrary gadget-authored strings.",
+        gadgets: "Titles and binding names are user-authored; the gadgets' own storage is exported separately, through each blueprint's allow-list.",
+        actionLog: "Action descriptions, provider result payloads, attempt messages/codes, and approval errors may contain secrets; personal actor ids are opaque, names and emails are withheld, and action references outside their strict formats are omitted.",
+      },
+    };
+  }
+
   async listCanvases(): Promise<CanvasDefinition[]> { return this.#canvasStore().list(); }
   async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.#canvasStore().get(id); }
-  async createCanvas(content: CanvasContent): Promise<CanvasDefinition> { return this.#canvasStore().create(content); }
-  async editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition> {
-    return this.#canvasStore().edit(id, expectedRevision, operations);
+  // Writes go through the workspace's canvas write methods, the agent's too (see OverseerImpl), as
+  // a `session` writer: FAC-44 checked this session's build when it opened (see CanvasWriter).
+  get #canvasWriter(): CanvasWriter { return { kind: "session", userId: this.clientUserId }; }
+  async createCanvas(content: CanvasContent): Promise<CanvasDefinition> {
+    return this.impl.createCanvasAs(this.#canvasWriter, content);
   }
-  async deleteCanvas(id: string, expectedRevision: string): Promise<void> { this.#canvasStore().delete(id, expectedRevision); }
+  async editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition> {
+    return this.impl.editCanvasAs(this.#canvasWriter, id, expectedRevision, operations);
+  }
+  async deleteCanvas(id: string, expectedRevision: string): Promise<void> {
+    await this.impl.deleteCanvasAs(this.#canvasWriter, id, expectedRevision);
+  }
+  async getCanvasPage(id: string): Promise<CanvasPage | null> { return this.#canvasStore().getPage(id); }
+  async editCanvasPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage> {
+    return this.impl.editCanvasPageAs(this.#canvasWriter, id, expectedRevision, operations);
+  }
 
   #flowStore(): WorkspaceFlowStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
@@ -12677,6 +13554,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let profile = await this.#getClientProfile();
     let hook = this.impl.storage.boundHooks.get(hookId);
     if (!hook) throw new Error("No such hook.");
+    // Clearing the pin removes the trigger's assignment too: retire it first (#374 round 2).
+    if (ref === null) this.impl.retireTriggerAssignment(hookId);
     this.impl.workflowDefinitionStore().pinTrigger(profile.id, hookId,
         hook.gadgetId ?? this.impl.defaultGadgetId ?? null, ref);
   }
@@ -12685,6 +13564,37 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]> {
     return this.impl.workflowDefinitionStore().deliveries((await this.#getClientProfile()).id, definitionId);
+  }
+  // A control lets named people run a pinned trigger now; setting one is building. Running one is
+  // the listed person's own request, checked against the authenticated session's profile.
+  async setTriggerControl(hookId: number, settings: TriggerControlSettings | null): Promise<TriggerControl | null> {
+    await this.#requireSharedConfiguration("build", "shared");
+    if (!this.impl.storage.boundHooks.get(hookId)) throw new Error("No such hook.");
+    return this.impl.workflowDefinitionStore().setControl(await this.#getClientProfile(), hookId, settings);
+  }
+  async listTriggerControls(): Promise<TriggerControl[]> {
+    return this.impl.workflowDefinitionStore().controls(null);
+  }
+  // Assigning a service account decides what runs act as, so it takes the deployment's publish
+  // authority (an Admin's), the interim rule until inferops ADR 0011 D1's workflow:assign is decided.
+  async setTriggerAssignment(hookId: number, settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> {
+    await this.#requireSharedConfiguration("publish", "always");
+    return this.impl.setTriggerAssignment(await this.#getClientProfile(), hookId, settings);
+  }
+  async getTriggerAssignment(hookId: number): Promise<TriggerAssignmentState> {
+    return {
+      enabled: workflowAssignmentsEnabled(this.impl.env),
+      assignment: this.impl.workflowDefinitionStore().assignmentOf(hookId),
+      retiredAutomatically: this.impl.workflowDefinitionStore().autoRetiredOf(hookId) !== null,
+    };
+  }
+  // Giving the key decides what runs act as, like assigning: the same authority.
+  async provisionTriggerCredential(hookId: number, key: string): Promise<TriggerAssignment> {
+    await this.#requireSharedConfiguration("publish", "always");
+    return this.impl.provisionTriggerCredential(await this.#getClientProfile(), hookId, key);
+  }
+  async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
+    return this.impl.invokeTrigger(this.clientUserId, this.clientProfileId, hookId);
   }
 
   #consoleStore(): WorkspaceConsoleStore {
@@ -12714,10 +13624,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("publish", "shared");
     this.#consoleStore().delete(id, expectedRevision);
     this.impl.announceConsoleRevision(id, null);
+    await this.#indexConsoleWidgets(id, null);
   }
   // Publication captures the console and its sources, reads the captured commits, then publishes
   // in one transaction only if the capture still holds (see ConsoleCapture), each widget entry
-  // freezing its commit's surfaces and each bound view its spec.
+  // freezing its commit's surfaces and each bound view its spec. Then the published widgets are
+  // listed in the deployment's widget index as this person (see #indexConsoleWidgets).
   async publishConsole(id: string, expectedRevision: string): Promise<OperateConsole> {
     await this.#requireSharedConfiguration("publish", "shared");
     let store = this.#consoleStore();
@@ -12725,7 +13637,89 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let commits = await this.impl.readSourceCommits(capture.commitIds);
     let published = store.publish(id, expectedRevision, capture, commits);
     this.impl.announceConsoleRevision(id, published.revision);
+    await this.#indexConsoleWidgets(id, published);
     return published;
+  }
+
+  // Lists console `id`'s live publication's widgets in the widget index of the deployment's
+  // shared-configuration service, and withdraws versions no published console of this workspace
+  // lists any more, as this person, through their own connected account (FAC-11; see
+  // console-widget-index.ts). Only this build-role surface reaches it. A deployment naming no such
+  // service has no index, and nothing is written or recorded. The publication or delete has
+  // already happened: what the service answered is recorded for getConsoleWidgetIndex, never thrown.
+  async #indexConsoleWidgets(id: string, published: OperateConsole | null): Promise<void> {
+    if (!getSharedConfigurationGatekeeper(this.impl.env)) return;
+    let storage = this.impl.storage;
+    let previous = storage.consoleWidgetIndex.get(id) ?? emptyWidgetIndexRecord(id);
+    let listedElsewhere = this.impl.publishedWidgetVersions(id);
+    let user = this.#clientUser;
+    let env = this.impl.env;
+    let next = await indexConsoleWidgets(previous,
+      published?.published ? { revision: published.published.revision, widgets: published.published.content.widgets ?? [] } : null,
+      listedElsewhere, {
+        workspaces: () => user.widgetIndexWorkspaces(),
+        register: (accountId, workspaceId, entry) => user.registerWidget(accountId, workspaceId, entry),
+        withdraw: (accountId, workspaceId, sourceId, sourceVersion) =>
+          user.withdrawWidget(accountId, workspaceId, sourceId, sourceVersion),
+        description: async blueprintId => {
+          let raw = await env.BLUEPRINTS.get(blueprintId);
+          let description = raw ? (JSON.parse(raw) as BlueprintKvRecord).metadata.description : undefined;
+          return typeof description === "string" && description.trim() !== "" ? description : null;
+        },
+      });
+    // What this run couldn't withdraw is owed by the workspace, not the console, so a deleted
+    // console's is still retried. Then every other owed withdrawal is tried as this person.
+    let now = Date.now();
+    let target = next.target ?? previous.target;
+    let earlier = [...storage.widgetIndexOwed.list()];
+    let fresh = target ? next.pendingWithdraws.map((pending): OwedWithdrawal => ({
+      key: owedWithdrawalKey(target.workspaceId, pending.versionId), workspaceId: target.workspaceId,
+      versionId: pending.versionId, userId: this.clientUserId, reason: `Still listed: ${pending.reason}`,
+      attempts: 1, nextAttemptAt: now + owedRetryDelay(1),
+    })) : [];
+    let retried = await retryOwedWithdrawals(earlier.filter(owed => !fresh.some(item => item.key === owed.key)),
+      this.impl.publishedWidgetVersions(), {
+        workspaces: () => user.widgetIndexWorkspaces(),
+        withdraw: (accountId, workspaceId, sourceId, sourceVersion) => user.withdrawWidget(accountId, workspaceId, sourceId, sourceVersion),
+      }, now);
+    let stored = { ...next, pendingWithdraws: [] };
+    if (published) storage.consoleWidgetIndex.put(stored);
+    else storage.consoleWidgetIndex.delete(id);
+    this.impl.storeOwedWithdrawals({ cleared: retried.cleared, kept: [...retried.kept, ...fresh] });
+  }
+
+  // Where console `id` stands in the widget index; null for a console with none (see
+  // ConsoleWidgetIndexReport). Build access only.
+  async getConsoleWidgetIndex(id: string): Promise<ConsoleWidgetIndexReport | null> {
+    let record = this.impl.storage.consoleWidgetIndex.get(id);
+    if (!record) return null;
+    // Every withdrawal the workspace still owes, a deleted console's included, so none goes unseen.
+    let owed = [...this.impl.storage.widgetIndexOwed.list()].map(item => ({ versionId: item.versionId, reason: item.reason }));
+    return { ...widgetIndexReport(record), pendingWithdraws: owed };
+  }
+
+  // The InferOps workspaces this person may list a console's widgets in, asked freshly with their
+  // own accounts: what a builder chooses a console's target from. Build access only.
+  async listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> {
+    if (!getSharedConfigurationGatekeeper(this.impl.env)) return [];
+    return (await this.#clientUser.widgetIndexWorkspaces()).map(({ workspaceId, name }) => ({ workspaceId, name }));
+  }
+
+  // Sets the workspace console `id` lists its widgets in, to one this person may list widgets in
+  // now, or clears it (null). The next publication writes there; nothing moves on its own.
+  async setConsoleWidgetIndexTarget(id: string, workspaceId: string | null): Promise<ConsoleWidgetIndexReport> {
+    await this.#requireSharedConfiguration("publish", "shared");
+    if (!this.#consoleStore().get(id, "draft")) throw new Error(`Console ${id} is not a console in this workspace.`);
+    let previous = this.impl.storage.consoleWidgetIndex.get(id) ?? emptyWidgetIndexRecord(id);
+    let target: ConsoleWidgetIndexRecord["target"] = null;
+    if (workspaceId !== null) {
+      let chosen = (await this.#clientUser.widgetIndexWorkspaces()).find(workspace => workspace.workspaceId === workspaceId);
+      if (!chosen) throw new Error("You can't publish shared configuration in that InferOps workspace.");
+      target = { workspaceId: chosen.workspaceId, name: chosen.name };
+    }
+    let next = { ...previous, target, blocked: null };
+    this.impl.storage.consoleWidgetIndex.put(next);
+    return widgetIndexReport(next);
   }
   async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
     return this.#consoleStore().get(id, source);
@@ -12733,9 +13727,25 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
     return this.#consoleStore().screen(consoleId, screenId, source);
   }
+  async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
+    return this.#consoleStore().page(consoleId, screenId, source);
+  }
+  async getConsoleWidgetStates(consoleId: string, revision: string, gadgetId: WorkpieceId)
+      : Promise<WidgetStateMachine | null> {
+    return this.#consoleStore().offeredWidget(consoleId, revision, gadgetId).frozen?.states ?? null;
+  }
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     this.#consoleStore().offeredWidget(consoleId, revision, gadgetId);
     // Build access may already open any gadget, so its capability is the ordinary one.
+    return this.getGadget(gadgetId);
+  }
+  // Build access opens the app's mainline, as getGadget does; only the placement is checked, so a
+  // builder previewing a published console after changing the app still sees what they built.
+  async getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+    let shown = this.#consoleStore().get(consoleId, "published");
+    if (!shown || shown.revision !== revision || !shown.published?.apps?.some(app => app.gadgetId === gadgetId)) {
+      throw new Error(`Console ${consoleId} does not offer app ${gadgetId} at revision ${revision}.`);
+    }
     return this.getGadget(gadgetId);
   }
   // A pinned commit must be the source's current commit or one of its ancestors within
@@ -13072,7 +14082,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     };
 
+    let ended = false;
     let unsubscribe = () => {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.kind.unsubscribe(kindSubscriber);
       this.impl.storage.installedFrom.unsubscribe(installedFromSubscriber);
@@ -13082,6 +14096,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       this.impl.storage.ownerInvitesOnly.unsubscribe(ownerInvitesOnlySubscriber);
       callback[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(unsubscribe);
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.kind.subscribe(kindSubscriber);
@@ -13551,11 +14567,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("build", "shared");
     let chatMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(modelId), this.impl.logger);
+    // Under the plain daily cap a binding can't use the platform's models, since its calls aren't
+    // agent turns the cap counts (FAC-152); the allowlist is enforced on every request it makes.
+    let refusal = modelBindingRefusal(this.impl.env, chatMeta.aiModel!);
+    if (refusal) throw new Error(refusal);
     let props: LanguageModelGatekeeperProps = {
       displayName: chatMeta.aiModel!.profile.name,
       config: chatMeta.aiModel!.config,
       initiator: this.impl.gadgetAuthorFor(chatMeta.profile),
       metadata: { source: "model-binding", gadgetId: this.impl.ctx.id.toString() },
+      ...(chatMeta.aiModel!.profile.managed ? { managed: true } : {}),
     }
 
     let creationSpec: GatekeeperCreationSpec = {
@@ -13782,7 +14803,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     const actions = this.impl.storage.actions;
     const read = () => {
       const record = actions.get(input.actionId);
-      if (record?.type !== "action") throw new Error("Approval refused");
+      // An assigned run's action is decided from the approvals list, through its own facet.
+      if (record?.type !== "action" || record.executedAs) throw new Error("Approval refused");
       return record;
     };
     const facet = (gatekeeperId: number) => this.impl.getGatekeeperFacet(gatekeeperId) as
@@ -14093,15 +15115,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error(`Can't reject an observation: ${id}`);
     }
 
-    let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
-
     // Resolve the rejecter's identity before notifying the gatekeeper, so a failed profile fetch
     // can't leave the action rejected with the gatekeeper but still "pending" in storage.
     let profile = await this.#getClientProfile();
     // The whole decision runs under the claim, through to the stored rejection, so no approval can
     // start between the gatekeeper's answer and the record saying it was rejected.
     await this.impl.withActionClaim(id, async () => {
-      await gatekeeper.rejectAction(action.action);
+      // An assigned run's action lives on that run's own facet, so it is rejected there (FAC-102
+      // follow-up A), whatever became of the assignment since: rejecting sends nothing.
+      let assigned = action.executedAs ? await this.impl.openAssignedActionFacet(action) : undefined;
+      let gatekeeper = assigned?.facet ?? this.impl.getGatekeeperFacet(action.gatekeeperId);
+      try {
+        await gatekeeper.rejectAction(action.action);
+      } finally {
+        assigned?.close();
+      }
       // Re-read after the wait: the claim kept other decisions out, but the record is the truth.
       let current = this.impl.storage.actions.get(id);
       if (current?.type === "action") Object.assign(action, current);
@@ -14331,6 +15359,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     subscriber = subscriber.dup();  // keep stub after return
     let subscribed = false;
     let disposed = false;
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(() => unsubscribe());
     subscriber.onRpcBroken(_ => unsubscribe());
 
     let dbSubscriber = {
@@ -14348,6 +15378,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     function unsubscribe() {
       if (disposed) return;
       disposed = true;
+      stream.untrack();
       if (subscribed) actions.unsubscribe(dbSubscriber);
       subscriber[Symbol.dispose]();
     };
@@ -14505,6 +15536,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let replayCount = 0;
 
     subscriber = subscriber.dup();  // keep stub after return
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(() => unsubscribe());
     this.impl.addChatSubscriber(subscriber);
     subscriber.onRpcBroken(_ => unsubscribe());
 
@@ -14549,6 +15582,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     function unsubscribe() {
       if (disposed) return;
       disposed = true;
+      stream.untrack();
       chats.unsubscribe(msgSubscriber);
       chatMeta.unsubscribe(metaSubscriber);
       self.impl.removeChatSubscriber(subscriber);
@@ -14839,6 +15873,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("publish", "shared");
     let record = this.impl.storage.blueprints.get(blueprintId);
     if (!record) throw new Error("No such blueprint.");
+    let startingVersion = record.metadata.version;
+    let startingCommitId = record.commitId;
     if (options.dataContract !== undefined && !options.updateCode) {
       throw new Error("A data contract is declared only with a new version (updateCode).");
     }
@@ -14848,30 +15884,37 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error("At least one update option must be provided.");
     }
 
-    if (options.title !== undefined) {
-      record.metadata.title = options.title;
-    }
-    if (options.description !== undefined) {
-      record.metadata.description = options.description;
-    }
-
     let codeSnapshot: Uint8Array | undefined;
+    let bindings: Record<string, BlueprintBinding> | undefined;
+    let nextCommitId: string | undefined;
+    let nextKind: WorkspaceKind | undefined;
+    let nextAuthoredWidgetBuild: true | undefined;
+    let nextVersion = record.metadata.version;
+    let nextDataContract = record.metadata.dataContract;
     if (options.updateCode || options.updateBindings) {
       // Re-collect binding metadata from the source gadget (validates annotations). Records
       // written before multi-gadget support carry no gadgetId; they export the default gadget.
       let gadgetId = this.impl.resolveGadgetId(record.gadgetId);
-      record.metadata.bindings = this.impl.collectBindingMetadata(gadgetId);
+      bindings = this.impl.collectBindingMetadata(gadgetId);
       if (options.updateCode) {
         let commitId = await this.impl.assertPublishableCommit(
             this.impl.getGadgetRecord(gadgetId).commitId);
-        await this.impl.assertPublishableKind(this.impl.storage.kind.get(), commitId);
-        record.commitId = commitId;
-        delete record.codeVersion;
-        record.metadata.version++;
-        record.metadata.kind = this.impl.storage.kind.get();
+        let kind = this.impl.storage.kind.get();
+        if (kind === "widget" && this.impl.env.AUTHORED_WIDGET_BUILD_ENABLED === "true") {
+          let sourceCommitId = commitId;
+          commitId = await this.impl.compileAuthoredWidgetCommit(sourceCommitId);
+          if (commitId !== sourceCommitId) nextAuthoredWidgetBuild = true;
+          await this.impl.assertPublishableKind(kind, commitId,
+              commitId === sourceCommitId ? undefined : sourceCommitId);
+        } else {
+          await this.impl.assertPublishableKind(kind, commitId);
+          commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+        }
+        nextCommitId = commitId;
+        nextKind = kind;
+        nextVersion++;
         // Each version declares its own contract; one published without is unknown.
-        if (dataContract !== undefined) record.metadata.dataContract = dataContract;
-        else delete record.metadata.dataContract;
+        nextDataContract = dataContract;
         codeSnapshot = await this.impl.snapshotCode(commitId);
       }
     }
@@ -14879,6 +15922,33 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let screenshot = options.screenshot === undefined
       ? undefined
       : options.screenshot === null ? null : validateBlueprintScreenshotUpload(options.screenshot);
+
+    // Defer record mutation until compile, snapshot and upload validation have succeeded.
+    if (nextCommitId !== undefined) {
+      // Compilation and snapshotting both await other work. Another publish may finish during
+      // either await, so compare immediately before mutation to keep a published version immutable.
+      let current = this.impl.storage.blueprints.get(blueprintId);
+      if (!current || current.metadata.version !== startingVersion ||
+          current.commitId !== startingCommitId) {
+        throw new Error("The Blueprint changed while building; publish again.");
+      }
+      // Preserve metadata-only changes that landed while this build was pending. Apply only
+      // this publish's requested fields to the freshly read record below.
+      record = current;
+    }
+    if (options.title !== undefined) record.metadata.title = options.title;
+    if (options.description !== undefined) record.metadata.description = options.description;
+    if (bindings !== undefined) record.metadata.bindings = bindings;
+    if (nextCommitId !== undefined) {
+      record.commitId = nextCommitId;
+      delete record.codeVersion;
+      record.metadata.version = nextVersion;
+      record.metadata.kind = nextKind!;
+      if (nextAuthoredWidgetBuild) record.authoredWidgetBuild = true;
+      else delete record.authoredWidgetBuild;
+      if (nextDataContract !== undefined) record.metadata.dataContract = nextDataContract;
+      else delete record.metadata.dataContract;
+    }
 
     record.metadata.lastUpdated = new Date();
 
@@ -15107,6 +16177,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // sight. A screen is layout and references only: every board on it resolves through the
   // viewer's own connection, never this workspace's. A screen no published console shows reads as
   // missing.
+  async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> { this.#deny(); }
+  async previewAuthoredWidget(_gadgetId: WorkpieceId, _chatId: number): Promise<AuthoredWidgetPreview> { this.#deny(); }
   async listCanvases(): Promise<CanvasDefinition[]> {
     let store = this.#consoleStore();
     let shown = new Set(store.listPublished().flatMap(consoleScreens));
@@ -15118,6 +16190,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async createCanvas(_content: CanvasContent): Promise<CanvasDefinition> { this.#deny(); }
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[]): Promise<CanvasDefinition> { this.#deny(); }
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  // The nested page is the builder's: a use session reads only published version 1 screens.
+  async getCanvasPage(_id: string): Promise<CanvasPage | null> { this.#deny(); }
+  async editCanvasPage(_id: string, _expectedRevision: string, _operations: CanvasPageOperation[]): Promise<CanvasPage> { this.#deny(); }
   async listFlows(): Promise<OperateFlow[]> { this.#deny(); }
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
@@ -15136,6 +16211,18 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
+  // An operator listed on a trigger's control may ask it to run, and sees only those controls; it
+  // configures nothing (FAC-102, inferops ADR 0011 S6).
+  async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
+  async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
+  async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }
+  async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
+  async listTriggerControls(): Promise<TriggerControl[]> {
+    return this.impl.workflowDefinitionStore().controls(this.clientProfileId);
+  }
+  async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
+    return this.impl.invokeTrigger(this.clientUserId, this.clientProfileId, hookId);
+  }
   // An operator granted "use" reaches the published consoles of the workspace without Build,
   // read-only: a console is references and presentation, and grants nothing. Drafts, and every
   // write, stay build-only.
@@ -15154,6 +16241,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
     if (source !== "published") this.#deny();
     return this.#consoleStore().screen(consoleId, screenId, source);
+  }
+  async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
+    if (source !== "published") this.#deny();
+    return this.#consoleStore().page(consoleId, screenId, source);
   }
   async validateArtifact(_gadgetId: WorkpieceId, _kind: ArtifactKind, _pins: ArtifactPin[],
       _model: ArtifactModelRequirement | null)
@@ -15286,12 +16377,18 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       }
     };
 
+    let ended = false;
     let unsubscribe = () => {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.kind.unsubscribe(kindSubscriber);
       this.impl.storage.testOnly.unsubscribe(testOnlySubscriber);
       callback[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(unsubscribe);
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.kind.subscribe(kindSubscriber);
@@ -15322,7 +16419,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
 
   // A widget install, registered or frozen, is offered only by a published console (see
-  // getConsoleWidget), never by membership in the workspace. Apps shared for use are unchanged.
+  // getConsoleWidget), never by membership in the workspace. So is an app a published console
+  // places (see getConsoleApp), which would otherwise run its mainline rather than the commit the
+  // console published. Other apps shared for use are unchanged.
   async getGadget(id: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     let record = this.impl.getGadgetRecord(id);  // also validates it exists
     if (record.pending) {
@@ -15334,15 +16433,57 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     if (record.frozenFor || installed?.kind === "widget") {
       throw new Error(`Gadget ${id} is a widget; open it through the console that offers it.`);
     }
+    // Checked when the capability is minted and again on every call through it and through any
+    // capability it returns, so one minted while the app was only shared for use stops reaching its
+    // mainline as soon as a published console places it (the console is then the only way in).
+    let check = async () => {
+      if (this.#placedApp(id)) {
+        throw new Error(`Gadget ${id} is an app a published console places; open it through that console.`);
+      }
+    };
+    await check();
     // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
     //     type system doesn't know this.
-    return new UseGadgetClientInterface(this.impl, id, this.clientUserId);
+    return new UseGadgetClientInterface(this.impl, id, this.clientUserId, check);
   }
+
+  // Whether a published console places app `id` (see WorkspaceConsoleStore.placedByPublishedConsole).
+  // Consoles exist only while durable views are on; with them off there is no console to open it by.
+  #placedApp(id: WorkpieceId): boolean {
+    if (this.impl.env.COMPOSABLE_VIEWS !== "true" || this.impl.env.DURABLE_VIEWS !== "true") return false;
+    return this.#consoleStore().placedByPublishedConsole(id);
+  }
+
+  // The app as the console's published revision fenced it: the live gadget, opened only while its
+  // current commit is the published one. The capability checks again on every call, with the
+  // caller's operate session, so once a builder changes the app (or the console moves on, or the
+  // person leaves it) a kept capability stops working and says why. Never the app's mainline.
+  async getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+    let check = async () => {
+      this.#consoleStore().offeredApp(consoleId, revision, gadgetId);
+      await this.impl.consoleSessionCheck(this.#clientUser, consoleId, revision);
+    };
+    await check();
+    // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
+    //     type system doesn't know this.
+    return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check);
+  }  // The widget index is written by a builder's own publication only (FAC-11).
+  async getConsoleWidgetIndex(_consoleId: string): Promise<ConsoleWidgetIndexReport | null> { this.#deny(); }
+  async listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> { this.#deny(); }
+  async setConsoleWidgetIndexTarget(_consoleId: string, _workspaceId: string | null): Promise<ConsoleWidgetIndexReport> { this.#deny(); }
+
 
   // The capability checks the console context again on every call: the console must still offer
   // the widget at that published revision, and the caller's own operate session must still have
   // that console and revision open. So one kept from an older publication, from a console since
   // unpublished or deleted, or from a console the person has since left stops working.
+  // A published entry never changes, so its frozen states are what every check would read.
+  async getConsoleWidgetStates(consoleId: string, revision: string, gadgetId: WorkpieceId)
+      : Promise<WidgetStateMachine | null> {
+    let states = this.#consoleStore().offeredWidget(consoleId, revision, gadgetId).frozen?.states ?? null;
+    await this.impl.consoleSessionCheck(this.#clientUser, consoleId, revision);
+    return states;
+  }
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     let ui = true;
     let check = async () => {
@@ -15530,8 +16671,15 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 // Overseer method fails to compile here until someone decides whether operate may call it.
 @validateRpc()
 class OperateOverseerInterface extends RpcTarget implements Overseer {
-  constructor(private owner: OverseerClientInterface) {
+  constructor(private owner: OverseerClientInterface, private retired: () => boolean) {
     super();
+  }
+
+  // Every allowed call checks the workspace's retired mark first (FAC-88): a capability held from
+  // before its owner's company change refuses from the moment the mark is set, until the access
+  // restart drops it. The refusal names nothing.
+  #live(): void {
+    if (this.retired()) throw new Error("This operate session has ended. Reload to start a new one.");
   }
 
   [Symbol.dispose]() {
@@ -15544,125 +16692,130 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
 
   // --- Allowed: the page around the chat ---
 
-  async getMetadata(): Promise<GadgetMetadata> { return this.owner.getMetadata(); }
+  async getMetadata(): Promise<GadgetMetadata> { this.#live(); return this.owner.getMetadata(); }
   async subscribeToMetadata(callback: RpcStub<(metadata: GadgetMetadata) => void>)
       : Promise<RpcStub<{}>> {
-    return this.owner.subscribeToMetadata(callback);
+    this.#live(); return this.owner.subscribeToMetadata(callback);
   }
   async subscribeToPresence(subscriber: RpcStub<PresenceSubscriber>): Promise<RpcStub<{}>> {
-    return this.owner.subscribeToPresence(subscriber);
+    this.#live(); return this.owner.subscribeToPresence(subscriber);
   }
   async subscribeToWorkpieces(subscriber: RpcStub<WorkpiecesSubscriber>): Promise<RpcStub<{}>> {
-    return this.owner.subscribeToWorkpieces(subscriber);
+    this.#live(); return this.owner.subscribeToWorkpieces(subscriber);
   }
   async subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
-    return this.owner.subscribeToConsoleLogs(subscriber);
+    this.#live(); return this.owner.subscribeToConsoleLogs(subscriber);
   }
-  async listCanvases(): Promise<CanvasDefinition[]> { return this.owner.listCanvases(); }
-  async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.owner.getCanvas(id); }
-  async listFlows(): Promise<OperateFlow[]> { return this.owner.listFlows(); }
-  async listConsoles(): Promise<OperateConsole[]> { return this.owner.listConsoles(); }
+  async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> { this.#deny(); }
+  async previewAuthoredWidget(_gadgetId: WorkpieceId, _chatId: number): Promise<AuthoredWidgetPreview> { this.#deny(); }
+  async listCanvases(): Promise<CanvasDefinition[]> { this.#live(); return this.owner.listCanvases(); }
+  async getCanvas(id: string): Promise<CanvasDefinition | null> { this.#live(); return this.owner.getCanvas(id); }
+  async listFlows(): Promise<OperateFlow[]> { this.#live(); return this.owner.listFlows(); }
+  async listConsoles(): Promise<OperateConsole[]> { this.#live(); return this.owner.listConsoles(); }
   async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
-    return this.owner.getConsole(id, source);
+    this.#live(); return this.owner.getConsole(id, source);
   }
   async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
-    return this.owner.getConsoleScreen(consoleId, screenId, source);
+    this.#live(); return this.owner.getConsoleScreen(consoleId, screenId, source);
+  }
+  async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
+    this.#live(); return this.owner.getConsolePage(consoleId, screenId, source);
   }
 
   // --- Allowed: the chat ---
 
-  async listChats(): Promise<AiChatMetadata[]> { return this.owner.listChats(); }
-  async listModels(): Promise<AiChatAuthorInfo[]> { return this.owner.listModels(); }
+  async listChats(): Promise<AiChatMetadata[]> { this.#live(); return this.owner.listChats(); }
+  async listModels(): Promise<AiChatAuthorInfo[]> { this.#live(); return this.owner.listModels(); }
   async getChatHistory(chatId: number, beforeSequence?: number): Promise<AiChatHistoryPage> {
-    return this.owner.getChatHistory(chatId, beforeSequence);
+    this.#live(); return this.owner.getChatHistory(chatId, beforeSequence);
   }
   async getChatMessage(chatId: number, sequence: number): Promise<AiChatMessage | undefined> {
-    return this.owner.getChatMessage(chatId, sequence);
+    this.#live(); return this.owner.getChatMessage(chatId, sequence);
   }
-  async listSlashCommands(): Promise<SlashCommandChoice[]> { return this.owner.listSlashCommands(); }
+  async listSlashCommands(): Promise<SlashCommandChoice[]> { this.#live(); return this.owner.listSlashCommands(); }
   async subscribeToChat(subscriber: RpcStub<AiChatSubscriber>, startAfter?: Date)
       : Promise<RpcStub<{}>> {
-    return this.owner.subscribeToChat(subscriber, startAfter);
+    this.#live(); return this.owner.subscribeToChat(subscriber, startAfter);
   }
   async getReadConsole(chatId: number): Promise<OperateConsoleRead | null> {
-    return this.owner.getReadConsole(chatId);
+    this.#live(); return this.owner.getReadConsole(chatId);
   }
   async newOperateReadChat(message: string, consoleRead = false): Promise<number> {
-    return this.owner.newOperateReadChat(message, consoleRead);
+    this.#live(); return this.owner.newOperateReadChat(message, consoleRead);
   }
   async newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[])
       : Promise<number> {
-    return this.owner.newChat(initialMessage, modelId, capsules, attachments);
+    this.#live(); return this.owner.newChat(initialMessage, modelId, capsules, attachments);
   }
   async sendChatMessage(chatId: number, message: string | SlashCommandRequest,
                         modelId: string | null,
                         capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[])
       : Promise<void> {
-    return this.owner.sendChatMessage(chatId, message, modelId, capsules, attachments);
+    this.#live(); return this.owner.sendChatMessage(chatId, message, modelId, capsules, attachments);
   }
   async uploadChatAttachment(attachment: ChatAttachmentUpload, modelId: string | null)
       : Promise<ChatAttachmentHandle> {
-    return this.owner.uploadChatAttachment(attachment, modelId);
+    this.#live(); return this.owner.uploadChatAttachment(attachment, modelId);
   }
   async getChatAttachmentContent(chatId: number, id: string): Promise<Uint8Array> {
-    return this.owner.getChatAttachmentContent(chatId, id);
+    this.#live(); return this.owner.getChatAttachmentContent(chatId, id);
   }
-  async deleteChatAttachment(id: string): Promise<void> { return this.owner.deleteChatAttachment(id); }
+  async deleteChatAttachment(id: string): Promise<void> { this.#live(); return this.owner.deleteChatAttachment(id); }
   async setChatTitle(chatId: number, title: string): Promise<void> {
-    return this.owner.setChatTitle(chatId, title);
+    this.#live(); return this.owner.setChatTitle(chatId, title);
   }
-  async deleteChat(chatId: number): Promise<void> { return this.owner.deleteChat(chatId); }
-  async stopAgent(chatId: number): Promise<void> { return this.owner.stopAgent(chatId); }
+  async deleteChat(chatId: number): Promise<void> { this.#live(); return this.owner.deleteChat(chatId); }
+  async stopAgent(chatId: number): Promise<void> { this.#live(); return this.owner.stopAgent(chatId); }
   async retryAgent(chatId: number, modelId: string): Promise<void> {
-    return this.owner.retryAgent(chatId, modelId);
+    this.#live(); return this.owner.retryAgent(chatId, modelId);
   }
 
   // --- Allowed: actions and connections, which wait for the person as they do in Build ---
 
   async subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date)
       : Promise<RpcStub<{}>> {
-    return this.owner.subscribeToActions(subscriber, startAfter);
+    this.#live(); return this.owner.subscribeToActions(subscriber, startAfter);
   }
   async listActions(options?: {beforeId?: number, filter?: ActionHistoryFilter})
       : Promise<ActionHistoryPage> {
-    return this.owner.listActions(options);
+    this.#live(); return this.owner.listActions(options);
   }
-  async approveAction(id: number): Promise<void> { return this.owner.approveAction(id); }
+  async approveAction(id: number): Promise<void> { this.#live(); return this.owner.approveAction(id); }
   async operateApproval(request: OperateApprovalRequest): Promise<OperateApprovalSnapshot> {
-    return this.owner.operateApproval(request);
+    this.#live(); return this.owner.operateApproval(request);
   }
-  async rejectAction(id: number): Promise<void> { return this.owner.rejectAction(id); }
+  async rejectAction(id: number): Promise<void> { this.#live(); return this.owner.rejectAction(id); }
   async listPreApprovableActions(): Promise<PreApprovableAction[]> {
-    return this.owner.listPreApprovableActions();
+    this.#live(); return this.owner.listPreApprovableActions();
   }
   async setAutoApprovedActionKind(gatekeeperId: WorkpieceId, actionKind: ActionKind)
       : Promise<void> {
-    return this.owner.setAutoApprovedActionKind(gatekeeperId, actionKind);
+    this.#live(); return this.owner.setAutoApprovedActionKind(gatekeeperId, actionKind);
   }
   async removeAutoApprovedActionKind(gatekeeperId: WorkpieceId, tag: string): Promise<void> {
-    return this.owner.removeAutoApprovedActionKind(gatekeeperId, tag);
+    this.#live(); return this.owner.removeAutoApprovedActionKind(gatekeeperId, tag);
   }
   async listAutoApprovedActionKinds()
       : Promise<Array<{ gatekeeperId: WorkpieceId; actionKind: ActionKind }>> {
-    return this.owner.listAutoApprovedActionKinds();
+    this.#live(); return this.owner.listAutoApprovedActionKinds();
   }
   async acceptConnectionRequest(requestId: string, result: {gatekeeperId: number})
       : Promise<void> {
-    return this.owner.acceptConnectionRequest(requestId, result);
+    this.#live(); return this.owner.acceptConnectionRequest(requestId, result);
   }
   async denyConnectionRequest(requestId: string): Promise<void> {
-    return this.owner.denyConnectionRequest(requestId);
+    this.#live(); return this.owner.denyConnectionRequest(requestId);
   }
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
-    return this.owner.newGatekeeper(accountId, resourceUrl);
+    this.#live(); return this.owner.newGatekeeper(accountId, resourceUrl);
   }
   async getGatekeeperById(id: number): Promise<GatekeeperClient<any>> {
-    return this.owner.getGatekeeperById(id);
+    this.#live(); return this.owner.getGatekeeperById(id);
   }
   async getGatekeeperByResourceUrl(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
-    return this.owner.getGatekeeperByResourceUrl(resourceUrl);
+    this.#live(); return this.owner.getGatekeeperByResourceUrl(resourceUrl);
   }
 
   // --- Denied: authoring ---
@@ -15680,6 +16833,10 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[])
       : Promise<CanvasDefinition> { this.#deny(); }
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
+  // The nested page is the builder's live draft: an operate session reads only what a console published.
+  async getCanvasPage(_id: string): Promise<CanvasPage | null> { this.#deny(); }
+  async editCanvasPage(_id: string, _expectedRevision: string, _operations: CanvasPageOperation[])
+      : Promise<CanvasPage> { this.#deny(); }
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
   async replaceFlow(_id: string, _expectedRevision: string, _content: OperateFlowContent)
       : Promise<OperateFlow> { this.#deny(); }
@@ -15691,6 +16848,12 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
+  async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
+  async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
+  async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }
+  async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
+  async listTriggerControls(): Promise<TriggerControl[]> { this.#deny(); }
+  async invokeTrigger(_hookId: number): Promise<WorkflowInvocation> { this.#deny(); }
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent)
@@ -15713,8 +16876,16 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async newArtifactPublisherGatekeeper(): Promise<GatekeeperClient<any>> { this.#deny(); }
   async createGadget(_title: string): Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getGadget(_id: WorkpieceId): Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async getConsoleWidgetStates(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
+      : Promise<WidgetStateMachine | null> { this.#deny(); }
   async getConsoleWidget(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async getConsoleApp(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
+      : Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  // The widget index is written by a builder's own publication only (FAC-11).
+  async getConsoleWidgetIndex(_consoleId: string): Promise<ConsoleWidgetIndexReport | null> { this.#deny(); }
+  async listConsoleWidgetIndexWorkspaces(): Promise<WidgetIndexWorkspace[]> { this.#deny(); }
+  async setConsoleWidgetIndexTarget(_consoleId: string, _workspaceId: string | null): Promise<ConsoleWidgetIndexReport> { this.#deny(); }
   async submitCodeChange(_chatId: number, _submission: CodeChangeSubmission)
       : Promise<{generation: number, revision: number}> { this.#deny(); }
   async listTree(_commitId: string): Promise<TreeNode[]> { this.#deny(); }
@@ -16005,7 +17176,18 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     // would be useless, so refuse rather than publish an empty archive.
     let commitId = await this.impl.assertPublishableCommit(
         this.impl.getGadgetRecord(this.id).commitId);
-    await this.impl.assertPublishableKind(this.impl.storage.kind.get(), commitId);
+    let kind = this.impl.storage.kind.get();
+    let authoredWidgetBuild = false;
+    if (kind === "widget" && this.impl.env.AUTHORED_WIDGET_BUILD_ENABLED === "true") {
+      let sourceCommitId = commitId;
+      commitId = await this.impl.compileAuthoredWidgetCommit(sourceCommitId);
+      authoredWidgetBuild = commitId !== sourceCommitId;
+      await this.impl.assertPublishableKind(kind, commitId,
+          commitId === sourceCommitId ? undefined : sourceCommitId);
+    } else {
+      await this.impl.assertPublishableKind(kind, commitId);
+      commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+    }
     let now = new Date();
 
     let metadata: BlueprintMetadata = {
@@ -16023,7 +17205,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     if (gadget.output) {
       metadata.output = gadget.output;
     }
-    metadata.kind = this.impl.storage.kind.get();
+    metadata.kind = kind;
     if (dataContract !== undefined) metadata.dataContract = dataContract;
 
     let record: BlueprintGadgetRecord = {
@@ -16031,6 +17213,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
       metadata,
       gadgetId: this.id,
       commitId,
+      ...(authoredWidgetBuild ? {authoredWidgetBuild: true as const} : {}),
     };
 
     let screenshot = screenshotUpload ? validateBlueprintScreenshotUpload(screenshotUpload) : undefined;
@@ -16272,6 +17455,241 @@ class SlashCommandAuthorizerImpl extends NativeRpcTarget implements ObservationA
 // quarantined connection refused on the hook routes: the enable that armed a hook may itself be
 // the widening that scheduled a restart, and a shrink-then-rewiden leaves stale firings pointing
 // at a connection pending re-verification (see #gatekeepersPendingRestart).
+/**
+ * Assigns pinned trigger `hookId`'s on-request runs to the service account the connection
+ * `settings.gatekeeperId` provisions for a fresh credential reference, or removes it (FAC-102,
+ * inferops ADR 0011 S1). The connection must be one the trigger's gadget binds, of the vendor the
+ * deployment names in SHARED_CONFIGURATION_GATEKEEPER; without one named there is nothing to assign
+ * to. A change drops runs waiting to start and ends the old reference's system facet. Callers check
+ * the role and authority first.
+ */
+export function setWorkflowTriggerAssignment(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "defaultGadgetId" | "workflowDefinitionStore" |
+        "visibleBindings" | "getGadgetRecord">,
+    caller: AiChatAuthorInfo, hookId: number, settings: TriggerAssignmentSettings | null): TriggerAssignment | null {
+  if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
+  let record = impl.storage.boundHooks.get(hookId);
+  if (!record) throw new Error("No such hook.");
+  let store = impl.workflowDefinitionStore();
+  let previous = store.assignmentOf(hookId);
+  let gatekeeperId: number | null = null;
+  if (settings !== null) {
+    if (!workflowAssignmentsEnabled(impl.env)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+    let requested = typeof settings === "object" ? (settings as {gatekeeperId?: unknown}).gatekeeperId : undefined;
+    if (typeof requested !== "number" || !Number.isSafeInteger(requested)) {
+      throw new TypeError("An assignment names the connection by its id.");
+    }
+    gatekeeperId = requested;
+    let vendor = getSharedConfigurationGatekeeper(impl.env);
+    if (!vendor) throw new Error("This deployment names no service whose accounts can run workflows.");
+    let gadgetId = record.gadgetId ?? impl.defaultGadgetId;
+    let bound = gadgetId !== undefined &&
+        impl.visibleBindings(impl.getGadgetRecord(gadgetId)).some(([, edge]) => edge.target === gatekeeperId);
+    if (!bound || gatekeeperVendorId(impl.storage.gatekeepers.get(gatekeeperId)) !== vendor) {
+      throw new Error(`Assign a ${vendor} connection that this trigger's gadget uses.`);
+    }
+  }
+  let assignment = store.setAssignment(caller, hookId, gatekeeperId);
+  if (previous && previous.credentialRef !== assignment?.credentialRef) retireAssignment(impl, previous);
+  return assignment;
+}
+
+// Ends an assignment's reach: aborts its system facet, so open sessions on it fail, and asks its
+// connection's vendor to delete the key stored for its reference. Best effort for the key, after
+// the change is committed: a failure is logged by hook (never a key), and the reference is never
+// used again, since runs check the live assignment on every call.
+function retireAssignment(impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns">, previous: TriggerAssignment): void {
+  // Each running delivery has its own facet (#374 round 3); abort every one on this reference.
+  for (let deliveryId of impl.systemRuns.deliveriesOf(previous.credentialRef)) {
+    impl.ctx.facets.abort(systemGatekeeperFacetName(previous.credentialRef, deliveryId),
+        new Error("The trigger's assignment ended."));
+  }
+  let vendorId = gatekeeperVendorId(impl.storage.gatekeepers.get(previous.gatekeeperId));
+  let vendor = vendorId === undefined ? undefined : buildGatekeeperVendorMap(impl.env).get(vendorId) as unknown as
+      Pick<GatekeeperVendor, "forgetSystemCredential"> | undefined;
+  void Promise.resolve().then(() => vendor?.forgetSystemCredential?.(previous.credentialRef)).catch(() => {
+    logger.warn("system credential could not be forgotten", {
+      event: "workflow.system_credential.forget.failed", hookId: previous.hookId,
+    });
+  });
+}
+
+/**
+ * Retires trigger `hookId`'s assignment, if it has one, before a route that removes it without
+ * `setWorkflowTriggerAssignment`: clearing the trigger's pin, deleting its hook or its connection
+ * (FAC-102, #374 round 2). Its system facet is aborted and its stored key forgotten.
+ */
+export function retireTriggerAssignment(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">, hookId: number): void {
+  let previous = impl.workflowDefinitionStore().assignmentOf(hookId);
+  if (previous) retireAssignment(impl, previous);
+}
+
+/**
+ * Retires and removes every assignment that no longer has its connection (#374 round 4): its hook
+ * or its trigger's gadget is gone, or the gadget no longer binds the assigned connection (an unbind,
+ * a rebind of the name to another connection, a merge that dropped the edge). Called from
+ * `bumpVersion`, which every change to a gadget's binding edges goes through.
+ */
+export function retireUnboundAssignments(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "defaultGadgetId" | "workflowDefinitionStore" |
+        "visibleBindings" | "getGadgetRecord">): void {
+  let store = impl.workflowDefinitionStore();
+  for (let assignment of store.assignments()) {
+    let hook = impl.storage.boundHooks.get(assignment.hookId);
+    let gadgetId = hook ? hook.gadgetId ?? impl.defaultGadgetId : undefined;
+    let gadget = gadgetId === undefined ? undefined : impl.storage.gadgets.get(gadgetId);
+    let bound = gadget !== undefined && gadget.type === "gadget" &&
+        impl.visibleBindings(impl.getGadgetRecord(gadgetId!)).some(([, edge]) => edge.target === assignment.gatekeeperId);
+    if (bound) continue;
+    retireAssignment(impl, assignment);
+    store.removeAssignment(assignment.hookId);
+  }
+}
+
+/**
+ * Retires and removes every assignment whose runs use connection `gatekeeperId`, before that
+ * connection is deleted (#374 round 3): an assignment's connection is chosen apart from the hook's
+ * host, so the hooks hosted on it aren't all of them.
+ */
+export function retireAssignmentsUsing(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">, gatekeeperId: number): void {
+  let store = impl.workflowDefinitionStore();
+  for (let assignment of store.assignmentsUsing(gatekeeperId)) {
+    retireAssignment(impl, assignment);
+    store.removeAssignment(assignment.hookId);
+  }
+}
+
+/**
+ * Gives assigned trigger `hookId`'s connection the service account's `key` (FAC-102, the lead's
+ * option a): relayed once to the connection's vendor (`provisionSystemCredential`), which checks it
+ * with its service before storing it, replacing any given before. Nothing of the key is kept, logged,
+ * echoed or returned here, and any refusal reads `PROVISION_REFUSED` whatever the reason, with no
+ * cause attached. Records who gave it and when. Callers check the role and authority first.
+ */
+export async function provisionWorkflowTriggerCredential(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">,
+    caller: AiChatAuthorInfo, hookId: number, key: string): Promise<TriggerAssignment> {
+  if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
+  if (!workflowAssignmentsEnabled(impl.env)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+  let assignment = impl.workflowDefinitionStore().assignmentOf(hookId);
+  if (!assignment) throw new Error("This trigger isn't assigned to a service account.");
+  if (typeof key !== "string" || !key || key.length > MAX_PROVISIONED_KEY_LENGTH) throw new Error(PROVISION_REFUSED);
+  let record = impl.storage.gatekeepers.get(assignment.gatekeeperId);
+  let vendorId = gatekeeperVendorId(record);
+  let resourceUrl = gatekeeperResourceUrl(record);
+  let vendor = vendorId === undefined ? undefined : buildGatekeeperVendorMap(impl.env).get(vendorId) as unknown as
+      Pick<GatekeeperVendor, "provisionSystemCredential" | "forgetSystemCredential"> | undefined;
+  if (!vendor?.provisionSystemCredential || resourceUrl === undefined) throw new Error(PROVISION_REFUSED);
+  try {
+    await vendor.provisionSystemCredential(assignment.credentialRef, {resourceUrl}, key);
+  } catch {
+    // The vendor's reason may quote the key or the service's answer; neither leaves here.
+    logger.warn("system credential was not accepted", {
+      event: "workflow.system_credential.refused", hookId,
+    });
+    throw new Error(PROVISION_REFUSED);
+  }
+  // The vendor has stored the key. Anything failing from here leaves it at rest for a reference
+  // this trigger no longer uses, so forget it before refusing (#375 round 2).
+  let marked: TriggerAssignment | null;
+  try {
+    marked = impl.workflowDefinitionStore().markProvisioned(hookId, assignment.credentialRef, caller);
+  } catch (error) {
+    await forgetProvisioned(impl, vendor, assignment);
+    throw error;
+  }
+  // The assignment changed while the key was being checked: what was stored is for a dead reference.
+  if (!marked) {
+    await forgetProvisioned(impl, vendor, assignment);
+    throw new Error("This trigger's assignment changed. Assign it again, then give the key.");
+  }
+  return marked;
+}
+
+/**
+ * Forgets the key just stored for `assignment`'s reference. If the vendor can't (#374, review.r2's
+ * recheck), fails closed: an assignment still on that reference is retired and removed, its
+ * facets aborted and its waiting runs dropped, so no run can act with a key provisioning refused.
+ * Logs by hook only, never the key or the reference.
+ */
+async function forgetProvisioned(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">,
+    vendor: Pick<GatekeeperVendor, "forgetSystemCredential">, assignment: TriggerAssignment): Promise<void> {
+  try {
+    if (!vendor.forgetSystemCredential) throw new Error("This connection can't forget a credential.");
+    await vendor.forgetSystemCredential(assignment.credentialRef);
+  } catch {
+    logger.warn("system credential could not be forgotten", {
+      event: "workflow.system_credential.forget.failed", hookId: assignment.hookId,
+    });
+    let store = impl.workflowDefinitionStore();
+    if (store.assignmentOf(assignment.hookId)?.credentialRef === assignment.credentialRef) {
+      retireAssignment(impl, assignment);
+      store.removeAssignment(assignment.hookId);
+      // Retired automatically, not by a person: refuse runs on request until an Admin acts (B).
+      store.markAutoRetired(assignment.hookId);
+    }
+  }
+}
+
+/**
+ * Admit `profileId`'s request to run trigger `hookId` now, then ask the trigger's gatekeeper to
+ * deliver it once (Overseer.invokeTrigger). The hook must be live, the person (`userId`) must hold
+ * InferOps' `workflow:invoke` through their own account where the deployment names that authority
+ * (`requireWorkflowInvoke`), and the control must list them; the gatekeeper gets only the minted invocation id, and its delivery goes through
+ * startHook like any other, which runs the pinned revision with the gadget's own bindings. A
+ * gatekeeper that can't run on request, or refuses now, leaves no invocation behind.
+ */
+export async function invokeWorkflowTrigger(
+    impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
+        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations">,
+    userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
+  if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
+  requireLiveHook(impl as OverseerImpl, hookId);
+  // The person's own InferOps grant (workflow:invoke), asked freshly at every request, so a removed
+  // grant stops the next run. Before anything is minted or handed on.
+  await requireWorkflowInvoke(impl, userId, hookId);
+  // Re-read after the await: the input gate was open, so the hook may have been disabled meanwhile.
+  let record = requireLiveHook(impl as OverseerImpl, hookId);
+  let store = impl.workflowDefinitionStore();
+  // Assignments off (FAC-102): a trigger assigned before is refused here, before anything is minted.
+  if (!workflowAssignmentsEnabled(impl.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+  if (store.autoRetiredOf(hookId)) throw new Error(TRIGGER_AUTO_RETIRED);
+  let invocation = store.beginInvocation(profileId, hookId);
+  // What startHook reads to tell this call's delivery taken (see takenInvocations).
+  impl.takenInvocations.set(invocation.id, false);
+  try {
+    await (record.controller as unknown as HookController<RpcTarget>).invoke!({invocationId: invocation.id});
+  } catch (error) {
+    // Decided by the recorded outcome, never by the error's words or by the request having gone
+    // (#374, review.r2): startHook marks the invocation taken as its delivery consumes it. Taken,
+    // the failure is the run's own and surfaces with its cause, whatever it names. Not taken (the
+    // gatekeeper never delivered it, or a pin, control or assignment change dropped it), the
+    // invoker gets fixed words only: that it can't run on request when the gatekeeper has no
+    // `invoke`, our own refusal when we gave one, and otherwise that it couldn't run just now.
+    let taken = impl.takenInvocations.get(invocation.id) === true;
+    store.cancelInvocation(invocation.id);
+    if (taken) throw error;
+    // The replaced error stays here, in the log: a fixed refusal carries no `cause`, since RPC
+    // would send it to the invoker along with the words meant to replace it (#374 re-QA).
+    logger.warn("on-request run did not start", { event: "workflow.invoke.not_started", hookId, error });
+    let message = error instanceof Error ? error.message : String(error);
+    if (/does not implement the method "invoke"|\binvoke is not a function|no such method:? "?invoke\b/i.test(message)) {
+      // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
+      throw new Error("This trigger can't be run on request.");
+    }
+    // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
+    if (message === WORKFLOW_ASSIGNMENTS_DISABLED || message === TRIGGER_AUTO_RETIRED) throw new Error(message);
+    // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
+    throw new Error(RUN_NOT_STARTED);
+  } finally {
+    impl.takenInvocations.delete(invocation.id);
+  }
+  return invocation;
+}
+
 function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {
   let record = impl.storage.boundHooks.get(hookId);
   if (!record?.enabled) throw new Error("Hook has been deleted or disabled.");
@@ -16290,6 +17708,33 @@ function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {
 // firing as independent stubs (the bindHook contract permits hooks to pass and return them) and
 // are not re-checked per call. That is deliberate: the holder is a gatekeeper bound by the session
 // contract, and this is a guard against a stale firing by mistake, not a revocable membrane.
+// The callback startHook returns for an admitted, assigned delivery (FAC-102): any call on it runs
+// the delivery once in its run-scoped worker (OverseerImpl.runAssignedDelivery), as its `WorkflowRun`
+// entrypoint's method of the same name (`run` when the callback itself is called). A second call is
+// refused, so a stored callback is no standing route to the service account.
+function makeSystemRunCallback(impl: OverseerImpl, hookId: number,
+    delivery: {deliveryId: number; commitId: string; credentialRef: string}): NativeRpcStub<RpcTarget> {
+  let used = false;
+  let once = (method: string | null, args: unknown[]) => {
+    if (used) throw new Error("This run already started.");
+    used = true;
+    return impl.runAssignedDelivery(hookId, delivery, method, args);
+  };
+  // TODO: Same workerd bug as makeHookFiringCallback: wrap the Proxy in a stub manually.
+  return new NativeRpcStub(new Proxy((() => {}) as unknown as RpcTarget, {
+    async apply(_target, _thisArg, args: unknown[]) {
+      return once(null, args);
+    },
+    get(_target, prop) {
+      if (typeof prop === "symbol" || prop === "then") return undefined;
+      return async (...args: unknown[]) => once(prop, args);
+    },
+    getPrototypeOf() {
+      return RpcTarget.prototype;
+    },
+  }));
+}
+
 function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcStub<RpcTarget> {
   // The proxy target must be callable for the `apply` trap to ever fire (a Proxy over a
   // non-callable target is itself non-callable), and the bindHook contract allows the bound
@@ -16321,6 +17766,36 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
   }));
 }
 
+// The receipt `ApprovalQueueImpl.submitAction` returns (FAC-97): the one way to read a submitted
+// action's status. Its `status` closes over that action's journal id and the connection it came
+// through, and reads only that record from this workspace's own journal; nothing takes an id from a
+// caller. So a receipt can't be forged or pointed at another gadget's, connection's or workspace's
+// action: reading one takes holding its `status` function, which RPC passes as a stub. What it says
+// about a refusal is a fixed code and the kernel's own fixed sentence for it, never the attempt's
+// message: provider text can name other people or carry secrets, and it stays in the action log for
+// the people deciding actions.
+function actionReceipt(impl: OverseerImpl, gatekeeperId: number, id: number): ActionReceipt {
+  return {
+    actionId: `action-${id}`,
+    status: async (): Promise<ActionReceiptStatus> => {
+      let record = impl.storage.actions.get(id);
+      if (record?.type !== "action" || record.gatekeeperId !== gatekeeperId) {
+        throw new Error("This action is no longer recorded in this workspace.");
+      }
+      let entry = actionRecordToLog(record) as Extract<ActionLogEntry, { type: "action" }>;
+      let outcome = actionOutcome(entry);
+      let attempt = entry.lastAttempt;
+      let refused = outcome === "failed" || outcome === "unknown" || outcome === "waiting";
+      let code = attempt && refused ? actionReceiptCode(attempt.code) : undefined;
+      return {
+        outcome,
+        ...(outcome === "succeeded" && entry.result ? { result: entry.result } : {}),
+        ...(code ? { code, reason: outcome === "unknown" ? ACTION_RECEIPT_UNKNOWN_REASON : ACTION_RECEIPT_REASON[code] } : {}),
+      };
+    },
+  };
+}
+
 @validateRpc()
 class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   // `hookId` is set only on the queue startHook returns with each firing: that queue is held by
@@ -16343,10 +17818,11 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
     return new GitCacheImpl(this.impl.gitCache, this.gatekeeperId);
   }
 
-  async submitAction(action: number, description: ActionDescription): Promise<void> {
+  async submitAction(action: number, description: ActionDescription): Promise<ActionReceipt> {
     await this.impl.resolveEnablerRoles();
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
-    this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller);
+    let id = this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller);
+    return actionReceipt(this.impl, this.gatekeeperId, id);
   }
 
   bindHook<Hook extends RpcTarget>(

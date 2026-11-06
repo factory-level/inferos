@@ -2,11 +2,15 @@ import { useEffect, useState } from 'react'
 import { useKumoToastManager } from '@cloudflare/kumo'
 import { LightningIcon } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
-import type { BoundHookInfo, GadgetSummary, Overseer } from '@gadgets/workshop-shared/api'
-import type { WorkflowDefinition, WorkflowDefinitionRef } from '@gadgets/workshop-shared/workflow-definition'
+import type { BoundHookInfo, CollaboratorInfo, GadgetSummary, Overseer } from '@gadgets/workshop-shared/api'
+import type {
+  TriggerAssignment, TriggerControl, WorkflowDefinition, WorkflowDefinitionRef,
+} from '@gadgets/workshop-shared/workflow-definition'
 import { HookToggle } from '../../components/HookToggle'
 import { WorkshopButton } from '../../components/WorkshopControls'
 import { reportIssue } from '../../errorReporting'
+import { type AssignableConnection, TriggerAssignmentEditor } from './TriggerAssignmentEditor'
+import { TriggerControlEditor } from './TriggerControlEditor'
 import { WorkflowDefinitionsSection } from './WorkflowDefinitionsSection'
 
 type Props = {
@@ -28,6 +32,16 @@ type Loaded =
       definitions: WorkflowDefinition[]
       // Each hook's pinned definition revision, by hook id; absent when unpinned.
       pins: ReadonlyMap<number, WorkflowDefinitionRef>
+      // Each pinned hook's run-on-request control, by hook id; absent when it has none.
+      controls: ReadonlyMap<number, TriggerControl>
+      // Who a control can list: the workspace's collaborators.
+      collaborators: CollaboratorInfo[]
+      // Each pinned hook's service-account assignment, by hook id; absent when it has none.
+      assignments: ReadonlyMap<number, TriggerAssignment>
+      // Whether this instance has assignments on, as the server reads it (off by default).
+      assignmentsEnabled: boolean
+      // The connections each pinned hook's gadget binds, which an assignment can choose, by hook id.
+      connections: ReadonlyMap<number, AssignableConnection[] | null>
     }
 
 // The definition revision a trigger could run: the published one for the gadget it wakes.
@@ -39,6 +53,25 @@ const publishedFor = (definitions: readonly WorkflowDefinition[], gadgetId: numb
       ? [{ definition, ref: { definitionId: definition.id, revision: revision.revision } }]
       : []
   })
+
+// The connections a trigger's gadget binds, once each, for choosing who its runs act as. The server
+// checks the choice. A gadget that can't be read gives null, which the editor shows as an error
+// with a retry, rather than as having no connections or failing the whole panel.
+const connectionsOf = async (overseer: RpcStub<Overseer>, gadgetId: number): Promise<AssignableConnection[] | null> => {
+  const gadget = overseer.getGadget(gadgetId)
+  try {
+    const bindings = await gadget.listBindings()
+    const seen = new Map<number, AssignableConnection>()
+    for (const b of bindings) {
+      if (b.vendorId !== undefined && !seen.has(b.target)) seen.set(b.target, { id: b.target, title: b.resourceTitle })
+    }
+    return [...seen.values()]
+  } catch {
+    return null
+  } finally {
+    gadget[Symbol.dispose]()
+  }
+}
 
 /**
  * A workflow's output pane: what wakes it, in place of an app preview. Lists the workspace's bound
@@ -63,15 +96,29 @@ export const WorkflowTriggersPanel = ({
   useEffect(() => {
     let cancelled = false
     const load = async () => {
-      const [hooks, definitions] = await Promise.all([overseer.listHooks(), overseer.listWorkflowDefinitions()])
+      const [hooks, definitions, controlList, collaborators] = await Promise.all([
+        overseer.listHooks(), overseer.listWorkflowDefinitions(), overseer.listTriggerControls(),
+        overseer.listCollaborators().catch(() => [] as CollaboratorInfo[]),
+      ])
       const refs = await Promise.all(hooks.map(h => overseer.getTriggerDefinition(h.id)))
       const pins = new Map<number, WorkflowDefinitionRef>()
       refs.forEach((ref, i) => { if (ref) pins.set(hooks[i]!.id, ref) })
-      return { hooks, definitions, pins }
+      const controls = new Map(controlList.map(control => [control.hookId, control]))
+      const pinned = hooks.filter(h => pins.has(h.id))
+      const [assignmentList, connectionList] = await Promise.all([
+        Promise.all(pinned.map(h => overseer.getTriggerAssignment(h.id))),
+        Promise.all(pinned.map(h => connectionsOf(overseer, h.gadgetId))),
+      ])
+      const assignments = new Map<number, TriggerAssignment>()
+      assignmentList.forEach((state, i) => { if (state.assignment) assignments.set(pinned[i]!.id, state.assignment) })
+      // One instance-wide switch; every read reports the same.
+      const assignmentsEnabled = assignmentList.some(state => state.enabled)
+      const connections = new Map(pinned.map((h, i) => [h.id, connectionList[i]!]))
+      return { hooks, definitions, pins, controls, collaborators, assignments, assignmentsEnabled, connections }
     }
     load()
-      .then(({ hooks, definitions, pins }) => {
-        if (!cancelled) setLoaded({ status: 'ready', hooks, definitions, pins })
+      .then(ready => {
+        if (!cancelled) setLoaded({ status: 'ready', ...ready })
       })
       .catch(err => {
         reportIssue('workflow-triggers.load', err)
@@ -175,10 +222,8 @@ export const WorkflowTriggersPanel = ({
                   const candidates = publishedFor(loaded.definitions, hook.gadgetId)
                     .filter(c => c.ref.definitionId !== pin?.definitionId || c.ref.revision !== pin?.revision)
                   return (
-                    <li
-                      key={hook.id}
-                      className={`flex items-center gap-3 px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''}`}
-                    >
+                    <li key={hook.id} className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''}`}>
+                    <div className="flex items-center gap-3">
                       <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-kumo-fill text-kumo-subtle">
                         <LightningIcon size={15} aria-hidden="true" />
                       </span>
@@ -215,6 +260,31 @@ export const WorkflowTriggersPanel = ({
                         disabled={toggling.has(hook.id)}
                         onToggle={enabled => handleToggle(hook.id, enabled)}
                       />
+                    </div>
+                    {pin && (
+                      <TriggerControlEditor
+                        // A saved or removed control remounts the editor with what the server kept.
+                        key={`${hook.id}:${JSON.stringify(loaded.controls.get(hook.id) ?? null)}`}
+                        overseer={overseer}
+                        hookId={hook.id}
+                        pin={pin}
+                        control={loaded.controls.get(hook.id) ?? null}
+                        collaborators={loaded.collaborators}
+                        onChanged={() => setReloadTick(t => t + 1)}
+                      />
+                    )}
+                    {pin && (
+                      <TriggerAssignmentEditor
+                        // An assigned, given or removed key remounts the editor with what the server kept.
+                        key={`${hook.id}:${JSON.stringify(loaded.assignments.get(hook.id) ?? null)}`}
+                        overseer={overseer}
+                        hookId={hook.id}
+                        enabled={loaded.assignmentsEnabled}
+                        assignment={loaded.assignments.get(hook.id) ?? null}
+                        connections={loaded.connections.get(hook.id) ?? null}
+                        onChanged={() => setReloadTick(t => t + 1)}
+                      />
+                    )}
                     </li>
                   )
                 })}

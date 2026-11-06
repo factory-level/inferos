@@ -7,13 +7,14 @@ import { initialConsumerConfig } from "./config.ts";
 import { checkConsumerFixture, validateBoardFixture } from "./fixtures.ts";
 
 const fixture = () => JSON.parse(readFileSync(new URL("./project-board.json", import.meta.url), "utf8"));
+const providerRevision = () => JSON.parse(readFileSync(new URL("../../custom-gatekeepers/gatekeeper-inferops/connection.json", import.meta.url), "utf8")).compatibility.provider.revision;
 const ref = "inferops://demo.local/project/board/DEMO";
 
 test("canonical fixture validates without returning record contents or losing bigint precision", () => {
   const input = fixture();
   input.columns[0].issues[0].revision = "900719925474099300001";
   const result = validateBoardFixture(input, ref);
-  assert.deepEqual(result, { projects: 1, columns: 3, issues: 1, schemaRevision: "0bc12ccc8f9758c4556ff5eb3502a6b7c9fa8262" });
+  assert.deepEqual(result, { projects: 1, columns: 3, issues: 1, schemaRevision: providerRevision() });
   assert.equal(input.columns[0].issues[0].revision, "900719925474099300001");
 });
 

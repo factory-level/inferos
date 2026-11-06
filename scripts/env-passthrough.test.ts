@@ -134,6 +134,10 @@ const EXPECTED: Record<string, ExpectedArea> = {
       // scripts/stage reads its admins, the optional Access service token for the post-deploy smoke
       // and the InferOps gatekeeper's optional InferLab edge secret.
       "STAGE_ADMINS", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "INFEROPS_EDGE_SECRET",
+      // stage.ts resolves the sibling InferOps checkout for release-tag and pin validation.
+      "INFEROPS_REPO",
+      // The local company-storage command reads this only when explicitly purging with --apply.
+      "INFEROPS_OFFBOARDING_TOKEN",
       // Read by `vp/concurrency.ts` in the wrapper before `vp` starts, never inside a task.
       "VP_RUN_CONCURRENCY_LIMIT",
       // The MOCK `inferops` and `codex` binaries in local/testdata, started as processes by the runner

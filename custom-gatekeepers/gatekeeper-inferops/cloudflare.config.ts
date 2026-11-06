@@ -21,4 +21,6 @@ export const migrations: DurableObjectMigration[] = [
   { tag: "v5", new_sqlite_classes: ["InferOpsMembersGatekeeper"] },
   { tag: "v6", new_sqlite_classes: ["InferOpsWorkflowPolicyGatekeeper"] },
   { tag: "v7", new_sqlite_classes: ["InferOpsAccountGatekeeper"] },
+  // FAC-102: the service-account keys of configured system workflows, one per assignment reference.
+  { tag: "v8", new_sqlite_classes: ["InferOpsSystemCredentials"] },
 ];

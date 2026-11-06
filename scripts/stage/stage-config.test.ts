@@ -3,16 +3,20 @@
 // not covered here.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { gatekeeperShortName, isGatekeeperPackage, readDeployablePackages } from "../release/manifest-lib.ts";
 import { ROOT, gatekeeperBindingName, type StagingConfig } from "../preview/staging-config.ts";
 import {
   buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageBucketName,
-  stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageTiers,
+  stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageR2Buckets, stageTiers,
   stageWorkerHost, stageWorkerName, resolveStageAdmins,
 } from "./stage-config.ts";
 import { STAGES, resolveStage, stageDefinitionProblems, type StageDefinition } from "./stages.ts";
-import { parseStageArgs } from "./stage.ts";
+import { parseStageArgs, resolveInferOpsReleaseTag } from "./stage.ts";
 
 const ACCOUNT_ID = "0".repeat(32);
 const ALL_PACKAGES = readDeployablePackages(ROOT);
@@ -133,6 +137,7 @@ test("resources are the stage's own, named stably and bound by id", () => {
   }
   assert.deepEqual(backend.r2_buckets, [{ binding: "BLUEPRINT_CONTENT", bucket_name: "inferos-prod-blueprint-content" }]);
   assert.equal(stageBucketName(stage, "BLUEPRINT_CONTENT"), "inferos-prod-blueprint-content");
+  assert.deepEqual(stageR2Buckets(stage, ALL_PACKAGES), ["inferos-prod-blueprint-content"]);
   assert.deepEqual(stageKvNamespaces(stage, ALL_PACKAGES).map((ns) => ns.title).toSorted(), [
     "inferos-prod-gatekeeper-context-context-collections",
     "inferos-prod-workshop-backend-avatars",
@@ -202,6 +207,24 @@ test("the backend signs in with InferLab only and carries no secret in its vars"
   assert.equal(build("dev").get("workshop-backend")?.vars?.CANVAS_CATALOG, undefined);
 });
 
+test("dev offers one cheap model with a daily turn cap; prod has no model bounds", () => {
+  const dev = build("dev").get("workshop-backend") as StagingConfig;
+  assert.equal(dev.vars?.MODEL_ALLOWLIST, "claude-haiku-5-5");
+  assert.equal(dev.vars?.DAILY_AGENT_TURN_LIMIT, "40");
+  const prod = build("prod").get("workshop-backend") as StagingConfig;
+  assert.equal(prod.vars?.MODEL_ALLOWLIST, undefined);
+  assert.equal(prod.vars?.DAILY_AGENT_TURN_LIMIT, undefined);
+});
+
+test("model bounds must name models and a positive daily cap", () => {
+  const problems = (agents: StageDefinition["agents"]) => stageDefinitionProblems({ ...STAGES.dev, agents }).join("\n");
+  assert.match(problems({ models: [], dailyTurnLimit: 1 }), /at least one model/);
+  assert.match(problems({ models: ["a,b"], dailyTurnLimit: 1 }), /not a model id/);
+  assert.match(problems({ models: ["claude-haiku-5-5"], dailyTurnLimit: 0 }), /positive integer/);
+  assert.match(problems({ models: ["claude-haiku-5-5"], dailyTurnLimit: 1.5 }), /positive integer/);
+  assert.equal(problems({ models: ["claude-haiku-5-5"], dailyTurnLimit: 1 }), "");
+});
+
 test("secrets: admins are required, and the plan names secrets without their values", () => {
   assert.throws(() => resolveStageAdmins({ list: " , " }), /STAGE_ADMINS/);
   const sentinel = "sentinel-secret-value-9f2c";
@@ -260,15 +283,42 @@ test("destructive Durable Object migrations are found; the committed ones have n
 test("the CLI parses its flags and refuses anything else", () => {
   assert.deepEqual(parseStageArgs(["deploy", "dev", "--dry-run", "--allow-dirty"]), {
     command: "deploy", stage: "dev", wrapper: undefined, dryRun: true, allowDirty: true,
-    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined,
+    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined, inferopsSha: undefined,
   });
   assert.deepEqual(parseStageArgs(["deploy", "--wrapper", "/w", "--dry-run"]), {
     command: "deploy", stage: "", wrapper: "/w", dryRun: true, allowDirty: false,
-    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined,
+    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined, inferopsSha: undefined,
   });
   assert.throws(() => parseStageArgs(["deploy", "dev", "--wrapper", "/w"]), /not both or neither/);
   assert.throws(() => parseStageArgs(["deploy", "--wrapper", "/w", "--allow-dirty"]), /clean tree/);
   assert.equal(parseStageArgs(["delete", "prod", "--confirm", "os.factorylevel.dev"]).confirm, "os.factorylevel.dev");
+  assert.equal(parseStageArgs(["deploy", "dev", "--inferops-sha", "a".repeat(40)]).inferopsSha, "a".repeat(40));
   assert.throws(() => parseStageArgs(["deploy"]), /Usage/);
   assert.throws(() => parseStageArgs(["deploy", "dev", "--force"]), /unknown argument: --force/);
+  assert.throws(() => parseStageArgs(["deploy", "dev", "--inferops-sha", "short-sha"]), /full 40-character commit SHA/);
+});
+
+test("the deployed InferOps release tag resolves after fetching tags, and a missing tag fails closed", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferops-release-tag-"));
+  const remote = join(root, "origin.git");
+  const source = join(root, "source");
+  const deploy = join(root, "deploy");
+  try {
+    execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" });
+    execFileSync("git", ["clone", remote, source], { stdio: "ignore" });
+    execFileSync("git", ["clone", remote, deploy], { stdio: "ignore" });
+    execFileSync("git", ["-C", source, "config", "user.name", "InferOS test"]);
+    execFileSync("git", ["-C", source, "config", "user.email", "inferos-test@example.invalid"]);
+    writeFileSync(join(source, "revision.txt"), "release\n");
+    execFileSync("git", ["-C", source, "add", "revision.txt"]);
+    execFileSync("git", ["-C", source, "commit", "-m", "release"]);
+    execFileSync("git", ["-C", source, "tag", "v1.2.3"]);
+    const expected = execFileSync("git", ["-C", source, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", source, "push", "origin", "HEAD:main", "--tags"]);
+
+    assert.equal(resolveInferOpsReleaseTag(deploy, "v1.2.3"), expected);
+    assert.throws(() => resolveInferOpsReleaseTag(deploy, "v9.9.9"), /release tag v9\.9\.9 does not resolve/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

@@ -1,6 +1,6 @@
 ---
 title: Deploy a persistent stage
-updated: 2026-11-03
+updated: 2026-11-05
 ---
 
 # Deploy a persistent stage
@@ -35,9 +35,10 @@ How to deploy, update, roll back and delete the two persistent InferOS instances
 ## Steps
 
 1. Rehearse with no network: `pnpm stage:deploy dev --dry-run`. It prints every worker, its vars, the backend's secret names (never values), the KV namespaces and the bucket.
-2. Deploy: `pnpm stage:deploy dev`. It builds the workspace (frontend in non-Access mode), creates any missing KV namespace, writes `wrangler.stage-dev.jsonc` beside each package, deploys gatekeepers, then the backend, then the router, checks that only the router (and, on `dev`, the gatekeeper's sign-in proxy) has a URL, checks the Access redirect on every stage hostname, and runs the smoke when a service token is set. `dev` refuses a dirty tree unless `--allow-dirty`; `prod` always refuses one.
-3. Accept it by hand: sign in through Access, choose "Sign in with InferLab", and open a board you hold (`inferops://<tenant>.<workspace>/project/board/<KEY>`). A config that validates is not acceptance. On `dev`, the reserved grokbot personas and their board are set up as in [set up the grokbot tenant for dev-os](grokbot-dev-os.md).
-4. Re-deploying is the same command; KV namespaces, the bucket and every Durable Object are kept.
+2. Confirm the InferOps release reported by `/status` (`version`, for example `v1.297.0`). InferOps runs on Cloud Run; its release tag identifies the deployed application revision. `stage:deploy` refreshes tags in the checkout at `INFEROPS_REPO` (or sibling `../inferops`) and resolves the tag with `git rev-list -n 1 <tag>`. If the deployed tag is unavailable or cannot be resolved, use `--inferops-sha <full-40-character-sha>` with the exact commit confirmed by the service owner. The checkout must contain the release commit. Deploy refuses a revision not descended from `connection.json`'s reviewed pin or whose board DTO changed since that pin; regenerate and review `scripts/consumer/project-board.schema.json` and update the pin before deploying such a change. Do not infer the deployed revision from a branch name or an InferOS Cloudflare Worker version.
+3. Deploy: `pnpm stage:deploy dev`. It builds the workspace (frontend in non-Access mode), creates any missing KV namespace, writes `wrangler.stage-dev.jsonc` beside each package, deploys gatekeepers, then the backend, then the router, checks that only the router (and, on `dev`, the gatekeeper's sign-in proxy) has a URL, checks the Access redirect on every stage hostname, and runs the smoke when a service token is set. `dev` refuses a dirty tree unless `--allow-dirty`; `prod` always refuses one. The successful command prints a JSON deploy record containing the InferOS commit, stage config digest, resolved InferOps commit and compatibility pin, and smoke report or skip reason. Save that record with the deployment evidence.
+4. Accept it by hand: sign in through Access, choose "Sign in with InferLab", and open a board you hold (`inferops://<tenant>.<workspace>/project/board/<KEY>`). A config that validates is not acceptance. On `dev`, the reserved grokbot personas and their board are set up as in [set up the grokbot tenant for dev-os](grokbot-dev-os.md).
+5. Re-deploying is the same command; KV namespaces, the bucket and every Durable Object are kept.
 
 ## InferLab edge secret
 
@@ -48,6 +49,26 @@ Dev InferLab's WAF lets the stage through only when the InferOps side and this s
 3. Deploy with `pnpm stage:deploy dev`, then sign in with InferLab.
 4. **Rotate.** Change both values and redeploy both sides. Requests are refused between the two deploys.
 5. **Remove.** Leaving the variable out does not delete the value, because a deploy without it keeps the previous version's secret. Delete it with `pnpm exec wrangler secret delete INFEROPS_EDGE_SECRET --name inferos-dev-gatekeeper-inferops`.
+
+## Agents on dev
+
+`dev` offers one model, Claude Haiku 5.5, with 40 agent turns per workspace owner per UTC day (`agents` in `scripts/stage/stages.ts`). It still needs a model source, which takes a person's steps:
+
+1. **Store the key in the gateway.** In the Cloudflare dashboard, AI Gateway, open or create the gateway in the stage's account. Add the Anthropic key to its stored provider keys. The key never goes in `.stage-dev.vars`, a stage secret or the repository.
+2. **Bound the spend.** In the Anthropic console, set the monthly spend limit on that key's workspace. It's the only dollar bound: InferOS counts turns, not dollars.
+3. **Name the gateway.** Add to `.stage-dev.vars`: `CF_AI_GATEWAY=<gateway name>`, `CF_AI_GATEWAY_ACCOUNT_ID=<account id>` and `CF_AI_GATEWAY_PROVIDERS=anthropic`. If the gateway is in the stage's own account, the `WORKERS_AI` binding carries requests and `CF_AI_GATEWAY_API_TOKEN` isn't needed. If it's in another account, add `CF_AI_GATEWAY_USE_BINDING=false` and a `CF_AI_GATEWAY_API_TOKEN` with Run and Read permission.
+4. **Rehearse.** `pnpm stage:deploy dev --dry-run`. The backend's secrets line should name `CF_AI_GATEWAY`, `CF_AI_GATEWAY_ACCOUNT_ID` and `CF_AI_GATEWAY_PROVIDERS`, with no value. Its vars should list `MODEL_ALLOWLIST` and `DAILY_AGENT_TURN_LIMIT`; the plan prints names, not values.
+5. **Deploy and accept.** `pnpm stage:deploy dev`, then sign in as a tester seat and send a chat message. The picker should offer only Claude Haiku 5.5.
+
+### How a tester seat signs in
+
+1. Open `https://dev-os.factorylevel.dev`. **Cloudflare Access** asks for an email: use the address its Allow policy names for this tester. A one-time code goes to that mailbox.
+2. Choose **Sign in with InferLab**. The persona page (`auth.dev-os.factorylevel.dev`) lists the reserved test seats. Pick one: `owner@grokbot.inferlab.dev`, `power@grokbot.inferlab.dev` or `operate@grokbot.inferlab.dev`. No password or secret is involved.
+3. **Your InferOS account is that email.** A different seat, or a seat whose address changed, is a different account, with its own empty list of workspaces, not lost ones. Check `/profile` to see which you're in. To switch seats, sign out of InferOS, open `https://auth.dev-os.factorylevel.dev/logout?return=/`, then sign in again.
+
+When the day's turns are used up, the chat says so and when they reset. Nothing else changes.
+
+On dev, a Gadget can't bind the platform's model, since the daily cap can't count a binding's calls: binding one is refused with a message saying so. A model a person adds on their own key can still be bound. A hand-added model that would run on the platform's gateway must be one dev offers.
 
 ## A company's own InferOS, from its wrapper
 
@@ -107,8 +128,18 @@ A company's InferOS is deployed from its wrapper repository, at the InferOS revi
 ## Rollback and deletion
 
 - `pnpm exec wrangler rollback --name inferos-<stage>-<package>` returns one worker to an earlier version. It never undoes a Durable Object migration, which is why the deploy refuses destructive migrations unless `--allow-destructive-migrations` is passed.
-- `pnpm stage:delete <stage> --confirm <hostname>` deletes the stage's workers, router first, and with them every Durable Object (all users' Workshop data). KV namespaces and the bucket are kept; delete them in the dashboard if that is intended.
+- The gatekeeper reports sanitized connected-InferOps readiness at `/gatekeeper/inferops/health/ready`; `pnpm local factory doctor stage-probe` and the authenticated stage smoke check this route. The response includes component names and statuses only. `degraded` means the service is ready with an optional component degraded; the probe and smoke name that component without failing. `down`, an unreadable body or non-200 remains not ready. InferOps `/status` publishes its Cloud Run release tag, which the deploy resolves to a commit; it is not an InferOS Cloudflare Worker version. The deploy record is evidence of the selected revisions and smoke outcome, not a rollback mechanism. For an InferOS application rollback, roll back affected Worker versions together and rerun the Access-protected smoke. Do not change prefixes, namespaces or Durable Object migrations during recovery.
+- InferOS persistent state is held in Cloudflare Durable Objects, KV and R2; InferOps application records and jobs are held in its database. Restarting a Worker or Cloud Run revision does not itself delete those stores. In-memory work and connections are transient: let health checks recover and rerun the smoke after a restart. Do not use `stage:delete` or change a stage prefix as a restart or rollback method.
+- `pnpm stage:delete <stage> --confirm <hostname>` deletes the stage's workers, router first, and with them every Durable Object (all users' Workshop data). It prints the exact KV namespaces and R2 buckets retained. It performs no export or KV/R2 deletion. For a real stage, a person must export and delete only the printed KV/R2 names in the matching Cloudflare account.
 - Never change a stage's `workerPrefix` or `resourcePrefix` in `scripts/stage/stages.ts`: the next deploy would create a new, empty instance and abandon the old one.
+
+## Configuration, restart and recovery
+
+- **InferOS stage configuration:** `.stage-<stage>.vars` or the shell supplies non-secret deploy variables such as `CLOUDFLARE_ACCOUNT_ID`. Wrangler secret inputs such as `STAGE_ADMINS`, `INFEROPS_EDGE_SECRET` and optional `CF_AI_GATEWAY_*` values are uploaded as secrets; the deploy plan and deploy record name secrets but never print their values. Keep secret values in the approved secret store or ignored local vars file. Do not put them in this runbook, command transcripts or a generated checked-in config.
+- **InferOps configuration:** the service selects its config with `NODE_CONFIG_ENV`; environment config files are combined with the encrypted `config/<environment>.sops.json` layer, and runtime secret environment values come from Google Secret Manager (`secretEnvs`). Treat those files and secret values as separate from InferOS Wrangler vars/secrets. Record names and the selected environment only. Never copy a decrypted config between worktrees or include values in deploy evidence.
+- **Cloudflare recovery (InferOS):** identify the affected stage and Worker, inspect the deploy record, then use the Cloudflare dashboard's Workers & Pages deployment history to send traffic back to the known-good version. Coordinate the router and affected gatekeepers/backend as one compatible set, then verify the Access redirect and run the protected smoke. A Worker rollback does not reverse Durable Object migrations; do not roll back across a data migration without an owner-approved compatibility plan. Leave KV, R2, Durable Object names and prefixes intact.
+- **InferOps Cloud Run recovery:** identify the project, region, service (`inferlab-api` or `inferlab-worker`), and known-good revision from the deployment record and Cloud Run revision history. In Cloud Run, route traffic back to the known-good revision for the affected service, then check readiness and the stage's connected-InferOps readiness route. Coordinate API and worker revisions when they share a release. Cloud Run revision rollback does not roll back database migrations; confirm schema compatibility before shifting traffic. Do not delete services or database resources as a restart step.
+- After either cloud recovers, record the revision(s), time, readiness result and smoke result. If the stage remains unavailable or the data/schema compatibility is unclear, stop before changing persistent resources and escalate to the service owner.
 
 ## Limits
 

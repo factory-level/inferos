@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
+  WIDGET_INDEX_FORBIDDEN, WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
   type InferOpsConnection,
 } from "../src/http-inferops";
 import { PROPOSAL_APPROVE_REFUSED, inferOpsErrorCode, isPolicyRefusal, writeStage } from "../src/inferops-client";
@@ -1270,6 +1270,82 @@ describe("the InferMind Wiki over HTTP", () => {
     const error = await refused.readDocumentText(DOC).catch(e => e) as Error;
     expect(error.message).toBe(`FORBIDDEN: ${WIKI_FORBIDDEN}`);
   });
+
+  // FAC-66: `knowledge.search` under the accepted knowledge read and search contract.
+  const HIT = {
+    sectionId: SECTION.toUpperCase(), sectionVersion: 4, documentId: DOC, documentSlug: "handbook",
+    documentTitle: "Handbook", tag: "purpose", snippet: "The <b>purpose</b> of this", score: 0.8,
+  };
+  const searchAnswer = (answer: () => Response) =>
+    fakeWiki(call => call.path.startsWith("/knowledge/search") ? answer() : undefined);
+
+  it("searches with the query and limit only, as the binding's own sign-in, and drops score", async () => {
+    const { client, calls } = searchAnswer(() => Response.json({ hits: [HIT] }));
+    expect(await client.searchWiki("purpose & scope?", 5)).toEqual([{
+      sectionId: SECTION, sectionVersion: 4, documentId: DOC, documentSlug: "handbook",
+      documentTitle: "Handbook", tag: "purpose", snippet: "The <b>purpose</b> of this",
+    }]);
+    const call = calls.at(-1)!;
+    const url = new URL(`https://x${call.path}`);
+    expect(call.method).toBe("GET");
+    expect(url.pathname).toBe("/knowledge/search");
+    expect([...url.searchParams.keys()]).toEqual(["query", "limit"]);
+    expect(url.searchParams.get("query")).toBe("purpose & scope?");
+    expect(url.searchParams.get("limit")).toBe("5");
+    expect(call.headers.get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(call.headers.get("x-workspace-id")).toBe(CONNECTION.workspaceId);
+    // No readable match is an empty list.
+    const { client: none } = searchAnswer(() => Response.json({ hits: [] }));
+    expect(await none.searchWiki("nothing", 20)).toEqual([]);
+  });
+
+  it("keeps each company's search to its own sign-in and workspace, and adds nothing", async () => {
+    // Two companies' connections: each search carries only its own token and workspace, and the
+    // hits are exactly what InferOps returned for that sign-in (a viewer's lens is InferOps').
+    const other: InferOpsConnection = {
+      ...CONNECTION, token: "iex_other-company", workspaceId: "90000000-0000-4000-8000-0000000000b2",
+    };
+    const seen: { token: string | null; workspace: string | null }[] = [];
+    const fetcher = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      seen.push({ token: headers.get("authorization"), workspace: headers.get("x-workspace-id") });
+      return Response.json({ hits: headers.get("x-workspace-id") === CONNECTION.workspaceId ? [HIT] : [] });
+    }) as typeof fetch;
+    expect(await openHttpInferOpsClient(other, fetcher).searchWiki("purpose", 20)).toEqual([]);
+    expect((await openHttpInferOpsClient(CONNECTION, fetcher).searchWiki("purpose", 20)).map(h => h.sectionId))
+      .toEqual([SECTION]);
+    expect(seen).toEqual([
+      { token: "Bearer iex_other-company", workspace: other.workspaceId },
+      { token: `Bearer ${TOKEN}`, workspace: CONNECTION.workspaceId },
+    ]);
+  });
+
+  it("reports a search that could not run as unavailable, never as no results", async () => {
+    const envelope = (status: number, code: string) =>
+      () => Response.json({ success: false, error: { code, message: "x" } }, { status });
+    for (const [what, answer] of [
+      ["a timeout", envelope(503, "SEARCH_TIMEOUT")],
+      ["a rate limit", envelope(429, "RATE_LIMITED")],
+      ["an InferOps without knowledge.search", envelope(404, "NOT_FOUND")],
+      ["an outage", envelope(500, "INTERNAL")],
+      ["a snippet over 300 characters", () => Response.json({ hits: [{ ...HIT, snippet: "x".repeat(301) }] })],
+      ["more hits than asked for", () => Response.json({ hits: [HIT, HIT] })],
+      ["a hit without its version", () => Response.json({ hits: [{ ...HIT, sectionVersion: undefined }] })],
+      ["no hits list", () => Response.json({ results: [] })],
+    ] as const) {
+      const { client } = searchAnswer(answer);
+      const error = await client.searchWiki("purpose", 1).then(() => null, e => e);
+      expect(inferOpsErrorCode(error), what).toBe("UNAVAILABLE");
+    }
+    // A snippet of 300 code points, emoji included, is within the cap.
+    const { client } = searchAnswer(() => Response.json({ hits: [{ ...HIT, snippet: "😀".repeat(300) }] }));
+    expect((await client.searchWiki("purpose", 1))[0]!.snippet).toHaveLength(600);
+    // A refusal stays a refusal.
+    const { client: refused } = searchAnswer(envelope(403, "FORBIDDEN"));
+    expect(((await refused.searchWiki("purpose", 1).catch(e => e)) as Error).message).toBe(`FORBIDDEN: ${WIKI_FORBIDDEN}`);
+    const { client: bad } = searchAnswer(envelope(400, "VALIDATION"));
+    expect(inferOpsErrorCode(await bad.searchWiki("purpose", 1).catch(e => e))).toBe("INVALID_REQUEST");
+  });
 });
 
 // MVP-40: InferOps' Wiki proposal routes (inferops#2368). Reads go through the Wiki's one 403
@@ -1471,5 +1547,56 @@ describe("company service queries and comments", () => {
     const call = fake.calls.find(item => item.path.endsWith("/comments"))!;
     expect(call.headers.get("X-Idempotency-Key")).toBe("same-action");
     expect(call.body).toEqual({ body: "Synthetic comment", kind: "comment", expectedIssueHeadSeq: "1041" });
+  });
+});
+
+// The widget index (FAC-11 slice 2): `widget.publish` and `widget.withdraw` as the connection's
+// own person, in its own workspace, for the company, with nothing but the pointer and its words.
+describe("widget index writes", () => {
+  type Sent = { method: string; path: string; workspaceId: string | null; body: unknown };
+  const widgetIndex = (answer: (sent: Sent) => Response) => {
+    const sent: Sent[] = [];
+    const client = openHttpInferOpsClient(CONNECTION, (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = new URL(String(input));
+      const headers = new Headers(init.headers);
+      const call = { method: init.method ?? "GET", path: url.pathname.replace("/api", "") + url.search,
+        workspaceId: headers.get("x-workspace-id"), body: init.body ? JSON.parse(String(init.body)) : undefined };
+      sent.push(call);
+      return answer(call);
+    }) as typeof fetch);
+    return { client, sent };
+  };
+  const ENTRY = { sourceId: "bp-1", sourceVersion: 2, title: "Free technicians", purpose: "Who is free" };
+
+  it("lists a widget version for the company, and withdraws it by its pointer", async () => {
+    const { client, sent } = widgetIndex(call => call.method === "PUT"
+      ? Response.json({ id: "d1", source: "inferos.blueprint", sourceId: "bp-1", sourceVersion: 2, digest: null,
+          title: "Free technicians", purpose: "Who is free", visibility: "company", publishedAt: "2026-11-04T00:00:00.000Z" })
+      : Response.json({ withdrawn: true }));
+    await client.publishWidgetDefinition(ENTRY);
+    expect(await client.withdrawWidgetDefinition("bp 1/x", 2)).toBe(true);
+    expect(sent).toEqual([
+      { method: "PUT", path: "/knowledge/widget-definitions", workspaceId: CONNECTION.workspaceId,
+        body: { source: "inferos.blueprint", sourceId: "bp-1", sourceVersion: 2, title: "Free technicians",
+                purpose: "Who is free", visibility: "company" } },
+      { method: "DELETE", path: "/knowledge/widget-definitions/bp%201%2Fx/2", workspaceId: CONNECTION.workspaceId, body: undefined },
+    ]);
+  });
+
+  it("refuses in its own words when InferOps refuses the permission, as a write that never took effect", async () => {
+    const { client } = widgetIndex(() => Response.json(
+      { error: { code: "FORBIDDEN", message: "Missing permission: configuration:publish" } }, { status: 403 }));
+    const refused = await client.publishWidgetDefinition(ENTRY).catch(e => e);
+    expect(inferOpsErrorCode(refused)).toBe("FORBIDDEN");
+    expect(refused.detail).toBe(WIDGET_INDEX_FORBIDDEN);
+    expect(writeStage(refused)).toBe("refused");
+  });
+
+  it("sends nothing for a definition InferOps would not take, and calls an answer for another version malformed", async () => {
+    const { client, sent } = widgetIndex(() => Response.json({ sourceId: "bp-other", sourceVersion: 2 }));
+    expect(inferOpsErrorCode(await client.publishWidgetDefinition({ ...ENTRY, title: "  " }).catch(e => e))).toBe("INVALID_REQUEST");
+    expect(inferOpsErrorCode(await client.withdrawWidgetDefinition("bp-1", 0).catch(e => e))).toBe("INVALID_REQUEST");
+    expect(sent).toEqual([]);
+    expect(inferOpsErrorCode(await client.publishWidgetDefinition(ENTRY).catch(e => e))).toBe("UNAVAILABLE");
   });
 });

@@ -30,6 +30,13 @@ vi.mock('@cloudflare/kumo', () => ({
       onClick={() => onCheckedChange(!checked)} />
   ),
   Tooltip: ({ children }: { children: ReactNode }) => <>{children}</>,
+  Checkbox: ({ checked, onCheckedChange, 'aria-label': label }: {
+    checked: boolean
+    onCheckedChange: (checked: boolean) => void
+    'aria-label': string
+  }) => (
+    <input type="checkbox" aria-label={label} checked={checked} onChange={e => onCheckedChange(e.target.checked)} />
+  ),
   Button: ({ children, onClick, disabled }: { children: ReactNode; onClick?: () => void; disabled?: boolean }) => (
     <button type="button" onClick={onClick} disabled={disabled}>{children}</button>
   ),
@@ -90,6 +97,10 @@ async function render(overseer: Partial<Overseer>, gadgets: GadgetSummary[] = []
   const withDefaults: Partial<Overseer> = {
     listWorkflowDefinitions: async () => [],
     getTriggerDefinition: async () => null,
+    listTriggerControls: async () => [],
+    listCollaborators: async () => [],
+    getTriggerAssignment: async () => ({ enabled: true, assignment: null }),
+    getGadget: (() => ({ listBindings: async () => [], [Symbol.dispose]: () => {} })) as unknown as Overseer['getGadget'],
     ...overseer,
   }
   await act(async () => {
@@ -205,5 +216,135 @@ describe('WorkflowTriggersPanel', () => {
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({
       title: "You don't have permission to share or publish configuration other people use.",
     }))
+  })
+})
+
+// FAC-102 part 2: who may run a pinned trigger on request.
+describe('a pinned trigger\'s run-on-request control', () => {
+  const PIN = { definitionId: 'def-1', revision: 1 }
+  const BEN_COLLABORATOR = { profile: BEN, addedBy: [], role: 'use' as const }
+  const setInput = (input: HTMLInputElement, value: string) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  it('lets a builder name a button and who may press it', async () => {
+    const setTriggerControl = vi.fn<Overseer['setTriggerControl']>(async () => null)
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      listCollaborators: async () => [BEN_COLLABORATOR], setTriggerControl,
+    })
+    expect(button('Add button')?.disabled).toBe(true)
+    await act(async () => { setInput(container.querySelector('[aria-label="Button label"]')!, 'Issue refunds now') })
+    await act(async () => { container.querySelector<HTMLInputElement>('[aria-label="Let Ben run it"]')!.click() })
+    await act(async () => { button('Add button')!.click() })
+    expect(setTriggerControl).toHaveBeenCalledWith(7, { label: 'Issue refunds now', invokers: ['ben'] })
+  })
+
+  it('shows an unpinned trigger no control', async () => {
+    await render({ listHooks: async () => [hook({ id: 7 })], listCollaborators: async () => [BEN_COLLABORATOR] })
+    expect(container.querySelector('[aria-label="Run on request"]')).toBeNull()
+    expect(container.querySelector('[aria-label="Runs act as"]')).toBeNull()
+  })
+
+  it("offers a pinned trigger its gadget's connections, once each, and disposes the gadget it read", async () => {
+    const dispose = vi.fn<() => void>()
+    const getGadget = vi.fn<(id: number) => unknown>(() => ({
+      listBindings: async () => [
+        { name: 'BOARD', target: 10, resourceTitle: 'Operations board', vendorId: 'inferops' },
+        { name: 'BOARD_AGAIN', target: 10, resourceTitle: 'Operations board', vendorId: 'inferops' },
+        { name: 'HELPER', target: 3, resourceTitle: 'Helper gadget' },
+      ],
+      [Symbol.dispose]: dispose,
+    }))
+    await render({
+      listHooks: async () => [hook({ id: 7, gadgetId: 0 })], getTriggerDefinition: async () => PIN,
+      getGadget: getGadget as unknown as Overseer['getGadget'],
+    })
+    const section = container.querySelector('[aria-label="Runs act as"]')!
+    expect(getGadget).toHaveBeenCalledWith(0)
+    expect(dispose).toHaveBeenCalledOnce()
+    expect(section.textContent).toContain('Operations board')
+    expect(section.textContent).not.toContain('Helper gadget')
+    expect(section.textContent?.match(/Operations board/g)).toHaveLength(1)
+  })
+
+  it("shows a gadget whose connections can't be read as an error, not as having none", async () => {
+    const dispose = vi.fn<() => void>()
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      getGadget: (() => ({
+        listBindings: async () => { throw new Error('gadget unavailable') }, [Symbol.dispose]: dispose,
+      })) as unknown as Overseer['getGadget'],
+    })
+    const section = container.querySelector('[aria-label="Runs act as"]')!
+    expect(section.querySelector('[role="alert"]')?.textContent).toBe("Couldn't read this trigger's connections.")
+    expect(section.textContent).not.toContain("Bind this trigger's gadget to a connection")
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it('says assignments are off on this instance when the server says so', async () => {
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      getTriggerAssignment: async () => ({ enabled: false, assignment: null }),
+    })
+    const section = container.querySelector('[aria-label="Runs act as"]')!
+    expect(section.textContent).toContain('Not enabled on this instance.')
+    expect(section.querySelector('input, select')).toBeNull()
+  })
+
+  it("shows a pinned trigger's assignment and whether its key was given", async () => {
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      getTriggerAssignment: async () => ({
+        enabled: true,
+        assignment: {
+          hookId: 7, gatekeeperId: 10, credentialRef: '5b2c1d8e-0000-4000-8000-0000000000a1', assignedBy: ADA, assignedAt: new Date(0),
+        },
+      }),
+    })
+    expect(container.querySelector('[aria-label="Runs act as"]')?.textContent)
+      .toContain('No key yet: runs are refused until an Admin gives one.')
+  })
+
+  it('lists recent runs on request with who asked, and shows a refusal in the server\'s words', async () => {
+    const control = { hookId: 7, label: 'Issue refunds now', invokers: ['ben'], definition: PIN, configuredBy: ADA, configuredAt: new Date(0) }
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      listCollaborators: async () => [BEN_COLLABORATOR], listTriggerControls: async () => [control],
+      listWorkflowDeliveries: async () => [
+        { hookId: 7, definitionId: 'def-1', revision: 1, commitId: 'a'.repeat(40), at: new Date(0) },
+        { hookId: 7, definitionId: 'def-1', revision: 1, commitId: 'a'.repeat(40), at: new Date(1), invocation: { id: 'i1', requestedBy: 'ben' } },
+      ],
+      setTriggerControl: async () => { throw new Error("You don't have permission to share or publish configuration other people use.") },
+    })
+    await act(async () => {})
+    const runs = container.querySelector('[aria-label="Recent runs on request"]')!
+    expect(runs.querySelectorAll('li')).toHaveLength(1)
+    expect(runs.textContent).toContain('Requested by Ben')
+    await act(async () => { button('Remove')!.click() })
+    expect(container.querySelector('[role="alert"]')?.textContent)
+      .toBe("You don't have permission to share or publish configuration other people use.")
+  })
+
+  it('shows a listed person who has left, lets the builder untick them, and needs a current one ticked to save', async () => {
+    const setTriggerControl = vi.fn<Overseer['setTriggerControl']>(async () => null)
+    const control = { hookId: 7, label: 'Issue refunds now', invokers: ['ben', 'gone'], definition: PIN, configuredBy: ADA, configuredAt: new Date(0) }
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      listCollaborators: async () => [BEN_COLLABORATOR], listTriggerControls: async () => [control],
+      listWorkflowDeliveries: async () => [], setTriggerControl,
+    })
+    const former = container.querySelector<HTMLInputElement>('[aria-label="Let a former collaborator (1) run it"]')!
+    expect(former.checked).toBe(true)
+    expect(container.textContent).toContain('No longer a collaborator')
+    // Untick Ben, the only current collaborator: the departed entry alone can't be saved.
+    await act(async () => { container.querySelector<HTMLInputElement>('[aria-label="Let Ben run it"]')!.click() })
+    expect(button('Save')?.disabled).toBe(true)
+    // Tick Ben again and remove the departed one: only Ben is saved.
+    await act(async () => { container.querySelector<HTMLInputElement>('[aria-label="Let Ben run it"]')!.click() })
+    await act(async () => { former.click() })
+    await act(async () => { button('Save')!.click() })
+    expect(setTriggerControl).toHaveBeenCalledWith(7, { label: 'Issue refunds now', invokers: ['ben'] })
   })
 })

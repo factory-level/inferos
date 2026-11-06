@@ -21,7 +21,7 @@ const testState = vi.hoisted(() => ({
     const install = piece as { id: number; commitId?: string; installedFrom?: { blueprintId: string; version: number; kind?: string } }
     return install.installedFrom?.kind === 'widget' ? [{ gadgetId: install.id, blueprintId: install.installedFrom.blueprintId,
       version: install.installedFrom.version, versionId: `${install.installedFrom.blueprintId}@${install.installedFrom.version}`,
-      commitId: install.commitId ?? null, surfaces: { ui: true, tools: [] }, refusal: null }] : []
+      commitId: install.commitId ?? null, surfaces: { ui: true, tools: [], states: null }, refusal: null }] : []
   })),
   overseer: null as unknown,
 }))

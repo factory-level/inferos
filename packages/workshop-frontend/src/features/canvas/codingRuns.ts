@@ -3,6 +3,7 @@
 // runs themselves come from the project's coding-dispatch binding; InferOps stays authoritative.
 import type { Repo, Run, RunReasonCode } from '@inferos/gatekeeper-inferops/src/types'
 import { canonicalBoardRef, type ProposalResult } from './boardData'
+import { withServerWords } from './serverWords'
 
 /**
  * How a run reads on a card. `awaiting-approval` is a dispatch proposed through this connection
@@ -102,9 +103,9 @@ export const dispatchRefOf = (boardRef: string): string | null => {
 export const codingErrorText = (result: Extract<ProposalResult, { ok: false }>, identifier: string, kind: 'dispatch' | 'cancel'): string => {
   const verb = kind === 'dispatch' ? 'dispatched' : 'cancelled'
   switch (result.code) {
-    case 'STALE_REVISION': return `${identifier} changed in InferOps since the board loaded. The board was re-read; try again.`
-    case 'RUN_ACTIVE': return `${identifier} already has a queued or running run, or a dispatch awaiting approval. Follow it or cancel it first.`
-    case 'DISABLED': return 'Coding dispatch is turned off for this deployment.'
+    case 'STALE_REVISION': return withServerWords(`${identifier} changed in InferOps since the board loaded. The board was re-read; try again.`, result.message)
+    case 'RUN_ACTIVE': return withServerWords(`${identifier} already has a queued or running run, or a dispatch awaiting approval. Follow it or cancel it first.`, result.message)
+    case 'DISABLED': return withServerWords('Coding dispatch is turned off for this deployment.', result.message)
     case 'FORBIDDEN': return `Not ${verb}: ${result.message}`
     case 'CONFLICT': return kind === 'cancel' ? `The run has already stopped: ${result.message}` : `Not ${verb}: ${result.message}`
     default: return `Not ${verb}: ${result.message}`

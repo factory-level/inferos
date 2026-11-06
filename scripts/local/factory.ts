@@ -400,23 +400,36 @@ async function inferosHealth(config: FactoryConfig, deps: FactoryDeps): Promise<
 }
 
 /**
- * `/health/ready` answers 200 even while Postgres is down; the body's `status` is the verdict. A body
- * without one (an older API) is judged by the HTTP status alone.
+ * `/health/ready` answers 200 even while Postgres is down; the body's `status` is the verdict.
  */
 function readyBodyOk(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
   const status = body && typeof body === "object" ? (body as { status?: unknown }).status : undefined;
-  return status === undefined || (typeof status === "string" && /^(?:ok|up|ready)$/.test(status));
+  return typeof status === "string" && /^(?:ok|up|ready|degraded)$/.test(status);
+}
+
+function degradedReadinessParts(body: unknown): string[] {
+  if (!body || typeof body !== "object") return [];
+  const checks = (body as { checks?: unknown }).checks;
+  if (!Array.isArray(checks)) return [];
+  return checks.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const check = item as { name?: unknown; status?: unknown };
+    return typeof check.name === "string" && check.status !== "ok" ? [check.name] : [];
+  });
 }
 
 async function inferopsHealth(config: FactoryConfig, deps: FactoryDeps): Promise<Check> {
   const url = `${config.inferopsUrl}/health/ready`;
   const { status, body } = await getJson(url, deps);
   const ready = status === 200 && readyBodyOk(body);
+  const degraded = body && typeof body === "object" && (body as { status?: unknown }).status === "degraded"
+    ? degradedReadinessParts(body) : [];
   const configured = config.inferopsMode === "image" ? `image ${config.inferopsImage} on database ${config.inferopsDb}`
     : config.inferopsMode === "checkout" ? `checkout ${config.inferopsDir}` : "the pinned test backend (pnpm local inferops up, scripts/local/inferops.ts)";
   return {
     name: "service:inferops", status: ready ? "READY" : "FAIL",
-    detail: ready ? `${url} answered 200 (${configured})`
+    detail: ready ? `${url} answered 200${degraded.length ? `; degraded components: ${degraded.join(", ")}` : ""} (${configured})`
       : `${url} ${status === null ? "did not answer" : status === 200 ? "answered 200 but not ready" : `answered ${status}`}; ${configured}`,
     health: { url, status, body },
   };
@@ -513,7 +526,7 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
     : deps.fetchImpl;
   if (target.kind !== "loopback") checks.push(...await accessTokenChecks(target, fetchStage, deps));
   if (target.kind === "remote") {
-    const check = await remoteInferlabCheck(target, deps);
+    const check = await remoteInferlabCheck(target, fetchStage, deps);
     checks.push(check.check);
     return { target, authMode: check.authMode, checks };
   }
@@ -533,16 +546,19 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
     checks.push({ name: "stage:inferops", status: "FAIL", detail: `no InferOps is recorded as connected to ${target.origin}: start it with pnpm local factory up dev --inferops-connect, or set FACTORY_INFEROPS_URL` });
     return { target, authMode: null, checks };
   }
-  const ready = await getJson(`${inferops}/health/ready`, deps);
+  const readinessUrl = `${target.origin}/gatekeeper/inferops/health/ready`;
+  const ready = await getJson(readinessUrl, { ...deps, fetchImpl: fetchStage });
   const auth = await getJson(`${inferops}/auth/public-config`, deps);
   const mode = auth.body && typeof auth.body === "object" ? (auth.body as { mode?: unknown }).mode : undefined;
   const healthy = ready.status === 200 && readyBodyOk(ready.body);
+  const degraded = ready.body && typeof ready.body === "object" && (ready.body as { status?: unknown }).status === "degraded"
+    ? degradedReadinessParts(ready.body) : [];
   checks.push({
     name: "stage:inferops", status: healthy && mode === "stub" ? "READY" : "FAIL",
-    detail: !healthy ? `${inferops}/health/ready ${ready.status === null ? "did not answer" : `answered ${ready.status}, not ready`}`
-      : mode === "stub" ? `${inferops}/health/ready answered 200; auth mode stub (persona sign-in, no password)`
+    detail: !healthy ? `${readinessUrl} ${ready.status === null ? "did not answer" : `answered ${ready.status}, not ready`}`
+      : mode === "stub" ? `${readinessUrl} answered 200${degraded.length ? `; degraded components: ${degraded.join(", ")}` : ""}; auth mode stub (persona sign-in, no password)`
         : `${inferops} is healthy but its auth mode is ${String(mode)}; a loopback stage's personas sign in only in stub mode`,
-    health: { url: `${inferops}/health/ready`, status: ready.status, body: ready.body, authMode: mode ?? null },
+    health: { url: readinessUrl, status: ready.status, body: ready.body, authMode: mode ?? null },
   });
   return { target, authMode: typeof mode === "string" ? mode : null, checks };
 }
@@ -553,22 +569,25 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
  * persona password (`requiredSmokeCredentials`). Read without credentials: InferLab is not behind
  * the stage's Access.
  */
-async function remoteInferlabCheck(target: StageTarget, deps: FactoryDeps): Promise<{ authMode: string | null; check: Check }> {
+async function remoteInferlabCheck(target: StageTarget, fetchStage: typeof fetch, deps: FactoryDeps): Promise<{ authMode: string | null; check: Check }> {
   const inferops = remoteStageInferopsUrl(target, deps.env);
   if (!inferops) {
     return { authMode: null, check: { name: "stage:inferops", status: "FAIL", detail: `no persistent stage in scripts/stage/stages.ts has the hostname ${new URL(target.origin).hostname}; set FACTORY_INFEROPS_URL to its InferLab API` } };
   }
-  const ready = await getJson(`${inferops}/health/ready`, deps);
+  const readinessUrl = `${target.origin}/gatekeeper/inferops/health/ready`;
+  const ready = await getJson(readinessUrl, { ...deps, fetchImpl: fetchStage });
   const mode = await inferlabAuthMode(inferops, deps.fetchImpl);
   const healthy = ready.status === 200 && readyBodyOk(ready.body);
+  const degraded = ready.body && typeof ready.body === "object" && (ready.body as { status?: unknown }).status === "degraded"
+    ? degradedReadinessParts(ready.body) : [];
   return {
     authMode: mode,
     check: {
       name: "stage:inferops", status: healthy && mode !== null ? "READY" : "FAIL",
-      detail: !healthy ? `${inferops}/health/ready ${ready.status === null ? "did not answer" : `answered ${ready.status}, not ready`}`
+      detail: !healthy ? `${readinessUrl} ${ready.status === null ? "did not answer" : `answered ${ready.status}, not ready`}`
         : mode === null ? `${inferops}/auth/public-config names no auth mode, so the smoke's credential set is unknown`
-          : `${inferops}/health/ready answered 200; auth mode ${mode} (${mode === "stub" ? "persona sign-in, no password" : "persona password required"})`,
-      health: { url: `${inferops}/health/ready`, status: ready.status, body: ready.body, authMode: mode },
+        : `${readinessUrl} answered 200${degraded.length ? `; degraded components: ${degraded.join(", ")}` : ""}; auth mode ${mode} (${mode === "stub" ? "persona sign-in, no password" : "persona password required"})`,
+      health: { url: readinessUrl, status: ready.status, body: ready.body, authMode: mode },
     },
   };
 }
@@ -1085,19 +1104,17 @@ async function stageSmoke(config: FactoryConfig, deps: FactoryDeps, timeoutMs: n
     return doctor;
   }
   const env = { ...asStringEnv(deps.env), FACTORY_STAGE_URL: config.stageUrl!, ...(config.stageAccess ? { FACTORY_STAGE_ACCESS: config.stageAccess } : {}) };
-  const script = join(deps.root, "scripts", "ci", "stage-smoke.ts");
-  if (!existsSync(script)) {
-    return { exitCode: 1, report: { ok: false, command: "factory stage-smoke", error: `the scripted stage smoke (${script}) is not in this checkout; it ships with the factory CI graph (draft #286)` },
-      headline: "factory stage-smoke: scripts/ci/stage-smoke.ts is not in this checkout" };
-  }
-  const smoke = deps.runIn([process.execPath, script], env, deps.root, timeoutMs);
-  // Only the smoke's own report lines: oracle verdicts and the evidence path, never the environment.
-  const lines = `${smoke.stdout}${smoke.stderr}`.split("\n").filter(line => /^\[(?:stage-smoke|factory)\]/.test(line));
+  const script = join(deps.root, "scripts", "preview", "smoke.ts");
+  if (!existsSync(script)) return { exitCode: 1, report: { ok: false, command: "factory stage-smoke", error: `the stage smoke (${script}) is not in this checkout` },
+    headline: "factory stage-smoke: scripts/preview/smoke.ts is not in this checkout" };
+  const smoke = deps.runIn([process.execPath, script, config.stageUrl!, "--gatekeeper", "inferops"], env, deps.root, timeoutMs);
+  let smokeReport: unknown;
+  try { smokeReport = JSON.parse(smoke.stdout); } catch { smokeReport = { ok: false, error: "stage smoke did not return a JSON report" }; }
   const ok = smoke.exitCode === 0;
   return {
     exitCode: ok ? 0 : 1,
-    report: { ...doctor.report, ok, command: "factory stage-smoke", smoke: { exitCode: smoke.exitCode, lines } },
-    headline: `${doctor.headline}\nstage smoke: ${ok ? "PASS" : `FAIL (exit ${smoke.exitCode})`}\n${lines.map(line => `  ${line}`).join("\n")}`,
+    report: { ...doctor.report, ok, command: "factory stage-smoke", smoke: { exitCode: smoke.exitCode, report: smokeReport } },
+    headline: `${doctor.headline}\nstage smoke: ${ok ? "PASS" : `FAIL (exit ${smoke.exitCode})`}`,
   };
 }
 
