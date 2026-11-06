@@ -14,6 +14,7 @@ import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
   SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
   systemGatekeeperFacetName, type AssignedDelivery, type AssignedExecution, type SystemRunHost,
+  type SystemRunRequester,
 } from "./system-run.js";
 import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
@@ -203,20 +204,17 @@ export const RUN_REQUESTER_REVOKED =
  * older than FAC-111) is refused: there is no company to compare. Refuses with
  * RUN_REQUESTER_REVOKED.
  *
- * The answer is awaited, and local state can change meanwhile, so this returns `revalidate`: a
- * synchronous re-read of what the await could have outlived (the control's listing, the run's
- * executor still being the trigger's assignment or the lack of one, the hook still live). The
- * caller runs it immediately before the protected work, with no await in between; it throws
- * RUN_REQUESTER_REVOKED.
+ * Returns the two re-checks a protected point repeats once its own last await is done, in this
+ * order and with no await after the second (see {@link RunRequesterCheck}).
  */
 export async function requireRunRequester(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" |
         "workflowDefinitionStore">,
-    hookId: number, deliveryId: number): Promise<() => void> {
+    hookId: number, deliveryId: number): Promise<RunRequesterCheck> {
   let store = impl.workflowDefinitionStore();
   let recorded = store.deliveryRun(deliveryId);
   if (!recorded) throw new Error(RUN_REQUESTER_REVOKED);
-  if (!recorded.invoked && recorded.run?.requester.kind !== "person") return () => {};
+  if (!recorded.invoked && recorded.run?.requester.kind !== "person") return NO_RUN_REQUESTER;
   let run = recorded.run;
   if (!run || run.requester.kind !== "person") throw new Error(RUN_REQUESTER_REVOKED);
   let profileId = run.requester.profileId;
@@ -231,7 +229,7 @@ export async function requireRunRequester(
       throw new Error(RUN_REQUESTER_REVOKED);
     }
   };
-  revalidate();
+  const recheck = async () => {
   let company: string | null = null;
   try {
     // Only where the deployment names the authority is there anything to ask (as at admission).
@@ -250,8 +248,25 @@ export async function requireRunRequester(
     });
     throw new Error(RUN_REQUESTER_REVOKED);
   }
-  return revalidate;
+  };
+  revalidate();
+  await recheck();
+  return { recheck, revalidate };
 }
+
+/**
+ * What a protected point of a person's run repeats after its own last await (FAC-104), from
+ * {@link requireRunRequester}: first `await recheck()`, the person's InferOps `workflow:invoke` and
+ * company asked again; then `revalidate()`, the synchronous re-read of local state (the control's
+ * listing, the run's executor still being the trigger's assignment or the lack of one, the hook
+ * still live); then the protected work, with no await in between. Both throw
+ * RUN_REQUESTER_REVOKED. The remote answer is itself an await: a revocation that lands while it is
+ * pending is the one this order can't see, and the local re-read right after it is what can't move.
+ */
+export type RunRequesterCheck = SystemRunRequester;
+
+/** A run the trigger fired itself: there is no person to re-check. */
+const NO_RUN_REQUESTER: RunRequesterCheck = { recheck: async () => {}, revalidate: () => {} };
 
 /**
  * The one refusal for a service-account key the Workshop won't relay or the service doesn't accept
@@ -6493,7 +6508,7 @@ class OverseerImpl implements AgentHooks {
       if (problem) throw new Error(problem);
       // A queued write is a protected point too (FAC-104): the person who asked for the run must
       // still be allowed to now, however long ago they asked. The assignment is checked again after.
-      let revalidate = await requireRunRequester(this, record.executedAs.hookId, record.executedAs.deliveryId);
+      let requester = await requireRunRequester(this, record.executedAs.hookId, record.executedAs.deliveryId);
       logger.info("assigned workflow action applying", {
         event: "workflow.assigned_action.applying", actionId: record.id, hookId: record.executedAs.hookId,
         ...(record.executedAs.runId ? { runId: record.executedAs.runId } : {}),
@@ -6508,11 +6523,15 @@ class OverseerImpl implements AgentHooks {
         assigned.close();
         throw new Error(problem);
       }
-      // The requester's local authority, re-read after the last await and with none before the
-      // write is sent (FAC-104): a control, assignment or hook change while their grant was being
-      // asked refuses here, leaving the write pending.
+      // The facet's open was the last await before the write (FAC-104): the person's InferOps grant
+      // and company are asked again now, then the assignment and their local authority are re-read
+      // synchronously, with no await before the write is sent. A refusal closes the facet and
+      // leaves the write pending.
       try {
-        revalidate();
+        await requester.recheck();
+        problem = this.assignedActionProblem(record);
+        if (problem) throw new Error(problem);
+        requester.revalidate();
       } catch (error) {
         assigned.close();
         throw error;
@@ -6875,9 +6894,9 @@ class OverseerImpl implements AgentHooks {
    * its request is a protected point, so a grant revoked meanwhile stops it before it runs.
    */
   async runAssignedDelivery(hookId: number, delivery: AssignedDelivery, method: string | null, args: unknown[]): Promise<unknown> {
-    let revalidate = await requireRunRequester(this, hookId, delivery.deliveryId);
+    let requester = await requireRunRequester(this, hookId, delivery.deliveryId);
     // Once right after the answer, and again inside the run after its last await (below).
-    revalidate();
+    requester.revalidate();
     let recorded = this.workflowDefinitionStore().deliveryRun(delivery.deliveryId);
     let run = recorded?.run;
     if (run) {
@@ -6887,8 +6906,9 @@ class OverseerImpl implements AgentHooks {
         executor: run.executor.kind === "service_account" ? `service_account:${run.executor.gatekeeperId}` : "gadget_bindings",
       });
     }
-    // Re-validated synchronously, after its last await and just before the run registers (FAC-104).
-    return runAssignedDelivery(this.#systemRunHost(), hookId, delivery, method, args, revalidate);
+    // Asked again after the code's load, its last await, then re-read synchronously just before the
+    // run registers (FAC-104).
+    return runAssignedDelivery(this.#systemRunHost(), hookId, delivery, method, args, requester);
   }
 
   // Open the session behind a binding loopback.
@@ -17868,11 +17888,11 @@ function makeSystemRunCallback(impl: OverseerImpl, hookId: number,
 // calls of the same firing don't ask InferOps again, but each re-reads the local state
 // (revalidate) and checks the hook.
 function makeHookFiringCallback(impl: OverseerImpl, hookId: number, requestedDelivery?: number): NativeRpcStub<RpcTarget> {
-  let checked: Promise<() => void> | undefined;
+  let checked: Promise<RunRequesterCheck> | undefined;
   const requester = async () => {
     if (requestedDelivery === undefined) return;
     checked ??= requireRunRequester(impl, hookId, requestedDelivery);
-    (await checked)();
+    (await checked).revalidate();
   };
   // The proxy target must be callable for the `apply` trap to ever fire (a Proxy over a
   // non-callable target is itself non-callable), and the bindHook contract allows the bound

@@ -318,3 +318,68 @@ describe("local authority changed while the person's answer was pending (FAC-104
     });
   });
 });
+
+// FAC-104 round 2 (review HIGH): the person's InferOps answer is asked again after the last await
+// before the work (the code's load, the facet's open), so a grant revoked or a company changed
+// while that await was pending refuses, with nothing started or sent.
+describe("the person's InferOps authority changed during the last await (FAC-104)", () => {
+  const admittedIn = (impl: any) => {
+    let stored = impl.storage.workflowDeliveries.get(DELIVERY);
+    impl.storage.workflowDeliveries.put({ ...stored, run: { ...stored.run, company: COMPANY } });
+  };
+  /** Holds `step` until released; `entered` resolves once it is pending. */
+  function held() {
+    let release!: () => void;
+    let gate = new Promise<void>(resolve => { release = resolve; });
+    let entered!: () => void;
+    let reached = new Promise<void>(resolve => { entered = resolve; });
+    return { gate, release, reached, entered };
+  }
+
+  it("doesn't start a delayed run whose grant is revoked while its code loads", async () => {
+    await inAssigned("fac104-remote-load", async impl => {
+      admittedIn(impl);
+      impl.systemRuns.end(DELIVERY);
+      let answer = { holds: true, company: COMPANY };
+      let asked = askingInferOps(impl, () => answer);
+      let load = vi.fn(() => ({ getEntrypoint: () => ({ run: async () => "ran" }) }));
+      impl.env = { ...impl.env, LOADER: { load } };
+      let loading = held();
+      impl.gitStore.readCommitFiles = async () => { loading.entered(); await loading.gate; return [["server.js", "export {}"]]; };
+      let starting = refusalOf(() => impl.runAssignedDelivery(HOOK, { deliveryId: DELIVERY, commitId: "c".repeat(40), credentialRef: REF }, null, []));
+      await loading.reached;
+      answer = { holds: false, company: COMPANY };
+      loading.release();
+      expect(await starting).toContain(RUN_REQUESTER_REVOKED);
+      expect(load).not.toHaveBeenCalled();
+      expect(() => impl.systemRuns.require({ from: "systemRun", hookId: HOOK, deliveryId: DELIVERY })).toThrow();
+      expect(asked.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  for (const [label, after] of [
+    ["revoked", { holds: false, company: COMPANY }],
+    ["answered in another company", { holds: true, company: "0b7e2c3a-1f00-4a00-8000-00000000000b" }],
+  ] as const) {
+    it(`refuses the apply when the grant is ${label} while the run's facet opens`, async () => {
+      await inAssigned(`fac104-remote-facet-${label.length}`, async (impl, opened, apply) => {
+        let record = await proposeAsRun(impl);
+        admittedIn(impl);
+        let answer: { holds: boolean; company: string } = { holds: true, company: COMPANY };
+        askingInferOps(impl, () => answer);
+        let opening = held();
+        let open = impl.openAssignedActionFacet;
+        impl.openAssignedActionFacet = async (r: unknown) => { opening.entered(); await opening.gate; return open(r); };
+        let applying = refusalOf(() => impl.applyPendingAction(record, ADA, false));
+        await opening.reached;
+        answer = after;
+        opening.release();
+        expect(await applying).toContain(RUN_REQUESTER_REVOKED);
+        expect(apply).not.toHaveBeenCalled();
+        expect(opened.length).toBe(1);
+        expect(opened.every(entry => entry.closed)).toBe(true);
+        expect(impl.storage.actions.get(record.id).state).toBe("pending");
+      });
+    });
+  }
+});

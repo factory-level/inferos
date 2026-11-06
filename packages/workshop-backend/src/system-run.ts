@@ -217,18 +217,29 @@ export function revocableSession(session: object, assertLive: () => void): objec
   });
 }
 
+/** The caller's re-check of the person who asked for a run (FAC-104; `RunRequesterCheck` in overseer.ts). */
+export interface SystemRunRequester {
+  /** Asks again for the person's remote authority; awaited after the code loads. */
+  recheck(): Promise<void>;
+  /** Re-reads local authority synchronously, immediately before the run registers. */
+  revalidate(): void;
+}
+
+const NO_REQUESTER: SystemRunRequester = { recheck: async () => {}, revalidate: () => {} };
+
 /**
  * Runs one admitted delivery of an assigned trigger: the delivery's pinned commit, loaded fresh,
  * whose `env` holds only the gadget's bindings to the assigned connection, each a loopback with the
  * `systemRun` caller. No `GADGET`, `GIT` or other binding is there, and the worker has no outbound
  * network, so no person's token is reachable and nothing falls back to one. Calls the code's
  * `WorkflowRun` entrypoint: `method` on it, or `run` when the firing calls the callback itself.
- * `revalidate` is the caller's synchronous re-check, run after the last await and immediately before
- * the run registers (FAC-104); it throws to refuse.
+ * `requester` is the caller's re-check of the person who asked for the run (FAC-104): once the code
+ * has loaded, its `recheck` is awaited, the assignment is read again, and its synchronous
+ * `revalidate` runs immediately before the run registers. Either throws to refuse.
  */
 export async function runAssignedDelivery(host: SystemRunHost, hookId: number, delivery: AssignedDelivery,
                                           method: string | null, args: unknown[],
-                                          revalidate: () => void = () => {}): Promise<unknown> {
+                                          requester: SystemRunRequester = NO_REQUESTER): Promise<unknown> {
   let assignment = host.assignmentOf(hookId);
   if (!assignment || assignment.credentialRef !== delivery.credentialRef) throw new Error(SYSTEM_RUN_ASSIGNMENT_CHANGED);
   if (host.systemRuns.has(delivery.deliveryId)) throw new Error("This run already started.");
@@ -242,11 +253,14 @@ export async function runAssignedDelivery(host: SystemRunHost, hookId: number, d
     throw new Error("This trigger's gadget no longer binds the connection its runs are assigned to.");
   }
   let modules = await host.readModules(delivery.commitId);
-  // Re-checked after the await: an assignment changed meanwhile never runs on the old one.
+  // The requester's remote authority, asked again once the code has loaded (FAC-104). It is the
+  // last await before the run registers.
+  await requester.recheck();
+  // Re-checked after the awaits: an assignment changed meanwhile never runs on the old one.
   if (host.assignmentOf(hookId)?.credentialRef !== delivery.credentialRef) throw new Error(SYSTEM_RUN_ASSIGNMENT_CHANGED);
   // The caller's own synchronous re-check (FAC-104: the requester's local authority), here, after
   // the last await and before the run registers, so nothing can change between it and the start.
-  revalidate();
+  requester.revalidate();
   host.systemRuns.begin(delivery.deliveryId,
       { hookId, gatekeeperId: assignment.gatekeeperId, credentialRef: assignment.credentialRef });
   try {

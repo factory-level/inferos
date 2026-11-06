@@ -177,11 +177,28 @@ describe("a run's sessions", () => {
   // and before the run registers, so a refusal there starts nothing.
   it("refuse to start when the caller's re-check refuses after the module read", async () => {
     let made = host();
-    let refusal = await runAssignedDelivery(made.h, HOOK, DELIVERY, null, [], () => { throw new Error("revoked meanwhile"); })
+    let refusal = await runAssignedDelivery(made.h, HOOK, DELIVERY, null, [],
+        { recheck: async () => {}, revalidate: () => { throw new Error("revoked meanwhile"); } })
         .then(() => "started", (e: Error) => e.message);
     expect(refusal).toBe("revoked meanwhile");
     expect(made.h.systemRuns.has(DELIVERY.deliveryId)).toBe(false);
     expect(made.sessions).toEqual([]);
+  });
+
+  // FAC-104 round 2: the remote re-check is awaited once the code has loaded, then the local one.
+  it("refuse to start when the caller's remote re-check refuses after the module read, loading nothing", async () => {
+    let made = host();
+    let order: string[] = [];
+    let read = made.h.readModules;
+    made.h.readModules = async commitId => { order.push("read"); return read(commitId); };
+    let refusal = await runAssignedDelivery(made.h, HOOK, DELIVERY, null, [], {
+      recheck: async () => { order.push("recheck"); throw new Error("revoked remotely"); },
+      revalidate: () => { order.push("revalidate"); },
+    }).then(() => "started", (e: Error) => e.message);
+    expect(refusal).toBe("revoked remotely");
+    expect(order).toEqual(["read", "recheck"]);
+    expect(made.loaded).toEqual([]);
+    expect(made.h.systemRuns.has(DELIVERY.deliveryId)).toBe(false);
   });
 
   it("refuse another connection, a gadget, git, another delivery and another hook", async () => {
