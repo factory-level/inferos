@@ -87,14 +87,19 @@ describe("through the Overseer", () => {
 
   async function session(role: "build" | "use", opts: { invoke?: (...args: unknown[]) => Promise<void>;
                                                           canBuild?: boolean;
-                                                          mayInvoke?: () => Promise<boolean> } = {}) {
+                                                          mayInvoke?: () => Promise<boolean>;
+                                                          assignmentsEnabled?: boolean } = {}) {
     let { durable, storage, store } = pinned();
     store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
     let invoke = vi.fn(opts.invoke ?? (async () => {}));
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
+    let takenInvocations = new Set<string>();
     let impl = {
-      env: opts.canBuild === undefined && opts.mayInvoke === undefined
-        ? {} : { SHARED_CONFIGURATION_GATEKEEPER: "inferops" },
+      takenInvocations,
+      env: {
+        ...(opts.canBuild === undefined && opts.mayInvoke === undefined ? {} : { SHARED_CONFIGURATION_GATEKEEPER: "inferops" }),
+        ...(opts.assignmentsEnabled ? { WORKFLOW_ASSIGNMENTS_ENABLED: "true" } : {}),
+      },
       isSharedConfiguration: async () => true,
       workflowDefinitionStore: () => store,
       getGadgetHead: headOf,
@@ -125,7 +130,7 @@ describe("through the Overseer", () => {
     let askedInvoke: string[] = [];
     let overseer = await openFakeOverseer({}, { role, impl });
     void durable;
-    return { overseer, store, invoke, hook, askedInvoke };
+    return { overseer, store, invoke, hook, askedInvoke, takenInvocations };
   }
 
   it("lets a listed Operator run the trigger, handing its gatekeeper only a server-made invocation", async () => {
@@ -180,25 +185,61 @@ describe("through the Overseer", () => {
     await expect(legacy.overseer.invokeTrigger(HOOK)).rejects.toThrow("This trigger can't be run on request.");
   });
 
-  // QA on #374, then review.r2: a run whose own call fails must fail with that cause, whatever the
-  // cause names; only the trigger's gatekeeper not taking the request means it can't run on request.
+  // QA on #374, then review.r2 twice: whether the request was taken (startHook delivered it) is
+  // recorded, never read from the error's words or inferred from the request having gone. Taken,
+  // a failure is the run's own and passes through; otherwise the invoker gets fixed words only.
+  const refusalOf = async (run: () => Promise<unknown>) => {
+    let refused: unknown;
+    try { await run(); } catch (error) { refused = error; }
+    return String(refused);
+  };
+
   it.for([
     'The RPC receiver does not implement the method "readBoard".',
     'The RPC receiver does not implement the method "invoke".',
     "env.BOARD.invoke is not a function",
-  ])("passes a run's own failure through unchanged: %s", async message => {
+  ])("passes a taken run's own failure through unchanged: %s", async message => {
     let made: Awaited<ReturnType<typeof session>> | undefined;
     made = await session("use", {
       invoke: async (...args: unknown[]) => {
-        // The gatekeeper took the invocation and delivered it (fire consumes it), then the run failed.
-        made!.store.cancelInvocation((args[0] as { invocationId: string }).invocationId);
+        made!.takenInvocations.add((args[0] as { invocationId: string }).invocationId);
         throw new Error(message);
       },
     });
-    let refused: unknown;
-    try { await made.overseer.invokeTrigger(HOOK); } catch (error) { refused = error; }
-    expect(String(refused)).toContain(message);
-    expect(String(refused)).not.toContain("can't be run on request");
+    let refused = await refusalOf(() => made!.overseer.invokeTrigger(HOOK));
+    expect(refused).toContain(message);
+    expect(refused).not.toContain("can't be run on request");
+  });
+
+  it("gives fixed words, never the raw error, when a change dropped the request before it was taken", async () => {
+    let made: Awaited<ReturnType<typeof session>> | undefined;
+    const internal = "internal: upstream reset at gatekeeper-host-7 (stack: x.ts:1)";
+    for (const [message, words] of [
+      ['The RPC receiver does not implement the method "invoke".', "This trigger can't be run on request."],
+      [internal, "This trigger couldn't be run just now."],
+    ] as const) {
+      made = await session("use", {
+        invoke: async () => {
+          // A pin, control or assignment change lands meanwhile and drops the waiting request.
+          made!.store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
+          throw new Error(message);
+        },
+      });
+      let refused = await refusalOf(() => made!.overseer.invokeTrigger(HOOK));
+      expect(refused).toContain(words);
+      expect(refused).not.toContain("upstream reset");
+      expect(refused).not.toContain("does not implement");
+    }
+  });
+
+  it("refuses at once, asking no gatekeeper, a trigger assigned while assignments are off", async () => {
+    let off = await session("use");
+    off.store.setAssignment(ADA, HOOK, 50);
+    expect(await refusalOf(() => off.overseer.invokeTrigger(HOOK))).toContain("Workflow assignments aren't enabled on this instance.");
+    expect(off.invoke).not.toHaveBeenCalled();
+    let on = await session("use", { assignmentsEnabled: true });
+    on.store.setAssignment(ADA, HOOK, 50);
+    await expect(on.overseer.invokeTrigger(HOOK)).resolves.toMatchObject({ hookId: HOOK });
   });
 
   it("refuses to run a disabled trigger", async () => {
@@ -339,7 +380,7 @@ describe("what an invoker sees, and what reaches the gatekeeper", () => {
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
     let impl = {
       env: {}, storage: { boundHooks: { get: () => hook } }, assertGatekeeperUsable: () => {},
-      workflowDefinitionStore: () => store,
+      workflowDefinitionStore: () => store, takenInvocations: new Set<string>(),
     };
     let direct = invokeWorkflowTrigger as unknown as (...args: unknown[]) => Promise<unknown>;
     await direct(impl, "viewer-id", OPERATOR, HOOK, { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" });
@@ -366,6 +407,7 @@ async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolea
   let askedInvoke: string[] = [];
   let impl = {
     env: mayInvoke ? { SHARED_CONFIGURATION_GATEKEEPER: "inferops" } : {},
+    takenInvocations: new Set<string>(),
     isSharedConfiguration: async () => true,
     workflowDefinitionStore: () => store,
     getGadgetHead: headOf,

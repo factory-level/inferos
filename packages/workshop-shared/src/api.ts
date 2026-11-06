@@ -30,7 +30,7 @@ import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } 
 import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
-  TriggerAssignment, TriggerAssignmentSettings,
+  TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation,
 } from "./workflow-definition.js";
@@ -2790,8 +2790,11 @@ export interface Overseer extends RpcTarget {
    * Clearing the pin removes it.
    */
   setTriggerAssignment(hookId: number, settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null>;
-  /** The assignment of trigger `hookId`, or null. Build only. */
-  getTriggerAssignment(hookId: number): Promise<TriggerAssignment | null>;
+  /**
+   * Whether assignments are enabled here, and trigger `hookId`'s assignment or null. Disabled
+   * reads as `enabled: false` rather than an error, so the UI can say so. Build only.
+   */
+  getTriggerAssignment(hookId: number): Promise<TriggerAssignmentState>;
   /**
    * Give assigned trigger `hookId`'s connection the service account's key (FAC-102), replacing any
    * given before. The Workshop relays `key` once to the connection's vendor, which checks it with its
