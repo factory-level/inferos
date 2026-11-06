@@ -44,7 +44,7 @@ afterEach(() => {
   calls = [];
   statesSeen = [];
   loaded = { commitIds: [], envs: [] };
-  gatekeeper = { next: 1, staged: new Map(), withdrawn: [] };
+  gatekeeper = { next: 1, staged: new Map(), withdrawn: [], failWithdraws: 0 };
   workflowRun = defaultWorkflowRun;
   answer = async () => "done";
 });
@@ -129,17 +129,22 @@ function admitted(impl: any, opts: { assigned?: boolean } = {}) {
 }
 
 const deliveryOf = (impl: any, id: number) => impl.storage.workflowDeliveries.get(id);
-const DESCRIPTION = { title: "Create issue", description: "Creates one issue.", implementsRevert: false };
+/** A write whose description reproduces all it sends (`descriptionIsComplete`), as a gatekeeper-kit card that fits does. */
+const DESCRIPTION: Record<string, unknown> & { title: string } = {
+  title: "Create issue", description: "Creates one issue.", implementsRevert: false, descriptionIsComplete: true,
+};
+/** One that doesn't: a summary, so two different operations can read the same. */
+const SUMMARY: Record<string, unknown> & { title: string } = { title: "Update issue", description: "Updates one issue.", implementsRevert: false };
 
 /**
  * A stand-in for a real gatekeeper's staging, across instances: each write it stages gets the next
  * key of a counter that only grows (as the InferOps gatekeeper's persisted one does), and a key the
  * workspace withdraws is dropped from what it holds staged.
  */
-let gatekeeper = { next: 1, staged: new Map<number, unknown>(), withdrawn: [] as number[] };
+let gatekeeper = { next: 1, staged: new Map<number, unknown>(), withdrawn: [] as number[], failWithdraws: 0 };
 
 /** Stage `description` at the stand-in gatekeeper and submit it through `caller`, as a session does. */
-async function stage(workspace: any, caller: unknown, description: typeof DESCRIPTION) {
+async function stage(workspace: any, caller: unknown, description: Record<string, unknown>) {
   let key = gatekeeper.next++;
   gatekeeper.staged.set(key, description);
   return workspace.submitActionNow(CONNECTION, key, description, caller, await actionDescriptionDigest(description));
@@ -155,7 +160,16 @@ const submitted = (impl: any, caller: unknown) => stage(impl, caller, DESCRIPTIO
  */
 function runsAs(impl: any, kind: "gadget-bindings" | "assigned",
                 body: (workspace: any, caller: unknown) => Promise<unknown>) {
-  const facet = { rejectAction: async (key: number) => { gatekeeper.staged.delete(key); gatekeeper.withdrawn.push(key); } };
+  const facet = {
+    rejectAction: async (key: number) => {
+      if (gatekeeper.failWithdraws > 0) {
+        gatekeeper.failWithdraws--;
+        throw new Error("the provider didn't answer");
+      }
+      gatekeeper.staged.delete(key);
+      gatekeeper.withdrawn.push(key);
+    },
+  };
   onPrototype(impl, "getGatekeeperFacet", () => facet);
   onPrototype(impl, "openAssignedActionFacet", async () => ({ facet, close: () => {} }));
   if (kind === "gadget-bindings") {
@@ -172,6 +186,11 @@ function runsAs(impl: any, kind: "gadget-bindings" | "assigned",
   });
 }
 const actionsOf = (impl: any) => [...impl.storage.actions.list()].filter((a: any) => a.type === "action");
+
+/** Runs the workspace's alarm once more: what withdraws a replay's staged copies (retryReplayWithdrawals). */
+async function nextAlarm(name: string) {
+  await runDurableObjectAlarm(env.TEST_OVERSEER.getByName(name));
+}
 
 async function settled(name: string, id: number) {
   let stub = env.TEST_OVERSEER.getByName(name);
@@ -261,7 +280,8 @@ describe("a requested run across a restart (FAC-112)", () => {
       expect(actions).toHaveLength(1);
       expect(actions[0].action).toBe(1);
       // The replay staged key 2 at the gatekeeper; matched to key 1's action, it was withdrawn there.
-      await vi.waitFor(() => expect(gatekeeper.withdrawn).toEqual([2]));
+      await nextAlarm(name);
+      expect(gatekeeper.withdrawn).toEqual([2]);
       expect([...gatekeeper.staged.keys()]).toEqual([1]);
     });
   }
@@ -287,7 +307,8 @@ describe("a requested run across a restart (FAC-112)", () => {
     let done = await settled(name, id);
     expect(done.execution).toMatchObject({ state: "finished", attempts: 2 });
     expect((await withImpl(name, impl => actionsOf(impl))).map((a: any) => a.action)).toEqual([1, 2]);
-    await vi.waitFor(() => expect(gatekeeper.withdrawn.toSorted()).toEqual([3, 4]));
+    await nextAlarm(name);
+    expect(gatekeeper.withdrawn.toSorted()).toEqual([3, 4]);
   });
 
   it("records a write a replay makes that the first attempt didn't, and leaves it for a person", async () => {
@@ -365,6 +386,90 @@ describe("a requested run across a restart (FAC-112)", () => {
     expect(actions).toEqual([expect.objectContaining({ state: "pending" })]);
   });
 
+});
+
+// Round 4 (review HIGH): an incomplete description doesn't show the operation it stands for, so two
+// different operations can read the same; such a write is never matched, so none is dropped.
+describe("a replay's write with an incomplete description (FAC-112)", () => {
+  it("is never matched: recorded again and left for a person, nothing withdrawn", async () => {
+    let name = `run-exec-incomplete-${crypto.randomUUID()}`;
+    let attempt = 0;
+    let id = await withImpl(name, impl => {
+      let delivery = admitted(impl);
+      runsAs(impl, "gadget-bindings", async (workspace, caller) => {
+        attempt++;
+        // The same summary each time, whatever operation the gatekeeper staged under it.
+        await stage(workspace, caller, SUMMARY);
+        if (attempt === 1) return new Promise(() => {});
+        return "ran";
+      });
+      impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+      void impl.runQueuedWorkflowRuns();
+      return delivery.deliveryId;
+    });
+    await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(1)));
+    await abortAllDurableObjects();
+    let done = await settled(name, id);
+    expect(done.execution).toMatchObject({ state: "finished", attempts: 2 });
+    let actions = await withImpl(name, impl => actionsOf(impl));
+    expect(actions.map((a: any) => [a.action, a.workflowRun.attempt])).toEqual([[1, 1], [2, 2]]);
+    expect(manualOnly(actions[1])).toBe(true);
+    expect(gatekeeper.withdrawn).toEqual([]);
+  });
+});
+
+// Round 4 (review MEDIUM): withdrawing a replay's second copy is recorded with the match, retried by
+// the alarm until it succeeds, and shown to a person, to reject, when it never does.
+/** A run that wrote once, was interrupted, and ran again to its end: its replay staged one copy. */
+async function replayed(name: string) {
+  let attempt = 0;
+  let id = await withImpl(name, impl => {
+    let delivery = admitted(impl);
+    runsAs(impl, "gadget-bindings", async (workspace, caller) => {
+      attempt++;
+      await stage(workspace, caller, DESCRIPTION);
+      if (attempt === 1) return new Promise(() => {});
+      return "ran";
+    });
+    impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+    void impl.runQueuedWorkflowRuns();
+    return delivery.deliveryId;
+  });
+  await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(1)));
+  await abortAllDurableObjects();
+  return settled(name, id);
+}
+
+describe("withdrawing a replay's staged copy (FAC-112)", () => {
+  it("is kept until the gatekeeper takes it: a failure is retried, then the entry goes", async () => {
+    let name = `run-exec-withdraw-${crypto.randomUUID()}`;
+    gatekeeper.failWithdraws = 1;
+    await replayed(name);
+    await withImpl(name, async impl => {
+      // The first try fails and is kept, with a later try due; the next succeeds.
+      await impl.retryReplayWithdrawals(Date.now() + 1e9);
+      expect([...impl.storage.replayWithdrawals.list()]).toEqual([expect.objectContaining({ action: 2, attempts: 1 })]);
+      await impl.retryReplayWithdrawals(Date.now() + 2e9);
+      expect([...impl.storage.replayWithdrawals.list()]).toEqual([]);
+    });
+    expect(gatekeeper.withdrawn).toEqual([2]);
+    expect([...gatekeeper.staged.keys()]).toEqual([1]);
+  });
+
+  it("never taken, becomes a pending duplicate a person can only reject", async () => {
+    let name = `run-exec-withdraw-stuck-${crypto.randomUUID()}`;
+    gatekeeper.failWithdraws = 1_000;
+    await replayed(name);
+    await withImpl(name, async impl => {
+      for (let i = 1; i <= 10; i++) await impl.retryReplayWithdrawals(Date.now() + i * 1e9);
+      expect([...impl.storage.replayWithdrawals.list()]).toEqual([]);
+      let [first, duplicate] = actionsOf(impl);
+      expect(duplicate).toMatchObject({ action: 2, state: "pending", replayDuplicateOf: first.id });
+      let refused = await impl.applyPendingAction(duplicate, ADA, false).then(() => "applied", (e: Error) => e.message);
+      expect(refused).toContain("duplicate");
+      expect(impl.storage.actions.get(duplicate.id).state).toBe("pending");
+    });
+  });
 });
 
 describe("a requested run uses only its stored starting context (FAC-112)", () => {

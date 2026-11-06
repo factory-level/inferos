@@ -1172,7 +1172,24 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
 }
 
 /** Which requested run proposed a write, and where (FAC-112; `ActionRecord.workflowRun`). */
-export type WorkflowRunWrite = { runId: string; hookId: number; deliveryId: number; writeKey: string; attempt: number };
+export type WorkflowRunWrite = { runId: string; hookId: number; deliveryId: number; writeKey?: string; attempt: number };
+
+/**
+ * A copy of a write a workflow run proposed again after a restart (FAC-112), which the gatekeeper
+ * staged under `action` and the workspace matched to its first proposal (`duplicateOf`): kept until
+ * the gatekeeper withdraws it, retried by the alarm at `nextAttemptAt`, and shown to a person to
+ * reject once `REPLAY_WITHDRAW_TRIES` tries have failed.
+ */
+export type ReplayWithdrawal = {
+  key: string; gatekeeperId: number; action: number; duplicateOf: number; attempts: number; nextAttemptAt: number;
+};
+
+/** How many times the alarm asks a gatekeeper to withdraw a replay's copy before a person is shown it. */
+export const REPLAY_WITHDRAW_TRIES = 5;
+
+/** The refusal to apply such a copy: it is the same write as one already proposed. */
+export const REPLAY_DUPLICATE_REFUSED =
+  "This is a duplicate of a write a workflow run proposed again after a restart. Reject it; the first one stands.";
 
 export type ActionRecord = {
   id: number,
@@ -1220,11 +1237,17 @@ export type ActionRecord = {
   executedAs?: AssignedExecution;
   /**
    * Set when an unassigned requested workflow run proposed it (FAC-112), through its gadget's own
-   * connection: the run, what identifies the write within it (`AssignedExecution.writeKey`), and
-   * the attempt. It applies
+   * connection: the run, what identifies the write within it (`AssignedExecution.writeKey`; absent
+   * when its description is incomplete, so it is never matched), and the attempt. It applies
    * through the connection's own facet, once the person who asked may still run it.
    */
   workflowRun?: WorkflowRunWrite;
+  /**
+   * Set on a copy a gatekeeper staged when a workflow run proposed a write again (FAC-112) and that
+   * it could not be made to withdraw: the action it duplicates. A person can reject it; it is never
+   * applied (`REPLAY_DUPLICATE_REFUSED`).
+   */
+  replayDuplicateOf?: number;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1813,6 +1836,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Withdrawals the widget index still owes, for the whole workspace (a deleted console's
       // included), retried on the next publication or delete and by the alarm.
       widgetIndexOwed: collection<OwedWithdrawal>()({ primaryKey: "key" }),
+      // Copies a gatekeeper staged when a workflow run proposed a write again, still to withdraw
+      // (FAC-112; see OverseerImpl.retryReplayWithdrawals).
+      replayWithdrawals: collection<ReplayWithdrawal>()({ primaryKey: "key" }),
       // An operate session workspace's host-board selections, by target; its selection requests,
       // by request key (settled ones kept as tombstones); and its audited reads (see host-boards.ts).
       hostBoardSelections: collection<HostBoardSelectionRecord>()({ primaryKey: "target" }),
@@ -2594,6 +2620,9 @@ class OverseerImpl implements AgentHooks {
       times.push(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
     }
 
+    // A replay's staged copies still to withdraw (FAC-112), each at its next try.
+    for (let entry of this.storage.replayWithdrawals.list()) times.push(entry.nextAttemptAt);
+
     // Owed widget index withdrawals, each until its alarm tries run out (see console-widget-index.ts).
     for (let owed of this.storage.widgetIndexOwed.list()) {
       if (owed.attempts < OWED_RETRY_CAP) times.push(owed.nextAttemptAt);
@@ -2627,6 +2656,7 @@ class OverseerImpl implements AgentHooks {
     try {
       this.toolLane.sweep();
       await this.#retryDueWidgetWithdrawals();
+      await this.retryReplayWithdrawals();
       do {
         let results = await Promise.allSettled([
           this.waitForAllAgentsToComplete(),
@@ -6546,6 +6576,8 @@ class OverseerImpl implements AgentHooks {
     // another attempt is safe (`retryable: true`). A thrown error, an attempt recorded without the
     // flag and a recovered interruption say nothing of the kind, so nothing is sent and nothing is
     // recorded: the person checks the provider and rejects it.
+    // A replay's copy of a write already proposed (FAC-112) is the same write again: never applied.
+    if (record.replayDuplicateOf !== undefined) throw new Error(REPLAY_DUPLICATE_REFUSED);
     let stored = this.storage.actions.get(record.id);
     let last = stored?.type === "action" ? stored.lastAttempt : undefined;
     if (last && last.retryable !== true) {
@@ -7055,35 +7087,92 @@ class OverseerImpl implements AgentHooks {
   // proposes the same writes, so each one already recorded is the answer, not a second one; the
   // provider's own action key, which a gatekeeper never reuses, plays no part. Nothing when the run
   // isn't counting (its attempt didn't start here).
-  #runWrite(runId: string, deliveryId: number, gatekeeperId: number, digest: string | undefined):
-      { writeKey?: string; already?: ActionRecord & {type: "action"} } {
+  #runWrite(runId: string, deliveryId: number, gatekeeperId: number, digest: string | undefined,
+            description: ActionDescription):
+      { counting: boolean; writeKey?: string; already?: ActionRecord & {type: "action"} } {
     let counts = this.#workflowRunProposals.get(deliveryId);
-    if (!counts) return {};
+    if (!counts) return { counting: false };
+    // A description that doesn't reproduce everything the write sends can read the same for two
+    // different operations, so such a write is never matched (round 4): recorded every time it is
+    // proposed, and on a replay left for a person (manualOnly), so no write is ever dropped.
+    if (description.descriptionIsComplete !== true) return { counting: true };
     if (digest === undefined) throw new Error("A workflow run's write reached the workspace without its digest.");
     let occurrence = counts.get(digest) ?? 0;
     counts.set(digest, occurrence + 1);
     let writeKey = `${runId}:${gatekeeperId}:${digest}:${occurrence}`;
     let already = this.storage.actions.byRunWrite.get(writeKey);
-    return already?.type === "action" ? { writeKey, already } : { writeKey };
+    return already?.type === "action" ? { counting: true, writeKey, already } : { counting: true, writeKey };
   }
 
   // A replay's write matched to the one its run already proposed (FAC-112): the gatekeeper staged
-  // it again under a new key, which is withdrawn there so it holds no second copy of the write,
-  // on the facet the first one lives on. Best effort, logged: the workspace records only the first.
+  // it again under a new key, which must be withdrawn there so it holds no second copy. Recorded
+  // durably now, in the step that returns the match, and withdrawn by the alarm
+  // (retryReplayWithdrawals), which retries until the gatekeeper takes it.
   #withdrawReplayedStage(already: ActionRecord & {type: "action"}, action: number): void {
     if (already.action === action) return;
-    this.ctx.waitUntil((async () => {
-      let assigned = already.executedAs ? await this.openAssignedActionFacet(already) : undefined;
-      try {
-        await (assigned?.facet ?? this.getGatekeeperFacet(already.gatekeeperId)).rejectAction(action);
-      } catch (error) {
-        logger.warn("replayed workflow write not withdrawn", {
-          event: "workflow.run.replay_withdraw_failed", actionId: already.id, error,
-        });
-      } finally {
-        assigned?.close();
+    let key = `${already.gatekeeperId}:${action}`;
+    if (this.storage.replayWithdrawals.get(key)) return;
+    this.storage.replayWithdrawals.put({
+      key, gatekeeperId: already.gatekeeperId, action, duplicateOf: already.id, attempts: 0, nextAttemptAt: Date.now(),
+    });
+    this.#updateAlarm();
+  }
+
+  /**
+   * The alarm's part in a replay's staged copies (FAC-112): asks the gatekeeper to withdraw each one
+   * due by `now`, on the facet the write it duplicates lives on, and forgets it once that succeeds.
+   * A failure is tried again later, with a growing delay. After `REPLAY_WITHDRAW_TRIES` failures the
+   * copy is shown to a person instead: a pending action marked `replayDuplicateOf`, which they can
+   * reject and which never applies.
+   */
+  async retryReplayWithdrawals(now = Date.now()): Promise<void> {
+    // Materialized first: the loop deletes and rewrites entries as it goes.
+    for (let entry of Array.from(this.storage.replayWithdrawals.list())) {
+      if (entry.nextAttemptAt > now) continue;
+      let first = this.storage.actions.get(entry.duplicateOf);
+      if (first?.type !== "action") {
+        this.storage.replayWithdrawals.delete(entry.key);
+        continue;
       }
-    })());
+      try {
+        let assigned = first.executedAs ? await this.openAssignedActionFacet(first) : undefined;
+        try {
+          await (assigned?.facet ?? this.getGatekeeperFacet(entry.gatekeeperId)).rejectAction(entry.action);
+        } finally {
+          assigned?.close();
+        }
+        this.storage.replayWithdrawals.delete(entry.key);
+      } catch (error) {
+        let attempts = entry.attempts + 1;
+        logger.warn("replayed workflow write not withdrawn", {
+          event: "workflow.run.replay_withdraw_failed", actionId: first.id, failureCount: attempts, error,
+        });
+        if (attempts < REPLAY_WITHDRAW_TRIES) {
+          this.storage.replayWithdrawals.put({ ...entry, attempts, nextAttemptAt: now + 60_000 * 2 ** attempts });
+          continue;
+        }
+        this.#surfaceReplayDuplicate(entry, first);
+      }
+    }
+    this.#updateAlarm();
+  }
+
+  // A copy the gatekeeper never withdrew (FAC-112), shown to a person as a pending action that
+  // names the write it duplicates, with its connection and run, so they can reject it there.
+  #surfaceReplayDuplicate(entry: ReplayWithdrawal, first: ActionRecord & {type: "action"}): void {
+    let id = this.storage.nextActionId.get();
+    let { writeKey: _writeKey, ...executedAs } = first.executedAs ?? {} as AssignedExecution;
+    let duplicate: ActionRecord = {
+      id, gatekeeperId: first.gatekeeperId, caller: first.caller, resourceTitle: first.resourceTitle,
+      resourceUrl: first.resourceUrl, action: entry.action, createdAt: new Date(), state: "pending",
+      type: "action", description: first.description, replayDuplicateOf: first.id,
+      ...(first.executedAs ? { executedAs: executedAs as AssignedExecution } : {}),
+    };
+    this.storage.transaction(() => {
+      this.storage.nextActionId.put(id + 1);
+      this.storage.actions.put(duplicate);
+      this.storage.replayWithdrawals.delete(entry.key);
+    });
   }
 
   /**
@@ -7614,7 +7703,8 @@ class OverseerImpl implements AgentHooks {
       if (run.gatekeeperId !== gatekeeperId) throw new Error("This workflow run can't propose actions on that connection.");
       // Both actors, for the audit (FAC-104): who asked for the run, and who it acts as.
       let admitted = this.workflowDefinitionStore().deliveryRun(caller.deliveryId)?.run;
-      let write = admitted ? this.#runWrite(admitted.runId, caller.deliveryId, gatekeeperId, writeDigest) : {};
+      let write: { writeKey?: string; already?: ActionRecord & {type: "action"} } =
+          admitted ? this.#runWrite(admitted.runId, caller.deliveryId, gatekeeperId, writeDigest, description) : {};
       if (write.already) {
         this.#withdrawReplayedStage(write.already, action);
         return write.already.id;
@@ -7638,14 +7728,16 @@ class OverseerImpl implements AgentHooks {
       let { hookId, deliveryId } = caller.run;
       let admitted = this.workflowDefinitionStore().deliveryRun(deliveryId)?.run;
       if (!admitted) throw new Error(RUN_REQUESTER_REVOKED);
-      let write = this.#runWrite(admitted.runId, deliveryId, gatekeeperId, writeDigest);
+      let write = this.#runWrite(admitted.runId, deliveryId, gatekeeperId, writeDigest, description);
       if (write.already) {
         this.#withdrawReplayedStage(write.already, action);
         return write.already.id;
       }
-      if (write.writeKey === undefined) throw new Error(SYSTEM_RUN_ENDED);
+      if (!write.counting) throw new Error(SYSTEM_RUN_ENDED);
       let attempt = this.storage.workflowDeliveries.get(deliveryId)?.execution?.attempts ?? 1;
-      workflowRun = { runId: admitted.runId, hookId, deliveryId, writeKey: write.writeKey, attempt };
+      workflowRun = {
+        runId: admitted.runId, hookId, deliveryId, attempt, ...(write.writeKey ? { writeKey: write.writeKey } : {}),
+      };
     }
 
     let actionId = this.storage.nextActionId.get();
