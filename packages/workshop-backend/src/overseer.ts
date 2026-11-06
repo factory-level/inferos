@@ -6,9 +6,15 @@ import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@g
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
+  TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation,
 } from "@gadgets/workshop-shared/workflow-definition";
+import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
+import {
+  SystemRunRegistry, openSystemRunSession, runAssignedDelivery, systemGatekeeperFacetName,
+  type AssignedDelivery, type SystemRunHost,
+} from "./system-run.js";
 import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
@@ -51,7 +57,7 @@ import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId,
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type SharedConfigurationAction, type WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
 import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -166,6 +172,36 @@ export async function requireWorkflowInvoke(
   for (let resourceUrl of boards) {
     if (!(await user.holdsWorkflowInvoke(resourceUrl))) throw new Error(WORKFLOW_INVOKE_REFUSED);
   }
+}
+
+/**
+ * The one refusal for a service-account key the Workshop won't relay or the service doesn't accept
+ * (FAC-102). Fixed words: nothing of the key or of the service's reason is ever repeated.
+ */
+export const PROVISION_REFUSED = "The key wasn't accepted.";
+
+/** The refusal for assigning, giving a key or an assigned run while assignments are off (FAC-102). */
+export const WORKFLOW_ASSIGNMENTS_DISABLED = "Workflow assignments aren't enabled on this instance.";
+
+/**
+ * Whether workflow trigger assignments are on (`WORKFLOW_ASSIGNMENTS_ENABLED === "true"`): off by
+ * default, and to stay off on every deployment until the fail-closed follow-up merges (the manager,
+ * 2026-11-06). The server decides; the UI only reflects it.
+ */
+export function workflowAssignmentsEnabled(env: { WORKFLOW_ASSIGNMENTS_ENABLED?: string }): boolean {
+  return env.WORKFLOW_ASSIGNMENTS_ENABLED === "true";
+}
+
+/** The fixed refusal when a request failed before its delivery took it, for any other reason. */
+const RUN_NOT_STARTED = "This trigger couldn't be run just now.";
+
+/** Longest service-account key relayed for provisioning. */
+const MAX_PROVISIONED_KEY_LENGTH = 1024;
+
+// The resource a gatekeeper connection serves, from its own record.
+function gatekeeperResourceUrl(record: GatekeeperRecord | undefined): string | undefined {
+  let spec = record?.creationSpec;
+  return spec && "resourceUrl" in spec && typeof spec.resourceUrl === "string" ? spec.resourceUrl : undefined;
 }
 
 /**
@@ -1012,6 +1048,8 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
       return caller.gadgetId === undefined ? undefined : {type: "gadget", id: String(caller.gadgetId)};
     case "hook":
       return {type: "system", id: "hook"};
+    case "systemRun":
+      return {type: "system", id: `systemRun:${caller.hookId}`};
   }
 }
 
@@ -1364,7 +1402,8 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   // Only the kind of caller leaves the server, never its chat or gadget id. Records persisted
   // before callers were tracked have no `caller`, so their entries carry no `requestedBy`.
   const from = (record.caller as GatekeeperCaller | undefined)?.from;
-  const requestedBy = from === "user" ? "person" : from;
+  // A trigger's assigned run (FAC-102) is the trigger's automation, like any other hook firing.
+  const requestedBy = from === "user" ? "person" : from === "systemRun" ? "hook" : from;
 
   switch (record.type) {
     case "observation":
@@ -1615,6 +1654,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Who may ask a pinned trigger to run now, and the requests admitted but not yet delivered
       // (FAC-102; see workflow-definition-store.ts).
       workflowTriggerControls: collection<StoredTriggerControl>()({ primaryKey: "hookId" }),
+      // Which service account an assigned trigger's on-request runs execute as (FAC-102).
+      workflowTriggerAssignments: collection<TriggerAssignment>()({ primaryKey: "hookId" }),
       workflowInvocations: collection<StoredWorkflowInvocation>()({ primaryKey: "id" }),
       // The newest on-request runs, which the run rates count (see workflow-definition-store.ts).
       workflowInvocationLog: collection<StoredWorkflowInvocationRecord>()({ primaryKey: "id" }),
@@ -3552,7 +3593,8 @@ class OverseerImpl implements AgentHooks {
         await this.removeWorkpiece(record.id);
       }
     }
-    for (let gadget of this.storage.gadgets.list()) {
+    // Buffer the records first: bumpVersion reads other lists, which would invalidate the cursor.
+    for (let gadget of Array.from(this.storage.gadgets.list())) {
       if (gadget.type !== "gadget") continue;  // worktrees have no binding edges
       let removed = false;
       for (let [name, edge] of Object.entries(gadget.bindings)) {
@@ -3576,6 +3618,7 @@ class OverseerImpl implements AgentHooks {
       await record.controller.disable();
     }
     this.storage.boundHooks.delete(record.id);
+    retireTriggerAssignment(this, record.id);
     this.workflowDefinitionStore().forgetTrigger(record.id);
 
     stampBindHookAction(this.storage, record.actionId, false, {clearHookId: true});
@@ -5703,7 +5746,8 @@ class OverseerImpl implements AgentHooks {
     let doomed = this.listPendingGadgets(chatId).filter(gadget =>
         gadget.pending!.sequence !== undefined && gadget.pending!.sequence >= revertFrom);
     let doomedIds = new Set(doomed.map(gadget => gadget.id));
-    for (let gadget of this.storage.gadgets.list()) {
+    // Buffer the records first: bumpVersion reads other lists, which would invalidate the cursor.
+    for (let gadget of Array.from(this.storage.gadgets.list())) {
       if (gadget.type !== "gadget" || doomedIds.has(gadget.id)) continue;
       let removed = false;
       for (let [name, edge] of Object.entries(gadget.bindings)) {
@@ -6544,9 +6588,12 @@ class OverseerImpl implements AgentHooks {
     // deliberately not awaited -- parking the teardown behind a gatekeeper round trip would keep
     // the connection's data flowing into the gadget for as long as that call took (or forever, if
     // it hangs), with the record gone and nobody verified against it.
+    // Every assignment whose runs use this connection goes too, wherever its hook is hosted (#374 round 3).
+    retireAssignmentsUsing(this, id);
     for (let hook of Array.from(this.storage.boundHooks.list())) {
       if (hook.gatekeeperId !== id) continue;
       this.storage.boundHooks.delete(hook.id);
+      retireTriggerAssignment(this, hook.id);
       this.workflowDefinitionStore().forgetTrigger(hook.id);
       stampBindHookAction(this.storage, hook.actionId, false, {clearHookId: true});
       if (hook.enabled) {
@@ -6604,8 +6651,58 @@ class OverseerImpl implements AgentHooks {
     return config;
   }
 
+  /** The admitted, assigned runs in flight (FAC-102; see system-run.ts). */
+  systemRuns = new SystemRunRegistry();
+
+  /**
+   * Invocations a delivery has taken while their `invokeTrigger` call is still waiting (#374):
+   * startHook adds one as `fire` consumes it, and invokeWorkflowTrigger reads and removes it to
+   * tell the run's own failure from a request that never started. In memory: both happen within
+   * the one call, which a reset ends anyway.
+   */
+  takenInvocations = new Set<string>();
+
+  // What system-run.ts needs of this workspace, bound to it.
+  #systemRunHost(): SystemRunHost {
+    return {
+      systemRuns: this.systemRuns,
+      assignmentOf: hookId => this.workflowDefinitionStore().assignmentOf(hookId),
+      liveHookGadget: hookId => {
+        let gadgetId = requireLiveHook(this, hookId).gadgetId ?? this.defaultGadgetId;
+        if (gadgetId === undefined) throw new Error("This trigger wakes no gadget.");
+        return gadgetId;
+      },
+      bindingsOf: gadgetId => this.visibleBindings(this.getGadgetRecord(gadgetId)),
+      makeLoopback: (gatekeeperId, caller) => this.makeBindingLoopback({type: "gatekeeper", id: gatekeeperId}, caller),
+      readModules: async commitId => {
+        let modules: Record<string, string> = {};
+        for (let [file, content] of await this.gitStore.readCommitFiles(commitId)) {
+          if (isGadgetModule(file)) modules[file] = content;
+        }
+        return modules;
+      },
+      loadWorker: code => this.env.LOADER.load({compatibilityDate: "2026-02-01", ...code, globalOutbound: null}),
+      vendorIdOf: gatekeeperId => gatekeeperVendorId(this.storage.gatekeepers.get(gatekeeperId)),
+      resourceUrlOf: gatekeeperId => gatekeeperResourceUrl(this.storage.gatekeepers.get(gatekeeperId)),
+      vendor: vendorId => buildGatekeeperVendorMap(this.env).get(vendorId) as unknown as
+          Pick<GatekeeperVendor, "getSystemGatekeeperClass"> | undefined,
+      facet: (name, cls) => this.ctx.facets.get(name, async () => ({class: cls})) as Fetcher<Gatekeeper<any>>,
+      openSession: (gatekeeperId, facet, caller) => this.openGatekeeperSession(gatekeeperId, facet, caller),
+      // A stub over the revocable wrapper, so every call the worker makes re-enters it here.
+      wrapSession: wrapper => new NativeRpcStub(wrapper as RpcTarget),
+      abortFacet: name => this.ctx.facets.abort(name, new Error("The workflow run ended.")),
+    };
+  }
+
+  /** Runs one admitted delivery of an assigned trigger (FAC-102; see system-run.ts). */
+  runAssignedDelivery(hookId: number, delivery: AssignedDelivery, method: string | null, args: unknown[]): Promise<unknown> {
+    return runAssignedDelivery(this.#systemRunHost(), hookId, delivery, method, args);
+  }
+
   // Open the session behind a binding loopback.
   startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
+    // A run-scoped worker's binding: only the assigned connection's system session (FAC-102).
+    if (caller.from === "systemRun") return openSystemRunSession(this.#systemRunHost(), target, caller);
     // Before every case, so a tainted chat's agent reaches no gadget, worktree, git or
     // non-allowlisted gatekeeper code, whenever the mark landed (see chat-taint.ts).
     if (caller.from === "agent") this.#assertUsableWhileTainted(caller.chatId, target);
@@ -6764,7 +6861,8 @@ class OverseerImpl implements AgentHooks {
     try {
       if (caller.from === "agent") {
         this.#getOrCreateCapturedActions(caller.chatId).actions.push(actionId);
-      } else if (caller.from !== "hook" && caller.chatId !== undefined && this.ownerId) {
+      } else if (caller.from !== "hook" && caller.from !== "systemRun" && caller.chatId !== undefined &&
+                 this.ownerId) {
         let owner = this.users.get(this.users.idFromString(this.ownerId));
         let userMeta = await owner.getChatContext(null);
         this.addChatMessages(caller.chatId, this.gadgetAuthorFor(userMeta.profile),
@@ -7416,6 +7514,9 @@ class OverseerImpl implements AgentHooks {
   // no merge can change (see assertNotFrozen), so a Build edit doesn't cut off the operators using
   // a published console's widgets; binding changes pass the one gadget they touched so that
   // renaming a binding on gadget A doesn't restart gadget B. Explicit ids are always restarted.
+  // It reads storage lists (the gadgets, and the trigger assignments it retires), so a caller must
+  // never call it while iterating a storage list lazily: only one kv.list() cursor can be open, and
+  // a new one invalidates it. Buffer the list with Array.from first.
   bumpVersion(affectedGadgetIds?: WorkpieceId[]): number {
     let codeVersion = this.storage.codeVersion.get() + 1;
     this.storage.codeVersion.put(codeVersion);
@@ -7427,6 +7528,9 @@ class OverseerImpl implements AgentHooks {
       this.ctx.facets.abort(this.gadgetFacetName(id),
           new Error("Gadget restarted due to code update."));
     }
+    // Every change to binding edges comes through here: an assignment whose connection is no
+    // longer bound is retired now, with its running deliveries' facets (#374 round 4).
+    retireUnboundAssignments(this);
     this.bumpLastActive();
     return codeVersion;
   }
@@ -11470,6 +11574,22 @@ class OverseerImpl implements AgentHooks {
   }
 
   /** This workspace's workflow definitions, their trigger pins and deliveries. */
+  /** See retireTriggerAssignment. */
+  retireTriggerAssignment(hookId: number): void {
+    retireTriggerAssignment(this, hookId);
+  }
+
+  /** See provisionWorkflowTriggerCredential. */
+  provisionTriggerCredential(caller: AiChatAuthorInfo, hookId: number, key: string): Promise<TriggerAssignment> {
+    return provisionWorkflowTriggerCredential(this, caller, hookId, key);
+  }
+
+  /** See setWorkflowTriggerAssignment. */
+  setTriggerAssignment(caller: AiChatAuthorInfo, hookId: number, settings: TriggerAssignmentSettings | null)
+      : TriggerAssignment | null {
+    return setWorkflowTriggerAssignment(this, caller, hookId, settings);
+  }
+
   /** See invokeWorkflowTrigger. */
   async invokeTrigger(userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
     return invokeWorkflowTrigger(this, userId, profileId, hookId);
@@ -12602,10 +12722,32 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // firing is recorded with it (workflow-definition-store.ts); it never falls back to another.
     // A delivery a person asked for (invokeTrigger) names the invocation admitted for it; the store
     // accepts only that, once, and records who asked as a claim beside the run.
-    this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
+    let invocationId = typeof request?.invocationId === "string" ? request.invocationId : undefined;
+    // Assignments off (FAC-102): a request for a trigger assigned before never runs, neither as the
+    // service account nor on the gadget's own callback, and is refused before it is taken.
+    if (invocationId !== undefined && !workflowAssignmentsEnabled(this.env) &&
+        this.impl.workflowDefinitionStore().assignmentOf(hookId)) {
+      throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+    }
+    let delivery = this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
         gadgetId => this.impl.getGadgetHead(gadgetId),
         profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build",
-        typeof request?.invocationId === "string" ? request.invocationId : undefined);
+        invocationId);
+    // The request is taken: from here a failure is the run's own (invokeWorkflowTrigger).
+    if (delivery?.invocation) this.impl.takenInvocations.add(delivery.invocation.id);
+
+    // An admitted request for an assigned trigger runs as its service account (FAC-102), in a
+    // run-scoped worker, never through the gadget's own callback and the bindings people connected.
+    if (delivery?.invocation && delivery.executedAs) {
+      let caller: GatekeeperCaller = {from: "systemRun", hookId, deliveryId: delivery.deliveryId};
+      return {
+        callback: makeSystemRunCallback(this.impl, hookId, {
+          deliveryId: delivery.deliveryId, commitId: delivery.commitId,
+          credentialRef: delivery.executedAs.credentialRef,
+        }),
+        approvalQueue: new ApprovalQueueImpl(this.impl, record.gatekeeperId, caller, hookId),
+      };
+    }
 
     // Both returned capabilities revalidate the hook per call rather than trusting this moment:
     // they are held outside this DO (even across resets -- the stored callback is a persistent
@@ -12802,6 +12944,13 @@ type GatekeeperCaller = {
   chatId?: number;
 } | {
   from: "hook";
+} | {
+  // An admitted, assigned run of a pinned trigger (FAC-102): the run-scoped worker's only binding
+  // carries this, set server-side in its loopback props, so no gadget, agent or client can claim it.
+  // Its sessions act as the trigger's assigned service account (see runAssignedDelivery).
+  from: "systemRun";
+  hookId: number;
+  deliveryId: number;
 };
 
 type GatekeeperLoopbackProps = {
@@ -13311,6 +13460,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let profile = await this.#getClientProfile();
     let hook = this.impl.storage.boundHooks.get(hookId);
     if (!hook) throw new Error("No such hook.");
+    // Clearing the pin removes the trigger's assignment too: retire it first (#374 round 2).
+    if (ref === null) this.impl.retireTriggerAssignment(hookId);
     this.impl.workflowDefinitionStore().pinTrigger(profile.id, hookId,
         hook.gadgetId ?? this.impl.defaultGadgetId ?? null, ref);
   }
@@ -13329,6 +13480,23 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async listTriggerControls(): Promise<TriggerControl[]> {
     return this.impl.workflowDefinitionStore().controls(null);
+  }
+  // Assigning a service account decides what runs act as, so it takes the deployment's publish
+  // authority (an Admin's), the interim rule until inferops ADR 0011 D1's workflow:assign is decided.
+  async setTriggerAssignment(hookId: number, settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> {
+    await this.#requireSharedConfiguration("publish", "always");
+    return this.impl.setTriggerAssignment(await this.#getClientProfile(), hookId, settings);
+  }
+  async getTriggerAssignment(hookId: number): Promise<TriggerAssignmentState> {
+    return {
+      enabled: workflowAssignmentsEnabled(this.impl.env),
+      assignment: this.impl.workflowDefinitionStore().assignmentOf(hookId),
+    };
+  }
+  // Giving the key decides what runs act as, like assigning: the same authority.
+  async provisionTriggerCredential(hookId: number, key: string): Promise<TriggerAssignment> {
+    await this.#requireSharedConfiguration("publish", "always");
+    return this.impl.provisionTriggerCredential(await this.#getClientProfile(), hookId, key);
   }
   async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
     return this.impl.invokeTrigger(this.clientUserId, this.clientProfileId, hookId);
@@ -15944,6 +16112,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // An operator listed on a trigger's control may ask it to run, and sees only those controls; it
   // configures nothing (FAC-102, inferops ADR 0011 S6).
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
+  async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
+  async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }
+  async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> {
     return this.impl.workflowDefinitionStore().controls(this.clientProfileId);
   }
@@ -16576,6 +16747,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
+  async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
+  async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }
+  async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> { this.#deny(); }
   async invokeTrigger(_hookId: number): Promise<WorkflowInvocation> { this.#deny(); }
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
@@ -17180,6 +17354,183 @@ class SlashCommandAuthorizerImpl extends NativeRpcTarget implements ObservationA
 // the widening that scheduled a restart, and a shrink-then-rewiden leaves stale firings pointing
 // at a connection pending re-verification (see #gatekeepersPendingRestart).
 /**
+ * Assigns pinned trigger `hookId`'s on-request runs to the service account the connection
+ * `settings.gatekeeperId` provisions for a fresh credential reference, or removes it (FAC-102,
+ * inferops ADR 0011 S1). The connection must be one the trigger's gadget binds, of the vendor the
+ * deployment names in SHARED_CONFIGURATION_GATEKEEPER; without one named there is nothing to assign
+ * to. A change drops runs waiting to start and ends the old reference's system facet. Callers check
+ * the role and authority first.
+ */
+export function setWorkflowTriggerAssignment(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "defaultGadgetId" | "workflowDefinitionStore" |
+        "visibleBindings" | "getGadgetRecord">,
+    caller: AiChatAuthorInfo, hookId: number, settings: TriggerAssignmentSettings | null): TriggerAssignment | null {
+  if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
+  let record = impl.storage.boundHooks.get(hookId);
+  if (!record) throw new Error("No such hook.");
+  let store = impl.workflowDefinitionStore();
+  let previous = store.assignmentOf(hookId);
+  let gatekeeperId: number | null = null;
+  if (settings !== null) {
+    if (!workflowAssignmentsEnabled(impl.env)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+    let requested = typeof settings === "object" ? (settings as {gatekeeperId?: unknown}).gatekeeperId : undefined;
+    if (typeof requested !== "number" || !Number.isSafeInteger(requested)) {
+      throw new TypeError("An assignment names the connection by its id.");
+    }
+    gatekeeperId = requested;
+    let vendor = getSharedConfigurationGatekeeper(impl.env);
+    if (!vendor) throw new Error("This deployment names no service whose accounts can run workflows.");
+    let gadgetId = record.gadgetId ?? impl.defaultGadgetId;
+    let bound = gadgetId !== undefined &&
+        impl.visibleBindings(impl.getGadgetRecord(gadgetId)).some(([, edge]) => edge.target === gatekeeperId);
+    if (!bound || gatekeeperVendorId(impl.storage.gatekeepers.get(gatekeeperId)) !== vendor) {
+      throw new Error(`Assign a ${vendor} connection that this trigger's gadget uses.`);
+    }
+  }
+  let assignment = store.setAssignment(caller, hookId, gatekeeperId);
+  if (previous && previous.credentialRef !== assignment?.credentialRef) retireAssignment(impl, previous);
+  return assignment;
+}
+
+// Ends an assignment's reach: aborts its system facet, so open sessions on it fail, and asks its
+// connection's vendor to delete the key stored for its reference. Best effort for the key, after
+// the change is committed: a failure is logged by hook (never a key), and the reference is never
+// used again, since runs check the live assignment on every call.
+function retireAssignment(impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns">, previous: TriggerAssignment): void {
+  // Each running delivery has its own facet (#374 round 3); abort every one on this reference.
+  for (let deliveryId of impl.systemRuns.deliveriesOf(previous.credentialRef)) {
+    impl.ctx.facets.abort(systemGatekeeperFacetName(previous.credentialRef, deliveryId),
+        new Error("The trigger's assignment ended."));
+  }
+  let vendorId = gatekeeperVendorId(impl.storage.gatekeepers.get(previous.gatekeeperId));
+  let vendor = vendorId === undefined ? undefined : buildGatekeeperVendorMap(impl.env).get(vendorId) as unknown as
+      Pick<GatekeeperVendor, "forgetSystemCredential"> | undefined;
+  void Promise.resolve().then(() => vendor?.forgetSystemCredential?.(previous.credentialRef)).catch(() => {
+    logger.warn("system credential could not be forgotten", {
+      event: "workflow.system_credential.forget.failed", hookId: previous.hookId,
+    });
+  });
+}
+
+/**
+ * Retires trigger `hookId`'s assignment, if it has one, before a route that removes it without
+ * `setWorkflowTriggerAssignment`: clearing the trigger's pin, deleting its hook or its connection
+ * (FAC-102, #374 round 2). Its system facet is aborted and its stored key forgotten.
+ */
+export function retireTriggerAssignment(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">, hookId: number): void {
+  let previous = impl.workflowDefinitionStore().assignmentOf(hookId);
+  if (previous) retireAssignment(impl, previous);
+}
+
+/**
+ * Retires and removes every assignment that no longer has its connection (#374 round 4): its hook
+ * or its trigger's gadget is gone, or the gadget no longer binds the assigned connection (an unbind,
+ * a rebind of the name to another connection, a merge that dropped the edge). Called from
+ * `bumpVersion`, which every change to a gadget's binding edges goes through.
+ */
+export function retireUnboundAssignments(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "defaultGadgetId" | "workflowDefinitionStore" |
+        "visibleBindings" | "getGadgetRecord">): void {
+  let store = impl.workflowDefinitionStore();
+  for (let assignment of store.assignments()) {
+    let hook = impl.storage.boundHooks.get(assignment.hookId);
+    let gadgetId = hook ? hook.gadgetId ?? impl.defaultGadgetId : undefined;
+    let gadget = gadgetId === undefined ? undefined : impl.storage.gadgets.get(gadgetId);
+    let bound = gadget !== undefined && gadget.type === "gadget" &&
+        impl.visibleBindings(impl.getGadgetRecord(gadgetId!)).some(([, edge]) => edge.target === assignment.gatekeeperId);
+    if (bound) continue;
+    retireAssignment(impl, assignment);
+    store.removeAssignment(assignment.hookId);
+  }
+}
+
+/**
+ * Retires and removes every assignment whose runs use connection `gatekeeperId`, before that
+ * connection is deleted (#374 round 3): an assignment's connection is chosen apart from the hook's
+ * host, so the hooks hosted on it aren't all of them.
+ */
+export function retireAssignmentsUsing(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">, gatekeeperId: number): void {
+  let store = impl.workflowDefinitionStore();
+  for (let assignment of store.assignmentsUsing(gatekeeperId)) {
+    retireAssignment(impl, assignment);
+    store.removeAssignment(assignment.hookId);
+  }
+}
+
+/**
+ * Gives assigned trigger `hookId`'s connection the service account's `key` (FAC-102, the lead's
+ * option a): relayed once to the connection's vendor (`provisionSystemCredential`), which checks it
+ * with its service before storing it, replacing any given before. Nothing of the key is kept, logged,
+ * echoed or returned here, and any refusal reads `PROVISION_REFUSED` whatever the reason, with no
+ * cause attached. Records who gave it and when. Callers check the role and authority first.
+ */
+export async function provisionWorkflowTriggerCredential(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">,
+    caller: AiChatAuthorInfo, hookId: number, key: string): Promise<TriggerAssignment> {
+  if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
+  if (!workflowAssignmentsEnabled(impl.env)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+  let assignment = impl.workflowDefinitionStore().assignmentOf(hookId);
+  if (!assignment) throw new Error("This trigger isn't assigned to a service account.");
+  if (typeof key !== "string" || !key || key.length > MAX_PROVISIONED_KEY_LENGTH) throw new Error(PROVISION_REFUSED);
+  let record = impl.storage.gatekeepers.get(assignment.gatekeeperId);
+  let vendorId = gatekeeperVendorId(record);
+  let resourceUrl = gatekeeperResourceUrl(record);
+  let vendor = vendorId === undefined ? undefined : buildGatekeeperVendorMap(impl.env).get(vendorId) as unknown as
+      Pick<GatekeeperVendor, "provisionSystemCredential" | "forgetSystemCredential"> | undefined;
+  if (!vendor?.provisionSystemCredential || resourceUrl === undefined) throw new Error(PROVISION_REFUSED);
+  try {
+    await vendor.provisionSystemCredential(assignment.credentialRef, {resourceUrl}, key);
+  } catch {
+    // The vendor's reason may quote the key or the service's answer; neither leaves here.
+    logger.warn("system credential was not accepted", {
+      event: "workflow.system_credential.refused", hookId,
+    });
+    throw new Error(PROVISION_REFUSED);
+  }
+  // The vendor has stored the key. Anything failing from here leaves it at rest for a reference
+  // this trigger no longer uses, so forget it before refusing (#375 round 2).
+  let marked: TriggerAssignment | null;
+  try {
+    marked = impl.workflowDefinitionStore().markProvisioned(hookId, assignment.credentialRef, caller);
+  } catch (error) {
+    await forgetProvisioned(impl, vendor, assignment);
+    throw error;
+  }
+  // The assignment changed while the key was being checked: what was stored is for a dead reference.
+  if (!marked) {
+    await forgetProvisioned(impl, vendor, assignment);
+    throw new Error("This trigger's assignment changed. Assign it again, then give the key.");
+  }
+  return marked;
+}
+
+/**
+ * Forgets the key just stored for `assignment`'s reference. If the vendor can't (#374, review.r2's
+ * recheck), fails closed: an assignment still on that reference is retired and removed, its
+ * facets aborted and its waiting runs dropped, so no run can act with a key provisioning refused.
+ * Logs by hook only, never the key or the reference.
+ */
+async function forgetProvisioned(
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">,
+    vendor: Pick<GatekeeperVendor, "forgetSystemCredential">, assignment: TriggerAssignment): Promise<void> {
+  try {
+    if (!vendor.forgetSystemCredential) throw new Error("This connection can't forget a credential.");
+    await vendor.forgetSystemCredential(assignment.credentialRef);
+  } catch {
+    logger.warn("system credential could not be forgotten", {
+      event: "workflow.system_credential.forget.failed", hookId: assignment.hookId,
+    });
+    let store = impl.workflowDefinitionStore();
+    if (store.assignmentOf(assignment.hookId)?.credentialRef === assignment.credentialRef) {
+      retireAssignment(impl, assignment);
+      store.removeAssignment(assignment.hookId);
+    }
+  }
+}
+
+/**
  * Admit `profileId`'s request to run trigger `hookId` now, then ask the trigger's gatekeeper to
  * deliver it once (Overseer.invokeTrigger). The hook must be live, the person (`userId`) must hold
  * InferOps' `workflow:invoke` through their own account where the deployment names that authority
@@ -17189,7 +17540,7 @@ class SlashCommandAuthorizerImpl extends NativeRpcTarget implements ObservationA
  */
 export async function invokeWorkflowTrigger(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
-        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
+        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations">,
     userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
@@ -17199,16 +17550,35 @@ export async function invokeWorkflowTrigger(
   // Re-read after the await: the input gate was open, so the hook may have been disabled meanwhile.
   let record = requireLiveHook(impl as OverseerImpl, hookId);
   let store = impl.workflowDefinitionStore();
+  // Assignments off (FAC-102): a trigger assigned before is refused here, before anything is minted.
+  if (!workflowAssignmentsEnabled(impl.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
   let invocation = store.beginInvocation(profileId, hookId);
   try {
     await (record.controller as unknown as HookController<RpcTarget>).invoke!({invocationId: invocation.id});
   } catch (error) {
+    // Decided by the recorded outcome, never by the error's words or by the request having gone
+    // (#374, review.r2): startHook marks the invocation taken as its delivery consumes it. Taken,
+    // the failure is the run's own and surfaces with its cause, whatever it names. Not taken (the
+    // gatekeeper never delivered it, or a pin, control or assignment change dropped it), the
+    // invoker gets fixed words only: that it can't run on request when the gatekeeper has no
+    // `invoke`, our own refusal when we gave one, and otherwise that it couldn't run just now.
+    let taken = impl.takenInvocations.has(invocation.id);
     store.cancelInvocation(invocation.id);
+    if (taken) throw error;
+    // The replaced error stays here, in the log: a fixed refusal carries no `cause`, since RPC
+    // would send it to the invoker along with the words meant to replace it (#374 re-QA).
+    logger.warn("on-request run did not start", { event: "workflow.invoke.not_started", hookId, error });
     let message = error instanceof Error ? error.message : String(error);
-    if (/does not implement|is not a function|undefined is not|no such method/i.test(message)) {
-      throw new Error("This trigger can't be run on request.", {cause: error});
+    if (/does not implement the method "invoke"|\binvoke is not a function|no such method:? "?invoke\b/i.test(message)) {
+      // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
+      throw new Error("This trigger can't be run on request.");
     }
-    throw error;
+    // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
+    if (message === WORKFLOW_ASSIGNMENTS_DISABLED) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+    // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
+    throw new Error(RUN_NOT_STARTED);
+  } finally {
+    impl.takenInvocations.delete(invocation.id);
   }
   return invocation;
 }
@@ -17231,6 +17601,33 @@ function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {
 // firing as independent stubs (the bindHook contract permits hooks to pass and return them) and
 // are not re-checked per call. That is deliberate: the holder is a gatekeeper bound by the session
 // contract, and this is a guard against a stale firing by mistake, not a revocable membrane.
+// The callback startHook returns for an admitted, assigned delivery (FAC-102): any call on it runs
+// the delivery once in its run-scoped worker (OverseerImpl.runAssignedDelivery), as its `WorkflowRun`
+// entrypoint's method of the same name (`run` when the callback itself is called). A second call is
+// refused, so a stored callback is no standing route to the service account.
+function makeSystemRunCallback(impl: OverseerImpl, hookId: number,
+    delivery: {deliveryId: number; commitId: string; credentialRef: string}): NativeRpcStub<RpcTarget> {
+  let used = false;
+  let once = (method: string | null, args: unknown[]) => {
+    if (used) throw new Error("This run already started.");
+    used = true;
+    return impl.runAssignedDelivery(hookId, delivery, method, args);
+  };
+  // TODO: Same workerd bug as makeHookFiringCallback: wrap the Proxy in a stub manually.
+  return new NativeRpcStub(new Proxy((() => {}) as unknown as RpcTarget, {
+    async apply(_target, _thisArg, args: unknown[]) {
+      return once(null, args);
+    },
+    get(_target, prop) {
+      if (typeof prop === "symbol" || prop === "then") return undefined;
+      return async (...args: unknown[]) => once(prop, args);
+    },
+    getPrototypeOf() {
+      return RpcTarget.prototype;
+    },
+  }));
+}
+
 function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcStub<RpcTarget> {
   // The proxy target must be callable for the `apply` trap to ever fire (a Proxy over a
   // non-callable target is itself non-callable), and the bindHook contract allows the bound

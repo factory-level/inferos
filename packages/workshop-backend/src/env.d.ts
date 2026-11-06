@@ -105,6 +105,12 @@ declare global {
       // on to avoid locking everyone out).
       DISABLE_PASSWORD_AUTH?: string;
 
+      // "true" turns workflow trigger assignments on (FAC-102): assigning a trigger's runs on
+      // request to a service account, giving its key, and runs acting as it. Off unless set, and
+      // not to be set on any deployment until the fail-closed follow-up merges. Off, removing and
+      // retiring still work. See workflowAssignmentsEnabled in overseer.ts.
+      WORKFLOW_ASSIGNMENTS_ENABLED?: string;
+
       // Gatekeeper vendor id (e.g. "inferops") that decides who may edit and publish shared
       // configuration: a workspace with collaborators or share links. Unset = Build is decided by
       // the sharing roles alone. See getSharedConfigurationGatekeeper in auth/config.ts.

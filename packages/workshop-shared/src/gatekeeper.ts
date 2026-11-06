@@ -620,6 +620,41 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
    * RPC stubs cannot report optional-method presence.
    */
   createAccount?(): Promise<Fetcher<GatekeeperUser>>;
+
+  /**
+   * The gatekeeper class a configured system workflow's run executes through (FAC-102, inferops
+   * ADR 0011 S1-S4, inferos ADR 0011): sessions of it act as the service account provisioned for
+   * `credentialRef`, a reference the Workshop minted for one trigger assignment, never as any
+   * person. The class's props carry only the reference; the credential itself stays inside this
+   * vendor, server-side, and never reaches the Workshop, a gadget, an agent or a log. A session
+   * whose reference has nothing provisioned, or whose credential the service refuses, fails its
+   * calls rather than falling back to another credential.
+   *
+   * `connection.resourceUrl` is the resource the assigned connection serves, read by the Workshop
+   * from that connection's own record: the class serves only it.
+   *
+   * Kernel-only: the Workshop calls it from its own server-side run of an admitted invocation, and
+   * vendors are reachable only through the deployment's service bindings. Absent on vendors with
+   * no system credentials; the Workshop then refuses such a run.
+   */
+  getSystemGatekeeperClass?(credentialRef: string, connection: { resourceUrl: string }):
+      Promise<DurableObjectClass<Gatekeeper<any>>>;
+
+  /**
+   * Store `key` as the service account's credential for `credentialRef` (FAC-102), replacing any
+   * stored before (a rotation), for the resource `connection.resourceUrl` names. The vendor checks
+   * the key with its service before storing it, and throws when the service doesn't accept it, so a
+   * wrong key is never stored. The Workshop relays the key once, from an Admin, and keeps nothing of
+   * it; the vendor never returns, logs or exposes it. Kernel-only, like `getSystemGatekeeperClass`.
+   */
+  provisionSystemCredential?(credentialRef: string, connection: { resourceUrl: string }, key: string): Promise<void>;
+
+  /**
+   * Delete the credential stored for `credentialRef`, if any (its assignment changed or went), and
+   * retire the reference: a store for it arriving later, from a provisioning that was still checking
+   * its key, must store nothing. The Workshop never reuses a reference. Kernel-only.
+   */
+  forgetSystemCredential?(credentialRef: string): Promise<void>;
 }
 
 export interface GatekeeperConnectCallback extends WorkerEntrypoint {

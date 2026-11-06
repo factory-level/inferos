@@ -376,6 +376,43 @@ it.concurrent("reverting agent steps drops their code, then the gadget and its n
   });
 });
 
+// Reverting walks the gadget records and restarts each one whose edge it drops; the restart reads
+// other lists (FAC-102's assignment scan), which must not invalidate the walk.
+it.concurrent("reverting an agent step drops the binding it proposed on an accepted gadget", async () => {
+  const model = models.script([
+    toolCall("createGadget", { title: "App", bindingName: "APP" }),
+    toolCall("writeFile", { workpiece: "APP", filename: "server.js", content: APP_SERVER }),
+    { text: "Done." },
+    toolCall("setGadgetBinding", { gadget: "APP", source: "TEST_AMBIENT", name: "DATA" }),
+    { text: "Bound." },
+  ]);
+  await using session = await openAgentSession(harness.url, {
+    modelId: SCRIPTED_MODEL_ID, userModel: model.userModel, ambientVendorIds: [TEST_VENDOR_ID],
+  });
+  const first = await session.runTurn("Build an app.");
+  expect(first.outcome).toEqual({ status: "completed" });
+  const chatId = first.history[0]!.chatId;
+  const [{ gadgetId }] = first.history.flatMap(message =>
+    message.type === "changes" ? message.createdGadgets ?? [] : []);
+  await reopen(session.username, async ({ ws }) => {
+    expect(await ws.mergeChanges(chatId)).toEqual({ outcome: "merged" });
+  });
+
+  const second = await session.runTurn("Bind it to the test data.");
+  expect(second.outcome).toEqual({ status: "completed" });
+  expect(model.remainingSteps()).toBe(0);
+  const bound = second.history.filter(message =>
+    message.type === "changes" && (message.addedBindings ?? []).length > 0).at(-1);
+  expect(bound).toBeDefined();
+
+  await reopen(session.username, async ({ ws }) => {
+    using gadget = await ws.getGadget(gadgetId);
+    expect((await gadget.listBindings(chatId)).map(binding => binding.name)).toContain("DATA");
+    await ws.revertChanges(chatId, bound!.sequence);
+    expect((await gadget.listBindings(chatId)).map(binding => binding.name)).not.toContain("DATA");
+  });
+});
+
 it.concurrent("deleting a chat drops its provisional gadget, binding claim and attachment", async () => {
   let accountId: number | undefined;
   await withClient(api => signUp(api, nextUsernames("chatdelete")[0]!), async api => {

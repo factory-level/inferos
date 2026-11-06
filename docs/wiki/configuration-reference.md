@@ -61,6 +61,7 @@ as its `settings` check. Doctor reports a secret by presence only and never prin
 | `local.port` | value | developer | `8787` | Always. | local | `inferos.config.json`; `pnpm dev` and `pnpm local start` | The wrapper's local Workshop port, distinct per wrapper. |
 | `upstream.revision` | reference | deployer | none | Always. | local | `inferos.config.json`, checked against the submodule by `inferos:check` | The exact InferOS commit the wrapper pins (and `upstream.repository`, an HTTPS URL or absolute path with no credentials). |
 | `Cloud deployment target` | reference | deployer | none | Optional. | cloud | No wrapper deploy command yet | Worker names, account and route for a hosted customer. **Unsupported:** The private customer runs locally; cloud deployment is tracked in factory-level/inferos#11. |
+| `WORKFLOW_ASSIGNMENTS_ENABLED` | value | deployer | off | Optional. | both | Shell, then the backend's `overseer.ts` (`workflowAssignmentsEnabled`) | `true` lets an Admin assign a trigger's runs on request to a service account and give its key, and runs act as it. Off: assigning and giving a key are refused, a request for a trigger assigned before is refused, and removing still works. Leave unset on every deployment until the fail-closed follow-up merges (FAC-102); QA turns it on explicitly. |
 
 ### Custom components
 
