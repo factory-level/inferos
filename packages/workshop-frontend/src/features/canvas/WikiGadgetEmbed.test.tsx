@@ -119,3 +119,28 @@ it('reads as revoked once the shown capability breaks', async () => {
   expect(text()).toContain('no longer available to you here')
   expect(text()).not.toContain('frame')
 })
+
+// r2 round 1 on #392: the shown widget belongs to the reference it was resolved for. When the
+// embed's target changes, the old widget is never rendered again, not even for one commit.
+it('never renders the previous widget once the embed names another one', async () => {
+  const shown = kernel(AVAILABLE)
+  await render()
+  expect(shownWith).toHaveBeenLastCalledWith(shown.stub)
+  // The next target is one this person can't open.
+  const refused = kernel(new Error('Unauthorized'))
+  shownWith.mockClear()
+  await act(async () => root.render(<WikiGadgetEmbed reference={{ ...reference, consoleId: 'secret', href: `${HREF}#secret` }} label="Finder" />))
+  await settle()
+  expect(shownWith).not.toHaveBeenCalled()
+  expect(refused.openGadget).toHaveBeenCalledWith('ws-7')
+  expect(text()).toContain('in a workspace you can’t open')
+})
+
+// r1 round 1 on #392: a failed resolve, which may be transient, can be checked again.
+it('offers to check again where it can’t open the workspace', async () => {
+  const k = kernel(new Error('Network down'))
+  await render()
+  await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Check again')!.click())
+  await settle()
+  expect(k.workspace.resolveEmbeddedWidget).toHaveBeenCalledTimes(2)
+})

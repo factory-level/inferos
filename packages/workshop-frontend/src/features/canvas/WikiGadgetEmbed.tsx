@@ -40,14 +40,22 @@ export const WikiGadgetEmbed = ({ reference, label }: { reference: GadgetReferen
   const auth = useOptionalAuthenticatedApi()
   const api = auth?.authenticatedApi
   const [attempt, setAttempt] = useState(0)
-  const [shown, setShown] = useState<Shown>({ status: 'loading' })
-  const { workspaceId, consoleId, sourceGadgetId } = reference
+  const { workspaceId, consoleId, sourceGadgetId, href } = reference
+  // What was shown belongs to the exact reference and attempt it was resolved for, and is used only
+  // while those still match: a changed target never renders the previous widget, even before the
+  // effect below has run for it.
+  const key = `${href}\n${attempt}`
+  const [answer, setAnswer] = useState<{ key: string; shown: Shown } | null>(null)
+  const shown: Shown = answer?.key === key ? answer.shown : { status: 'loading' }
 
   useEffect(() => {
+    const setShown = (next: Shown | ((state: Shown) => Shown)) => setAnswer(previous => {
+      const before = previous?.key === key ? previous.shown : { status: 'loading' } as Shown
+      return { key, shown: typeof next === 'function' ? next(before) : next }
+    })
     if (!api) { setShown({ status: 'no-access' }); return }
     let current = true
     let stub: RpcStub<GadgetClient> | null = null
-    setShown({ status: 'loading' })
     const workspace = api.openGadget(workspaceId)
     ;(async () => {
       let widget: EmbeddedConsoleWidget
@@ -75,7 +83,7 @@ export const WikiGadgetEmbed = ({ reference, label }: { reference: GadgetReferen
       stub?.[Symbol.dispose]()
       workspace[Symbol.dispose]()
     }
-  }, [api, workspaceId, consoleId, sourceGadgetId, attempt])
+  }, [api, workspaceId, consoleId, sourceGadgetId, key])
 
   const title = shown.status === 'ready' ? shown.widget.label : label || 'Embedded widget'
   const stale = shown.status === 'ready' &&
@@ -87,9 +95,9 @@ export const WikiGadgetEmbed = ({ reference, label }: { reference: GadgetReferen
       {stale && <Badge variant="warning">Updated since it was placed</Badge>}
     </header>
     {shown.status === 'loading' && <p aria-busy="true" className="flex items-center gap-2 p-3 text-sm text-kumo-subtle"><Loader size="sm" /> Loading the widget…</p>}
-    {shown.status === 'no-access' && <p className="p-3 text-sm text-kumo-subtle">
-      This widget is in a workspace you can’t open, so it isn’t shown. <code className="break-all">{reference.href}</code>
-    </p>}
+    {shown.status === 'no-access' && <div className="flex flex-wrap items-center gap-2 p-3 text-sm text-kumo-subtle">
+      <p>This widget is in a workspace you can’t open, so it isn’t shown. <code className="break-all">{reference.href}</code></p>{again}
+    </div>}
     {shown.status === 'unavailable' && <div className="flex flex-wrap items-center gap-2 p-3 text-sm text-kumo-subtle">
       <p>{UNAVAILABLE[shown.reason]}</p>{again}
     </div>}

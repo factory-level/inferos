@@ -82,7 +82,8 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
       case 'page': return reference.host === host
         ? <Button size="sm" onClick={() => setChosen(reference.slug)}>Open page: {label || reference.slug}</Button>
         : <p className="text-sm text-kumo-subtle">A page of another Wiki, not shown here: <code className="break-all">{href}</code></p>
-      case 'gadget': return <WikiGadgetEmbed reference={reference} label={label} />
+      // Keyed by the whole reference, so a slot that now holds another embed starts over.
+      case 'gadget': return <WikiGadgetEmbed key={href} reference={reference} label={label} />
       case 'unsupported': return <p className="text-sm text-kumo-subtle">{label || 'Embedded widget'}: this kind of reference is not shown on the canvas. <code className="break-all">{href}</code></p>
     }
   }
