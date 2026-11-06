@@ -3,6 +3,7 @@ import { Badge, Button, Input, Loader } from '@cloudflare/kumo'
 import { MagnifyingGlass } from '@phosphor-icons/react'
 import type { WikiSearchResult } from './wikiData'
 import { snippetParts } from './wikiSnippet'
+import { UNAVAILABLE_WIKI_SEARCH } from './canvasReadFeedback'
 
 type Searched = { status: 'idle' } | { status: 'searching'; query: string } | { status: 'done'; query: string; result: WikiSearchResult }
 
@@ -57,9 +58,7 @@ const SearchResults = ({ searched, onOpenPage, onRetry, onClear }: {
   const clear = <Button size="sm" variant="ghost" onClick={onClear}>Clear search</Button>
   if (!result.ok) {
     return <div className="space-y-2">
-      <p role="alert" className="text-sm text-kumo-danger">
-        {result.code === 'UNAVAILABLE' ? 'Search unavailable, so this is not an empty result' : 'Could not search this Wiki'}: {result.message}
-      </p>
+      <p role="alert" className="text-sm text-kumo-danger">{UNAVAILABLE_WIKI_SEARCH}</p>
       <div className="flex gap-2">{result.code === 'UNAVAILABLE' && <Button size="sm" onClick={onRetry}>Try again</Button>}{clear}</div>
     </div>
   }

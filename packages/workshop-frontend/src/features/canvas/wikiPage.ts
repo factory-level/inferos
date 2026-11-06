@@ -9,7 +9,6 @@ import { parseWikiDocumentUrl } from '@inferos/gatekeeper-inferops/src/resources
 import type { WikiDocument, WikiDocumentNode, WikiSection, WikiStructure, WikiStructurePage } from '@inferos/gatekeeper-inferops/src/types'
 import { authoredContent, composeDocumentText, embeddedReferences, masterStructureText } from '@inferos/gatekeeper-inferops/src/wiki'
 import { canonicalBoardRef } from './boardData'
-import { withServerWords } from './serverWords'
 
 /** One page in the tree, with the pages under it in order. */
 export type WikiTreeNode = { page: WikiDocumentNode; children: WikiTreeNode[] }
@@ -289,14 +288,14 @@ export const editStatus = (edit: ProposedEdit | undefined): { label: string; var
 /** What a refused or stale edit tells the person, by the gatekeeper's code; `subject` is what was edited. */
 export const editErrorText = (edit: ProposedEdit, subject: 'section' | 'page' = 'section'): string => {
   if (edit.phase === 'stale') {
-    return edit.message ?? `Not saved: the ${subject} changed in InferMind before this edit was decided. The page shows the current text; edit it again.`
+    return `This ${subject} changed before the edit was decided. The current page is shown; review it before trying again.`
   }
   switch (edit.code) {
-    case 'STALE_REVISION': return withServerWords(`Not sent: the ${subject} changed since the page was read. The page was read again; edit the current text.`, edit.message)
-    case 'CONFLICT': return `Not sent: ${edit.message ?? `another edit of this ${subject} is waiting for a decision.`}`
-    case 'FORBIDDEN': return `Not sent: ${edit.message ?? 'you cannot edit this Wiki.'}`
-    case 'NOT_FOUND': return withServerWords(`Not sent: the ${subject} is no longer in this Wiki.`, edit.message)
-    case 'DISABLED': return withServerWords('Not sent: InferOps is turned off for this deployment.', edit.message)
-    default: return `Not sent: ${edit.message ?? 'the edit could not be proposed.'}`
+    case 'STALE_REVISION': return `This ${subject} changed since it was read. The current page is shown; review it before trying again.`
+    case 'CONFLICT': return `Another edit of this ${subject} is waiting for a decision.`
+    case 'FORBIDDEN': return subject === 'page' ? "You can't edit this page." : "You can't edit this section."
+    case 'NOT_FOUND': return `This ${subject} is no longer available in the Wiki.`
+    case 'DISABLED': return "InferOps is unavailable. Your edit wasn't sent."
+    default: return 'Your edit could not be sent. Try again later.'
   }
 }

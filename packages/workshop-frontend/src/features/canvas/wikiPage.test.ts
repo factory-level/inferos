@@ -150,8 +150,8 @@ it('decides an awaiting body edit only from the page: pending, applied, rejected
   expect(reconcileBodyEdit(edit, at({})).phase).toBe('rejected')
   expect(reconcileBodyEdit(edit, at({ body: 'someone else', version: 4 })).phase).toBe('stale')
   expect(reconcileBodyEdit(edit, at({ id: 'other' }))).toMatchObject({ phase: 'stale', message: 'The page is no longer in this Wiki.' })
-  expect(editErrorText({ ...edit, phase: 'refused', code: 'STALE_REVISION' }, 'page')).toBe('Not sent: the page changed since the page was read. The page was read again; edit the current text.')
-  expect(editErrorText({ ...edit, phase: 'stale' }, 'page')).toContain('the page changed in InferMind')
+  expect(editErrorText({ ...edit, phase: 'refused', code: 'STALE_REVISION' }, 'page')).toBe('This page changed since it was read. The current page is shown; review it before trying again.')
+  expect(editErrorText({ ...edit, phase: 'stale' }, 'page')).toBe('This page changed before the edit was decided. The current page is shown; review it before trying again.')
 })
 
 it('leaves a Master\'s documentation coverage block out of the agent text it compares, and nothing else', () => {
@@ -164,10 +164,9 @@ it('leaves a Master\'s documentation coverage block out of the agent text it com
   expect(agentTextShown(quoted)).toBe(quoted)
 })
 
-// FAC-97: the hints keep InferMind's own words beside them, when it gave some.
-it('keeps the server\'s words for a stale, missing or switched-off edit', () => {
-  for (const code of ['STALE_REVISION', 'NOT_FOUND', 'DISABLED'] as const) {
-    const text = editErrorText({ phase: 'refused', code, message: `Server says ${code}.` } as Parameters<typeof editErrorText>[0])
-    expect(text).toContain(`Server says ${code}.`)
+it('never includes provider words in edit feedback', () => {
+  for (const code of ['STALE_REVISION', 'CONFLICT', 'FORBIDDEN', 'NOT_FOUND', 'DISABLED', 'INTERNAL'] as const) {
+    const text = editErrorText({ phase: 'refused', code, message: `WIKI_EDIT_SENTINEL provider says ${code}.` } as Parameters<typeof editErrorText>[0])
+    expect(text).not.toContain('WIKI_EDIT_SENTINEL')
   }
 })
