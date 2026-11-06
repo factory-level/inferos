@@ -180,15 +180,24 @@ describe("through the Overseer", () => {
     await expect(legacy.overseer.invokeTrigger(HOOK)).rejects.toThrow("This trigger can't be run on request.");
   });
 
-  // QA on #374: a run whose own binding call fails must fail with that cause, not read as a
-  // gatekeeper that can't run on request.
-  it("passes a run's own failure through, even one that names a missing method", async () => {
-    let failing = await session("use", {
-      invoke: async () => { throw new Error('The RPC receiver does not implement the method "readBoard".'); },
+  // QA on #374, then review.r2: a run whose own call fails must fail with that cause, whatever the
+  // cause names; only the trigger's gatekeeper not taking the request means it can't run on request.
+  it.for([
+    'The RPC receiver does not implement the method "readBoard".',
+    'The RPC receiver does not implement the method "invoke".',
+    "env.BOARD.invoke is not a function",
+  ])("passes a run's own failure through unchanged: %s", async message => {
+    let made: Awaited<ReturnType<typeof session>> | undefined;
+    made = await session("use", {
+      invoke: async (...args: unknown[]) => {
+        // The gatekeeper took the invocation and delivered it (fire consumes it), then the run failed.
+        made!.store.cancelInvocation((args[0] as { invocationId: string }).invocationId);
+        throw new Error(message);
+      },
     });
     let refused: unknown;
-    try { await failing.overseer.invokeTrigger(HOOK); } catch (error) { refused = error; }
-    expect(String(refused)).toContain('does not implement the method "readBoard"');
+    try { await made.overseer.invokeTrigger(HOOK); } catch (error) { refused = error; }
+    expect(String(refused)).toContain(message);
     expect(String(refused)).not.toContain("can't be run on request");
   });
 
