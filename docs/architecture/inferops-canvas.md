@@ -22,7 +22,13 @@ covers:
   - packages/workshop-frontend/src/components/GadgetPresence.tsx
   - packages/workshop-shared/src/api.ts
   - packages/workshop-shared/src/canvas.ts
+  - packages/workshop-shared/src/governed-data.ts
+  - packages/workshop-shared/src/governed-data.test.ts
   - packages/workshop-shared/src/canvas-model.ts
+  - packages/workshop-shared/src/workspace-settings.ts
+  - packages/workshop-shared/src/configuration-trace.ts
+  - packages/workshop-backend/src/workspace-configuration.ts
+  - packages/workshop-backend/__tests__/workspace-configuration.test.ts
   - packages/workshop-shared/src/canvas-model-fixtures
   - packages/workshop-shared/src/workspace-kind.ts
   - scripts/consumer/views.ts
@@ -163,6 +169,38 @@ Board and Wiki widgets resolve their session through one frontend helper, `openI
 Real Workers/RPC tests cover concurrent revision conflicts, rollback, scope isolation, build/use roles, quota and recreation identity. A harness configuration update reloads Workers with durable views disabled, proves access is denied, then reenables them and reads the original definition. This demonstrates Worker-reload retention, not a cloud rollout, OS crash recovery, schema migration or completed consumer view experience.
 
 The release slice of #34 (one private Kanban/Operate view with a live reference) has its own end-to-end test in `packages/integration-tests/__tests__/workshop-canvas.test.ts`. A view whose board card targets `inferops://demo.local/project/board/DEMO` is created and edited; an edit or delete at the replaced revision is rejected with the `Canvas changed` conflict and the stored definition is unchanged; two connections of the same owner editing the same revision produce exactly one winner and one conflict. Another account cannot open the workspace, and its own workspace neither lists nor reads the view and reports `not found` on edit. A collaborator added with the `use` role opens the workspace, lists and reads no view while no console shows it, and gets `Unauthorized` on edit and delete. The owner's Operate session opens the view, then the Workshop Worker is restarted through a harness configuration update (a pre-restart connection is shown to drop). Afterwards the definition, its revision and its board reference read back unchanged, the Operate session's working set and focus still hold the view and resolve to it, the use-role denial and the stale-revision conflict still apply, and an edit at the current revision advances it. Like the reload test above, this is local Worker-restart evidence, not a cloud deployment or OS crash recovery claim, and it reads no board data.
+
+### Workspace and page configuration
+
+FAC-95 makes the design's two configuration levels explicit ([ADR 0017](../adr/0017-page-settings-override.md), proposed, which amends ADR 0014 decision 4).
+
+- **One registry.** `WORKSPACE_SETTINGS` (`workshop-shared/src/workspace-settings.ts`) names each setting with the values it takes, its default and what it permits:
+  - `baseUi.alerts`: whether widgets may ask the host to show an alert. Default off.
+  - `baseUi.notifications`: whether widgets may raise a notification. Default off. Delivery isn't defined (FAC-114), so this records the choice and its owner only.
+  - `chatPane.widgets`: which of the console's widgets the operate chat pane may open, `console` or `none`. Default `console`.
+
+  `parseWorkspaceSettings` takes only a plain record (prototype `Object.prototype` or null), so a `Date`, `Map`, class instance or the like, which has no entries of its own, can never read as "no settings" and clear them. It refuses an unknown key or value in fixed words. An empty record is how a builder clears every setting at one level. No setting grants authority. Nothing reads them to draw yet: the builder and runtime surfaces that use them are later work.
+- **Two levels, one shape.**
+  - **The workspace's settings** are one revisioned record, `WorkspaceConfiguration`. It lives in the `workspaceConfiguration` storage singleton, and is read and saved by `workspace-configuration.ts`.
+  - **A page's overrides** are `CanvasPage.settings`, the same keys. `parseCanvasPage` accepts them and refuses a bad one as `invalid-setting`. They're replaced by one `setSettings` page operation; an empty object removes them. Every other inheritance field is still `undefined-inheritance`.
+  - **Storage:** a page with settings has no version 1 form (`canvasDefinitionFromPage` returns null), so the store keeps it nested; clearing them lets it return to its row.
+  - **Resolution:** `resolveWorkspaceSetting(key, workspace, page)` gives the value and its owner: `page`, `workspace` or `default`.
+- **The RPCs** are build role only. The use role and the operate session are refused all three, and `workshop-use-role.test.ts` lists them among the denied.
+  - `getWorkspaceConfiguration()` reads the record.
+  - `setWorkspaceConfiguration(expectedRevision, settings)` saves it. It is building, so in a shared workspace the deployment's shared-configuration service must agree, asked fresh as for hooks and workflow saves (FAC-44). The check and the write are one storage step: a stale revision is `WORKSPACE_CONFIGURATION_CHANGED`, and an unknown key or value is refused, writing nothing.
+  - Page overrides go through `editCanvasPage` with the canvas writes' existing authority.
+- **Publication** freezes both. `ConsolePublication.settings` copies the workspace's settings, absent when there are none, and each published page keeps its own `settings`. So FAC-99's Admin publish check governs what operators get, and a later change reaches them through a republish.
+- **The trace.** `traceConfiguration(canvasId | null)` (build only, over the pure `traceConfiguration` in `configuration-trace.ts`) lists:
+  - each setting as the page resolves it, with its owner;
+  - each page hook (an attachment, FAC-94), with the page or node that holds it (`formatCanvasTarget`), its event, its effect and what it permits: navigation, a raised event within the page, or an action requested through the person's own grant and approval;
+  - the workspace's gatekeeper hooks, read-only, owned by their gatekeeper and gadget, with any workflow revision they're pinned to.
+
+  Every entry says it grants nothing.
+- **Tests.**
+  - `workspace-settings.test.ts` and `configuration-trace.test.ts` in `workshop-shared`.
+  - `canvas-model.test.ts`, "a page's settings".
+  - `workspace-configuration.test.ts`: a save at its revision, refusals writing nothing, page overrides persisting nested and through edits, and publication freezing both.
+  - `shared-configuration.test.ts`: an Operator refused through the read-only session, and another company's member refused at the write, asked `build`.
 
 ## Canvas page and builder composition UI
 
@@ -559,3 +597,22 @@ A console's bound views (MVP-26, see [bound views](operate-mode.md#bound-views))
 - **Design divergence.** The design's *page's sections as Markdown* predates the page contract: a page with a body now shows its body instead of its sections, as InferOps' reader and agent text do ([#87](https://github.com/factory-level/inferos/issues/87), MVP-13 parity).
 
 `wikiPage.test.ts` covers the tree (order, unlisted parent, cycle), the structure navigation (pillar order, shared pages, unfiled, pages not listed or not placed, the tree fallback for an empty or unread structure, the default page), embed splitting equal to the gatekeeper's references over the demo fixture, the authored body of every demo page equal to the gatekeeper's `authoredContent`, the agent text for a section page, a body page and a Master, Wiki routes (slash slugs), body editability, reference parsing (a `%2F` slash slug included) and section and body edit reconciliation; `wikiData.test.ts` covers canonical resolution and unbound, missing pages, failed refresh, lost access, `DISABLED` and a removed connection, newest-read ordering, an edit through proposing, awaiting and applied, rejected and stale outcomes (and a read older than the edit never deciding it), a refused stale proposal, the agent text and disposal, plus the structure read and its failure apart from the list, structure and page failures apart from each other, lost access dropping the structure, newest structure read, a list read older than lost access never landing, and a body edit through proposing, awaiting under `pendingBody`, matched by a read and applied only by its own approval (logged before the proposal returned), rejected, stale, refused stale, unchanged and forbidden; `CanvasWikiWidget.test.tsx` renders it in `CanvasView` and covers the tree and Markdown (no raw HTML, no `javascript:`/`data:` href), the configured and an unknown first page, the live Kanban and issue embed from one board read, a wrong-tenant issue as not connected, the embed following the Kanban's state and revision and a deleted issue, a failing embed beside working ones, the Wiki not connected and refused, an edit through *Waiting for approval* to *Saved* after a decided action, rejected and stale edits, read-only rendering, agent text equal to the rendered sections, and disposal of the Wiki and board sessions, plus the structure navigation (root first, Masters in pillar order, a shared page opening the same page from either pillar, unfiled pages), a body page rendered without its sections and with its embed and its agent text from the same body, a Master's generated list (not editable, links selecting pages, agent text equal), a failed structure read stated with the tree shown and refreshed, a failed page read beside the structure, a body edit through *Waiting for approval* to saved after a decided action and still pending after a reload, saved and rejected outcomes, the same text set by another writer and an approval of another page's or an unseen edit never reading as saved, a pending body deletion kept after a reload and read-only, stale, conflicting and denied body edits keeping the draft, **Add page body** beside section edits and no body edit read-only, a slash-slug page reference opening that page, and search (a result's snippet as text with only the matched words marked and the section's own `<script>` literal, a result opening its page, no match, an unavailable search never reading as empty and its retry, and *Edit pending*); `wikiSnippet.test.ts` covers `snippetParts`, unmatched markers included, and the widget test a lone `</b>` shown as text. Live acceptance against a running InferOps/InferMind is not recorded here.
+
+## Governed data contract (FAC-9)
+
+The contract a source-agnostic Refine provider reads and writes through, on any connector (`packages/workshop-shared/src/governed-data.ts`). It's built against inferops ADR 0013 W3 to W5, which is **proposed**, and is the first of FAC-9's four changes: this contract, the InferOps connector, the tickets connector, then the host provider and its UI.
+
+- **Resources.** `object/table` (an InferOps custom table) and `tickets/queue` (the local synthetic tickets connector). `CanvasDataBinding` gains them, additively at schema version 1, with the widget that reads them, in the provider change.
+- **A governed session,** `GovernedReadSession`, is fixed to its connection, workspace and person where it was opened. It offers `describe()` (fields and declared commands), `list(request)` and `get(id)`, and the connector logs each read as an observation.
+- **Requests,** `parseGovernedListRequest`, are validated against the resource's own description before anything is read:
+  - **Keys:** only `filters`, `sort`, `pageSize` and `cursor`. A URL, a method or a `meta` is refused (`INVALID_REQUEST`).
+  - **Filters:** at most 4, all of which must hold. Each is on a declared filterable field with `eq` or `contains`, against one scalar value.
+  - **Sort:** one key, on a sortable field.
+  - **Page size:** 1 to 50, 25 by default.
+  - **Personal fields** are never filterable or sortable, so they can't be probed (`FIELD_NOT_FILTERABLE`, `FIELD_NOT_SORTABLE`).
+  - Every refusal is a fixed code (`GovernedRequestError`) and names no data.
+- **Listing runs on the server,** in the connector (`listGoverned`), over a snapshot of at most 200 rows the connector already reads under its own authority. It filters, then sorts stably with ties broken by id, then pages. `truncated` says when the snapshot hit its bound. A cursor is bound to its request's filters and sort, so a cursor made for one request, or not made here, is refused (`INVALID_CURSOR`).
+- **Writes** are only a resource's declared commands (`GovernedCommand`, ADR 0013 W4 to W6). Each is proposed, decided, and applied by the connector. There is no generic create, update or delete.
+- **It grants nothing:** a request can only narrow what the session already returns.
+- **Tests:** `governed-data.test.ts`.
+

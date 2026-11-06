@@ -3,7 +3,7 @@ import { parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from 
 import {
   canvasPageEffects,
   canvasWidgetEventsHeard,
-  CANVAS_MODEL_LIMITS, CANVAS_WIDGET_ACTIONS, CanvasModelError, canvasDefinitionFromPage, canvasPageFromDefinition, canvasTargetPath, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
+  CANVAS_MODEL_LIMITS, CANVAS_WIDGET_ACTIONS, CanvasModelError, applyCanvasPageOperations, canvasDefinitionFromPage, canvasPageFromDefinition, canvasTargetPath, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
   resolveCanvasTarget, type CanvasModelErrorCode, type CanvasNode, type CanvasPage, type CanvasTarget,
 } from "./canvas-model";
 import rejected from "./canvas-model-fixtures/rejected.json";
@@ -431,5 +431,35 @@ describe("widget events drive page effects (FAC-94)", () => {
       [{ id: "up", version: 1, on: "finish", effect: { kind: "raise-event", target: "a", event: "ping" } }],
       [{ id: "back", version: 1, on: "ping", effect: { kind: "raise-event", target: "a", event: "ping" } }],
     )))).toEqual({ code: "reference-cycle", at: "back" });
+  });
+});
+
+// FAC-95: a page may override the workspace's settings, by registry key only (ADR 0017).
+describe("a page's settings (FAC-95)", () => {
+  const base = { schemaVersion: 2, id: "p", revision: "0", title: "P", children: ["a"], attachments: [],
+    nodes: [{ nodeType: "object", id: "a", title: "A", columns: 1, children: [], attachments: [] }] };
+
+  test("are registry keys with their values, kept only when there are some", () => {
+    expect(parseCanvasPage({ ...base, settings: { "baseUi.alerts": true } }).settings).toEqual({ "baseUi.alerts": true });
+    expect(parseCanvasPage({ ...base, settings: {} })).not.toHaveProperty("settings");
+    expect(parseCanvasPage(base)).not.toHaveProperty("settings");
+  });
+
+  test("refuse an unknown key or value as invalid-setting, and every other override field as before", () => {
+    expect(rejection(() => parseCanvasPage({ ...base, settings: { "baseUi.modals": true } }))).toEqual({ code: "invalid-setting", at: "p.settings" });
+    expect(rejection(() => parseCanvasPage({ ...base, settings: { "chatPane.widgets": "all" } }))).toEqual({ code: "invalid-setting", at: "p.settings" });
+    expect(rejection(() => parseCanvasPage({ ...base, overrides: { "baseUi.alerts": true } }))).toMatchObject({ code: "undefined-inheritance" });
+  });
+
+  test("are replaced by one operation, and keep a page version 1 can't hold", () => {
+    const page = parseCanvasPage(base);
+    const set = applyCanvasPageOperations(page, [{ type: "setSettings", settings: { "chatPane.widgets": "none" } }]);
+    expect(set.settings).toEqual({ "chatPane.widgets": "none" });
+    expect(canvasDefinitionFromPage(set)).toBeNull();
+    expect(canvasDefinitionFromPage(page)).not.toBeNull();
+    expect(applyCanvasPageOperations(set, [{ type: "renamePage", title: "Q" }]).settings).toEqual({ "chatPane.widgets": "none" });
+    expect(applyCanvasPageOperations(set, [{ type: "setSettings", settings: {} }])).not.toHaveProperty("settings");
+    expect(rejection(() => applyCanvasPageOperations(page, [{ type: "setSettings", settings: { x: 1 } }])))
+      .toEqual({ code: "invalid-setting", at: "operations[0]" });
   });
 });

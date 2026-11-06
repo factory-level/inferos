@@ -102,6 +102,10 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
     (ws: RpcStub<Overseer>) => unknown> = {
   previewAuthoredWidget: ws => ws.previewAuthoredWidget(1, 1),
   exportWorkspaceRecords: ws => ws.exportWorkspaceRecords(),
+  // The workspace's settings are the builder's (FAC-95); operators get a publication's frozen copy.
+  getWorkspaceConfiguration: ws => ws.getWorkspaceConfiguration(),
+  setWorkspaceConfiguration: ws => ws.setWorkspaceConfiguration("0", { "baseUi.alerts": true }),
+  traceConfiguration: ws => ws.traceConfiguration(null),
   createCanvas: ws => ws.createCanvas({ title: "View", sections: [] }),
   editCanvas: ws => ws.editCanvas("view", "0", [{ type: "rename", title: "New" }]),
   deleteCanvas: ws => ws.deleteCanvas("view", "0"),
