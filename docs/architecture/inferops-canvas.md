@@ -623,6 +623,16 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
   - Every refusal is a fixed code (`GovernedRequestError`) and names no data.
 - **Listing runs on the server,** in the connector (`listGoverned`), over a snapshot of at most 200 rows the connector already reads under its own authority. It filters, then sorts stably with ties broken by id, then pages. `truncated` says when the snapshot hit its bound. A cursor is bound to its request's filters and sort, so another request's cursor, or one that doesn't decode, is refused (`INVALID_CURSOR`). It is not signed: it carries only an offset into what the same request may already read, so an altered one can only skip within that.
 - **Writes** are only a resource's declared commands (`GovernedCommand`, ADR 0013 W4 to W6). Each is proposed, decided, and applied by the connector. There is no generic create, update or delete.
+  - **The session:** `GovernedWriteSession.command(request)` returns `{ outcome: "proposed" }`, never a result. The row is read again to see the outcome.
+  - **The request** is validated by `parseGovernedCommand` before anything is read or proposed. It holds only `command`, `id`, `values` and `expectedRevision`:
+    - a command the resource declares (otherwise `COMMAND_NOT_DECLARED`);
+    - one row id;
+    - exactly that command's fields, each a value of its field's type, and one of the field's `options` where it has them;
+    - the row's revision as it was read.
+  - **Refused:** a second row, a URL or a `meta`.
+- **Connectors:**
+  - **The InferOps custom table** (`gatekeeper-inferops`) declares no commands.
+  - **The tickets queue** (`gatekeeper-tickets`) declares one, `setStatus`, on `status` (`open`, `pending` or `closed`). It proposes exactly what the session's own `setStatus` proposes, so it carries the same checks, the same approval and the same apply. Its fields are fixed, so a list request is checked in full before the queue is read.
 - **It grants nothing:** a request can only narrow what the session already returns.
-- **Tests:** `governed-data.test.ts`.
+- **Tests:** `governed-data.test.ts`, `gatekeeper-inferops`'s `governed-table.test.ts` and `gatekeeper-tickets`'s `governed-queue.test.ts`.
 

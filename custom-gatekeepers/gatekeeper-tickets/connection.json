@@ -29,6 +29,18 @@
         },
         {
           "method": "readTicket"
+        },
+        {
+          "method": "describe",
+          "notes": "FAC-9 governed read: the queue's fields and its one declared command."
+        },
+        {
+          "method": "list",
+          "notes": "FAC-9 governed read: checked in full against the fixed fields before the queue is read, then filtered, sorted and paged in the gatekeeper."
+        },
+        {
+          "method": "get",
+          "notes": "FAC-9 governed read: readTicket's read; a ticket of another queue, or none, is null."
         }
       ],
       "writes": [
@@ -38,6 +50,13 @@
           "idempotency": "provider-key",
           "revert": "never",
           "notes": "Refused at proposal and again at apply for a closed ticket or the status it already has (INVALID_STATE)."
+        },
+        {
+          "method": "command",
+          "concurrency": "expected-revision",
+          "idempotency": "provider-key",
+          "revert": "never",
+          "notes": "FAC-9 governed form of setStatus, its one declared command: validated against the declared fields and statuses, then proposed exactly as setStatus is."
         }
       ]
     }
