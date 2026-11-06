@@ -33,6 +33,46 @@ export const CANVAS_MODEL_LIMITS = {
 export const CANVAS_ACTION_EVENTS = ["action-accepted", "action-completed", "action-failed", "action-uncertain"] as const;
 
 /**
+ * The outcomes a gadget widget's attachment may hear about the runs a person asked one of its
+ * gadget's triggers for (FAC-116): the run's first final outcome. Only the run's own result raises
+ * them, so no attachment can raise one, and `waiting` raises none.
+ */
+export const CANVAS_RUN_EVENTS = ["run-succeeded", "run-failed", "run-uncertain"] as const;
+/** One of `CANVAS_RUN_EVENTS`. */
+export type CanvasRunEvent = (typeof CANVAS_RUN_EVENTS)[number];
+
+// A run event names its trigger inside the event itself: `run-result-<outcome>-<hookId as 24 digits>`,
+// 42 to 45 characters. So an attachment keeps exactly the fields an earlier reader accepts (its `on`
+// takes up to 64), and no widget event can ever be one: a declared event has at most 40 characters
+// (widget-state.ts), and `run-result-` is reserved there too. An earlier build reads the page, its
+// publication refuses the attachment as undeclared, and no transition can be named that, so on a
+// rollback it never fires.
+const RUN_EVENT_PREFIX = "run-result-";
+const RUN_EVENT = /^run-result-(succeeded|failed|uncertain)-([0-9]{24})$/;
+
+// Whether `event` is a run event, well formed or not: one no attachment may raise.
+const isRunEvent = (event: string): boolean => parseCanvasRunEvent(event) !== null;
+
+/**
+ * The attachment event that hears trigger `trigger`'s `event` (FAC-116), e.g.
+ * `run-result-succeeded-000000000000000000000011`.
+ */
+export function canvasRunEvent(event: CanvasRunEvent, trigger: number): string {
+  return `${RUN_EVENT_PREFIX}${event.slice("run-".length)}-${String(trigger).padStart(24, "0")}`;
+}
+
+/**
+ * The run event and trigger attachment event `on` names (FAC-116), null when it names none, and
+ * `"malformed"` for a run event without a well-formed trigger, which no attachment may hear.
+ */
+export function parseCanvasRunEvent(on: string): { event: CanvasRunEvent; trigger: number } | null | "malformed" {
+  if (!on.startsWith(RUN_EVENT_PREFIX)) return null;
+  const match = RUN_EVENT.exec(on);
+  const trigger = match ? Number(match[2]) : Number.NaN;
+  return match && Number.isSafeInteger(trigger) && trigger >= 0 ? { event: `run-${match[1]}` as CanvasRunEvent, trigger } : "malformed";
+}
+
+/**
  * Actions an attachment may request of each widget kind, as the widgets offer them today.
  * Naming one requests it; the widget's own approval path and the actor's authority still decide.
  */
@@ -79,7 +119,10 @@ export interface CanvasAttachment {
   id: string;
   /** Attachment schema version. */
   version: 1;
-  /** Event on the owning node: a widget's action event, or one an attachment on this page raises. */
+  /**
+   * Event on the owning node: a widget's action event, one an attachment on this page raises, or,
+   * on a gadget widget, a trigger's run event (`canvasRunEvent`, FAC-116).
+   */
   on: string;
   /** The single effect it runs. */
   effect: CanvasEffect;
@@ -229,7 +272,10 @@ function parseAttachments(value: unknown, at: string): CanvasAttachment[] {
     const id = parseId(entry && typeof entry === "object" ? (entry as Record<string, unknown>).id : undefined, position);
     const a = fields(entry, ["id", "version", "on", "effect"], id);
     if (a.version !== 1) return reject("unknown-version", id);
-    return { id, version: 1, on: parseEvent(a.on, id), effect: parseEffect(a.effect, id) };
+    const on = parseEvent(a.on, id);
+    // A run event must name its trigger (FAC-116).
+    if (parseCanvasRunEvent(on) === "malformed") return reject("invalid-attachment", id);
+    return { id, version: 1, on, effect: parseEffect(a.effect, id) };
   });
 }
 
@@ -339,7 +385,7 @@ function checkAttachments(page: CanvasPage, byId: ReadonlyMap<string, CanvasNode
       if (effect.kind === "navigate") continue;
       if (effect.target !== page.id && !byId.has(effect.target)) return reject("missing-reference", attachment.id);
       if (effect.kind === "raise-event") {
-        if (actionEvents.includes(effect.event)) return reject("reserved-event", attachment.id);
+        if (actionEvents.includes(effect.event) || isRunEvent(effect.event)) return reject("reserved-event", attachment.id);
         raised.add(key(effect.target, effect.event));
         edge(key(owner.id, attachment.on), key(effect.target, effect.event), attachment.id);
       } else {
@@ -358,6 +404,11 @@ function checkAttachments(page: CanvasPage, byId: ReadonlyMap<string, CanvasNode
     // and publication checks it against the frozen widget (FAC-94, `canvasWidgetEventsHeard`).
     const ownEvents = owner.node?.nodeType === "widget" && owner.node.kind === "inferos.gadget";
     for (const attachment of owner.attachments) {
+      // A run's result is heard only on a gadget widget, which publication checks owns the trigger.
+      if (isRunEvent(attachment.on)) {
+        if (!ownEvents) return reject("unknown-event", attachment.id);
+        continue;
+      }
       const declared = emits && actionEvents.includes(attachment.on);
       const own = ownEvents && !actionEvents.includes(attachment.on);
       if (!declared && !own && !raised.has(key(owner.id, attachment.on))) return reject("unknown-event", attachment.id);
@@ -403,8 +454,32 @@ export function canvasWidgetEventsHeard(page: CanvasPage): CanvasWidgetEventHear
   const actionEvents: readonly string[] = CANVAS_ACTION_EVENTS;
   return page.nodes.flatMap(node => node.nodeType !== "widget" || node.kind !== "inferos.gadget" ? [] :
     node.attachments
-      .filter(attachment => !actionEvents.includes(attachment.on) && !raised.has(`${node.id}\n${attachment.on}`))
+      .filter(attachment => !actionEvents.includes(attachment.on) && parseCanvasRunEvent(attachment.on) === null &&
+        !raised.has(`${node.id}\n${attachment.on}`))
       .map(attachment => ({ nodeId: node.id, targetRef: node.targetRef, event: attachment.on, attachmentId: attachment.id })));
+}
+
+/** One attachment on a gadget widget that hears one trigger's run results (FAC-116). */
+export interface CanvasRunEventHeard {
+  /** The widget node the attachment is on. */
+  nodeId: string;
+  /** The widget's `gadget:<id>` reference. */
+  targetRef: string;
+  /** The trigger (bound hook id) it names, which publication checks belongs to that gadget. */
+  trigger: number;
+  /** The run event it hears. */
+  event: CanvasRunEvent;
+  /** The attachment's ID. */
+  attachmentId: string;
+}
+
+/** Every attachment on a parsed page that hears a trigger's run results (FAC-116), for publication to check. */
+export function canvasRunEventsHeard(page: CanvasPage): CanvasRunEventHeard[] {
+  return page.nodes.flatMap(node => node.nodeType !== "widget" ? [] : node.attachments.flatMap(attachment => {
+    const run = parseCanvasRunEvent(attachment.on);
+    return run === null || run === "malformed" ? [] :
+      [{ nodeId: node.id, targetRef: node.targetRef, trigger: run.trigger, event: run.event, attachmentId: attachment.id }];
+  }));
 }
 
 /** A page effect an event leads to: what the page runs, as opposed to a raised event it follows. */
@@ -419,10 +494,29 @@ export type CanvasPageEffect = CanvasNavigateEffect | CanvasRequestActionEffect;
  * grants nothing: a requested action still needs the person's own grant and approval.
  */
 export function canvasPageEffects(page: CanvasPage, targetRef: string, event: string): CanvasPageEffect[] {
-  const owners = new Map<string, CanvasAttachment[]>([[page.id, page.attachments], ...page.nodes.map(node => [node.id, node.attachments] as [string, CanvasAttachment[]])]);
-  const pending: { node: string; event: string }[] = page.nodes
+  // A run event is raised only by the run's own result (`canvasRunEffects`), never as a widget's.
+  if (parseCanvasRunEvent(event) !== null) return [];
+  return pageEffects(page, page.nodes
     .filter(node => node.nodeType === "widget" && node.targetRef === targetRef)
-    .map(node => ({ node: node.id, event }));
+    .map(node => ({ node: node.id, event })));
+}
+
+/**
+ * The page effects that run event `event` of trigger `trigger` leads to on a parsed page (FAC-116),
+ * in order: from the attachments naming that trigger, following raised events as
+ * `canvasPageEffects` does. Nothing else reaches them, and they reach only what they raise.
+ */
+export function canvasRunEffects(page: CanvasPage, trigger: number, event: CanvasRunEvent): CanvasPageEffect[] {
+  const on = canvasRunEvent(event, trigger);
+  return pageEffects(page, page.nodes
+    .filter(node => node.nodeType === "widget" && node.kind === "inferos.gadget")
+    .map(node => ({ node: node.id, event: on })));
+}
+
+// Follows `start`'s events through the page's attachments to the effects they reach.
+function pageEffects(page: CanvasPage, start: { node: string; event: string }[]): CanvasPageEffect[] {
+  const owners = new Map<string, CanvasAttachment[]>([[page.id, page.attachments], ...page.nodes.map(node => [node.id, node.attachments] as [string, CanvasAttachment[]])]);
+  const pending = [...start];
   const effects: CanvasPageEffect[] = [];
   let steps = 0;
   while (pending.length > 0 && steps < CANVAS_MODEL_LIMITS.attachments) {
