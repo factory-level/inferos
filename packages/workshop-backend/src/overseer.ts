@@ -12,8 +12,8 @@ import type {
 } from "@gadgets/workshop-shared/workflow-definition";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
-  SystemRunRegistry, openSystemRunSession, runAssignedDelivery, systemGatekeeperFacetName,
-  type AssignedDelivery, type SystemRunHost,
+  SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
+  systemGatekeeperFacetName, type AssignedDelivery, type AssignedExecution, type SystemRunHost,
 } from "./system-run.js";
 import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
@@ -180,8 +180,17 @@ export async function requireWorkflowInvoke(
  */
 export const PROVISION_REFUSED = "The key wasn't accepted.";
 
-/** The refusal for assigning, giving a key or an assigned run while assignments are off (FAC-102). */
-export const WORKFLOW_ASSIGNMENTS_DISABLED = "Workflow assignments aren't enabled on this instance.";
+export { WORKFLOW_ASSIGNMENTS_DISABLED };
+
+/**
+ * The refusal for a run on request of a trigger whose assignment was retired automatically
+ * (FAC-102 follow-up B), until an Admin re-assigns it or removes the assignment.
+ */
+const ASSIGNED_ACTION_UNREACHABLE =
+  "This action's connection can't act as its workflow's service account now, so it wasn't applied.";
+
+export const TRIGGER_AUTO_RETIRED =
+  "This trigger's service-account assignment was retired automatically. An Admin needs to assign it again or remove it.";
 
 /**
  * Whether workflow trigger assignments are on (`WORKFLOW_ASSIGNMENTS_ENABLED === "true"`): off by
@@ -1090,6 +1099,13 @@ export type ActionRecord = {
   aguiApproval?: ActionApprovalCorrelation;
   /** What the provider reported the apply produced (see ActionLogEntry.result); set only on approval. */
   result?: ActionResult;
+  /**
+   * Set when an assigned workflow run proposed it (FAC-102 follow-up A): the trigger, the run's
+   * delivery and the assignment's credential reference. It applies, once a person approves it, as
+   * the service account through a short-lived session on that run's own system facet, and only
+   * while that assignment still holds (see openAssignedActionFacet).
+   */
+  executedAs?: AssignedExecution;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1656,6 +1672,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       workflowTriggerControls: collection<StoredTriggerControl>()({ primaryKey: "hookId" }),
       // Which service account an assigned trigger's on-request runs execute as (FAC-102).
       workflowTriggerAssignments: collection<TriggerAssignment>()({ primaryKey: "hookId" }),
+      // Triggers whose assignment was retired automatically, refused on request until an Admin acts
+      // (FAC-102 follow-up B; see WorkspaceWorkflowDefinitionStore.markAutoRetired).
+      workflowTriggerAutoRetired: collection<{ hookId: number; retiredAt: Date }>()({ primaryKey: "hookId" }),
       workflowInvocations: collection<StoredWorkflowInvocation>()({ primaryKey: "id" }),
       // The newest on-request runs, which the run rates count (see workflow-definition-store.ts).
       workflowInvocationLog: collection<StoredWorkflowInvocationRecord>()({ primaryKey: "id" }),
@@ -6246,6 +6265,47 @@ class OverseerImpl implements AgentHooks {
 
   // `cls` is for the one caller that has the class in hand but has deliberately not published the
   // record yet (`addGatekeeper`); everyone else resolves it from the record.
+  /**
+   * Why `record`, an assigned run's action, may not apply now, or null (FAC-102 follow-up A; see
+   * assignedActionProblem in system-run.ts): assignments on, the same assignment on the same
+   * connection, and that connection still bound to the trigger's live gadget.
+   */
+  assignedActionProblem(record: ActionRecord & {type: "action"}): string | null {
+    return assignedActionProblem(this.#systemRunHost(), record.executedAs!, record.gatekeeperId,
+        workflowAssignmentsEnabled(this.env));
+  }
+
+  /**
+   * A short-lived session as the service account `record`'s run acted as (FAC-102 follow-up A):
+   * the connection vendor's system class for the assignment's credential reference, on the run's
+   * own facet (`systemgatekeeper-<ref>-<delivery>`), whose storage still holds the action after the
+   * run ended. `close` aborts the facet; call it once the apply or rejection returns. Callers check
+   * the assignment first (assignedActionProblem) where acting as it matters.
+   */
+  async openAssignedActionFacet(record: ActionRecord & {type: "action"}):
+      Promise<{facet: Fetcher<Gatekeeper<any>>; close(): void}> {
+    let executedAs = record.executedAs!;
+    let connection = this.storage.gatekeepers.get(record.gatekeeperId);
+    let vendorId = gatekeeperVendorId(connection);
+    let resourceUrl = gatekeeperResourceUrl(connection);
+    let vendor = vendorId === undefined ? undefined : buildGatekeeperVendorMap(this.env).get(vendorId) as unknown as
+        Pick<GatekeeperVendor, "getSystemGatekeeperClass"> | undefined;
+    if (!vendor?.getSystemGatekeeperClass || resourceUrl === undefined) throw new Error(ASSIGNED_ACTION_UNREACHABLE);
+    let cls: DurableObjectClass<Gatekeeper<any>>;
+    try {
+      cls = await vendor.getSystemGatekeeperClass(executedAs.credentialRef, {resourceUrl});
+    } catch (error) {
+      logger.warn("assigned action's system class unavailable", {
+        event: "workflow.assigned_action.unreachable", hookId: executedAs.hookId, error,
+      });
+      // oxlint-disable-next-line eslint/preserve-caught-error -- the vendor's reason stays in the log.
+      throw new Error(ASSIGNED_ACTION_UNREACHABLE);
+    }
+    let name = systemGatekeeperFacetName(executedAs.credentialRef, executedAs.deliveryId);
+    let facet = this.ctx.facets.get(name, async () => ({class: cls})) as Fetcher<Gatekeeper<any>>;
+    return {facet, close: () => this.ctx.facets.abort(name, new Error("The action's decision finished."))};
+  }
+
   getGatekeeperFacet(id: number, cls?: GatekeeperClass): Fetcher<Gatekeeper<any>> {
     return this.ctx.facets.get(`gatekeeper${id}`, async () => {
       let resolved = cls ?? this.storage.gatekeepers.get(id)?.class;
@@ -6344,7 +6404,22 @@ class OverseerImpl implements AgentHooks {
     if (last && last.retryable !== true) {
       throw new Error(`${NOT_RETRYABLE_MESSAGE} ${last.message}`);
     }
-    let gatekeeper = this.getGatekeeperFacet(record.gatekeeperId);
+    // An assigned run's action applies as its service account, on a short-lived session over the
+    // run's own system facet, which holds the action; never the connection's own facet, which never
+    // saw it. Refused, with nothing sent and the action left pending, unless the assignment that
+    // proposed it still holds; checked again once the session is open (FAC-102 follow-up A).
+    let assigned: {facet: Fetcher<Gatekeeper<any>>; close(): void} | undefined;
+    if (record.executedAs) {
+      let problem = this.assignedActionProblem(record);
+      if (problem) throw new Error(problem);
+      assigned = await this.openAssignedActionFacet(record);
+      problem = this.assignedActionProblem(record);
+      if (problem) {
+        assigned.close();
+        throw new Error(problem);
+      }
+    }
+    let gatekeeper = assigned?.facet ?? this.getGatekeeperFacet(record.gatekeeperId);
     // An artifact publisher publishes as the person approving (see publishApprovedArtifact); an
     // auto-approval never publishes, since no person approved it.
     let approvingKey = `${record.gatekeeperId}:${record.action}`;
@@ -6377,6 +6452,7 @@ class OverseerImpl implements AgentHooks {
       throw error;
     } finally {
       this.#approvingPublishers.delete(approvingKey);
+      assigned?.close();
     }
     if (result && "failed" in result) {
       this.#recordUnsuccessfulApply(record, result.failed, resolvedBy, autoApproved);
@@ -6660,7 +6736,7 @@ class OverseerImpl implements AgentHooks {
    * tell the run's own failure from a request that never started. In memory: both happen within
    * the one call, which a reset ends anyway.
    */
-  takenInvocations = new Set<string>();
+  takenInvocations = new Map<string, boolean>();
 
   // What system-run.ts needs of this workspace, bound to it.
   #systemRunHost(): SystemRunHost {
@@ -7207,6 +7283,15 @@ class OverseerImpl implements AgentHooks {
       this.gitCache.verifyPushAncestry(gatekeeperId, description.pushedCommits);
     }
 
+    // An assigned run's action is recorded with who the run acts as, so its apply can act as that
+    // service account later (FAC-102 follow-up A). Only from a run still running on this connection.
+    let executedAs: AssignedExecution | undefined;
+    if (caller.from === "systemRun") {
+      let run = this.systemRuns.require(caller);
+      if (run.gatekeeperId !== gatekeeperId) throw new Error("This workflow run can't propose actions on that connection.");
+      executedAs = { hookId: caller.hookId, deliveryId: caller.deliveryId, credentialRef: run.credentialRef };
+    }
+
     let actionId = this.storage.nextActionId.get();
     this.storage.nextActionId.put(actionId + 1);
 
@@ -7220,7 +7305,8 @@ class OverseerImpl implements AgentHooks {
       createdAt: new Date(),
       state: "pending",
       type: "action",
-      description
+      description,
+      ...(executedAs ? { executedAs } : {}),
     };
 
     // The marking walk stamps the verified push closure "pending push" -- the read grant that
@@ -7237,7 +7323,8 @@ class OverseerImpl implements AgentHooks {
     // Same auto-approval gate the drainer uses, named because awaitDecision uses it too. The drain
     // is deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
     let roleOf = this.enablerRoles();
-    let willAutoApprove =
+    // A person approves every write an assigned run proposes; no rule approves it (FAC-102).
+    let willAutoApprove = caller.from !== "systemRun" &&
         autoApprovalRule(this.storage, roleOf, gatekeeperId, description) !== undefined;
     if (!willAutoApprove) this.traceAgentActionApproval(record, "requested");
 
@@ -12729,12 +12816,19 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
         this.impl.workflowDefinitionStore().assignmentOf(hookId)) {
       throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
     }
+    // An assignment retired automatically refuses requests until an Admin acts (follow-up B).
+    if (invocationId !== undefined && this.impl.workflowDefinitionStore().autoRetiredOf(hookId)) {
+      throw new Error(TRIGGER_AUTO_RETIRED);
+    }
     let delivery = this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
         gadgetId => this.impl.getGadgetHead(gadgetId),
         profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build",
         invocationId);
     // The request is taken: from here a failure is the run's own (invokeWorkflowTrigger).
-    if (delivery?.invocation) this.impl.takenInvocations.add(delivery.invocation.id);
+    // Only for an invokeTrigger call still waiting on it: a late delivery leaves nothing behind.
+    if (delivery?.invocation && this.impl.takenInvocations.has(delivery.invocation.id)) {
+      this.impl.takenInvocations.set(delivery.invocation.id, true);
+    }
 
     // An admitted request for an assigned trigger runs as its service account (FAC-102), in a
     // run-scoped worker, never through the gadget's own callback and the bindings people connected.
@@ -13491,6 +13585,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return {
       enabled: workflowAssignmentsEnabled(this.impl.env),
       assignment: this.impl.workflowDefinitionStore().assignmentOf(hookId),
+      retiredAutomatically: this.impl.workflowDefinitionStore().autoRetiredOf(hookId) !== null,
     };
   }
   // Giving the key decides what runs act as, like assigning: the same authority.
@@ -14708,7 +14803,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     const actions = this.impl.storage.actions;
     const read = () => {
       const record = actions.get(input.actionId);
-      if (record?.type !== "action") throw new Error("Approval refused");
+      // An assigned run's action is decided from the approvals list, through its own facet.
+      if (record?.type !== "action" || record.executedAs) throw new Error("Approval refused");
       return record;
     };
     const facet = (gatekeeperId: number) => this.impl.getGatekeeperFacet(gatekeeperId) as
@@ -15019,15 +15115,21 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error(`Can't reject an observation: ${id}`);
     }
 
-    let gatekeeper = this.impl.getGatekeeperFacet(action.gatekeeperId);
-
     // Resolve the rejecter's identity before notifying the gatekeeper, so a failed profile fetch
     // can't leave the action rejected with the gatekeeper but still "pending" in storage.
     let profile = await this.#getClientProfile();
     // The whole decision runs under the claim, through to the stored rejection, so no approval can
     // start between the gatekeeper's answer and the record saying it was rejected.
     await this.impl.withActionClaim(id, async () => {
-      await gatekeeper.rejectAction(action.action);
+      // An assigned run's action lives on that run's own facet, so it is rejected there (FAC-102
+      // follow-up A), whatever became of the assignment since: rejecting sends nothing.
+      let assigned = action.executedAs ? await this.impl.openAssignedActionFacet(action) : undefined;
+      let gatekeeper = assigned?.facet ?? this.impl.getGatekeeperFacet(action.gatekeeperId);
+      try {
+        await gatekeeper.rejectAction(action.action);
+      } finally {
+        assigned?.close();
+      }
       // Re-read after the wait: the claim kept other decisions out, but the record is the truth.
       let current = this.impl.storage.actions.get(id);
       if (current?.type === "action") Object.assign(action, current);
@@ -17526,6 +17628,8 @@ async function forgetProvisioned(
     if (store.assignmentOf(assignment.hookId)?.credentialRef === assignment.credentialRef) {
       retireAssignment(impl, assignment);
       store.removeAssignment(assignment.hookId);
+      // Retired automatically, not by a person: refuse runs on request until an Admin acts (B).
+      store.markAutoRetired(assignment.hookId);
     }
   }
 }
@@ -17552,7 +17656,10 @@ export async function invokeWorkflowTrigger(
   let store = impl.workflowDefinitionStore();
   // Assignments off (FAC-102): a trigger assigned before is refused here, before anything is minted.
   if (!workflowAssignmentsEnabled(impl.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+  if (store.autoRetiredOf(hookId)) throw new Error(TRIGGER_AUTO_RETIRED);
   let invocation = store.beginInvocation(profileId, hookId);
+  // What startHook reads to tell this call's delivery taken (see takenInvocations).
+  impl.takenInvocations.set(invocation.id, false);
   try {
     await (record.controller as unknown as HookController<RpcTarget>).invoke!({invocationId: invocation.id});
   } catch (error) {
@@ -17562,7 +17669,7 @@ export async function invokeWorkflowTrigger(
     // gatekeeper never delivered it, or a pin, control or assignment change dropped it), the
     // invoker gets fixed words only: that it can't run on request when the gatekeeper has no
     // `invoke`, our own refusal when we gave one, and otherwise that it couldn't run just now.
-    let taken = impl.takenInvocations.has(invocation.id);
+    let taken = impl.takenInvocations.get(invocation.id) === true;
     store.cancelInvocation(invocation.id);
     if (taken) throw error;
     // The replaced error stays here, in the log: a fixed refusal carries no `cause`, since RPC
@@ -17574,7 +17681,7 @@ export async function invokeWorkflowTrigger(
       throw new Error("This trigger can't be run on request.");
     }
     // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
-    if (message === WORKFLOW_ASSIGNMENTS_DISABLED) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+    if (message === WORKFLOW_ASSIGNMENTS_DISABLED || message === TRIGGER_AUTO_RETIRED) throw new Error(message);
     // oxlint-disable-next-line eslint/preserve-caught-error -- RPC would send the cause to the invoker; it is logged above.
     throw new Error(RUN_NOT_STARTED);
   } finally {

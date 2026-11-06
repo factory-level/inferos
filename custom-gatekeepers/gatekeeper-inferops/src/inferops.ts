@@ -324,6 +324,20 @@ function systemCredentialsOf(exports: ExportsWithStores, credentialRef: string) 
 /** What a system run's call is refused with when nothing usable is provisioned for it (FAC-102). */
 const NO_SYSTEM_CREDENTIAL = "No service account is provisioned for this workflow's runs.";
 
+/** What a system session says when InferOps refuses the service-account key (FAC-102 follow-up C). */
+const SYSTEM_KEY_REFUSED = "The assignment's service-account key was refused. An Admin needs to assign it again.";
+
+/**
+ * The refusal for a service-account key InferOps rejected: still an `UNAUTHORIZED` InferOpsError,
+ * so every mapping by code is unchanged, but worded for the assignment and named plainly, so the
+ * message a run or an approver sees carries no `InferOpsError:` prefix.
+ */
+function systemKeyRefused(cause: InferOpsError): InferOpsError {
+  const refused = new InferOpsError("UNAUTHORIZED", SYSTEM_KEY_REFUSED, cause.facts);
+  refused.name = "Error";
+  return refused;
+}
+
 /**
  * A system workflow run's client (FAC-102): its authority is the service-account key stored for
  * `credentialRef`, read per request, and only for the `host` it was checked for. Nothing provisioned
@@ -338,7 +352,14 @@ function systemClient(env: Cloudflare.Env, exports: ExportsWithStores, credentia
     async authorize(operation) {
       const authority = await systemCredentialsOf(exports, credentialRef).authority(host);
       if (!authority) throw new InferOpsError("UNAUTHORIZED", NO_SYSTEM_CREDENTIAL);
-      return operation(authority);
+      try {
+        return await operation(authority);
+      } catch (error) {
+        // A refused service-account key is the assignment's to fix, not a person's to reconnect
+        // (FAC-102 follow-up C): named as such, without the person-oriented hint or a class name.
+        if (error instanceof InferOpsError && error.code === "UNAUTHORIZED") throw systemKeyRefused(error);
+        throw error;
+      }
     },
   }, inferLabFetch(env));
 }
@@ -2277,6 +2298,7 @@ function proposalFailureMessage(what: string, code: string | null, detail: strin
   }
   switch (code) {
     case "UNAUTHORIZED":
+      if (detail === SYSTEM_KEY_REFUSED) return `${what} was not applied: ${detail}`;
       return `${what} was not applied: InferOps rejected this connection's credential. Reconnect InferOps.`;
     case "DISABLED":
       return `${what} was not applied: InferOps is turned off for this deployment. It can be ` +

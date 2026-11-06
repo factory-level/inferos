@@ -2104,6 +2104,19 @@ describe("system credentials (FAC-102)", () => {
     expect(await systemRead("system-forgotten")).toContain("No service account is provisioned");
   });
 
+  // FAC-102 follow-up C: a refused service-account key is named as such, with no person-oriented
+  // reconnect hint and no class-name prefix.
+  it("names a refused service-account key as the assignment's, not a person's connection", async () => {
+    const REFUSED = "5b2c1d8e-0000-4000-8000-0000000000a6";
+    serviceKey();
+    expect(await hooks().provisionSystem(REFUSED, BOARD_URL, KEY)).toBeNull();
+    inferlab.access.delete(KEY);
+    const refused = await systemRead("system-key-refused", BOARD_URL, REFUSED);
+    expect(refused).toContain("The assignment's service-account key was refused. An Admin needs to assign it again.");
+    expect(refused).not.toContain("Reconnect InferOps");
+    expect(refused).not.toContain("InferOpsError");
+  });
+
   it("fails a run's call once InferOps revokes the key, and falls back to nothing", async () => {
     // REF was forgotten above, and a forgotten reference never stores again.
     const REVOKED = "5b2c1d8e-0000-4000-8000-0000000000a3";

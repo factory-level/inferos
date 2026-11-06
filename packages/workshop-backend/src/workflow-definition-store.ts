@@ -55,7 +55,7 @@ export class WorkspaceWorkflowDefinitionStore {
       private storage: Pick<OverseerStorage,
           "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
-          "nextWorkflowInvocationLogId" | "workflowTriggerAssignments">) {}
+          "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired">) {}
 
   /** The definitions `viewer` may see: their own in full, and others' published revision only. */
   list(viewer: string): WorkflowDefinition[] {
@@ -234,6 +234,8 @@ export class WorkspaceWorkflowDefinitionStore {
   setAssignment(caller: AiChatAuthorInfo, hookId: number, gatekeeperId: number | null): TriggerAssignment | null {
     return this.durableStorage.transactionSync(() => {
       this.#dropInvocations(hookId);
+      // An Admin re-assigning or removing it is the action an automatic retirement waits for.
+      this.storage.workflowTriggerAutoRetired.delete(hookId);
       if (gatekeeperId === null) {
         this.storage.workflowTriggerAssignments.delete(hookId);
         return null;
@@ -261,6 +263,23 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowTriggerAssignments.put(updated);
       return { ...updated };
     });
+  }
+
+  /**
+   * Marks trigger `hookId` as having had its assignment retired automatically (FAC-102 follow-up B,
+   * a refused key that couldn't be forgotten): runs on request are refused while the mark stands,
+   * rather than falling back to the gadget's own connections, until an Admin re-assigns the trigger
+   * or removes its assignment (`setAssignment`, which clears it). A retirement a person chose leaves
+   * no mark.
+   */
+  markAutoRetired(hookId: number): void {
+    this.storage.workflowTriggerAutoRetired.put({ hookId, retiredAt: new Date() });
+  }
+
+  /** Trigger `hookId`'s automatic-retirement mark, or null (see `markAutoRetired`). */
+  autoRetiredOf(hookId: number): { hookId: number; retiredAt: Date } | null {
+    let stored = this.storage.workflowTriggerAutoRetired.get(hookId);
+    return stored ? { ...stored } : null;
   }
 
   /** Every assignment. */
@@ -405,6 +424,7 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowTriggerPins.delete(hookId);
       this.storage.workflowTriggerControls.delete(hookId);
       this.storage.workflowTriggerAssignments.delete(hookId);
+      this.storage.workflowTriggerAutoRetired.delete(hookId);
       for (let invocation of this.storage.workflowInvocations.list()) {
         if (invocation.hookId === hookId) this.storage.workflowInvocations.delete(invocation.id);
       }
