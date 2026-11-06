@@ -18,6 +18,12 @@ const rejection = (run: () => unknown): { code: CanvasModelErrorCode; at: string
   throw new Error("Expected a rejection");
 };
 
+const canvasBoardAt = (page: CanvasPage) => page.nodes.find((node): node is Extract<CanvasNode, {nodeType: "widget"}> =>
+  node.nodeType === "widget" && node.kind === "inferops.project-board")!;
+const canvasAuthorityFields = (widget: CanvasNode) => JSON.stringify(Object.fromEntries(
+  Object.entries(widget).filter(([key]) => ["permission", "permissions", "grant", "grants", "capability", "capabilities", "scope", "scopes", "role", "roles", "principal", "runAs", "credential", "credentials", "token", "apiKey", "secret", "owner", "ownership", "sharing", "authority"].includes(key)),
+));
+
 /**
  * Read a page back as sections. It checks the documented mapping from the other direction, so a
  * fixture can't lose a reference or a layout field and still pass. The migration itself is FAC-81's.
@@ -76,11 +82,29 @@ describe("valid fixtures", () => {
     expect((byId.get("g") as Extract<CanvasNode, {nodeType: "widget"}>).dataBinding).toBeUndefined();
   });
 
-  test("a read binding has no write or workflow fields and cannot alter action offers", () => {
-    const page = parseCanvasPage(valid[2].page);
-    const board = page.nodes.find((node): node is Extract<CanvasNode, {nodeType: "widget"}> => node.nodeType === "widget" && node.kind === "inferops.project-board")!;
-    expect(Object.keys(board.dataBinding ?? {}).toSorted()).toEqual(["ref", "resource", "schemaVersion"]);
-    expect(CANVAS_WIDGET_ACTIONS[board.kind]).toEqual(["transition-issue", "create-issue", "update-issue"]);
+  test("adding, changing, or removing a read binding leaves the stored widget's authority unchanged", () => {
+    const source = structuredClone(valid[2].page) as { nodes: Record<string, unknown>[] };
+    const initial = parseCanvasPage(source);
+    const initialBoard = canvasBoardAt(initial);
+    const actionListBytes = JSON.stringify(CANVAS_WIDGET_ACTIONS[initialBoard.kind]);
+    const initialAuthorityBytes = canvasAuthorityFields(initialBoard);
+    expect(Object.keys(initialBoard.dataBinding ?? {}).toSorted()).toEqual(["ref", "resource", "schemaVersion"]);
+
+    // Legacy input without a binding is normalized; changing a binding means changing its target
+    // and matching typed reference together. In neither case does it add widget authority.
+    const withoutBinding = structuredClone(source);
+    delete withoutBinding.nodes.find(node => node.id === "board-1")!.dataBinding;
+    const otherTarget = "inferops://acme.operations/project/board/OTHER";
+    const changedBinding = structuredClone(source);
+    const changed = changedBinding.nodes.find(node => node.id === "board-1")!;
+    changed.targetRef = otherTarget;
+    changed.dataBinding = { resource: "project/board", ref: otherTarget, schemaVersion: 1 };
+
+    for (const input of [source, withoutBinding, changedBinding]) {
+      const stored = canvasBoardAt(parseCanvasPage(input));
+      expect(JSON.stringify(CANVAS_WIDGET_ACTIONS[stored.kind])).toBe(actionListBytes);
+      expect(canvasAuthorityFields(stored)).toBe(initialAuthorityBytes);
+    }
     expect(CANVAS_WIDGET_ACTIONS["inferos.gadget"]).toEqual([]);
   });
 
@@ -89,6 +113,7 @@ describe("valid fixtures", () => {
     ["a reference different from targetRef", { resource: "project/board", ref: "inferops://other.operations/project/board/ENG", schemaVersion: 1 }, "invalid-data-binding"],
     ["an unsupported schema version", { resource: "project/board", ref: "inferops://acme.operations/project/board/ENG", schemaVersion: 2 }, "invalid-data-binding"],
     ["an authority field", { resource: "project/board", ref: "inferops://acme.operations/project/board/ENG", schemaVersion: 1, workflow: "invoke" }, "invalid-data-binding"],
+    ["an action-capability field", { resource: "project/board", ref: "inferops://acme.operations/project/board/ENG", schemaVersion: 1, actionCapabilities: ["create-issue"] }, "invalid-data-binding"],
   ] as const)("rejects %s", (_name, dataBinding, code) => {
     const page = structuredClone(valid[2].page) as { nodes: Record<string, unknown>[] };
     const board = page.nodes.find(node => node.id === "board-1")!;
