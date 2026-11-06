@@ -169,6 +169,7 @@ InferOps stays authoritative. A `runId` sent to it is a correlation claim and au
 
 | Issue | Takes from this record |
 | --- | --- |
+| FAC-111 | **Built in part (2026-11-06):** `runId`, the definition pin, the envelope's company, requester and executor, and a correlation id, stored with the trigger's delivery at admission and reloaded from it alone ([operate mode](../architecture/operate-mode.md), "Durable runs"). Outcomes, events, delegates, action ids and destinations aren't stored |
 | FAC-110 | Store the record at admission with its pin and envelope; run it through `spawnCallable`; a "first turn" signal. The contract change in `agent-deployment.ts` |
 | FAC-113 | Occurrence keys per trigger. Event triggers need a hook delivery identity first |
 | FAC-114 | Callback binding, destinations and `delivery`, `uncertain` staying visible after reconnect, R6 |

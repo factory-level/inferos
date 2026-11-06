@@ -166,7 +166,18 @@ export async function holdsSharedConfiguration(
  */
 export async function holdsWorkflowInvoke(
     records: Iterable<ConnectedAccountRecord>, vendorId: string, resourceUrl: string): Promise<boolean> {
-  return holdsDeploymentAuthority(records, vendorId, account => account.holdsWorkflowInvoke(resourceUrl),
+  return (await workflowInvokeAnswer(records, vendorId, resourceUrl)).holds;
+}
+
+/**
+ * `holdsWorkflowInvoke`'s answer with the company it was given in (FAC-111): the one scope the
+ * person's live accounts of `vendorId` answered in, or null when none answered with a scope. A run
+ * admitted on a yes records that company as its scope.
+ */
+export async function workflowInvokeAnswer(
+    records: Iterable<ConnectedAccountRecord>, vendorId: string, resourceUrl: string,
+): Promise<{ holds: boolean; company: string | null }> {
+  return deploymentAuthority(records, vendorId, account => account.holdsWorkflowInvoke(resourceUrl),
       "Couldn't check whether you may run workflows. Try again.");
 }
 
@@ -176,6 +187,15 @@ async function holdsDeploymentAuthority(
     ask: (account: SharedConfigurationAccountStub) => Promise<SharedConfigurationAnswer>,
     failure: string,
 ): Promise<boolean> {
+  return (await deploymentAuthority(records, vendorId, ask, failure)).holds;
+}
+
+// The combiner with the one scope it was answered in; more than one scope refuses, as before.
+async function deploymentAuthority(
+    records: Iterable<ConnectedAccountRecord>, vendorId: string,
+    ask: (account: SharedConfigurationAccountStub) => Promise<SharedConfigurationAnswer>,
+    failure: string,
+): Promise<{ holds: boolean; company: string | null }> {
   let scopes = new Set<string>();
   let holds = false;
   for (let record of records) {
@@ -194,7 +214,8 @@ async function holdsDeploymentAuthority(
     if (answer.holds === true) holds = true;
   }
   if (scopes.size > 1) throw new Error(SHARED_CONFIGURATION_AMBIGUOUS);
-  return holds;
+  let [company] = scopes;
+  return { holds, company: company ?? null };
 }
 
 // Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names; see the note above.
@@ -2441,14 +2462,16 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /**
    * Whether this person may ask a configured system workflow to run (FAC-102), as the deployment's
    * SHARED_CONFIGURATION_GATEKEEPER vendor decides it through their own connected accounts (the
-   * module-level `holdsWorkflowInvoke`), about the resource `resourceUrl` only. The Overseer asks
-   * only when the deployment names a vendor, once per connection the workflow acts through.
+   * module-level `workflowInvokeAnswer`), about the resource `resourceUrl` only, and the InferOps
+   * company that answer was given in (FAC-111), which an admitted run records as its scope. The
+   * Overseer asks only when the deployment names a vendor, once per connection the workflow acts
+   * through; with none named there is nothing to ask, a yes with no company.
    */
-  async holdsWorkflowInvoke(resourceUrl: string): Promise<boolean> {
+  async workflowInvokeAnswer(resourceUrl: string): Promise<{ holds: boolean; company: string | null }> {
     let vendorId = getSharedConfigurationGatekeeper(this.env);
-    if (!vendorId) return true;
-    if (typeof resourceUrl !== "string" || !resourceUrl) return false;
-    return holdsWorkflowInvoke(this.#connectedAccountRecords(), vendorId, resourceUrl);
+    if (!vendorId) return { holds: true, company: null };
+    if (typeof resourceUrl !== "string" || !resourceUrl) return { holds: false, company: null };
+    return workflowInvokeAnswer(this.#connectedAccountRecords(), vendorId, resourceUrl);
   }
 
   /**
