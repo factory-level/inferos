@@ -47,6 +47,7 @@ export const UNIT_NODE: readonly string[] = [
   "code-preview.test.ts",
   "console-host-boards.test.ts",
   "console-tool-surfaces.test.ts",
+  "console-embedded-widget.test.ts",
   "feature-flags.test.ts",
   "gadget-export.test.ts",
   "git-cache.test.ts",

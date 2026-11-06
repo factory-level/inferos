@@ -180,6 +180,33 @@ export function consoleWidgetVersionId(widget: Pick<ConsoleWidgetEntry, "bluepri
 }
 
 /**
+ * A published console's widget as a Wiki page embeds it (FAC-12): named by its source gadget, which
+ * a republish keeps, and resolved to what the console publishes now. `available` names the current
+ * publication's frozen install, which the page opens through `Overseer.getEmbeddedWidget` exactly
+ * as Operate runs it, so both show one instance's state, never a copy. It holds references and the
+ * entry's label only. `unavailable` says why nothing is shown, in fixed words: the console isn't
+ * published, its publication no longer lists that widget, or the widget has no UI to show.
+ */
+export type EmbeddedConsoleWidget =
+  | {
+      status: "available";
+      consoleId: string;
+      /** The console's current published revision. */
+      revision: string;
+      /** That revision's frozen install of the widget. */
+      gadgetId: WorkpieceId;
+      /** The entry's label, which operators see. */
+      label: string;
+      /** The blueprint and version the publication runs, which a page compares with its link. */
+      blueprintId: string;
+      version: number;
+    }
+  | { status: "unavailable"; reason: EmbeddedConsoleWidgetUnavailable };
+
+/** Why an embedded console widget shows nothing (see `EmbeddedConsoleWidget`). */
+export type EmbeddedConsoleWidgetUnavailable = "not-published" | "not-offered" | "no-ui";
+
+/**
  * One widget install of a workspace, as a builder choosing what a console registers sees it: its
  * stable version, what its current commit offers, and whether a console can offer it now. Frozen
  * installs and gadgets that aren't widget installs are never candidates.

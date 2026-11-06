@@ -27,7 +27,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
-import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
@@ -2872,6 +2872,25 @@ export interface Overseer extends RpcTarget {
    * Denied to the operate session.
    */
   getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
+   * Resolve a published console's widget as a Wiki page embeds it (FAC-12): by its source gadget
+   * (`ConsoleWidgetFreeze.sourceGadgetId`), which a republish keeps, to the console's current
+   * publication's frozen install, or why there is none (`EmbeddedConsoleWidget`). Reads only what
+   * the console publishes. Answered to whoever may read this workspace's published consoles (build
+   * or use access), with no operate session required. Denied to the operate session.
+   */
+  resolveEmbeddedWidget(consoleId: string, sourceGadgetId: WorkpieceId): Promise<EmbeddedConsoleWidget>;
+  /**
+   * Open a widget embedded in a Wiki page (FAC-12), as `resolveEmbeddedWidget` named it: the
+   * frozen install `gadgetId` that console `consoleId`'s published revision `revision` offers. It is
+   * the same instance Operate runs, so a page and an operator share its state. For the use role
+   * this is `getConsoleWidget` without its open-session requirement: being able to read the
+   * workspace's published consoles is enough. Every call on the returned capability checks again
+   * that the console is still published at `revision` and still offers the widget with a UI, and a
+   * use session ends when its access is removed, so a kept capability stops working. Refused
+   * otherwise, and for a widget published without a UI. Denied to the operate session.
+   */
+  getEmbeddedWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
   /**
    * Open an app a console places, as its published revision `revision` fenced it (FAC-89 part 2):
    * `gadgetId` is the live app, with its own storage and bindings, never a copy (see

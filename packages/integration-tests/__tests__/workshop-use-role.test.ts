@@ -87,6 +87,9 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     "getConsoleApp" |
     // A published widget's frozen local states, checked as getConsoleWidget is (FAC-86, widget-state.test.ts).
     "getConsoleWidgetStates" |
+    // A widget a Wiki page embeds, by its source gadget, without an open operate session (FAC-12,
+    // wiki-embedded-widget.test.ts).
+    "resolveEmbeddedWidget" | "getEmbeddedWidget" |
     // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
     "listWorkflowDefinitions" |
     // A use collaborator listed on a trigger's control may run it, and sees only those controls

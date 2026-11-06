@@ -3,7 +3,7 @@ import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
 import { canvasDefinitionProjection, canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
 import { nestedPage, readCanvasDefinition } from "./canvas-store";
-import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleWidgetFreeze, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
@@ -836,6 +836,21 @@ export class WorkspaceConsoleStore {
       throw new Error(`Console ${consoleId} does not offer widget ${gadgetId}.`);
     }
     return entry;
+  }
+
+  /**
+   * Console `consoleId`'s widget whose source gadget is `sourceGadgetId`, as a Wiki page embeds it
+   * (FAC-12): the current publication's frozen install, or why there is none. Reads only what the
+   * console publishes, so it never names a draft or another console's widget.
+   */
+  embeddedWidget(consoleId: string, sourceGadgetId: WorkpieceId): EmbeddedConsoleWidget {
+    let shown = this.get(consoleId, "published");
+    if (!shown) return { status: "unavailable", reason: "not-published" };
+    let entry = shown.widgets?.find(widget => widget.frozen?.sourceGadgetId === sourceGadgetId);
+    if (!entry) return { status: "unavailable", reason: "not-offered" };
+    if (entry.frozen?.ui === false) return { status: "unavailable", reason: "no-ui" };
+    return { status: "available", consoleId, revision: shown.revision, gadgetId: entry.gadgetId,
+      label: entry.label, blueprintId: entry.blueprintId, version: entry.version };
   }
 
   /**

@@ -52,7 +52,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -13815,6 +13815,14 @@ function joinSessionPresence(
   };
 }
 
+// FAC-12: that console `consoleId`'s published revision `revision` offers frozen install `gadgetId`
+// as a widget with a UI, which an embed shows; throws otherwise, in getConsoleWidget's words.
+function embeddedWidgetOffered(store: WorkspaceConsoleStore, consoleId: string, revision: string, gadgetId: WorkpieceId): void {
+  if (store.offeredWidget(consoleId, revision, gadgetId).frozen?.ui === false) {
+    throw new Error(`Widget ${gadgetId} has no UI; its console offers only its tools.`);
+  }
+}
+
 @validateRpc()
 class OverseerClientInterface extends RpcTarget implements Overseer {
   #clientProfilePromise: Promise<AiChatAuthorInfo> | undefined;
@@ -14207,6 +14215,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async getConsoleWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     this.#consoleStore().offeredWidget(consoleId, revision, gadgetId);
     // Build access may already open any gadget, so its capability is the ordinary one.
+    return this.getGadget(gadgetId);
+  }
+  async resolveEmbeddedWidget(consoleId: string, sourceGadgetId: WorkpieceId): Promise<EmbeddedConsoleWidget> {
+    return this.#consoleStore().embeddedWidget(consoleId, sourceGadgetId);
+  }
+  // Build access may already open any gadget; only what the publication offers is checked, as for
+  // getConsoleWidget, so a builder sees the embed as an operator would.
+  async getEmbeddedWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+    embeddedWidgetOffered(this.#consoleStore(), consoleId, revision, gadgetId);
     return this.getGadget(gadgetId);
   }
   // Build access opens the app's mainline, as getGadget does; only the placement is checked, so a
@@ -16968,6 +16985,20 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check, !ui);
   }
 
+  // FAC-12: an embed needs only what this role already has, reading the published consoles; unlike
+  // getConsoleWidget, the console needn't be open in the caller's operate session. A use session
+  // ends when its access is removed (`joinSession`), so a kept capability stops with it.
+  async resolveEmbeddedWidget(consoleId: string, sourceGadgetId: WorkpieceId): Promise<EmbeddedConsoleWidget> {
+    return this.#consoleStore().embeddedWidget(consoleId, sourceGadgetId);
+  }
+  async getEmbeddedWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
+    let check = async () => { embeddedWidgetOffered(this.#consoleStore(), consoleId, revision, gadgetId); };
+    await check();
+    // @ts-expect-error An RpcTarget implementing the interface works in place of a stub, but the
+    //     type system doesn't know this.
+    return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check);
+  }
+
   // --- Denied methods (build-only) ---
 
   async setTitle(_title: string): Promise<void> { this.#deny(); }
@@ -17349,6 +17380,10 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getConsoleWidgetStates(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<WidgetStateMachine | null> { this.#deny(); }
   async getConsoleWidget(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
+      : Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async resolveEmbeddedWidget(_consoleId: string, _sourceGadgetId: WorkpieceId)
+      : Promise<EmbeddedConsoleWidget> { this.#deny(); }
+  async getEmbeddedWidget(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async getConsoleApp(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
