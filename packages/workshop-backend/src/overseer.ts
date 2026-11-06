@@ -1176,7 +1176,8 @@ export type WorkflowRunWrite = { runId: string; hookId: number; deliveryId: numb
 
 /**
  * A copy of a write a workflow run proposed again after a restart (FAC-112), which the gatekeeper
- * staged under `action` and the workspace matched to its first proposal (`duplicateOf`): kept until
+ * staged under `action` and the workspace matched to its first proposal (`duplicateOf`), keyed by
+ * the facet it lives on and that key (`<facet>:<action>`, since each facet numbers its own): kept until
  * the gatekeeper withdraws it, retried by the alarm at `nextAttemptAt`, and shown to a person to
  * reject once `REPLAY_WITHDRAW_TRIES` tries have failed.
  */
@@ -7110,7 +7111,13 @@ class OverseerImpl implements AgentHooks {
   // (retryReplayWithdrawals), which retries until the gatekeeper takes it.
   #withdrawReplayedStage(already: ActionRecord & {type: "action"}, action: number): void {
     if (already.action === action) return;
-    let key = `${already.gatekeeperId}:${action}`;
+    // Keyed by the facet the copy lives on, which numbers its own actions: an assigned run's own per
+    // delivery (systemGatekeeperFacetName), else the connection's. Two assigned deliveries on one
+    // connection can stage the same key, each on its own facet (round 5).
+    let facet = already.executedAs
+      ? systemGatekeeperFacetName(already.executedAs.credentialRef, already.executedAs.deliveryId)
+      : `gatekeeper-${already.gatekeeperId}`;
+    let key = `${facet}:${action}`;
     if (this.storage.replayWithdrawals.get(key)) return;
     this.storage.replayWithdrawals.put({
       key, gatekeeperId: already.gatekeeperId, action, duplicateOf: already.id, attempts: 0, nextAttemptAt: Date.now(),

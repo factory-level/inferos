@@ -456,6 +456,36 @@ describe("withdrawing a replay's staged copy (FAC-112)", () => {
     expect([...gatekeeper.staged.keys()]).toEqual([1]);
   });
 
+  // Round 5 (review HIGH): each assigned delivery's writes live on its own facet, which numbers its
+  // actions from 1, so two deliveries on one connection can both stage the same key. Each copy is
+  // tracked by the facet it lives on, so neither is orphaned.
+  it("tracks and withdraws two assigned deliveries' copies with the same key, each on its own facet", async () => {
+    await withImpl(`run-exec-withdraw-two-${crypto.randomUUID()}`, async impl => {
+      let first = admitted(impl, { assigned: true });
+      let store = impl.workflowDefinitionStore();
+      let second = store.fire(HOOK, GADGET, (gid: number) => (gid === GADGET ? commit(1) : undefined), () => true,
+          store.beginInvocation(PERSON, HOOK, null).id)!;
+      let withdrawn: string[] = [];
+      onPrototype(impl, "openAssignedActionFacet", async (record: any) => ({
+        facet: { rejectAction: async (key: number) => { withdrawn.push(`${record.executedAs.deliveryId}:${key}`); } },
+        close: () => {},
+      }));
+      for (let d of [first.deliveryId, second.deliveryId]) {
+        let caller = { from: "systemRun", hookId: HOOK, deliveryId: d };
+        impl.systemRuns.begin(d, { hookId: HOOK, gatekeeperId: CONNECTION, credentialRef: REF });
+        let digest = await actionDescriptionDigest(DESCRIPTION);
+        impl.startWorkflowRunProposals(d);
+        impl.submitActionNow(CONNECTION, 1, DESCRIPTION, caller, digest); // its facet's first key
+        impl.startWorkflowRunProposals(d); // the replay
+        impl.submitActionNow(CONNECTION, 2, DESCRIPTION, caller, digest); // matched; the facet's next key
+      }
+      expect([...impl.storage.replayWithdrawals.list()]).toHaveLength(2);
+      await impl.retryReplayWithdrawals(Date.now() + 1e9);
+      expect(withdrawn.toSorted()).toEqual([`${first.deliveryId}:2`, `${second.deliveryId}:2`].toSorted());
+      expect([...impl.storage.replayWithdrawals.list()]).toEqual([]);
+    });
+  });
+
   it("never taken, becomes a pending duplicate a person can only reject", async () => {
     let name = `run-exec-withdraw-stuck-${crypto.randomUUID()}`;
     gatekeeper.failWithdraws = 1_000;
