@@ -28,6 +28,11 @@ function replacesModulesOrClock(source: string): boolean {
   return /\bvi\.(?:mock|doMock|useFakeTimers|setSystemTime)\b/u.test(source);
 }
 
+/** Whether `source` restarts every object in its runtime (the cloudflare:test abort-all call). */
+function restartsAllObjects(source: string): boolean {
+  return /\babortAllDurableObjects\s*\(/u.test(source);
+}
+
 /** `backend` files allowed to use `vi.mock`, fake timers or system time, each with its reason. */
 const BACKEND_MODULE_OR_CLOCK_EXCEPTIONS: Readonly<Record<string, string>> = {};
 
@@ -47,6 +52,13 @@ describe("test projects", () => {
 
   it("keep every file that loads the backend in a backend project", () => {
     expect(onDisk.filter(file => loadsBackend(read(file)) && !BACKEND_FILES.includes(file))).toEqual([]);
+  });
+
+  // Restarting every Durable Object in `backend`'s shared runtime restarts other files' objects
+  // mid-test, so a file that does runs in `backend-restart`, with a runtime of its own.
+  it("keep every file that restarts all Durable Objects in backend-restart", () => {
+    expect(onDisk.filter(file => restartsAllObjects(read(file)) && !BACKEND_RESTART.includes(file))).toEqual([]);
+    expect(BACKEND_RESTART.filter(file => !restartsAllObjects(read(file)))).toEqual([]);
   });
 
   it("keep module mocks, fake timers and system time out of the backend project", () => {
@@ -70,6 +82,9 @@ describe("test projects", () => {
     expect(replacesModulesOrClock(`${vi}.mock("jose", () => ({}));`)).toBe(true);
     expect(replacesModulesOrClock(`${vi}.doMock(path);`)).toBe(true);
     expect(replacesModulesOrClock(`${vi}.useFakeTimers();`)).toBe(true);
+    let abortAll = ["abortAll", "DurableObjects"].join("");
+    expect(restartsAllObjects(`await ${abortAll}();`)).toBe(true);
+    expect(restartsAllObjects(`import { ${abortAll} } from "x";`)).toBe(false);
     expect(replacesModulesOrClock(`${vi}.setSystemTime(0);`)).toBe(true);
     expect(replacesModulesOrClock("vi.stubGlobal('fetch', f); vi.useRealTimers();")).toBe(false);
   });
