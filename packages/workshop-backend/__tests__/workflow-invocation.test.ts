@@ -503,6 +503,19 @@ describe("the invoker's own InferOps grant (workflow:invoke, inferops ADR 0011 D
     for (let i = 0; i < 3; i++) store.beginInvocation(OPERATOR, HOOK);
   });
 
+  it("does not let a read binding replace the person's workflow:invoke grant", async () => {
+    let { overseer, store, invoke } = await invokeSession(async () => false);
+    const invokeWithUntrustedBinding = overseer.invokeTrigger as unknown as
+      (hookId: number, widget: unknown) => Promise<unknown>;
+
+    await expect(invokeWithUntrustedBinding.call(overseer, HOOK, {
+      dataBinding: { resource: "project/board", ref: OPS_BOARD },
+    })).rejects.toThrow(WORKFLOW_INVOKE_REFUSED);
+    expect(invoke).not.toHaveBeenCalled();
+    // Nothing was minted: the per-person rate still has all its runs.
+    for (let i = 0; i < 3; i++) store.beginInvocation(OPERATOR, HOOK);
+  });
+
   it("lets a listed Operator who holds it run the trigger", async () => {
     let { overseer, invoke } = await invokeSession(async () => true);
     let invocation = await overseer.invokeTrigger(HOOK);

@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type CanvasDefinition, type CanvasProjectBoardWidget, type CanvasWidget } from "../packages/workshop-shared/src/canvas.ts";
+import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type CanvasDefinition, type CanvasProjectBoardWidget, type CanvasWikiWidget, type CanvasWidget } from "../packages/workshop-shared/src/canvas.ts";
 
 const board = (id = "board-a"): CanvasWidget => ({ id, kind: "inferops.project-board", version: 1,
   targetRef: "inferops://demo.local/project/board/DEMO", size: "full", params: { workflow: "software", showCompleted: false } });
-const wiki = (page: string | null = null): CanvasWidget => ({ id: "wiki-a", kind: "inferops.wiki", version: 1,
+const wiki = (page: string | null = null): CanvasWikiWidget => ({ id: "wiki-a", kind: "inferops.wiki", version: 1,
   targetRef: "inferops://demo.local/knowledge/wiki", size: "full", params: { page } });
-const boundWiki = (page: string | null = null): CanvasWidget => ({ ...wiki(page), dataBinding: {
+const boundWiki = (page: string | null = null): CanvasWikiWidget => ({ ...wiki(page), dataBinding: {
   resource: "knowledge/wiki", ref: "inferops://demo.local/knowledge/wiki", schemaVersion: 1,
 } });
 const gadget = (id = "gadget-a", targetRef = "gadget:7"): CanvasWidget => ({ id, kind: "inferos.gadget", version: 1,
