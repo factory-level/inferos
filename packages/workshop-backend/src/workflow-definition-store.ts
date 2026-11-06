@@ -386,6 +386,14 @@ export class WorkspaceWorkflowDefinitionStore {
     }
   }
 
+  /**
+   * Whether invocation `id` is still waiting: minted and not yet taken by a delivery (`fire`
+   * consumes it) nor forgotten. A trigger's gatekeeper that took it implemented `invoke`.
+   */
+  isWaiting(id: string): boolean {
+    return this.storage.workflowInvocations.get(id) !== undefined;
+  }
+
   /** Forgets an invocation the trigger's gatekeeper didn't take, so it can never start a run. */
   cancelInvocation(id: string): void {
     this.storage.workflowInvocations.delete(id);

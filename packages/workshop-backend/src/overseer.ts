@@ -17480,11 +17480,14 @@ export async function invokeWorkflowTrigger(
   try {
     await (record.controller as unknown as HookController<RpcTarget>).invoke!({invocationId: invocation.id});
   } catch (error) {
+    // Decided by what happened to the invocation, not by the error's words (#374, review.r2): a
+    // delivery consumes it, so if it is gone the gatekeeper implemented `invoke` and took the
+    // request, and the failure is the run's own, surfacing with its cause whatever it names. Only
+    // a request no delivery took can mean the gatekeeper has no `invoke` at all.
+    let taken = !store.isWaiting(invocation.id);
     store.cancelInvocation(invocation.id);
     let message = error instanceof Error ? error.message : String(error);
-    // Only the gatekeeper lacking `invoke` itself means it can't run on request. Any other failure,
-    // a run's own binding call included, is the run's, and surfaces with its cause.
-    if (/does not implement the method "invoke"|\binvoke is not a function|no such method:? "?invoke\b/i.test(message)) {
+    if (!taken && /does not implement the method "invoke"|\binvoke is not a function|no such method:? "?invoke\b/i.test(message)) {
       throw new Error("This trigger can't be run on request.", {cause: error});
     }
     throw error;
