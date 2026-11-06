@@ -17656,7 +17656,7 @@ async function forgetProvisioned(
  */
 export async function invokeWorkflowTrigger(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
-        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations">,
+        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations" | "getGadgetHead">,
     userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
@@ -17669,6 +17669,10 @@ export async function invokeWorkflowTrigger(
   // Assignments off (FAC-102): a trigger assigned before is refused here, before anything is minted.
   if (!workflowAssignmentsEnabled(impl.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
   if (store.autoRetiredOf(hookId)) throw new Error(TRIGGER_AUTO_RETIRED);
+  // A stale pinned revision (the code moved since it was saved) is refused here, in the words fire
+  // uses, before anything is minted or the trigger's gatekeeper is asked to run it (FAC-111).
+  store.requireCurrentRevision(hookId, record.gadgetId ?? impl.defaultGadgetId ?? null,
+      gadgetId => impl.getGadgetHead(gadgetId));
   // The company the person was answered in becomes the run's scope (FAC-111).
   let invocation = store.beginInvocation(profileId, hookId, company);
   // What startHook reads to tell this call's delivery taken (see takenInvocations).
