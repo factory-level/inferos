@@ -55,7 +55,7 @@ describe("a page's overrides", () => {
     const row = canvases.create(screen);
     const page = canvases.editPage(row.id, row.revision, [{ type: "setSettings", settings: { "baseUi.notifications": true } }]);
     expect(page.settings).toEqual({ "baseUi.notifications": true });
-    expect(storage.canvasPages.get(row.id)?.page.settings).toEqual({ "baseUi.notifications": true });
+    expect(storage.canvasPages.get(row.id)?.settings).toEqual({ "baseUi.notifications": true });
     const renamed = canvases.editPage(row.id, page.revision, [{ type: "renamePage", title: "Renamed" }]);
     expect(renamed.settings).toEqual({ "baseUi.notifications": true });
     // Removing every override lets the page go back to its version 1 row.
@@ -74,7 +74,7 @@ describe("a page's overrides", () => {
       expect(() => canvases.savePage({ ...page, settings }, page.revision)).toThrow(/invalid-setting/);
     }
     expect(canvases.getPage(row.id)).toEqual(page);
-    expect(storage.canvasPages.get(row.id)?.page.settings).toEqual({ "baseUi.alerts": true });
+    expect(storage.canvasPages.get(row.id)?.settings).toEqual({ "baseUi.alerts": true });
   });
 
   it("refuse an unknown key, and keep refusing every other override field", () => {
@@ -111,5 +111,31 @@ describe("a console publication", () => {
     const draft = consoles.create(consoleOver(row.id));
     const published = consoles.publish(draft.id, draft.revision, consoles.capture(draft.id, draft.revision), new Map());
     expect(published.published).not.toHaveProperty("settings");
+  });
+});
+
+// FAC-95 follow-up: a reader from before page settings (inferos f681e3a1) refuses a page with any
+// field it doesn't know. So a page's overrides are stored beside the page, never inside it: the
+// stored page has exactly the fields that reader takes, and the overrides stay inert there.
+describe("a page's overrides on a rollback", () => {
+  const OLD_PAGE_FIELDS = ["attachments", "children", "id", "nodes", "revision", "schemaVersion", "title"];
+
+  it("are stored beside the nested page and its published copy, which keep only the fields an older reader takes", () => {
+    const { storage, canvases, consoles } = setUp();
+    const row = canvases.create(screen);
+    const page = canvases.editPage(row.id, row.revision, [{ type: "setSettings", settings: { "baseUi.alerts": true } }]);
+    expect(page.settings).toEqual({ "baseUi.alerts": true });
+    const stored = storage.canvasPages.get(row.id)!;
+    expect(Object.keys(stored.page).toSorted()).toEqual(OLD_PAGE_FIELDS);
+    expect(stored.settings).toEqual({ "baseUi.alerts": true });
+    // Read back, the page has them again.
+    expect(canvases.getPage(row.id)?.settings).toEqual({ "baseUi.alerts": true });
+
+    const draft = consoles.create(consoleOver(row.id));
+    consoles.publish(draft.id, draft.revision, consoles.capture(draft.id, draft.revision), new Map());
+    const snapshot = [...storage.consoleScreens.list()].find(item => item.screenId === row.id)!;
+    expect(Object.keys(snapshot.page!).toSorted()).toEqual(OLD_PAGE_FIELDS);
+    expect(snapshot.pageSettings).toEqual({ "baseUi.alerts": true });
+    expect(consoles.page(draft.id, row.id, "published")?.settings).toEqual({ "baseUi.alerts": true });
   });
 });
