@@ -119,7 +119,6 @@ export const BACKEND: readonly string[] = [
   "agent-calls.test.ts",
   "workflow-run-restart.test.ts",
   "workflow-run-execution.test.ts",
-  "workflow-run-results.test.ts",
   "agent-tracing.test.ts",
   "authored-widget-publish-flow.test.ts",
   "authorize-observation-flags.test.ts",
@@ -151,4 +150,14 @@ export const BACKEND: readonly string[] = [
   "workflow-assigned-writes.test.ts",
   "worktree-session.test.ts",
   "worktrees.test.ts",
+];
+
+/**
+ * Backend files that restart every Durable Object (`abortAllDurableObjects()`). In the shared
+ * `backend` runtime that would also restart, mid-test, the objects of other files the same worker
+ * ran, which breaks them (and can crash workerd: see `workerd/backend-file-boundary.ts`). So these
+ * run in their own project, `backend-restart`, after `backend`, each file with its own Miniflare.
+ */
+export const BACKEND_RESTART: readonly string[] = [
+  "workflow-run-results.test.ts",
 ];

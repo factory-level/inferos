@@ -4,10 +4,12 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { BACKEND, UNIT_NODE, WORKERD_LIGHT } from "./test-projects.js";
+import { BACKEND, BACKEND_RESTART, UNIT_NODE, WORKERD_LIGHT } from "./test-projects.js";
 
 const here = import.meta.dirname;
-const PROJECTS = { "unit-node": UNIT_NODE, "workerd-light": WORKERD_LIGHT, backend: BACKEND };
+const PROJECTS = { "unit-node": UNIT_NODE, "workerd-light": WORKERD_LIGHT, backend: BACKEND, "backend-restart": BACKEND_RESTART };
+/** The files that run against the backend Worker, in either backend project. */
+const BACKEND_FILES = [...BACKEND, ...BACKEND_RESTART];
 const onDisk = readdirSync(here).filter(file => file.endsWith(".test.ts"));
 
 /**
@@ -43,12 +45,12 @@ describe("test projects", () => {
     expect([...placed.keys()].filter(file => !onDisk.includes(file))).toEqual([]);
   });
 
-  it("keep every file that loads the backend in the backend project", () => {
-    expect(onDisk.filter(file => loadsBackend(read(file)) && !BACKEND.includes(file))).toEqual([]);
+  it("keep every file that loads the backend in a backend project", () => {
+    expect(onDisk.filter(file => loadsBackend(read(file)) && !BACKEND_FILES.includes(file))).toEqual([]);
   });
 
   it("keep module mocks, fake timers and system time out of the backend project", () => {
-    expect(BACKEND.filter(file =>
+    expect(BACKEND_FILES.filter(file =>
       replacesModulesOrClock(read(file)) && !(file in BACKEND_MODULE_OR_CLOCK_EXCEPTIONS))).toEqual([]);
   });
 
