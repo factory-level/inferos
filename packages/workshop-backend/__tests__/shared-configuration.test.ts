@@ -172,6 +172,24 @@ async function shared(answers: { build: Answer; publish: Answer }, storage: obje
 
 describe("a build session in a shared workspace", () => {
 
+  // FAC-99: publication is the company Admin's. An Operator (a build collaborator the service says
+  // no to for publish) and another company's Admin (to whom the deployment's service answers no:
+  // gatekeeper-inferops account.test.ts, "answers for nothing in a deployment that names another
+  // company") are refused before the console store is touched.
+  it("refuses a console publication by an Operator, or by another company's Admin (FAC-99)", async () => {
+    let operator = await open({
+      env: GATED, shared: true, collaborator: true, answer: action => action === "build",
+    });
+    expect(kind(operator.overseer)).toBe("OverseerClientInterface");
+    operator.asked.length = 0;
+    await expect(operator.overseer.publishConsole("console", "1")).rejects.toThrow(REFUSED);
+    expect(operator.asked).toEqual(["publish"]);
+    let otherCompany = await shared({ build: true, publish: false });
+    otherCompany.asked.length = 0;
+    await expect(otherCompany.overseer.publishConsole("console", "1")).rejects.toThrow(REFUSED);
+    expect(otherCompany.asked).toEqual(["publish"]);
+  });
+
   it("refuses publishing, installs and blueprint changes without publish, before anything runs", async () => {
     let { overseer, asked } = await shared({ build: true, publish: false });
     asked.length = 0;

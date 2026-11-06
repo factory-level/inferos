@@ -13781,7 +13781,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let store = this.#consoleStore();
     let capture = store.capture(id, expectedRevision);
     let commits = await this.impl.readSourceCommits(capture.commitIds);
-    let published = store.publish(id, expectedRevision, capture, commits);
+    // Who publishes is recorded with the publication (FAC-99).
+    let published = store.publish(id, expectedRevision, capture, commits, await this.#getClientProfile());
     this.impl.announceConsoleRevision(id, published.revision);
     await this.#indexConsoleWidgets(id, published);
     return published;

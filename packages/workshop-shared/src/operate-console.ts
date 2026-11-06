@@ -1,4 +1,4 @@
-import type { WorkpieceId } from "./api.js";
+import type { AiChatAuthorInfo, WorkpieceId } from "./api.js";
 import type { WidgetIndexOutcome } from "./gatekeeper.js";
 import { MAX_WORKSPACE_FLOWS, type OperateFlow } from "./operate-flow.js";
 import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
@@ -340,6 +340,12 @@ export type ConsolePublication = {
   revision: string;
   /** When it was published, as an ISO 8601 timestamp. */
   publishedAt: string;
+  /**
+   * Who published it (FAC-99): the person whose session published, whose authority the
+   * deployment's shared-configuration service confirmed for a shared workspace. Absent on
+   * publications made before it was recorded, and on consoles the storage migration published.
+   */
+  publishedBy?: AiChatAuthorInfo;
   /** The console's content as published. */
   content: OperateConsoleContent;
   /**
