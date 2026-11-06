@@ -61,6 +61,7 @@ as its `settings` check. Doctor reports a secret by presence only and never prin
 | `local.port` | value | developer | `8787` | Always. | local | `inferos.config.json`; `pnpm dev` and `pnpm local start` | The wrapper's local Workshop port, distinct per wrapper. |
 | `upstream.revision` | reference | deployer | none | Always. | local | `inferos.config.json`, checked against the submodule by `inferos:check` | The exact InferOS commit the wrapper pins (and `upstream.repository`, an HTTPS URL or absolute path with no credentials). |
 | `Cloud deployment target` | reference | deployer | none | Optional. | cloud | No wrapper deploy command yet | Worker names, account and route for a hosted customer. **Unsupported:** The private customer runs locally; cloud deployment is tracked in factory-level/inferos#11. |
+| `WORKFLOW_ASSIGNMENTS_ENABLED` | value | deployer | off | Optional. | both | Shell, then the backend's `overseer.ts` (`workflowAssignmentsEnabled`) | `true` lets an Admin assign a trigger's runs on request to a service account and give its key, and runs act as it. Off: assigning and giving a key are refused, a request for a trigger assigned before is refused, and removing still works. Leave unset on every deployment until the fail-closed follow-up merges (FAC-102); QA turns it on explicitly. |
 
 ### Custom components
 
@@ -87,7 +88,6 @@ as its `settings` check. Doctor reports a secret by presence only and never prin
 | `PUBLISH_CLOUDFLAREOS_WIDGET` | value | deployer | off | Optional. | local | `inferos.config.json` `capabilities.PUBLISH_CLOUDFLAREOS_WIDGET` (version 2), else the shell; the backend's `publication.ts` | Lets widget-kind blueprints be published (`deployment` or `export`) once a deployment admin approves each one. Off refuses every publication operation and suspends widget publications; on again needs each one re-confirmed. Never publishes by itself. |
 | `PUBLISH_CLOUDFLAREOS_APP` | value | deployer | off | Optional. | local | `inferos.config.json` `capabilities.PUBLISH_CLOUDFLAREOS_APP` (version 2), else the shell; the backend's `publication.ts` | The same switch for app- and workflow-kind blueprints. |
 | `PUBLICATION_SELF_APPROVAL` | value | deployer | off | Optional. | both | Shell, then the backend's `auth/config.ts` | `true` lets a deployment admin approve a publication they requested; the record says so. Authorization config: env only, never an admin setting. |
-| `WORKFLOW_ASSIGNMENTS_ENABLED` | value | deployer | off | Optional. Leave unset on every deployment until the fail-closed follow-up merges (FAC-102). | both | Shell, then the backend's `overseer.ts` (`workflowAssignmentsEnabled`) | `true` lets an Admin assign a trigger's runs on request to a service account and give its key, and runs act as it. Off: assigning and giving a key are refused, a request for a trigger assigned before is refused, and removing still works. QA turns it on explicitly. |
 
 <!-- settings:end -->
 
