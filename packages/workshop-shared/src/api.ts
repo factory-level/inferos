@@ -2851,6 +2851,14 @@ export interface Overseer extends RpcTarget {
    * operate session.
    */
   getRequestedRun(invocationId: string): Promise<RequestedRun | null>;
+  /**
+   * The runs the caller asked trigger `hookId` for (FAC-116; inferos ADR 0012, proposed): the
+   * newest `REQUESTED_RUNS_MAX`, newest first, each exactly as `getRequestedRun` reads it, so the
+   * person sees their runs' outcomes after any reconnect. Only the caller's own requests, never
+   * anyone else's, and empty for a trigger they asked nothing of. Open to build and use sessions;
+   * refused in an operate session.
+   */
+  listRequestedRuns(hookId: number): Promise<RequestedRun[]>;
 
   /**
    * List this workspace's consoles: one operator role's menu of views over this workspace's

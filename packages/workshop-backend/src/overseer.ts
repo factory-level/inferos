@@ -10,7 +10,9 @@ import type {
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
 } from "@gadgets/workshop-shared/workflow-definition";
-import { WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS } from "@gadgets/workshop-shared/workflow-definition";
+import {
+  REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS,
+} from "@gadgets/workshop-shared/workflow-definition";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
@@ -7204,6 +7206,15 @@ class OverseerImpl implements AgentHooks {
     };
   }
 
+  /**
+   * The runs `profileId` asked trigger `hookId` for (FAC-116): the newest `REQUESTED_RUNS_MAX`,
+   * newest first, each exactly as `getRequestedRun` reads it for them. Nobody else's.
+   */
+  listRequestedRuns(profileId: string, hookId: number): RequestedRun[] {
+    return this.workflowDefinitionStore().requestedDeliveries(profileId, hookId, REQUESTED_RUNS_MAX)
+      .flatMap(delivery => this.getRequestedRun(profileId, delivery.invocation!.id) ?? []);
+  }
+
   // What identifies the write run `runId` (delivery `deliveryId`) proposes now (FAC-112): the
   // connection, its description's digest and which identical write of this attempt it is, and the
   // action already recorded with that identity, if any. A run that runs again after a restart
@@ -14215,6 +14226,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async getRequestedRun(invocationId: string): Promise<RequestedRun | null> {
     return this.impl.getRequestedRun(this.clientProfileId, invocationId);
   }
+  async listRequestedRuns(hookId: number): Promise<RequestedRun[]> {
+    return this.impl.listRequestedRuns(this.clientProfileId, hookId);
+  }
 
   #consoleStore(): WorkspaceConsoleStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
@@ -16862,6 +16876,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async getRequestedRun(invocationId: string): Promise<RequestedRun | null> {
     return this.impl.getRequestedRun(this.clientProfileId, invocationId);
   }
+  async listRequestedRuns(hookId: number): Promise<RequestedRun[]> {
+    return this.impl.listRequestedRuns(this.clientProfileId, hookId);
+  }
   // An operator granted "use" reaches the published consoles of the workspace without Build,
   // read-only: a console is references and presentation, and grants nothing. Drafts, and every
   // write, stay build-only.
@@ -17512,6 +17529,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async listTriggerControls(): Promise<TriggerControl[]> { this.#deny(); }
   async invokeTrigger(_hookId: number): Promise<WorkflowInvocation> { this.#deny(); }
   async getRequestedRun(_invocationId: string): Promise<RequestedRun | null> { this.#deny(); }
+  async listRequestedRuns(_hookId: number): Promise<RequestedRun[]> { this.#deny(); }
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent)

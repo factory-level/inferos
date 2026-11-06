@@ -156,6 +156,9 @@ export type WorkflowRunDestination = "history";
 /** Per destination: not yet, done, or given up on. Separate from the outcome (ADR 0012 §2). */
 export type WorkflowRunDelivery = Partial<Record<WorkflowRunDestination, "pending" | "delivered" | "undelivered">>;
 
+/** The most runs `listRequestedRuns` returns for one person and one trigger: the newest (FAC-116). */
+export const REQUESTED_RUNS_MAX = 20;
+
 /**
  * What the person who asked for a run reads of it (FAC-114, `getRequestedRun`): the run, the
  * revision it ran, its outcome and fixed reason, and each write it proposed, by action id, with that
