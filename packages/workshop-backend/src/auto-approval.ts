@@ -43,12 +43,6 @@ export function enablerHasBuild(rule: AutoApproveTagRecord, roleOf: EffectiveRol
 }
 
 /**
- * The single authority on whether an action may be applied without a human: the enabling rule if
- * the author marked the action `autoApprovable`, a user enabled a rule for its `actionKind` on
- * this gatekeeper and still has Build access, and the workspace has not latched restricted mode;
- * else undefined.
- */
-/**
  * Whether no auto-approval rule may approve `record` (FAC-102, FAC-112): a write an assigned run
  * proposed, or one a requested run proposed on a later attempt, after a restart ran it again.
  */
@@ -56,6 +50,12 @@ export function manualOnly(record: { caller: { from: string }; workflowRun?: { a
   return record.caller.from === "systemRun" || (record.workflowRun !== undefined && record.workflowRun.attempt > 1);
 }
 
+/**
+ * The single authority on whether an action may be applied without a human: the enabling rule if
+ * the author marked the action `autoApprovable`, a user enabled a rule for its `actionKind` on
+ * this gatekeeper and still has Build access, and the workspace has not latched restricted mode;
+ * else undefined.
+ */
 export function autoApprovalRule(
     storage: AutoApprovalStorage, roleOf: EffectiveRoleLookup, gatekeeperId: number,
     description: ActionDescription)

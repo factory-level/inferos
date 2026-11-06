@@ -45,11 +45,11 @@ export type AssignedExecution = {
    */
   requestedBy?: string | null;
   /**
-   * Its place among the writes its run proposed in one attempt, from 0 (FAC-112): a run that runs
-   * again after a restart proposes the same writes in the same order, and each is matched to the
-   * one already recorded at its place rather than recorded again.
+   * What identifies the write within its run (FAC-112): the connection, its description's digest
+   * and which identical write of the attempt it is. A run that runs again after a restart proposes
+   * the same write with the same key, and it is matched to this one rather than recorded again.
    */
-  proposal?: number;
+  writeKey?: string;
 };
 
 /**
@@ -177,6 +177,26 @@ export class GadgetRunRegistry {
   has(deliveryId: number): boolean {
     return this.#runs.has(deliveryId);
   }
+}
+
+// `value` with every object's keys in sorted order, at every level: one JSON text per value.
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).toSorted().map(key => [key, canonical((value as Record<string, unknown>)[key])]));
+  }
+  return value;
+}
+
+/**
+ * What identifies a write a requested run proposes, apart from the provider's action key (FAC-112
+ * round 3): the SHA-256, in hex, of its description in canonical JSON (object keys sorted at every
+ * level), so the same write described the same way has the same digest whenever it is proposed.
+ */
+export async function actionDescriptionDigest(description: unknown): Promise<string> {
+  let bytes = new TextEncoder().encode(JSON.stringify(canonical(description)));
+  let digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /** The binding names of a gadget that reach `gatekeeperId`: the only ones a run's `env` holds. */

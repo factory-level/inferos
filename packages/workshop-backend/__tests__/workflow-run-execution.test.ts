@@ -14,6 +14,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { RUN_REQUESTER_REVOKED, type OverseerDurableObject } from "../src/overseer.js";
+import { manualOnly } from "../src/auto-approval.js";
+import { actionDescriptionDigest } from "../src/system-run.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -42,6 +44,7 @@ afterEach(() => {
   calls = [];
   statesSeen = [];
   loaded = { commitIds: [], envs: [] };
+  gatekeeper = { next: 1, staged: new Map(), withdrawn: [] };
   workflowRun = defaultWorkflowRun;
   answer = async () => "done";
 });
@@ -127,8 +130,47 @@ function admitted(impl: any, opts: { assigned?: boolean } = {}) {
 
 const deliveryOf = (impl: any, id: number) => impl.storage.workflowDeliveries.get(id);
 const DESCRIPTION = { title: "Create issue", description: "Creates one issue.", implementsRevert: false };
-/** The run's one write, through `caller`: a pending action on the connection. */
-const submitted = (impl: any, caller: unknown) => impl.submitActionNow(CONNECTION, 1, DESCRIPTION, caller);
+
+/**
+ * A stand-in for a real gatekeeper's staging, across instances: each write it stages gets the next
+ * key of a counter that only grows (as the InferOps gatekeeper's persisted one does), and a key the
+ * workspace withdraws is dropped from what it holds staged.
+ */
+let gatekeeper = { next: 1, staged: new Map<number, unknown>(), withdrawn: [] as number[] };
+
+/** Stage `description` at the stand-in gatekeeper and submit it through `caller`, as a session does. */
+async function stage(workspace: any, caller: unknown, description: typeof DESCRIPTION) {
+  let key = gatekeeper.next++;
+  gatekeeper.staged.set(key, description);
+  return workspace.submitActionNow(CONNECTION, key, description, caller, await actionDescriptionDigest(description));
+}
+
+/** A write through `caller` from outside a run's worker, at the stand-in gatekeeper's next key. */
+const submitted = (impl: any, caller: unknown) => stage(impl, caller, DESCRIPTION);
+
+/**
+ * Runs `body` as the run's pinned code, with the caller its writes carry: the gadget's own, naming
+ * the run, or (assigned) the run-scoped `systemRun` one, registered as running for the attempt.
+ * The connection's facet withdraws at the stand-in gatekeeper.
+ */
+function runsAs(impl: any, kind: "gadget-bindings" | "assigned",
+                body: (workspace: any, caller: unknown) => Promise<unknown>) {
+  const facet = { rejectAction: async (key: number) => { gatekeeper.staged.delete(key); gatekeeper.withdrawn.push(key); } };
+  onPrototype(impl, "getGatekeeperFacet", () => facet);
+  onPrototype(impl, "openAssignedActionFacet", async () => ({ facet, close: () => {} }));
+  if (kind === "gadget-bindings") {
+    workflowRun = workerEnv => body(workerEnv.BOARD.workspace, workerEnv.BOARD.caller);
+    return;
+  }
+  onPrototype(impl, "runAssignedDelivery", async function (this: any, hookId: number, d: { deliveryId: number }) {
+    this.systemRuns.begin(d.deliveryId, { hookId, gatekeeperId: CONNECTION, credentialRef: REF });
+    try {
+      return await body(this, { from: "systemRun", hookId, deliveryId: d.deliveryId });
+    } finally {
+      this.systemRuns.end(d.deliveryId);
+    }
+  });
+}
 const actionsOf = (impl: any) => [...impl.storage.actions.list()].filter((a: any) => a.type === "action");
 
 async function settled(name: string, id: number) {
@@ -190,69 +232,74 @@ describe("a requested run across a restart (FAC-112)", () => {
     expect(done.execution).toMatchObject({ state: "finished", attempts: 1 });
   });
 
-  // Round 2 (the manager's (a)): a gadget-bindings run executes in a run-scoped worker from its
-  // pinned commit, and its writes name it, so an interrupted run runs again from its start and its
-  // repeated write is the one already recorded, never a second, applied or not.
-  it("on the gadget's bindings, interrupted after an applied write, runs again without writing twice", async () => {
-    let name = `run-exec-midrun-${crypto.randomUUID()}`;
+  // Round 3: a write a run proposes is identified by its content (the connection, a digest of its
+  // description, and which identical write of the attempt it is), never by the provider's action
+  // key, which a real gatekeeper never reuses. Each case runs with keys that only grow, as the
+  // InferOps gatekeeper's persisted counter does.
+  for (const kind of ["gadget-bindings", "assigned"] as const) {
+    it(`${kind}: interrupted after a write, runs again to finished with no second write and no copy left staged`, async () => {
+      let name = `run-exec-replay-${kind}-${crypto.randomUUID()}`;
+      let attempt = 0;
+      let id = await withImpl(name, impl => {
+        let delivery = admitted(impl, { assigned: kind === "assigned" });
+        runsAs(impl, kind, async (workspace, caller) => {
+          attempt++;
+          await stage(workspace, caller, DESCRIPTION);
+          if (attempt === 1) return new Promise(() => {}); // interrupted after its write
+          return "ran";
+        });
+        impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+        void impl.runQueuedWorkflowRuns();
+        return delivery.deliveryId;
+      });
+      await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(1)));
+      await abortAllDurableObjects();
+      let done = await settled(name, id);
+      expect(attempt).toBe(2);
+      expect(done.execution).toMatchObject({ state: "finished", attempts: 2 });
+      let actions = await withImpl(name, impl => actionsOf(impl));
+      expect(actions).toHaveLength(1);
+      expect(actions[0].action).toBe(1);
+      // The replay staged key 2 at the gatekeeper; matched to key 1's action, it was withdrawn there.
+      await vi.waitFor(() => expect(gatekeeper.withdrawn).toEqual([2]));
+      expect([...gatekeeper.staged.keys()]).toEqual([1]);
+    });
+  }
+
+  it("matches two identical writes of a replay by which of them each is", async () => {
+    let name = `run-exec-twice-${crypto.randomUUID()}`;
     let attempt = 0;
     let id = await withImpl(name, impl => {
       let delivery = admitted(impl);
-      workflowRun = async workerEnv => {
+      runsAs(impl, "gadget-bindings", async (workspace, caller) => {
         attempt++;
-        let workspace = workerEnv.BOARD.workspace;
-        let actionId = workspace.submitActionNow(CONNECTION, 1, DESCRIPTION, workerEnv.BOARD.caller);
-        // The write was applied (as an auto-approval would), then the restart interrupts the run.
-        if (attempt === 1) {
-          workspace.storage.actions.put({ ...workspace.storage.actions.get(actionId), state: "approved", autoApproved: true });
-          return new Promise(() => {});
-        }
+        await stage(workspace, caller, DESCRIPTION);
+        await stage(workspace, caller, DESCRIPTION);
+        if (attempt === 1) return new Promise(() => {});
         return "ran";
-      };
+      });
       impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
       void impl.runQueuedWorkflowRuns();
       return delivery.deliveryId;
     });
-    await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(1)));
+    await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(2)));
     await abortAllDurableObjects();
     let done = await settled(name, id);
-    expect(attempt).toBe(2);
     expect(done.execution).toMatchObject({ state: "finished", attempts: 2 });
-    let actions = await withImpl(name, impl => actionsOf(impl));
-    expect(actions).toHaveLength(1);
-    expect(actions[0]).toMatchObject({
-      state: "approved", workflowRun: { runId: done.run.runId, deliveryId: id, proposal: 0, attempt: 1 },
-    });
+    expect((await withImpl(name, impl => actionsOf(impl))).map((a: any) => a.action)).toEqual([1, 2]);
+    await vi.waitFor(() => expect(gatekeeper.withdrawn.toSorted()).toEqual([3, 4]));
   });
 
-  it("on the gadget's bindings, a replay that proposes a different write than before is refused", async () => {
-    await withImpl(`run-exec-diverge-gadget-${crypto.randomUUID()}`, impl => {
-      let delivery = admitted(impl);
-      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: delivery.deliveryId } };
-      impl.workflowDefinitionStore().startRun(delivery.deliveryId);
-      impl.gadgetRuns.begin(delivery.deliveryId, { hookId: HOOK, gadgetId: GADGET });
-      impl.startWorkflowRunProposals(delivery.deliveryId);
-      submitted(impl, caller);
-      impl.startWorkflowRunProposals(delivery.deliveryId);
-      expect(() => impl.submitActionNow(CONNECTION, 2, { ...DESCRIPTION, title: "Close issue" }, caller))
-        .toThrow("proposed a different write");
-      expect(actionsOf(impl)).toHaveLength(1);
-    });
-  });
-
-  // Round 1 (review HIGH): an assigned run's writes name their run, so a replay's writes are the
-  // ones it already proposed: matched by run and by order, never recorded or applied twice.
-  it("assigned, interrupted after a write, runs again without proposing that write twice", async () => {
-    let name = `run-exec-replay-${crypto.randomUUID()}`;
+  it("records a write a replay makes that the first attempt didn't, and leaves it for a person", async () => {
+    let name = `run-exec-newwrite-${crypto.randomUUID()}`;
     let attempt = 0;
     let id = await withImpl(name, impl => {
-      let delivery = admitted(impl, { assigned: true });
-      onPrototype(impl, "runAssignedDelivery", async function (this: any, hookId: number, d: { deliveryId: number }) {
+      let delivery = admitted(impl);
+      runsAs(impl, "gadget-bindings", async (workspace, caller) => {
         attempt++;
-        this.systemRuns.begin(d.deliveryId, { hookId, gatekeeperId: CONNECTION, credentialRef: REF });
-        submitted(this, { from: "systemRun", hookId, deliveryId: d.deliveryId });
-        if (attempt === 1) return new Promise(() => {}); // interrupted after its write
-        this.systemRuns.end(d.deliveryId);
+        await stage(workspace, caller, DESCRIPTION);
+        if (attempt === 1) return new Promise(() => {});
+        await stage(workspace, caller, { ...DESCRIPTION, title: "Close issue" });
         return "ran";
       });
       impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
@@ -262,52 +309,62 @@ describe("a requested run across a restart (FAC-112)", () => {
     await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(1)));
     await abortAllDurableObjects();
     let done = await settled(name, id);
-    expect(attempt).toBe(2);
     expect(done.execution).toMatchObject({ state: "finished", attempts: 2 });
     let actions = await withImpl(name, impl => actionsOf(impl));
-    expect(actions).toHaveLength(1);
-    expect(actions[0]).toMatchObject({ state: "pending", executedAs: { runId: done.run.runId } });
+    expect(actions.map((a: any) => [a.description.title, a.workflowRun.attempt])).toEqual([["Create issue", 1], ["Close issue", 2]]);
+    expect(manualOnly(actions[1])).toBe(true);
   });
 
-  // Round 2 (review HIGH): the write's own action key is part of what is matched, not only its
-  // description, so a replay proposing the same words for a different action is refused too.
-  it("a replay whose write has the same description but another action key is refused, both kinds", async () => {
-    await withImpl(`run-exec-actionkey-${crypto.randomUUID()}`, impl => {
-      let assigned = admitted(impl, { assigned: true });
-      let systemCaller = { from: "systemRun", hookId: HOOK, deliveryId: assigned.deliveryId };
-      impl.systemRuns.begin(assigned.deliveryId, { hookId: HOOK, gatekeeperId: CONNECTION, credentialRef: REF });
-      impl.startWorkflowRunProposals(assigned.deliveryId);
-      submitted(impl, systemCaller);
-      impl.startWorkflowRunProposals(assigned.deliveryId);
-      expect(() => impl.submitActionNow(CONNECTION, 2, DESCRIPTION, systemCaller)).toThrow("proposed a different write");
-      expect(actionsOf(impl)).toHaveLength(1);
-    });
-    await withImpl(`run-exec-actionkey-gadget-${crypto.randomUUID()}`, impl => {
+  // The InferOps gatekeeper joins a repeated create to its pending record and submits nothing.
+  it("continues when a replayed create joins its pending record and submits nothing", async () => {
+    let name = `run-exec-join-${crypto.randomUUID()}`;
+    let attempt = 0;
+    let id = await withImpl(name, impl => {
       let delivery = admitted(impl);
-      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: delivery.deliveryId } };
-      impl.workflowDefinitionStore().startRun(delivery.deliveryId);
-      impl.gadgetRuns.begin(delivery.deliveryId, { hookId: HOOK, gadgetId: GADGET });
-      impl.startWorkflowRunProposals(delivery.deliveryId);
-      submitted(impl, caller);
-      impl.startWorkflowRunProposals(delivery.deliveryId);
-      expect(() => impl.submitActionNow(CONNECTION, 2, DESCRIPTION, caller)).toThrow("proposed a different write");
-      expect(actionsOf(impl)).toHaveLength(1);
+      runsAs(impl, "gadget-bindings", async (workspace, caller) => {
+        attempt++;
+        if (attempt === 1) {
+          await stage(workspace, caller, DESCRIPTION);
+          return new Promise(() => {});
+        }
+        return "ran"; // the gatekeeper joined the pending create: nothing reaches the workspace
+      });
+      impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+      void impl.runQueuedWorkflowRuns();
+      return delivery.deliveryId;
     });
+    await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(1)));
+    await abortAllDurableObjects();
+    let done = await settled(name, id);
+    expect(done.execution).toMatchObject({ state: "finished", attempts: 2 });
+    expect(await withImpl(name, impl => actionsOf(impl))).toHaveLength(1);
   });
 
-  it("assigned, a replay that proposes a different write than before is refused, not recorded", async () => {
-    await withImpl(`run-exec-diverge-${crypto.randomUUID()}`, impl => {
-      let delivery = admitted(impl, { assigned: true });
-      let caller = { from: "systemRun", hookId: HOOK, deliveryId: delivery.deliveryId };
-      impl.systemRuns.begin(delivery.deliveryId, { hookId: HOOK, gatekeeperId: CONNECTION, credentialRef: REF });
-      impl.startWorkflowRunProposals(delivery.deliveryId);
-      submitted(impl, caller);
-      impl.startWorkflowRunProposals(delivery.deliveryId); // the replay
-      expect(() => impl.submitActionNow(CONNECTION, 2, { ...DESCRIPTION, title: "Close issue" }, caller))
-        .toThrow("proposed a different write");
-      expect(actionsOf(impl)).toHaveLength(1);
+  // The InferOps gatekeeper refuses a second edit of a target while the first is pending: the
+  // replay fails, and the first write stays pending for a person, never applied twice.
+  it("fails a replayed edit the gatekeeper refuses while the first is pending, leaving that one pending", async () => {
+    let name = `run-exec-edit-${crypto.randomUUID()}`;
+    let attempt = 0;
+    let id = await withImpl(name, impl => {
+      let delivery = admitted(impl);
+      runsAs(impl, "gadget-bindings", async (workspace, caller) => {
+        attempt++;
+        if (attempt === 2) throw new Error("This issue already has a pending edit.");
+        await stage(workspace, caller, DESCRIPTION);
+        return new Promise(() => {});
+      });
+      impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+      void impl.runQueuedWorkflowRuns();
+      return delivery.deliveryId;
     });
+    await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(1)));
+    await abortAllDurableObjects();
+    let done = await settled(name, id);
+    expect(done.execution).toMatchObject({ state: "failed", failure: "runtime-error", attempts: 2 });
+    let actions = await withImpl(name, impl => actionsOf(impl));
+    expect(actions).toEqual([expect.objectContaining({ state: "pending" })]);
   });
+
 });
 
 describe("a requested run uses only its stored starting context (FAC-112)", () => {
@@ -336,7 +393,7 @@ describe("a requested run uses only its stored starting context (FAC-112)", () =
     let id = await withImpl(name, impl => {
       let delivery = admitted(impl);
       workflowRun = async workerEnv => {
-        workerEnv.BOARD.workspace.submitActionNow(CONNECTION, 1, DESCRIPTION, workerEnv.BOARD.caller);
+        await stage(workerEnv.BOARD.workspace, workerEnv.BOARD.caller, DESCRIPTION);
         return "ran";
       };
       impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
@@ -347,7 +404,7 @@ describe("a requested run uses only its stored starting context (FAC-112)", () =
     expect(loaded.envs[0]!.BOARD.caller).toEqual({ from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: id } });
     let actions = await withImpl(name, impl => actionsOf(impl));
     expect(actions).toEqual([expect.objectContaining({
-      workflowRun: { runId: done.run.runId, hookId: HOOK, deliveryId: id, proposal: 0, attempt: 1 },
+      workflowRun: { runId: done.run.runId, hookId: HOOK, deliveryId: id, writeKey: expect.any(String), attempt: 1 },
     })]);
   });
 
@@ -358,7 +415,7 @@ describe("a requested run uses only its stored starting context (FAC-112)", () =
       impl.workflowDefinitionStore().startRun(delivery.deliveryId);
       impl.gadgetRuns.begin(delivery.deliveryId, { hookId: HOOK, gadgetId: GADGET });
       impl.startWorkflowRunProposals(delivery.deliveryId);
-      let actionId = submitted(impl, caller);
+      let actionId = await submitted(impl, caller);
       impl.workflowDefinitionStore().setControl(ADA, HOOK, { label: "Run refunds", invokers: ["someone-else"] });
       impl.getGatekeeperFacet = () => { throw new Error("the write was sent"); };
       let refused = await impl.applyPendingAction(impl.storage.actions.get(actionId), ADA, false)

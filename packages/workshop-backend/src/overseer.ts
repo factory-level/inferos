@@ -13,7 +13,7 @@ import type {
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
-  GadgetRunRegistry, SYSTEM_RUN_ENDED, openGadgetRunSession, runGadgetBindingsDelivery,
+  GadgetRunRegistry, SYSTEM_RUN_ENDED, actionDescriptionDigest, openGadgetRunSession, runGadgetBindingsDelivery,
   systemGatekeeperFacetName, type AssignedDelivery, type AssignedExecution, type GadgetRunCaller, type SystemRunHost,
   type SystemRunRequester,
 } from "./system-run.js";
@@ -188,13 +188,6 @@ export async function requireWorkflowInvoke(
   let [company] = companies;
   return company!;
 }
-
-/**
- * The refusal of a write an assigned run proposes when it runs again after a restart (FAC-112) and
- * proposes, at some place, a different write than it did before: nothing is recorded.
- */
-export const WORKFLOW_RUN_REPLAY_DIVERGED =
-  "This workflow run proposed a different write when it ran again, so it stopped. Ask for it again.";
 
 /**
  * The fixed category stored for a run that threw `error` (FAC-112): known refusals by their own
@@ -1179,7 +1172,7 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
 }
 
 /** Which requested run proposed a write, and where (FAC-112; `ActionRecord.workflowRun`). */
-export type WorkflowRunWrite = { runId: string; hookId: number; deliveryId: number; proposal: number; attempt: number };
+export type WorkflowRunWrite = { runId: string; hookId: number; deliveryId: number; writeKey: string; attempt: number };
 
 export type ActionRecord = {
   id: number,
@@ -1227,7 +1220,8 @@ export type ActionRecord = {
   executedAs?: AssignedExecution;
   /**
    * Set when an unassigned requested workflow run proposed it (FAC-112), through its gadget's own
-   * connection: the run, its place among the writes the run proposed, and the attempt. It applies
+   * connection: the run, what identifies the write within it (`AssignedExecution.writeKey`), and
+   * the attempt. It applies
    * through the connection's own facet, once the person who asked may still run it.
    */
   workflowRun?: WorkflowRunWrite;
@@ -1919,13 +1913,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           // reconnect replays only the records changed during the gap.
           byLastChanged: actionLastChangedKey,
           // Sparse: only new bridge records carry this field, so legacy actions need no backfill.
-          // Sparse (FAC-112): an assigned run's writes, by run and place, so a run that runs again
-          // after a restart finds the write it already proposed at each place.
-          byRunProposal(record: ActionRecord) {
+          // Sparse (FAC-112): a requested run's writes, by what identifies each within its run
+          // (`writeKey`), so a run that runs again after a restart finds the writes it proposed.
+          byRunWrite(record: ActionRecord) {
             if (record.type !== "action") return null;
-            if (record.workflowRun) return `${record.workflowRun.runId}#${record.workflowRun.proposal}`;
-            return record.executedAs?.runId !== undefined && record.executedAs.proposal !== undefined
-              ? `${record.executedAs.runId}#${record.executedAs.proposal}` : null;
+            return record.workflowRun?.writeKey ?? record.executedAs?.writeKey ?? null;
           },
           byApprovalThread(record: ActionRecord) {
             return record.type === "action" && record.aguiApproval && record.aguiApproval.replacement === undefined
@@ -2336,9 +2328,10 @@ class OverseerImpl implements AgentHooks {
   // each queued run again from its start.
   #runningWorkflowRuns = new Map<number, Promise<void>>();
 
-  // How many writes each assigned run has proposed in its current attempt (FAC-112), by delivery
-  // id: the place of its next one (AssignedExecution.proposal). Set to 0 when an attempt starts.
-  #workflowRunProposals = new Map<number, number>();
+  // For each requested run's current attempt (FAC-112), by delivery id: how many writes of each
+  // description digest it has proposed, which numbers its next identical one. Emptied as an
+  // attempt starts; absent when no attempt of it runs here.
+  #workflowRunProposals = new Map<number, Map<string, number>>();
 
   // Ambient connections whose getAgentCatalog() answered null, which the contract makes permanent
   // for the connection. Held in memory only: a gatekeeper that gains a catalog in a later version
@@ -7056,32 +7049,49 @@ class OverseerImpl implements AgentHooks {
     else logger.warn("workflow run failed", { event: "workflow.run.failed", ...fields, runFailure: failure, error });
   }
 
-  // The place of the next write run `runId` (delivery `deliveryId`) proposes in this attempt
-  // (FAC-112), and the action already recorded there, if any. A run that runs again after a restart
-  // proposes the same writes in the same order: the write recorded at this place is the answer,
-  // not a second one, when it is the same write -- the same connection, the gatekeeper's own action
-  // key and the same description -- and any other write there refuses (fail closed). No place when
-  // the run isn't counting (its attempt didn't start here).
-  #runProposalPlace(runId: string, deliveryId: number, gatekeeperId: number, action: number,
-                    description: ActionDescription): { proposal?: number; already?: number } {
-    let proposal = this.#workflowRunProposals.get(deliveryId);
-    if (proposal === undefined) return {};
-    this.#workflowRunProposals.set(deliveryId, proposal + 1);
-    let already = this.storage.actions.byRunProposal.get(`${runId}#${proposal}`);
-    if (!already) return { proposal };
-    if (already.type === "action" && already.gatekeeperId === gatekeeperId && already.action === action &&
-        JSON.stringify(already.description) === JSON.stringify(description)) {
-      return { proposal, already: already.id };
-    }
-    throw new Error(WORKFLOW_RUN_REPLAY_DIVERGED);
+  // What identifies the write run `runId` (delivery `deliveryId`) proposes now (FAC-112): the
+  // connection, its description's digest and which identical write of this attempt it is, and the
+  // action already recorded with that identity, if any. A run that runs again after a restart
+  // proposes the same writes, so each one already recorded is the answer, not a second one; the
+  // provider's own action key, which a gatekeeper never reuses, plays no part. Nothing when the run
+  // isn't counting (its attempt didn't start here).
+  #runWrite(runId: string, deliveryId: number, gatekeeperId: number, digest: string | undefined):
+      { writeKey?: string; already?: ActionRecord & {type: "action"} } {
+    let counts = this.#workflowRunProposals.get(deliveryId);
+    if (!counts) return {};
+    if (digest === undefined) throw new Error("A workflow run's write reached the workspace without its digest.");
+    let occurrence = counts.get(digest) ?? 0;
+    counts.set(digest, occurrence + 1);
+    let writeKey = `${runId}:${gatekeeperId}:${digest}:${occurrence}`;
+    let already = this.storage.actions.byRunWrite.get(writeKey);
+    return already?.type === "action" ? { writeKey, already } : { writeKey };
+  }
+
+  // A replay's write matched to the one its run already proposed (FAC-112): the gatekeeper staged
+  // it again under a new key, which is withdrawn there so it holds no second copy of the write,
+  // on the facet the first one lives on. Best effort, logged: the workspace records only the first.
+  #withdrawReplayedStage(already: ActionRecord & {type: "action"}, action: number): void {
+    if (already.action === action) return;
+    this.ctx.waitUntil((async () => {
+      let assigned = already.executedAs ? await this.openAssignedActionFacet(already) : undefined;
+      try {
+        await (assigned?.facet ?? this.getGatekeeperFacet(already.gatekeeperId)).rejectAction(action);
+      } catch (error) {
+        logger.warn("replayed workflow write not withdrawn", {
+          event: "workflow.run.replay_withdraw_failed", actionId: already.id, error,
+        });
+      } finally {
+        assigned?.close();
+      }
+    })());
   }
 
   /**
-   * Starts counting the writes queued run `deliveryId` proposes (FAC-112), from place 0: called as
-   * each attempt of an assigned run starts, so a run that runs again proposes from place 0 again.
+   * Starts counting the writes queued run `deliveryId` proposes (FAC-112), afresh: called as each
+   * attempt starts, so a run that runs again numbers its identical writes from the first again.
    */
   startWorkflowRunProposals(deliveryId: number): void {
-    this.#workflowRunProposals.set(deliveryId, 0);
+    this.#workflowRunProposals.set(deliveryId, new Map());
   }
 
   // Open the session behind a binding loopback.
@@ -7564,7 +7574,7 @@ class OverseerImpl implements AgentHooks {
   // the enabler roles first (resolveEnablerRoles), or no auto-approval rule can fire here. Returns
   // the journal id it minted, which only an `ActionReceiptImpl` hands out (as a capability).
   submitActionNow(gatekeeperId: number, action: number,
-                     description: ActionDescription, caller: GatekeeperCaller)
+                     description: ActionDescription, caller: GatekeeperCaller, writeDigest?: string)
       : number {
     // An in-flight facet RPC can outlive removeGatekeeper, and a pending action on a removed
     // connection could never be approved or rejected (both dereference the facet).
@@ -7604,15 +7614,18 @@ class OverseerImpl implements AgentHooks {
       if (run.gatekeeperId !== gatekeeperId) throw new Error("This workflow run can't propose actions on that connection.");
       // Both actors, for the audit (FAC-104): who asked for the run, and who it acts as.
       let admitted = this.workflowDefinitionStore().deliveryRun(caller.deliveryId)?.run;
-      let place = admitted ? this.#runProposalPlace(admitted.runId, caller.deliveryId, gatekeeperId, action, description) : undefined;
-      if (place?.already !== undefined) return place.already;
-      let proposal = place?.proposal;
+      let write = admitted ? this.#runWrite(admitted.runId, caller.deliveryId, gatekeeperId, writeDigest) : {};
+      if (write.already) {
+        this.#withdrawReplayedStage(write.already, action);
+        return write.already.id;
+      }
+      let writeKey = write.writeKey;
       executedAs = {
         hookId: caller.hookId, deliveryId: caller.deliveryId, credentialRef: run.credentialRef,
         ...(admitted ? {
           runId: admitted.runId,
           requestedBy: admitted.requester.kind === "person" ? admitted.requester.profileId : null,
-          ...(proposal !== undefined ? { proposal } : {}),
+          ...(writeKey !== undefined ? { writeKey } : {}),
         } : {}),
       };
     }
@@ -7625,11 +7638,14 @@ class OverseerImpl implements AgentHooks {
       let { hookId, deliveryId } = caller.run;
       let admitted = this.workflowDefinitionStore().deliveryRun(deliveryId)?.run;
       if (!admitted) throw new Error(RUN_REQUESTER_REVOKED);
-      let place = this.#runProposalPlace(admitted.runId, deliveryId, gatekeeperId, action, description);
-      if (place.already !== undefined) return place.already;
-      if (place.proposal === undefined) throw new Error(SYSTEM_RUN_ENDED);
+      let write = this.#runWrite(admitted.runId, deliveryId, gatekeeperId, writeDigest);
+      if (write.already) {
+        this.#withdrawReplayedStage(write.already, action);
+        return write.already.id;
+      }
+      if (write.writeKey === undefined) throw new Error(SYSTEM_RUN_ENDED);
       let attempt = this.storage.workflowDeliveries.get(deliveryId)?.execution?.attempts ?? 1;
-      workflowRun = { runId: admitted.runId, hookId, deliveryId, proposal: place.proposal, attempt };
+      workflowRun = { runId: admitted.runId, hookId, deliveryId, writeKey: write.writeKey, attempt };
     }
 
     let actionId = this.storage.nextActionId.get();
@@ -18176,9 +18192,14 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   }
 
   async submitAction(action: number, description: ActionDescription): Promise<ActionReceipt> {
+    // A requested run's write is identified by its content (FAC-112): digested here, before the
+    // checks below, which then hold through to the write.
+    let caller = this.caller;
+    let fromRun = caller.from === "systemRun" || (caller.from === "gadget" && caller.run !== undefined);
+    let writeDigest = fromRun ? await actionDescriptionDigest(description) : undefined;
     await this.impl.resolveEnablerRoles();
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
-    let id = this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller);
+    let id = this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller, writeDigest);
     return actionReceipt(this.impl, this.gatekeeperId, id);
   }
 
