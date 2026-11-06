@@ -4,6 +4,7 @@ import type { Overseer } from '@gadgets/workshop-shared/api'
 import { PRIORITY_LABELS } from './kanbanBoard'
 import type { BoardRequest } from './boardData'
 import { useBoardData } from './useBoardData'
+import { FORBIDDEN_READ_BINDING, UNAVAILABLE_READ_BINDING } from './canvasReadFeedback'
 
 const PENDING_LABELS = { create: 'New issue, waiting for approval', update: 'Edit waiting for approval', transition: 'Move waiting for approval' } as const
 
@@ -33,9 +34,10 @@ export const WikiIssueEmbed = ({ overseer, boardRef, identifier, href }: {
     {state.status === 'unbound' && <p className="text-kumo-subtle">
       Not connected. This workspace has no connection to the board of {identifier}, so the issue is not shown. <code className="break-all">{href}</code>
     </p>}
-    {state.status === 'disabled' && <p role="status" className="text-kumo-subtle">{state.message}</p>}
+    {state.status === 'disabled' && <p role="status" className="text-kumo-subtle">InferOps is unavailable. This issue will appear again when InferOps is available.</p>}
     {state.status === 'error' && <div className="flex flex-wrap items-center gap-2">
-      <p role="alert" className="text-kumo-danger">Could not read {identifier}: {state.message}</p>
+      <p role="alert" className="text-kumo-danger">{state.code === 'UNAUTHORIZED' ? 'Sign in to InferOps again to read this issue.'
+        : state.code === 'FORBIDDEN' ? FORBIDDEN_READ_BINDING : UNAVAILABLE_READ_BINDING}</p>
       <Button size="sm" onClick={refresh}>Try again</Button>
     </div>}
     {board && !issue && <p className="text-kumo-subtle">

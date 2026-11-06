@@ -212,7 +212,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
               const section = holdable ? active.sections[index] : undefined
               return <>
                 <p className="text-xs font-medium uppercase text-kumo-subtle">{section ? 'Section' : 'Object'}</p>
-                {section && <CanvasSectionEditor key={section.id} section={section} busy={canvas.busy} first={index === 0} gadgets={gadgets}
+                {section && <CanvasSectionEditor key={section.id} section={section} busy={canvas.busy} first={index === 0} gadgets={gadgets} overseer={overseer}
                   acceptedGadgets={acceptedGadgets} onEdit={editSelected} catalog={catalog} viewTitle={active.title} onAskAgent={onAskAgent}
                   pageId={active.id} showWidgets={false}
                   onMoveUp={() => void canvas.edit([{ type: 'moveSection', sectionId: section.id, index: index - 1 }])} />}
@@ -227,7 +227,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
               const index = section?.widgets.findIndex(widget => widget.id === selected.node.id) ?? -1
               return <>
                 <p className="text-xs font-medium uppercase text-kumo-subtle">Widget</p>
-                {section && index >= 0 && <CanvasWidgetCard widget={section.widgets[index]!} section={section} index={index} busy={canvas.busy} gadgets={gadgets} onEdit={editSelected} />}
+                {section && index >= 0 && <CanvasWidgetCard widget={section.widgets[index]!} section={section} index={index} busy={canvas.busy} gadgets={gadgets} overseer={overseer} onEdit={editSelected} />}
                 <CanvasNodeEditor key={`${selected.node.id}:${page.revision}`} page={page} node={selected.node} busy={canvas.busy}
                   onEdit={editPageSelected} nestingOnly={!!section && index >= 0} />
                 <CanvasAttachmentsEditor key={`a:${selected.node.id}:${page.revision}`} target={selected.node.id} node={selected.node}

@@ -154,18 +154,20 @@ it('shows the Kanban\'s new state and revision in the embed once the board is re
     .toContain('ENG-1 is not on the ENG board. It may have been deleted or moved.')
 })
 
-it('renders the other embeds when one fails, and the last page with a failed refresh', async () => {
-  const opsRead = vi.fn<() => Promise<Board>>(async () => { throw new Error('Error: FORBIDDEN: The connection was refused.') })
+it('renders the other embeds when one fails, and the last page with a fixed stale warning', async () => {
+  const opsRead = vi.fn<() => Promise<Board>>(async () => { throw new Error('Error: FORBIDDEN: WIKI_SENTINEL connection refused') })
   bindings.set(OPS, connection({ readBoard: opsRead, [Symbol.dispose]: () => {} }))
   await render(widget())
   const work = section('current-work')
-  expect(work.querySelector('[aria-label="Issue OPS-2"] [role="alert"]')?.textContent).toBe('Could not read OPS-2: The connection was refused.')
+  expect(work.querySelector('[aria-label="Issue OPS-2"] [role="alert"]')?.textContent).toBe('You do not have read access to this resource.')
+  expect(container.textContent).not.toContain('WIKI_SENTINEL')
   expect(work.querySelector('[aria-label="Issue ENG-1"]')?.textContent).toContain('Revision 7')
   expect(work.querySelector(`[aria-label="Project board ${ENG}"] [data-issue-id="i1"]`)).not.toBeNull()
-  wiki.session.readDocument.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: InferOps did not answer.'))
+  wiki.session.readDocument.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: WIKI_SENTINEL did not answer'))
   await click(button(wikiArticle(), 'Refresh Wiki'))
   expect(wikiArticle().textContent).toContain('Refresh failed')
-  expect(wikiArticle().textContent).toContain('Showing the last read; refresh failed: InferOps did not answer.')
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('This Wiki may be stale; refresh to try again.')
+  expect(container.textContent).not.toContain('WIKI_SENTINEL')
   expect(section('purpose')).toBeDefined()
 })
 
@@ -177,14 +179,20 @@ it('says the Wiki is not connected without a connection, and has no access once 
   bindings.set(WIKI, connection(wiki.session))
   await click(button(wikiArticle(), 'Refresh Wiki'))
   expect(section('purpose')).toBeDefined()
-  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: FORBIDDEN: No InferMind access.'))
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: FORBIDDEN: WIKI_SENTINEL no access'))
   await click(button(wikiArticle(), 'Refresh Wiki'))
-  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('No access to this Wiki: No InferMind access.')
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('You do not have read access to this resource.')
+  expect(container.textContent).not.toContain('WIKI_SENTINEL')
   expect(wikiArticle().querySelector('section')).toBeNull()
-  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: Sign in to InferOps again.'))
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: UNAUTHORIZED: WIKI_SENTINEL auth detail'))
   await click(button(wikiArticle(), 'Refresh Wiki'))
   expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('Sign in to InferOps again to read this Wiki.')
+  expect(container.textContent).not.toContain('WIKI_SENTINEL')
   expect(wikiArticle().querySelector('section')).toBeNull()
+  wiki.session.listDocuments.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: WIKI_SENTINEL down'))
+  await click(button(wikiArticle(), 'Refresh Wiki'))
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('This resource is unavailable.')
+  expect(container.textContent).not.toContain('WIKI_SENTINEL')
 })
 
 it('proposes a section edit, shows it waiting for approval and not saved, and saved only once the decided action re-reads the page', async () => {
@@ -224,7 +232,7 @@ it('says a rejected edit was not saved, and why a stale one was not sent, keepin
   await act(async () => setFieldValue(section('purpose').querySelector('textarea')!, 'Mine'))
   await act(async () => section('purpose').querySelector('form')!.requestSubmit())
   await settle()
-  expect(section('purpose').querySelector('[role="alert"]')?.textContent).toContain('Not sent: the section changed since the page was read.')
+  expect(section('purpose').querySelector('[role="alert"]')?.textContent).toBe('This section changed since it was read. The current page is shown; review it before trying again.')
   expect(section('purpose').querySelector('textarea')?.value).toBe('Mine')
 })
 
@@ -243,6 +251,16 @@ it('shows what an agent reads through the same connection, and does not compare 
   // The handbook embeds the DEMO board.
   expect(panel.textContent).toContain('Not compared: an agent reads each embedded widget as its live text.')
   expect(wiki.session.readDocumentText).toHaveBeenCalledWith('handbook')
+})
+
+it('uses fixed feedback when the agent-text read fails', async () => {
+  organize()
+  await render(widget('operations'))
+  wiki.session.readDocumentText.mockRejectedValueOnce(new Error('Error: INTERNAL: AGENT_TEXT_SENTINEL provider detail'))
+  await click(button(wikiArticle(), 'Agent view'))
+  const panel = wikiArticle().querySelector<HTMLElement>('[aria-label="Agent view"]')!
+  expect(panel.querySelector('[role="alert"]')?.textContent).toBe('The agent text is unavailable.')
+  expect(panel.textContent).not.toContain('AGENT_TEXT_SENTINEL')
 })
 
 /** Serves the Wiki only through the organization's InferOps account connection, as `openWiki` does. */
@@ -365,12 +383,13 @@ it('shows a Master\'s generated page list as generated, not editable, whose link
 
 it('states a failed structure read, shows the page tree meanwhile, and a Master\'s list as unread', async () => {
   organize()
-  wiki.session.readStructure.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: InferOps did not answer.'))
+  wiki.session.readStructure.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: WIKI_SENTINEL structure'))
   await render(widget('engineering'))
-  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('Could not read how this Wiki is organized, so its pages are shown as a tree: InferOps did not answer.')
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('Wiki structure is unavailable; pages are shown as a tree.')
   expect(pageNav().querySelector('ul[aria-label^="Pages in"]')).toBeNull()
   expect(button(pageNav(), 'Team handbook')).toBeDefined()
-  expect(wikiArticle().textContent).toContain('Could not read the pages this page lists: InferOps did not answer.')
+  expect(wikiArticle().textContent).toContain('Wiki structure is unavailable.')
+  expect(container.textContent).not.toContain('WIKI_SENTINEL')
   await click(button(wikiArticle(), 'Agent view'))
   expect(wikiArticle().querySelector('[aria-label="Agent view"]')?.textContent).toContain('Not compared')
   await click(button(wikiArticle(), 'Refresh Wiki'))
@@ -380,10 +399,11 @@ it('states a failed structure read, shows the page tree meanwhile, and a Master\
 
 it('shows the structure when a page read fails, and the page when it is read again', async () => {
   organize()
-  wiki.session.readDocument.mockRejectedValueOnce(new Error('Error: INTERNAL: boom'))
+  wiki.session.readDocument.mockRejectedValueOnce(new Error('Error: INTERNAL: WIKI_SENTINEL page'))
   await render(widget())
   expect(pageNav().querySelector('ul[aria-label="Pages in Engineering"]')).not.toBeNull()
-  expect(wikiArticle().textContent).toContain('Could not read the page: boom')
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('This Wiki page is unavailable.')
+  expect(container.textContent).not.toContain('WIKI_SENTINEL')
   await click(button(wikiArticle(), 'Try again'))
   expect(pageBody().textContent).toContain('Acme builds bridges.')
 })
@@ -478,7 +498,7 @@ it('keeps a pending body deletion visible after a reload, read-only too', async 
   expect(pageBody().textContent).toContain("The proposed body is empty: approving it removes this page's body.")
 })
 
-it('says why a body edit was not sent or stale, keeps retryable drafts, and clears them when access is revoked', async () => {
+it('uses fixed words for edit failures and keeps the readable page when editing is forbidden', async () => {
   organize()
   await render(widget('operations'))
   await click(button(pageBody(), 'Edit page body'))
@@ -486,19 +506,24 @@ it('says why a body edit was not sent or stale, keeps retryable drafts, and clea
   await act(async () => setFieldValue(pageBody().querySelector('textarea')!, 'Mine'))
   await act(async () => pageBody().querySelector('form')!.requestSubmit())
   await settle()
-  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: the page changed since the page was read. The page was read again; edit the current text. The server said: Page operations is at version 4, not 3. Read it again.')
+  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('This page changed since it was read. The current page is shown; review it before trying again.')
+  expect(pageBody().textContent).not.toContain('EDIT_SENTINEL')
   expect(pageBody().querySelector('textarea')?.value).toBe('Mine')
   await click(button(pageBody(), 'Cancel'))
   expect(pageBody().textContent).toContain('Changed in InferMind meanwhile.')
 
-  wiki.session.updateDocumentBody.mockRejectedValueOnce(new Error('Error: CONFLICT: Page operations already has a body edit that has not taken effect yet.'))
+  wiki.session.updateDocumentBody.mockRejectedValueOnce(new Error('Error: CONFLICT: EDIT_SENTINEL pending edit detail'))
   await proposeBody('Second try')
-  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Not sent: Page operations already has a body edit that has not taken effect yet.')
+  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe('Another edit of this page is waiting for a decision.')
+  expect(pageBody().textContent).not.toContain('EDIT_SENTINEL')
   await click(button(pageBody(), 'Cancel'))
-  wiki.session.updateDocumentBody.mockRejectedValueOnce(new Error('Error: FORBIDDEN: Your InferOps access cannot edit this Wiki.'))
+  wiki.session.updateDocumentBody.mockRejectedValueOnce(new Error('Error: FORBIDDEN: EDIT_SENTINEL edit permission detail'))
   await proposeBody('Third try')
-  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('No access to this Wiki: Your InferOps access cannot edit this Wiki.')
-  expect(wikiArticle().querySelector('textarea')).toBeNull()
+  expect(pageBody().querySelector('[role="alert"]')?.textContent).toBe("You can't edit this page.")
+  expect(pageBody().textContent).toContain('Changed in InferMind meanwhile.')
+  expect(wikiArticle().textContent).not.toContain('EDIT_SENTINEL')
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).not.toBe('You do not have read access to this resource.')
+  expect(pageBody().querySelector('textarea')).toBeNull()
 })
 
 it('offers to add a body to a page that reads as its sections, keeping section edits, and no body edit read-only', async () => {
@@ -562,12 +587,20 @@ it('says when nothing readable matches, and never calls an unavailable search em
   wiki.setSearchDown(true)
   await search('team')
   const alert = wikiArticle().querySelector('[role="alert"]')!
-  expect(alert.textContent).toContain('Search unavailable, so this is not an empty result')
+  expect(alert.textContent).toBe('Wiki search is unavailable; this is not an empty result.')
   expect(wikiArticle().textContent).not.toContain('No section you can read matches')
   expect(results()).toBeNull()
   wiki.setSearchDown(false)
   await click(button(wikiArticle(), 'Try again'))
   expect(results()!.querySelectorAll('li')).toHaveLength(1)
+})
+
+it('uses fixed feedback when a Wiki search fails', async () => {
+  await render(widget())
+  wiki.session.searchWiki.mockRejectedValueOnce(new Error('Error: UNAVAILABLE: SEARCH_SENTINEL provider detail'))
+  await search('team')
+  expect(wikiArticle().querySelector('[role="alert"]')?.textContent).toBe('Wiki search is unavailable; this is not an empty result.')
+  expect(wikiArticle().textContent).not.toContain('SEARCH_SENTINEL')
 })
 
 it('marks a result whose section has an edit of this connection waiting', async () => {

@@ -24,7 +24,7 @@ export const WikiEditForm = ({ label, initial, maxLength, hint, onPropose, onClo
     setSending(true)
     const result = await onPropose(draft)
     setSending(false)
-    if (result.ok) onClose()
+    if (result.ok || (!result.ok && result.code === 'FORBIDDEN')) onClose()
   }}>
     <InputArea label={label} rows={8} maxLength={maxLength} value={draft} disabled={sending}
       onChange={event => setDraft(event.target.value)} />

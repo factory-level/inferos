@@ -156,7 +156,7 @@ export class WikiData {
     } catch (error) {
       const code = codeOf(error)
       const message = messageOf(error)
-      if (this.#failed(error) || accessGeneration !== this.#accessGeneration) return { ok: false, code, message }
+      if ((code !== 'FORBIDDEN' && this.#failed(error)) || accessGeneration !== this.#accessGeneration) return { ok: false, code, message }
       this.#putEdit({ ...edit, phase: 'refused', code, message })
       return { ok: false, code, message }
     } finally {
@@ -192,7 +192,7 @@ export class WikiData {
     } catch (error) {
       const code = codeOf(error)
       const message = messageOf(error)
-      if (this.#failed(error) || accessGeneration !== this.#accessGeneration) return { ok: false, code, message }
+      if ((code !== 'FORBIDDEN' && this.#failed(error)) || accessGeneration !== this.#accessGeneration) return { ok: false, code, message }
       this.#putBodyEdit({ ...edit, phase: 'refused', code, message })
       return { ok: false, code, message }
     } finally {

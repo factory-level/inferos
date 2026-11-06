@@ -13,6 +13,7 @@ import { useBoardActivity } from './useBoardActivity'
 import { useBoardData } from './useBoardData'
 import { useCodingDispatch } from './useCodingDispatch'
 import { useHasBeenOnScreen } from './useHasBeenOnScreen'
+import { FORBIDDEN_READ_BINDING, STALE_BOARD_READ, UNAVAILABLE_READ_BINDING } from './canvasReadFeedback'
 
 export type CanvasBoardWidgetProps = {
   widget: CanvasProjectBoardWidget
@@ -100,17 +101,16 @@ export const CanvasBoardWidget = (props: CanvasBoardWidgetProps) => {
         Not connected. This workspace has no connection to this board or to its organization's InferOps account. Connect one, for example by asking in the chat, to see it live.
       </p>)}
       {state.status === 'disabled' && <p role="status" className="text-sm text-kumo-subtle">
-        {state.message} The connection to this board is kept; it shows the board again once InferOps is turned back on.
+        InferOps is unavailable. The connection to this board is kept; it will appear again when InferOps is available.
       </p>}
       {state.status === 'error' && <div className="space-y-2">
         <p role="alert" className="text-sm text-kumo-danger">
           {state.code === 'UNAUTHORIZED' ? 'Sign in to InferOps again to read this board.'
-            : state.code === 'FORBIDDEN' ? `No access to this board: ${state.message}`
-              : `Could not read the board: ${state.message}`}
+            : state.code === 'FORBIDDEN' ? FORBIDDEN_READ_BINDING : UNAVAILABLE_READ_BINDING}
         </p>
         <Button size="sm" onClick={refresh}>Try again</Button>
       </div>}
-      {state.status === 'stale' && state.error && <p role="alert" className="mb-2 text-xs text-kumo-danger">Showing the last board read; refresh failed: {state.error}</p>}
+      {state.status === 'stale' && state.error && <p role="alert" className="mb-2 text-xs text-kumo-danger">{STALE_BOARD_READ}</p>}
       {missingIssue && <div role="alert" className="mb-2 flex flex-wrap items-center gap-2 text-sm text-kumo-subtle">
         <span>The issue you had open is no longer on this board. It may have been deleted or moved.</span>
         <Button size="sm" onClick={() => openIssue.onChange(null)}>Back to the board</Button>

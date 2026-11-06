@@ -1,5 +1,7 @@
 import { CanvasWidgetCard } from './CanvasWidgetCard'
 import { CanvasAddGadgetForm } from './CanvasAddGadgetForm'
+import type { RpcStub } from 'capnweb'
+import type { Overseer } from '@gadgets/workshop-shared/api'
 import { Button, Input } from '@cloudflare/kumo'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasCatalog, CanvasOperation, CanvasSection } from '@gadgets/workshop-shared/canvas'
@@ -12,6 +14,7 @@ type Props = {
   busy: boolean
   first: boolean
   gadgets: ReadonlyMap<WorkpieceId, GadgetSummary>
+  overseer: RpcStub<Overseer>
   acceptedGadgets: GadgetSummary[]
   /** What the deployment lets this section offer. */
   catalog: CanvasCatalog
@@ -25,7 +28,7 @@ type Props = {
   showWidgets?: boolean
 }
 
-export const CanvasSectionEditor = ({ section, busy, first, gadgets, acceptedGadgets, catalog, viewTitle, onMoveUp, onEdit, onAskAgent, pageId, showWidgets = true }: Props) => (
+export const CanvasSectionEditor = ({ section, busy, first, gadgets, overseer, acceptedGadgets, catalog, viewTitle, onMoveUp, onEdit, onAskAgent, pageId, showWidgets = true }: Props) => (
   <section className="@container space-y-3 rounded-lg border border-kumo-line p-4" aria-label={section.title}>
     <div className="flex flex-wrap items-center justify-between gap-2">
       <h3 className="font-medium text-kumo-default">{section.title}</h3>
@@ -50,7 +53,7 @@ export const CanvasSectionEditor = ({ section, busy, first, gadgets, acceptedGad
     </form>
     {showWidgets && <div className={sectionGridClass(section.columns)}>
       {section.widgets.map((widget, index) => <CanvasWidgetCard key={widget.id} widget={widget} section={section}
-        index={index} busy={busy} gadgets={gadgets} onEdit={onEdit} />)}
+        index={index} busy={busy} gadgets={gadgets} overseer={overseer} onEdit={onEdit} />)}
     </div>}
     {catalog.widgetKinds.includes('inferos.gadget') && <>
       <CanvasAddGadgetForm section={section} gadgets={acceptedGadgets} busy={busy} onEdit={onEdit} />

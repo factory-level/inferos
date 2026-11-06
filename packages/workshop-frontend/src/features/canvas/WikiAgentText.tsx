@@ -3,6 +3,7 @@ import { Badge, Loader } from '@cloudflare/kumo'
 import type { WikiDocument } from '@inferos/gatekeeper-inferops/src/types'
 import type { AgentTextResult } from './wikiData'
 import { agentTextShown } from './wikiPage'
+import { UNAVAILABLE_WIKI_AGENT_TEXT } from './canvasReadFeedback'
 
 /**
  * The page as an agent reads it (`readDocumentText` through the same connection), beside a
@@ -42,7 +43,7 @@ export const WikiAgentText = ({ document, shownText, onRead }: {
       {compared && <Badge variant={matches ? 'success' : 'warning'}>{matches ? 'Same as this page' : 'Differs from this page'}</Badge>}
     </div>
     {!current && <p aria-busy="true" className="flex items-center gap-2 text-sm text-kumo-subtle"><Loader size="sm" /> Reading the agent text…</p>}
-    {current && !current.ok && <p role="alert" className="text-sm text-kumo-danger">Could not read the agent text: {current.message}</p>}
+    {current && !current.ok && <p role="alert" className="text-sm text-kumo-danger">{UNAVAILABLE_WIKI_AGENT_TEXT}</p>}
     {compared && !matches && <p className="text-xs text-kumo-subtle">The page changed between the two reads. Refresh to compare again.</p>}
     {composed && <p className="text-xs text-kumo-subtle">
       Composed from this page as read here, the way an agent's page text is composed. Through this account connection it leaves out what only InferOps adds: a Master's coverage and embedded widgets' live text.
