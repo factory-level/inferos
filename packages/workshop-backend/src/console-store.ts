@@ -8,10 +8,11 @@ import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
 import type { GadgetFileClassification } from "@gadgets/workshop-shared/workspace-kind";
+import { readWorkspaceConfiguration } from "./workspace-configuration";
 import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
 import type { GadgetRecord, OverseerStorage } from "./overseer";
 
-type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "canvasPages" | "consoleScreens" | "gadgets" | "flows">;
+type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "canvasPages" | "consoleScreens" | "gadgets" | "flows" | "workspaceConfiguration">;
 
 /**
  * How publication creates and removes frozen installs (see `ConsoleWidgetEntry`). Both are called
@@ -490,8 +491,11 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
   }
   let publishedContent = { ...content, ...(content.widgets === undefined ? {} : { widgets }),
     ...(content.boundViews === undefined ? {} : { boundViews }) };
+  // The workspace's settings freeze with the publication (FAC-95), as its pages do.
+  let settings = readWorkspaceConfiguration(storage).settings;
   let result: OperateConsole = { ...stored,
     published: { revision, publishedAt, ...(publishedBy ? { publishedBy } : {}), content: publishedContent,
+      ...(Object.keys(settings).length === 0 ? {} : { settings: structuredClone(settings) }),
       ...(flows.length === 0 ? {} : { flows }),
       screens: screens.map(({ screenId, row, page }) => ({ id: screenId, revision: (page ?? row).revision })), apps } };
   if (jsonBytes(result) > CONSOLE_SIZE_LIMITS.console) {

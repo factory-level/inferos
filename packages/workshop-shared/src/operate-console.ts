@@ -1,3 +1,4 @@
+import type { WorkspaceSettings } from "./workspace-settings.js";
 import type { WorkpieceId } from "./api.js";
 import type { WidgetIndexOutcome } from "./gatekeeper.js";
 import { MAX_WORKSPACE_FLOWS, type OperateFlow } from "./operate-flow.js";
@@ -351,6 +352,13 @@ export type ConsolePublication = {
   publishedBy?: ConsolePublisher;
   /** The console's content as published. */
   content: OperateConsoleContent;
+  /**
+   * The workspace's settings when it was published (FAC-95), which each published page's own
+   * `settings` may override: operators get these, and a later change to the workspace's settings
+   * reaches them through a republish. Absent when the workspace set none, and on publications made
+   * before settings existed.
+   */
+  settings?: WorkspaceSettings;
   /**
    * The flows `content.flows` lists, each as it was when published, in that order; absent if it
    * lists none. Operators run only these: a later edit to a flow reaches them through a republish.
