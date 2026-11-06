@@ -987,6 +987,12 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
     return this.#tableRead(table, own.slice(0, options.limit));
   }
 
+  async readTableDefinition(tableId: string): Promise<TableRecordSchema> {
+    const table = this.#tables().tables.find(t => t.id === tableId);
+    if (!table) throw tableNotFound();
+    return table;
+  }
+
   async readTableRow(recordId: string): Promise<TableRead> {
     const { tables, rows } = this.#tables();
     const row = rows.find(r => r.id === recordId);
@@ -1096,6 +1102,8 @@ export function openInferOpsClient(
     listTables: () => stub.listTables(),
     readTable: (host, tableId, options) => host === account.host
       ? stub.readTable(tableId, options) : Promise.reject(tableNotFound()),
+    readTableDefinition: (host, tableId) => host === account.host
+      ? stub.readTableDefinition(tableId) : Promise.reject(tableNotFound()),
     readTableRow: (host, recordId) => host === account.host
       ? stub.readTableRow(recordId) : Promise.reject(tableNotFound()),
     listWorkspaceMembers: () => stub.listWorkspaceMembers(),

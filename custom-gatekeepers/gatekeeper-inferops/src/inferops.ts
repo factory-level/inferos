@@ -4521,22 +4521,33 @@ class TableSessionImpl extends RpcTarget implements InferOpsTableSession {
     };
   }
 
+  /** The bound table's definition alone, with no rows (`readTableDefinition`). */
+  async #definition(): Promise<TableRead> {
+    const { client, host, tableId } = this.#scope;
+    return { table: await client.readTableDefinition(host, tableId), rows: [] };
+  }
+
   async describe(): Promise<GovernedDescription> {
-    const read = await this.#read(1);
-    const description = this.#governed(read);
+    const definition = await this.#definition();
+    const description = this.#governed(definition);
     await this.#queue.authorizeObservation({
       title: "Describe InferOps custom table",
-      description: `Read the definition of the custom table ${plainInline(describeTable(read).label)} on ` +
+      description: `Read the definition of the custom table ${plainInline(describeTable(definition).label)} on ` +
         `${this.#scope.host}: ${description.fields.length} fields.`,
     });
     return description;
   }
 
   async list(query?: GovernedListQuery): Promise<GovernedListResult> {
-    // The request's shape is checked before anything is read; its fields, against the read's own
-    // definition, before anything is returned or logged.
+    // Checked before any row is read: the request's shape, then its fields and types against the
+    // table's definition alone, so an unknown, a personal and a wrong-typed field are each refused
+    // at the same step, reading no row and logging nothing.
     governedRequest(() => parseGovernedListRequest(query ?? {}, null));
+    const definition = await this.#definition();
+    governedRequest(() => parseGovernedListRequest(query ?? {}, this.#governed(definition)));
     const read = await this.#read(MAX_TABLE_ROWS);
+    // And again against the definition the rows came with: a column that turned personal between
+    // the two reads is refused here, before anything is returned or logged.
     const request = governedRequest(() => parseGovernedListRequest(query ?? {}, this.#governed(read)));
     const { table, records } = projectRows(read);
     const result = listGoverned(records.map(record => ({ id: record.id, values: record.values })), request);

@@ -89,13 +89,16 @@
       "urlPattern": "inferops://*/object/table/*",
       "gatekeeper": "InferOpsTableGatekeeper",
       "session": "InferOpsTableSession",
-      "scope": "One custom table, by id, in one InferOps workspace the signed-in person holds; per-person sign-in only (no stopgap connection), or the mock's demo table. Every read goes through InferOps' object.embed with a reference built from the binding's props, so InferOps checks the exact <tenant>.<workspace> against the reader on each read. Read-only: no writes. Personal columns are projected out of every read, without a trace.",
+      "scope": "One custom table, by id, in one InferOps workspace the signed-in person holds; per-person sign-in only (no stopgap connection), or the mock's demo table. Every row read goes through InferOps' object.embed with a reference built from the binding's props, so InferOps checks the exact <tenant>.<workspace> against the reader on each read; the governed describe and list read the definition alone through table.get, in the workspace the client was opened for from that host. Read-only: no writes. Personal columns are projected out of every read, without a trace.",
       "enabledBy": ["INFEROPS_ENABLED", "INFEROPS_TABLES_ENABLED"],
       "observers": "admission",
       "reads": [
         { "method": "describeTable", "notes": "The definition without personal columns." },
         { "method": "listRecords", "notes": "Up to 50 rows, newest first, with the definition from the same read; relatedTo narrows to rows linked to one endpoint. No filter on column values." },
-        { "method": "getRecord", "notes": "One row of the bound table, with the definition from the same read; a row of another table is NOT_FOUND." }
+        { "method": "getRecord", "notes": "One row of the bound table, with the definition from the same read; a row of another table is NOT_FOUND." },
+        { "method": "describe", "notes": "FAC-9 governed read: the visible columns as fields, from the definition alone (table.get, no rows)." },
+        { "method": "list", "notes": "FAC-9 governed read: a request is checked against the definition alone before any row is read, then rows are read once and checked again against their own definition; filtered, sorted and paged in the gatekeeper over the newest 50." },
+        { "method": "get", "notes": "FAC-9 governed read: getRecord's read; a row of another table, or none, is null." }
       ],
       "writes": []
     },
@@ -242,7 +245,7 @@
         "kind": "object/table",
         "cases": ["resource-scope", "observation", "sharing", "revocation", "server-error-retry"],
         "reason": "Read-only and private-only: the shared suite's adapter assumes writes and an admissible collaborator, so this kind has its own suite. Sharing is the private-only refusal (addObserver always throws).",
-        "coveredBy": ["__tests__/table.test.ts", "__tests__/table-http.test.ts", "__tests__/account.test.ts"]
+        "coveredBy": ["__tests__/table.test.ts", "__tests__/table-http.test.ts", "__tests__/governed-table.test.ts", "__tests__/account.test.ts"]
       },
       {
         "kind": "object/table",

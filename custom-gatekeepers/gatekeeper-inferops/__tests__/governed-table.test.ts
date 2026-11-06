@@ -85,6 +85,32 @@ describe("the custom table as a governed resource (FAC-9)", () => {
     expect((await hooks.log()).observations).toEqual([]);
   });
 
+  it("checks a request against the table's definition before any row is read: unknown, personal and wrong-typed fields alike", async () => {
+    const { session, hooks, mock } = setup();
+    const refusals: string[] = [];
+    for (const request of [
+      { filters: [{ field: "missing", op: "eq", value: "x" }] },
+      { filters: [{ field: "custodian_email", op: "eq", value: "x" }] },
+      { sort: { field: "missing", order: "asc" } },
+      { sort: { field: "custodian_email", order: "asc" } },
+      { filters: [{ field: "hours", op: "contains", value: "81" }] },
+      { filters: [{ field: "hours", op: "eq", value: "8120" }] },
+    ]) {
+      refusals.push(await failure(session.list(request as never)));
+    }
+    // A personal field is refused exactly as one the table doesn't have.
+    expect(refusals[1]).toBe(refusals[0]);
+    expect(refusals[3]).toBe(refusals[2]);
+    expect(refusals.every(message => /INVALID_REQUEST/.test(message))).toBe(true);
+    expect(await mock.tableReads()).toBe(0);
+    expect((await hooks.log()).observations).toEqual([]);
+    // Describing reads no row either; a valid request reads the rows once.
+    await session.describe();
+    expect(await mock.tableReads()).toBe(0);
+    await session.list({ filters: [{ field: "status", op: "eq", value: "repair" }] });
+    expect(await mock.tableReads()).toBe(1);
+  });
+
   it("gets one row of the bound table, and a row of another table, or none, as nothing", async () => {
     const { session, hooks, mock } = setup();
     expect(await session.get("71000000-0000-4000-8000-000000000003")).toMatchObject({

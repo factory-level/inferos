@@ -11,6 +11,9 @@
 //   50; there is no filter on column values in this slice. Adding one needs InferOps to return the
 //   definition from the same snapshot the filter ran against, including for an empty result, or a
 //   column that turned personal between the two reads could be probed through what it matches.
+//   The governed `list` (FAC-9) filters in the gatekeeper instead, over rows already projected with
+//   their own read's definition, so that probe can't happen there. It also checks a request against
+//   the definition alone (`readTableDefinition`) before reading any row.
 // - The switch (`INFEROPS_TABLES_ENABLED`) is off unless set to "true", and needs InferOps itself
 //   on. Like the other switches it is checked on every call, so a binding or session that exists
 //   when it is turned off is refused from its next call and resumes when it is turned back on.

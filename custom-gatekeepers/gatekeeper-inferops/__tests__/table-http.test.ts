@@ -197,6 +197,32 @@ describe("custom tables over HTTP", () => {
     expect((await client.readTable(HOST, TABLE, { limit: 50 })).rows).toHaveLength(50);
   });
 
+  it("reads a table's definition alone through table.get in the client's own workspace, with no rows", async () => {
+    const { calls, client } = fake(() => ok({ type: type() }));
+    const table = await client.readTableDefinition(HOST, TABLE);
+    expect(table).toMatchObject({ id: TABLE, label: "Assets", version: 4 });
+    expect(table.columns.map(c => [c.name, c.personal])).toEqual([["serial", false], ["owner_email", true]]);
+    expect(calls.map(c => [c.method, c.path, c.ref])).toEqual([["GET", `/object/types/${TABLE}`, null]]);
+    expect(calls[0]!.headers.get("x-workspace-id")).toBe(CONNECTION.workspaceId);
+  });
+
+  it("refuses a definition read as one NOT_FOUND, and an answer about another table as UNAVAILABLE", async () => {
+    const messages = new Set<string>();
+    for (const [status, code] of [[404, "NOT_FOUND"], [403, "FORBIDDEN"]] as const) {
+      const { client } = fake(() => refused(status, code));
+      const message = await failure(client.readTableDefinition(HOST, TABLE));
+      expect(message).toMatch(/^InferOpsError: NOT_FOUND: /);
+      expect(message).not.toContain("server detail");
+      messages.add(message);
+    }
+    const { calls, client } = fake(() => ok({}));
+    messages.add(await failure(client.readTableDefinition(HOST, "../types")));
+    expect(calls).toEqual([]);
+    expect(messages.size).toBe(1);
+    const other = fake(() => ok({ type: type({ id: OTHER_TABLE }) }));
+    expect(await failure(other.client.readTableDefinition(HOST, TABLE))).toMatch(/UNAVAILABLE/);
+  });
+
   it("lists the workspace's tables for the picker, ids and labels only", async () => {
     const { client } = fake(() => ok({ types: [type()] }));
     expect(await client.listTables()).toEqual([{ id: TABLE, label: "Assets" }]);
