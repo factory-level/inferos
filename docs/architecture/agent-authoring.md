@@ -3,13 +3,18 @@ title: Reusable native agent authoring
 design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/agent-authoring.md
 covers:
   - packages/workshop-shared/src/api.ts
+  - packages/workshop-shared/src/feature-flags.ts
   - packages/workshop-shared/src/agent-artifact.ts
   - packages/workshop-backend/src/agent-spawner-binding.d.ts
   - packages/workshop-backend/src/overseer.ts
+  - packages/workshop-backend/src/authored-widget-publication.ts
+  - packages/workshop-backend/src/feature-flags.ts
   - packages/workshop-backend/src/blueprint-archive.ts
   - packages/workshop-backend/src/authored-widget-build.ts
   - packages/workshop-backend/src/authored-widget-build-runtime.ts
   - packages/workshop-backend/src/authored-widget-build-compiler.ts
+  - packages/workshop-backend/src/authored-widget-preflight.ts
+  - packages/workshop-backend/src/authored-widget-validation.ts
   - packages/workshop-backend/scripts/build-authored-widget-dependencies.ts
   - packages/workshop-backend/src/artifact-store.ts
   - packages/workshop-backend/src/artifact-publisher.ts
@@ -48,9 +53,11 @@ Current state after the revision-storage slice of [#16](https://github.com/facto
 ### Authored widget compiler (FAC-8)
 
 `compileAuthoredWidget()` accepts an in-memory TSX/CSS file map and bundles it with a server-owned
-React/Refine dependency set. It rejects external CSS references, unsupported source and import
-forms, and forces Refine telemetry off in the emitted artifact. Source checks for browser and
-network globals provide author feedback only; they are not a security boundary. The focused
+React/Refine dependency set using esbuild-WASM. The Worker and build Durable Object do not load the
+TypeScript compiler package. Esbuild parses TSX and the virtual filesystem plugin limits imports to
+the reviewed dependency closure; the input validator rejects external CSS references. Refine
+telemetry is forced off in the emitted artifact. Source checks for browser and network globals
+provide author feedback only; they are not a security boundary. The focused
 real-browser proof in `packages/workshop-frontend/src/GadgetUI.request-probes.test.ts` covers
 specific outbound request APIs from the production frame; it does not establish a general egress
 guarantee. Compilation caps source size, file size and file count, and stops waiting for an esbuild
@@ -190,3 +197,22 @@ Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/
 ## Evidence
 
 See the [source ledger](../wiki/research-sources.md) for sibling repository revisions and official references.
+
+### Authored-widget draft preview
+
+The UI receives the deployment-owned `authored-widgets` flag, resolved from
+`AUTHORED_WIDGET_BUILD_ENABLED` and never from Flagship. `Overseer.previewAuthoredWidget(gadgetId,
+chatId)` is a build-session capability. It materializes pending chat code changes, requires the chat
+to own the gadget's draft, checks every draft path, and compiles only TSX/CSS sources through the
+same isolated build Durable Object used by publication. It returns
+`{jsCode, measurements: {durationMs, clientBytes}}`; it creates no commit, Blueprint record, R2
+object or binding change. Use-role and operate sessions, including agent callers, are denied. A
+disabled flag refuses before reading draft files or allocating a build object. Preview waits at most
+15 seconds and returns no JavaScript larger than 2 MiB. These limits bound the caller and response;
+a timed-out synchronous WASM build may continue until its build object resets.
+
+The shared build checks parse each TSX source before bundling and refuse denied globals, dynamic
+imports, dynamic code loading, `import.meta`, unapproved package imports, invalid syntax and a
+missing default component export. These checks provide early feedback and defense in depth; they
+are not the sandbox boundary. Isolation and the reviewed dependency closure remain the security
+boundary for authored code.

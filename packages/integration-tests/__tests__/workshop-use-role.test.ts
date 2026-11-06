@@ -95,6 +95,7 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {
+  previewAuthoredWidget: ws => ws.previewAuthoredWidget(1, 1),
   exportWorkspaceRecords: ws => ws.exportWorkspaceRecords(),
   createCanvas: ws => ws.createCanvas({ title: "View", sections: [] }),
   editCanvas: ws => ws.editCanvas("view", "0", [{ type: "rename", title: "New" }]),
