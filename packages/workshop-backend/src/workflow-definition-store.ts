@@ -544,20 +544,13 @@ export class WorkspaceWorkflowDefinitionStore {
   /**
    * Mark queued run `deliveryId` started (FAC-112), counting the attempt, and return its delivery,
    * the run's only starting context. Null, and the run unqueued, when its delivery is gone (dropped
-   * past `MAX_WORKFLOW_DELIVERIES`), and when a restart interrupted it while it ran on the gadget's
-   * own bindings: then it ends `interrupted` rather than run again, since the writes it made went
-   * through the gadget's own sessions, which name no run, so a second run could repeat them. An
-   * assigned run's writes name it, so it runs again, and its repeated writes are matched to the
-   * ones it made (`OverseerImpl.submitActionNow`).
+   * past `MAX_WORKFLOW_DELIVERIES`). A run a restart interrupted runs again from its start: its
+   * writes name it, so the ones it repeats are matched to those it made (`OverseerImpl.submitActionNow`).
    */
   startRun(deliveryId: number): StoredWorkflowDelivery | null {
     let delivery = this.storage.workflowDeliveries.get(deliveryId);
     if (!delivery?.execution) {
       this.storage.workflowRunQueue.delete(deliveryId);
-      return null;
-    }
-    if (delivery.execution.state === "running" && !delivery.executedAs) {
-      this.endRun(deliveryId, "interrupted");
       return null;
     }
     let started: StoredWorkflowDelivery = {

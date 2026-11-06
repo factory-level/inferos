@@ -15,7 +15,8 @@ import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SYSTEM_RUN_ENDED, SYSTEM_RUN_UNSUPPORTED, SYSTEM_RUN_WRONG_CONNECTION,
   ASSIGNED_ACTION_STALE, SystemRunRegistry, assignedActionProblem, openSystemRunSession, revocableSession,
   runAssignedDelivery, systemGatekeeperFacetName,
-  type SystemRunCaller, type SystemRunHost,
+  GADGET_RUN_WRONG_CONNECTION, GadgetRunRegistry, openGadgetRunSession, runGadgetBindingsDelivery,
+  type GadgetRunCaller, type SystemRunCaller, type SystemRunHost,
 } from "../src/system-run.js";
 import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { openFakeOverseer } from "./fixtures.js";
@@ -53,6 +54,8 @@ function host(opts: {
     unbindConnection(): void;
   } = {
     systemRuns: new SystemRunRegistry(),
+    gadgetRuns: new GadgetRunRegistry(),
+    openGadgetSession: async (gatekeeperId: number) => ({ session: gatekeeperId, read: async () => "read" }),
     assignmentOf: () => assignment && { ...assignment, assignedBy: ADA, assignedAt: new Date(0) },
     liveHookGadget: () => {
       if (!hookLive) throw new Error("Hook has been deleted or disabled.");
@@ -113,6 +116,7 @@ function host(opts: {
 }
 
 const DELIVERY = { deliveryId: 7, commitId: commit(1), credentialRef: "ref-1" };
+const GADGET_CALLER: GadgetRunCaller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: 7 } };
 const CALLER: SystemRunCaller = { from: "systemRun", hookId: HOOK, deliveryId: 7 };
 
 describe("a run-scoped worker", () => {
@@ -986,5 +990,54 @@ describe("a late delivery", () => {
     takenInvocations.set(waited.id, false);
     await overseer.startHook(HOOK, { invocationId: waited.id });
     expect(takenInvocations.get(waited.id)).toBe(true);
+  });
+});
+
+// FAC-112 round 2 (the manager's (a)): an unassigned requested run executes like an assigned one,
+// from its pinned commit in a run-scoped worker, but over the gadget's own connections, each
+// binding carrying the run, and its sessions live only while it runs.
+describe("an unassigned requested run's worker", () => {
+  it("loads the pinned commit with a binding per gadget connection, each the run's, after the re-checks", async () => {
+    let made = host();
+    made.h.setAssignment(null);
+    let order: string[] = [];
+    let read = made.h.readModules;
+    made.h.readModules = async commitId => { order.push(`read ${commitId}`); return read(commitId); };
+    let result = await runGadgetBindingsDelivery(made.h, HOOK, { deliveryId: 7, commitId: commit(1) }, null, ["go"], {
+      recheck: async () => { order.push("recheck"); },
+      revalidate: () => { order.push("revalidate"); },
+    });
+    expect(result).toEqual({ ran: ["go"] });
+    expect(order).toEqual([`read ${commit(1)}`, "recheck", "revalidate"]);
+    expect(Object.keys(made.loaded[0]!.env).toSorted()).toEqual(["BOARD", "INFEROPS", "MAIL", "TABLES"]);
+    expect(new Set(made.loopbacks.map(([, caller]) => JSON.stringify(caller)))).toEqual(new Set([JSON.stringify(GADGET_CALLER)]));
+    expect(made.h.gadgetRuns.has(7)).toBe(false);
+  });
+
+  it("refuses an assigned trigger, and a remote re-check that refuses, loading nothing", async () => {
+    let assigned = host();
+    await expect(runGadgetBindingsDelivery(assigned.h, HOOK, { deliveryId: 7, commitId: commit(1) }, null, []))
+      .rejects.toThrow(SYSTEM_RUN_ASSIGNMENT_CHANGED);
+    let revoked = host();
+    revoked.h.setAssignment(null);
+    await expect(runGadgetBindingsDelivery(revoked.h, HOOK, { deliveryId: 7, commitId: commit(1) }, null, [],
+        { recheck: async () => { throw new Error("revoked remotely"); }, revalidate: () => {} })).rejects.toThrow("revoked remotely");
+    expect(revoked.loaded).toEqual([]);
+  });
+
+  it("opens the gadget's own session only while the run runs, on a connection the gadget binds", async () => {
+    let made = host();
+    await expect(openGadgetRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, GADGET_CALLER)).rejects.toThrow(SYSTEM_RUN_ENDED);
+    made.h.gadgetRuns.begin(7, { hookId: HOOK, gadgetId: GADGET });
+    let session = await openGadgetRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, GADGET_CALLER) as any;
+    await expect(session.read()).resolves.toBe("read");
+    for (let target of [{ type: "gatekeeper", id: 99 }, { type: "gadget", id: GADGET }, { type: "git" }]) {
+      await expect(openGadgetRunSession(made.h, target, GADGET_CALLER)).rejects.toThrow(target.type === "gatekeeper" ? SYSTEM_RUN_ENDED : GADGET_RUN_WRONG_CONNECTION);
+    }
+    await expect(openGadgetRunSession(made.h, { type: "gatekeeper", id: INFEROPS },
+        { ...GADGET_CALLER, run: { hookId: HOOK, deliveryId: 8 } })).rejects.toThrow(SYSTEM_RUN_ENDED);
+    // A stub the worker kept fails once the run ends.
+    made.h.gadgetRuns.end(7);
+    await expect(session.read()).rejects.toThrow(SYSTEM_RUN_ENDED);
   });
 });

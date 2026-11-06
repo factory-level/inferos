@@ -13,7 +13,8 @@ import type {
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
-  systemGatekeeperFacetName, type AssignedDelivery, type AssignedExecution, type SystemRunHost,
+  GadgetRunRegistry, SYSTEM_RUN_ENDED, openGadgetRunSession, runGadgetBindingsDelivery,
+  systemGatekeeperFacetName, type AssignedDelivery, type AssignedExecution, type GadgetRunCaller, type SystemRunHost,
   type SystemRunRequester,
 } from "./system-run.js";
 import {
@@ -114,7 +115,7 @@ import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank,
     bumpAuthzGeneration, readAuthzGeneration, watchAuthzCollection, watchAuthzSingleton,
     watchSharingAuthzInputs } from "./sharing";
-import { AutoApprovalDrainer, autoApprovalRule, enablerHasBuild, NO_ROLES, type EffectiveRoleLookup }
+import { AutoApprovalDrainer, autoApprovalRule, enablerHasBuild, manualOnly, NO_ROLES, type EffectiveRoleLookup }
     from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext } from "./observability";
@@ -189,13 +190,6 @@ export async function requireWorkflowInvoke(
 }
 
 /**
- * The refusal at a run's start (FAC-112) when the gadget's code moved on from the commit the run
- * was admitted for: a run on the gadget's bindings runs only the revision it pinned, never newer code.
- */
-export const WORKFLOW_RUN_CODE_CHANGED =
-  "The workflow's code changed after this run was asked for, so it didn't run. Ask for it again.";
-
-/**
  * The refusal of a write an assigned run proposes when it runs again after a restart (FAC-112) and
  * proposes, at some place, a different write than it did before: nothing is recorded.
  */
@@ -209,7 +203,6 @@ export const WORKFLOW_RUN_REPLAY_DIVERGED =
 export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
   let message = error instanceof Error ? error.message : "";
   if (message === RUN_REQUESTER_REVOKED) return "requester-revoked";
-  if (message === WORKFLOW_RUN_CODE_CHANGED) return "code-changed";
   if (message === SYSTEM_RUN_ASSIGNMENT_CHANGED || message === WORKFLOW_ASSIGNMENTS_DISABLED ||
       message === TRIGGER_AUTO_RETIRED) return "assignment-changed";
   if (message === "Hook has been deleted or disabled.") return "trigger-gone";
@@ -1185,6 +1178,9 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
   }
 }
 
+/** Which requested run proposed a write, and where (FAC-112; `ActionRecord.workflowRun`). */
+export type WorkflowRunWrite = { runId: string; hookId: number; deliveryId: number; proposal: number; attempt: number };
+
 export type ActionRecord = {
   id: number,
   gatekeeperId: WorkpieceId;
@@ -1229,6 +1225,12 @@ export type ActionRecord = {
    * while that assignment still holds (see openAssignedActionFacet).
    */
   executedAs?: AssignedExecution;
+  /**
+   * Set when an unassigned requested workflow run proposed it (FAC-112), through its gadget's own
+   * connection: the run, its place among the writes the run proposed, and the attempt. It applies
+   * through the connection's own facet, once the person who asked may still run it.
+   */
+  workflowRun?: WorkflowRunWrite;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1920,8 +1922,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           // Sparse (FAC-112): an assigned run's writes, by run and place, so a run that runs again
           // after a restart finds the write it already proposed at each place.
           byRunProposal(record: ActionRecord) {
-            return record.type === "action" && record.executedAs?.runId !== undefined &&
-                record.executedAs.proposal !== undefined
+            if (record.type !== "action") return null;
+            if (record.workflowRun) return `${record.workflowRun.runId}#${record.workflowRun.proposal}`;
+            return record.executedAs?.runId !== undefined && record.executedAs.proposal !== undefined
               ? `${record.executedAs.runId}#${record.executedAs.proposal}` : null;
           },
           byApprovalThread(record: ActionRecord) {
@@ -6594,6 +6597,12 @@ class OverseerImpl implements AgentHooks {
         throw error;
       }
     }
+    // An unassigned requested run's write is a protected point too (FAC-104, FAC-112): the person
+    // who asked must still be allowed to now. Asked, then re-read synchronously before it is sent.
+    if (!record.executedAs && record.workflowRun) {
+      let requester = await requireRunRequester(this, record.workflowRun.hookId, record.workflowRun.deliveryId);
+      requester.revalidate();
+    }
     let gatekeeper = assigned?.facet ?? this.getGatekeeperFacet(record.gatekeeperId);
     // An artifact publisher publishes as the person approving (see publishApprovedArtifact); an
     // auto-approval never publishes, since no person approved it.
@@ -6905,6 +6914,23 @@ class OverseerImpl implements AgentHooks {
   /** The admitted, assigned runs in flight (FAC-102; see system-run.ts). */
   systemRuns = new SystemRunRegistry();
 
+  /** The unassigned requested runs in flight (FAC-112; see system-run.ts). */
+  gadgetRuns = new GadgetRunRegistry();
+
+  /** The gadget modules of `commitId`, which a run-scoped worker loads (FAC-102, FAC-112). */
+  async workflowRunModules(commitId: string): Promise<Record<string, string>> {
+    let modules: Record<string, string> = {};
+    for (let [file, content] of await this.gitStore.readCommitFiles(commitId)) {
+      if (isGadgetModule(file)) modules[file] = content;
+    }
+    return modules;
+  }
+
+  /** Loads a run-scoped worker: fresh, with no outbound network (FAC-102, FAC-112). */
+  loadWorkflowRunWorker(code: { mainModule: string; modules: Record<string, string>; env: Record<string, unknown> }) {
+    return this.env.LOADER.load({compatibilityDate: "2026-02-01", ...code, globalOutbound: null});
+  }
+
   /**
    * Invocations a delivery has taken while their `invokeTrigger` call is still waiting (#374):
    * startHook adds one as `fire` consumes it, and invokeWorkflowTrigger reads and removes it to
@@ -6925,14 +6951,11 @@ class OverseerImpl implements AgentHooks {
       },
       bindingsOf: gadgetId => this.visibleBindings(this.getGadgetRecord(gadgetId)),
       makeLoopback: (gatekeeperId, caller) => this.makeBindingLoopback({type: "gatekeeper", id: gatekeeperId}, caller),
-      readModules: async commitId => {
-        let modules: Record<string, string> = {};
-        for (let [file, content] of await this.gitStore.readCommitFiles(commitId)) {
-          if (isGadgetModule(file)) modules[file] = content;
-        }
-        return modules;
-      },
-      loadWorker: code => this.env.LOADER.load({compatibilityDate: "2026-02-01", ...code, globalOutbound: null}),
+      readModules: commitId => this.workflowRunModules(commitId),
+      loadWorker: code => this.loadWorkflowRunWorker(code),
+      gadgetRuns: this.gadgetRuns,
+      openGadgetSession: (gatekeeperId, caller) =>
+          this.openGatekeeperSession(gatekeeperId, this.getGatekeeperFacet(gatekeeperId), caller),
       vendorIdOf: gatekeeperId => gatekeeperVendorId(this.storage.gatekeepers.get(gatekeeperId)),
       resourceUrlOf: gatekeeperId => gatekeeperResourceUrl(this.storage.gatekeepers.get(gatekeeperId)),
       vendor: vendorId => buildGatekeeperVendorMap(this.env).get(vendorId) as unknown as
@@ -6993,22 +7016,12 @@ class OverseerImpl implements AgentHooks {
     await Promise.all(this.#runningWorkflowRuns.values());
   }
 
-  /**
-   * The gadget's own hook code for trigger `hookId`, which a run on the gadget's bindings calls
-   * (FAC-112): the stored persistent callback of the live hook. A separate method only so tests can
-   * stand in for a gadget facet.
-   */
-  workflowRunCallback(hookId: number): NativeRpcStub<RpcTarget> {
-    return requireLiveHook(this, hookId).callback;
-  }
-
   // Runs one queued workflow run (FAC-112) from its delivery alone: the run record's executor
-  // decides how, and nothing the request or a page holds now is read. An assigned run executes as
-  // its service account from its pinned commit (runAssignedDelivery, with FAC-104's re-checks). A
-  // run on the gadget's bindings runs the gadget's code, so it runs only while that code is still
-  // the commit the run pinned: the person is re-checked (FAC-104), the head compared, the local
-  // state re-read synchronously, and then the hook code is called with no await in between. The
-  // outcome is recorded either way; a reset meanwhile leaves the run queued, to run again.
+  // decides how, and nothing the request or a page holds now is read. Either kind runs its pinned
+  // commit in a run-scoped worker, with FAC-104's re-checks: an assigned run as its service account
+  // (runAssignedDelivery), any other over the gadget's own connections (runGadgetBindingsDelivery).
+  // The outcome is recorded either way; a reset meanwhile leaves the run queued, to run again from
+  // its start, and the writes it already proposed are matched rather than repeated (submitActionNow).
   async #executeWorkflowRun(queued: QueuedWorkflowRun): Promise<void> {
     let store = this.workflowDefinitionStore();
     let delivery = store.startRun(queued.deliveryId);
@@ -7016,22 +7029,17 @@ class OverseerImpl implements AgentHooks {
     let { hookId, deliveryId, method, args } = queued;
     let error: unknown;
     try {
+      this.startWorkflowRunProposals(deliveryId);
       if (delivery.executedAs) {
-        this.startWorkflowRunProposals(deliveryId);
         await this.runAssignedDelivery(hookId,
             { deliveryId, commitId: delivery.commitId, credentialRef: delivery.executedAs.credentialRef }, method, args);
       } else {
+        // The manager's (a): from the pinned commit, in a run-scoped worker over the gadget's own
+        // connections, naming the run, never the gadget's live hook code.
         let requester = await requireRunRequester(this, hookId, deliveryId);
-        let record = requireLiveHook(this, hookId);
-        let gadgetId = record.gadgetId ?? this.defaultGadgetId;
-        if (gadgetId === undefined || this.getGadgetHead(gadgetId) !== delivery.commitId) {
-          throw new Error(WORKFLOW_RUN_CODE_CHANGED);
-        }
         requester.revalidate();
-        let callback = this.workflowRunCallback(hookId) as any;
-        await (method === null
-          ? Reflect.apply(callback, undefined, args)
-          : Reflect.apply(callback[method], callback, args));
+        await runGadgetBindingsDelivery(this.#systemRunHost(), hookId,
+            { deliveryId, commitId: delivery.commitId }, method, args, requester);
       }
     } catch (thrown) {
       error = thrown ?? new Error("The run failed.");
@@ -7048,6 +7056,25 @@ class OverseerImpl implements AgentHooks {
     else logger.warn("workflow run failed", { event: "workflow.run.failed", ...fields, runFailure: failure, error });
   }
 
+  // The place of the next write run `runId` (delivery `deliveryId`) proposes in this attempt
+  // (FAC-112), and the action already recorded there, if any. A run that runs again after a restart
+  // proposes the same writes in the same order: the write recorded at this place is the answer,
+  // not a second one, and a different write there refuses (fail closed). No place when the run
+  // isn't counting (its attempt didn't start here).
+  #runProposalPlace(runId: string, deliveryId: number, gatekeeperId: number, description: ActionDescription):
+      { proposal?: number; already?: number } {
+    let proposal = this.#workflowRunProposals.get(deliveryId);
+    if (proposal === undefined) return {};
+    this.#workflowRunProposals.set(deliveryId, proposal + 1);
+    let already = this.storage.actions.byRunProposal.get(`${runId}#${proposal}`);
+    if (!already) return { proposal };
+    if (already.type === "action" && already.gatekeeperId === gatekeeperId &&
+        JSON.stringify(already.description) === JSON.stringify(description)) {
+      return { proposal, already: already.id };
+    }
+    throw new Error(WORKFLOW_RUN_REPLAY_DIVERGED);
+  }
+
   /**
    * Starts counting the writes queued run `deliveryId` proposes (FAC-112), from place 0: called as
    * each attempt of an assigned run starts, so a run that runs again proposes from place 0 again.
@@ -7060,6 +7087,10 @@ class OverseerImpl implements AgentHooks {
   startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
     // A run-scoped worker's binding: only the assigned connection's system session (FAC-102).
     if (caller.from === "systemRun") return openSystemRunSession(this.#systemRunHost(), target, caller);
+    // An unassigned requested run's binding: its gadget's own session, live only while the run runs (FAC-112).
+    if (caller.from === "gadget" && caller.run) {
+      return openGadgetRunSession(this.#systemRunHost(), target, caller as GadgetRunCaller);
+    }
     // Before every case, so a tainted chat's agent reaches no gadget, worktree, git or
     // non-allowlisted gatekeeper code, whenever the mark landed (see chat-taint.ts).
     if (caller.from === "agent") this.#assertUsableWhileTainted(caller.chatId, target);
@@ -7572,21 +7603,9 @@ class OverseerImpl implements AgentHooks {
       if (run.gatekeeperId !== gatekeeperId) throw new Error("This workflow run can't propose actions on that connection.");
       // Both actors, for the audit (FAC-104): who asked for the run, and who it acts as.
       let admitted = this.workflowDefinitionStore().deliveryRun(caller.deliveryId)?.run;
-      // Its place among the writes this attempt proposed (FAC-112). A run that runs again after a
-      // restart proposes the same writes in the same order: the write already recorded at this
-      // place is the answer, not a second one, and a different write there refuses (fail closed).
-      let proposal = this.#workflowRunProposals.get(caller.deliveryId);
-      if (admitted && proposal !== undefined) {
-        this.#workflowRunProposals.set(caller.deliveryId, proposal + 1);
-        let already = this.storage.actions.byRunProposal.get(`${admitted.runId}#${proposal}`);
-        if (already) {
-          if (already.type === "action" && already.gatekeeperId === gatekeeperId &&
-              JSON.stringify(already.description) === JSON.stringify(description)) {
-            return already.id;
-          }
-          throw new Error(WORKFLOW_RUN_REPLAY_DIVERGED);
-        }
-      }
+      let place = admitted ? this.#runProposalPlace(admitted.runId, caller.deliveryId, gatekeeperId, description) : undefined;
+      if (place?.already !== undefined) return place.already;
+      let proposal = place?.proposal;
       executedAs = {
         hookId: caller.hookId, deliveryId: caller.deliveryId, credentialRef: run.credentialRef,
         ...(admitted ? {
@@ -7595,6 +7614,21 @@ class OverseerImpl implements AgentHooks {
           ...(proposal !== undefined ? { proposal } : {}),
         } : {}),
       };
+    }
+
+    // An unassigned requested run's write (FAC-112): only while the run runs, recorded with the run
+    // and its place, and matched, as an assigned run's is, when a replay proposes it again.
+    let workflowRun: WorkflowRunWrite | undefined;
+    if (caller.from === "gadget" && caller.run) {
+      this.gadgetRuns.require(caller as GadgetRunCaller);
+      let { hookId, deliveryId } = caller.run;
+      let admitted = this.workflowDefinitionStore().deliveryRun(deliveryId)?.run;
+      if (!admitted) throw new Error(RUN_REQUESTER_REVOKED);
+      let place = this.#runProposalPlace(admitted.runId, deliveryId, gatekeeperId, description);
+      if (place.already !== undefined) return place.already;
+      if (place.proposal === undefined) throw new Error(SYSTEM_RUN_ENDED);
+      let attempt = this.storage.workflowDeliveries.get(deliveryId)?.execution?.attempts ?? 1;
+      workflowRun = { runId: admitted.runId, hookId, deliveryId, proposal: place.proposal, attempt };
     }
 
     let actionId = this.storage.nextActionId.get();
@@ -7612,6 +7646,7 @@ class OverseerImpl implements AgentHooks {
       type: "action",
       description,
       ...(executedAs ? { executedAs } : {}),
+      ...(workflowRun ? { workflowRun } : {}),
     };
 
     // The marking walk stamps the verified push closure "pending push" -- the read grant that
@@ -7628,8 +7663,9 @@ class OverseerImpl implements AgentHooks {
     // Same auto-approval gate the drainer uses, named because awaitDecision uses it too. The drain
     // is deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
     let roleOf = this.enablerRoles();
-    // A person approves every write an assigned run proposes; no rule approves it (FAC-102).
-    let willAutoApprove = caller.from !== "systemRun" &&
+    // A person approves every write an assigned run proposes, and every write a requested run
+    // proposes again on a later attempt; no rule approves them (FAC-102, FAC-112).
+    let willAutoApprove = !manualOnly(record) &&
         autoApprovalRule(this.storage, roleOf, gatekeeperId, description) !== undefined;
     if (!willAutoApprove) this.traceAgentActionApproval(record, "requested");
 
@@ -8037,6 +8073,9 @@ class OverseerImpl implements AgentHooks {
     let gadgetId: WorkpieceId;
     if (caller.from === "gadget") {
       if (caller.gadgetId === undefined) throw new Error("Agent spawner has no calling gadget scope.");
+      // A requested run's worker (FAC-112) delegates nothing, as an assigned run's can't: the
+      // spawner would start an agent outside the run, on no run's authority.
+      if (caller.run) throw new Error("Agent spawner has no calling gadget scope.");
       gadgetId = caller.gadgetId;
       let gadget = this.getGadgetRecord(gadgetId);
       allowed = new Set([gadgetId,
@@ -13341,6 +13380,11 @@ type GatekeeperCaller = {
   // ActionRecords persisted before multi-gadget support have no gadgetId. `defaultGadgetId`
   // should be assumed when `gadgetId` is absent.
   gadgetId?: WorkpieceId;
+
+  // Set only on the bindings of an unassigned requested run's worker (FAC-112, GadgetRunCaller):
+  // the run that made the call, so its sessions live only while it runs and its writes name it.
+  // Server-set in the loopback's props, never by the worker.
+  run?: { hookId: number; deliveryId: number };
 } | {
   from: "user";
   chatId?: number;

@@ -1,17 +1,19 @@
 // FAC-112: a run a person asked for executes in the workspace's own Durable Object, from its stored
 // record, after the call that started it has returned: the firing's callback only queues it
-// (durably, beside its FAC-111 run record), and the Overseer's alarm runs it. So it carries on when
-// the browser that asked is gone, resumes after a restart with the same run id, revision and
-// authority, and runs only the code its revision pinned.
+// (durably, beside its FAC-111 run record), and the Overseer's alarm runs it in a run-scoped worker
+// loaded from its pinned commit. So it carries on when the browser that asked is gone, resumes
+// after a restart with the same run id, revision and authority, never runs newer code, and each
+// write it makes names it, so a replay repeats none.
 //
-// Over a real Overseer Durable Object. The gadget's hook code is the one seam: the workspace reads
-// it through `workflowRunCallback`, replaced here on the shared prototype so a restarted instance
-// reaches the same stand-in (a real gadget facet can't be minted from a test). Everything the run
-// is checked and executed from is the workspace's own storage.
+// Over a real Overseer Durable Object. The run-scoped worker's seams (the pinned commit's modules,
+// the dynamic worker, the binding loopback and the gadget's bindings) are replaced on the shared
+// prototype, so a restarted instance reaches the same stand-ins: a real dynamic worker and git
+// commit can't be made from a test. Everything the run is checked and executed from is the
+// workspace's own storage.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { RUN_REQUESTER_REVOKED, WORKFLOW_RUN_CODE_CHANGED, type OverseerDurableObject } from "../src/overseer.js";
+import { RUN_REQUESTER_REVOKED, type OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -39,6 +41,8 @@ afterEach(() => {
   for (let undo of restore.splice(0)) undo();
   calls = [];
   statesSeen = [];
+  loaded = { commitIds: [], envs: [] };
+  workflowRun = defaultWorkflowRun;
   answer = async () => "done";
 });
 
@@ -58,15 +62,37 @@ async function withImpl<T>(name: string, fn: (impl: any) => Promise<T> | T): Pro
   return runInDurableObject(stub, async (instance: OverseerDurableObject) => fn((instance as any).impl));
 }
 
-/** The stand-in hook code for `workspace`: records each call, and the run's state when it came. */
-function standIn(workspace: any) {
-  return {
-    onSchedule: async (...args: unknown[]) => {
-      calls.push({ method: "onSchedule", args });
-      statesSeen.push(structuredClone([...workspace.storage.workflowDeliveries.list()].at(-1)?.execution));
-      return answer();
-    },
-  };
+/** What the stand-in run-scoped worker loaded and ran, across instances. */
+let loaded: { commitIds: string[]; envs: Record<string, any>[] } = { commitIds: [], envs: [] };
+/** The stand-in `WorkflowRun.onSchedule` of the pinned code: gets the worker's env and the args. */
+let workflowRun = defaultWorkflowRun;
+/** By default the pinned code records each call, and the run's state when it came, then answers. */
+async function defaultWorkflowRun(workerEnv: Record<string, any>, args: unknown[]): Promise<unknown> {
+  calls.push({ method: "onSchedule", args });
+  statesSeen.push(structuredClone([...workerEnv.BOARD.workspace.storage.workflowDeliveries.list()].at(-1)?.execution));
+  return answer();
+}
+
+/**
+ * The run-scoped worker's seams, on the shared prototype (a real dynamic worker and git commit can't
+ * be made from a test): the pinned commit's modules, the worker loaded from them, the binding
+ * loopback (plain, so a run's write can be made with the caller it carries), and the gadget's
+ * bindings (BOARD, to the connection).
+ */
+function workerSeams(impl: any) {
+  onPrototype(impl, "workflowRunModules", async (commitId: string) => {
+    loaded.commitIds.push(commitId);
+    return { "server.js": `// ${commitId}` };
+  });
+  onPrototype(impl, "loadWorkflowRunWorker", (code: { env: Record<string, any> }) => {
+    loaded.envs.push(code.env);
+    return { getEntrypoint: () => ({ onSchedule: (...args: unknown[]) => workflowRun(code.env, args) }) };
+  });
+  onPrototype(impl, "makeBindingLoopback", function (this: unknown, target: unknown, caller: unknown) {
+    return { target, caller, workspace: this };
+  });
+  onPrototype(impl, "visibleBindings", () => [["BOARD", { target: CONNECTION }]]);
+  onPrototype(impl, "getGadgetRecord", () => ({}));
 }
 
 /**
@@ -74,9 +100,7 @@ function standIn(workspace: any) {
  * PERSON, and one admitted run PERSON asked for, fired. Returns the delivery.
  */
 function admitted(impl: any, opts: { assigned?: boolean } = {}) {
-  onPrototype(impl, "workflowRunCallback", function (this: any) {
-    return standIn(this);
-  });
+  workerSeams(impl);
   onPrototype(impl, "getGadgetHead", (id: number) => (id === GADGET ? commit(1) : undefined));
   impl.storage.gatekeepers.put({
     id: CONNECTION, resourceTitle: "Scheduled Tasks", class: {} as any,
@@ -166,29 +190,54 @@ describe("a requested run across a restart (FAC-112)", () => {
     expect(done.execution).toMatchObject({ state: "finished", attempts: 1 });
   });
 
-  // Round 1 (review HIGH): a gadget-bindings run's writes go through the gadget's own sessions,
-  // which name no run, so running it again could repeat an applied (even auto-approved) write.
-  // Interrupted while running, it isn't run again: it ends as interrupted, with its one write.
-  it("on the gadget's bindings, interrupted while running, isn't run again: no second write", async () => {
+  // Round 2 (the manager's (a)): a gadget-bindings run executes in a run-scoped worker from its
+  // pinned commit, and its writes name it, so an interrupted run runs again from its start and its
+  // repeated write is the one already recorded, never a second, applied or not.
+  it("on the gadget's bindings, interrupted after an applied write, runs again without writing twice", async () => {
     let name = `run-exec-midrun-${crypto.randomUUID()}`;
+    let attempt = 0;
     let id = await withImpl(name, impl => {
       let delivery = admitted(impl);
-      answer = () => {
-        // The run's write lands, then the restart interrupts the run before it ends.
-        submitted(impl, { from: "gadget", gadgetId: GADGET });
-        return new Promise(() => {});
+      workflowRun = async workerEnv => {
+        attempt++;
+        let workspace = workerEnv.BOARD.workspace;
+        let actionId = workspace.submitActionNow(CONNECTION, 1, DESCRIPTION, workerEnv.BOARD.caller);
+        // The write was applied (as an auto-approval would), then the restart interrupts the run.
+        if (attempt === 1) {
+          workspace.storage.actions.put({ ...workspace.storage.actions.get(actionId), state: "approved", autoApproved: true });
+          return new Promise(() => {});
+        }
+        return "ran";
       };
       impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
       void impl.runQueuedWorkflowRuns();
       return delivery.deliveryId;
     });
     await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(1)));
-    answer = async () => "done";
     await abortAllDurableObjects();
     let done = await settled(name, id);
-    expect(calls.map(c => c.method)).toEqual(["onSchedule"]);
-    expect(done.execution).toMatchObject({ state: "failed", failure: "interrupted", attempts: 1 });
-    expect(await withImpl(name, impl => actionsOf(impl))).toHaveLength(1);
+    expect(attempt).toBe(2);
+    expect(done.execution).toMatchObject({ state: "finished", attempts: 2 });
+    let actions = await withImpl(name, impl => actionsOf(impl));
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({
+      state: "approved", workflowRun: { runId: done.run.runId, deliveryId: id, proposal: 0, attempt: 1 },
+    });
+  });
+
+  it("on the gadget's bindings, a replay that proposes a different write than before is refused", async () => {
+    await withImpl(`run-exec-diverge-gadget-${crypto.randomUUID()}`, impl => {
+      let delivery = admitted(impl);
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: delivery.deliveryId } };
+      impl.workflowDefinitionStore().startRun(delivery.deliveryId);
+      impl.gadgetRuns.begin(delivery.deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(delivery.deliveryId);
+      submitted(impl, caller);
+      impl.startWorkflowRunProposals(delivery.deliveryId);
+      expect(() => impl.submitActionNow(CONNECTION, 2, { ...DESCRIPTION, title: "Close issue" }, caller))
+        .toThrow("proposed a different write");
+      expect(actionsOf(impl)).toHaveLength(1);
+    });
   });
 
   // Round 1 (review HIGH): an assigned run's writes name their run, so a replay's writes are the
@@ -236,19 +285,61 @@ describe("a requested run across a restart (FAC-112)", () => {
 });
 
 describe("a requested run uses only its stored starting context (FAC-112)", () => {
-  it("doesn't run code that changed after it was admitted, and says why", async () => {
+  // Round 2 (the manager's (a)): the page edited mid-run reaches the gadget's own facet only; the
+  // run's worker was loaded from the pinned commit, and it finishes on it.
+  it("on the gadget's bindings, finishes on its pinned revision when the page is edited mid-run", async () => {
     let name = `run-exec-code-${crypto.randomUUID()}`;
     let id = await withImpl(name, impl => {
       let delivery = admitted(impl);
+      workflowRun = async workerEnv => {
+        // The page's code is edited while the run runs: the gadget's head moves on.
+        onPrototype(workerEnv.BOARD.workspace, "getGadgetHead", (gid: number) => (gid === GADGET ? commit(2) : undefined));
+        return "ran";
+      };
       impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
-      // The page's code is edited meanwhile: the gadget's head moves on from the pinned commit.
-      onPrototype(impl, "getGadgetHead", (gid: number) => (gid === GADGET ? commit(2) : undefined));
       return delivery.deliveryId;
     });
     let done = await settled(name, id);
-    expect(calls).toEqual([]);
-    expect(done.execution).toMatchObject({ state: "failed", failure: "code-changed" });
-    expect(JSON.stringify(done)).not.toContain(WORKFLOW_RUN_CODE_CHANGED);
+    expect(calls).toEqual([]); // never the gadget's own hook code
+    expect(loaded.commitIds).toEqual([commit(1)]);
+    expect(done.execution).toMatchObject({ state: "finished", attempts: 1 });
+  });
+
+  it("on the gadget's bindings, gives the worker only the gadget's connections, each carrying the run", async () => {
+    let name = `run-exec-env-${crypto.randomUUID()}`;
+    let id = await withImpl(name, impl => {
+      let delivery = admitted(impl);
+      workflowRun = async workerEnv => {
+        workerEnv.BOARD.workspace.submitActionNow(CONNECTION, 1, DESCRIPTION, workerEnv.BOARD.caller);
+        return "ran";
+      };
+      impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+      return delivery.deliveryId;
+    });
+    let done = await settled(name, id);
+    expect(Object.keys(loaded.envs[0]!)).toEqual(["BOARD"]);
+    expect(loaded.envs[0]!.BOARD.caller).toEqual({ from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: id } });
+    let actions = await withImpl(name, impl => actionsOf(impl));
+    expect(actions).toEqual([expect.objectContaining({
+      workflowRun: { runId: done.run.runId, hookId: HOOK, deliveryId: id, proposal: 0, attempt: 1 },
+    })]);
+  });
+
+  it("on the gadget's bindings, re-checks the person at a queued write: taken off the control, it stays pending", async () => {
+    await withImpl(`run-exec-write-${crypto.randomUUID()}`, async impl => {
+      let delivery = admitted(impl);
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: delivery.deliveryId } };
+      impl.workflowDefinitionStore().startRun(delivery.deliveryId);
+      impl.gadgetRuns.begin(delivery.deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(delivery.deliveryId);
+      let actionId = submitted(impl, caller);
+      impl.workflowDefinitionStore().setControl(ADA, HOOK, { label: "Run refunds", invokers: ["someone-else"] });
+      impl.getGatekeeperFacet = () => { throw new Error("the write was sent"); };
+      let refused = await impl.applyPendingAction(impl.storage.actions.get(actionId), ADA, false)
+        .then(() => "applied", (e: Error) => e.message);
+      expect(refused).toBe(RUN_REQUESTER_REVOKED);
+      expect(impl.storage.actions.get(actionId).state).toBe("pending");
+    });
   });
 
   it("runs an assigned run from its pinned commit as its service account, whatever the page holds now", async () => {

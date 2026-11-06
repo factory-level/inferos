@@ -109,6 +109,22 @@ describe("AutoApprovalDrainer.drain", () => {
     }
   });
 
+  // FAC-112 round 2: a write a requested workflow run proposes on a later attempt (a replay after a
+  // restart) always waits for a person, even under a rule that would approve it on the first.
+  it("applies a run's first-attempt write under its rule, and leaves a replayed run's write for a person", async () => {
+    let storage = makeStorage();
+    enableRule(storage);
+    putAction(storage, 1);
+    putAction(storage, 2);
+    for (let [id, attempt] of [[1, 1], [2, 2]] as const) {
+      storage.actions.put({ ...getAction(storage, id), workflowRun: { runId: "run", hookId: 3, deliveryId: 4, proposal: id - 1, attempt } });
+    }
+    let { applyFn, calls } = makeImmediateApply(storage);
+    await new AutoApprovalDrainer(storage, resolvedRoles, applyFn).drain(GK);
+    expect(calls).toEqual([1]);
+    expect(getAction(storage, 2).state).toBe("pending");
+  });
+
   it("stops at a manual gate without skipping ahead, then resumes once it clears", async () => {
     let storage = makeStorage();
     enableRule(storage);

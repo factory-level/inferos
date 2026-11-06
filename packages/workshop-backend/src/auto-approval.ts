@@ -48,6 +48,14 @@ export function enablerHasBuild(rule: AutoApproveTagRecord, roleOf: EffectiveRol
  * this gatekeeper and still has Build access, and the workspace has not latched restricted mode;
  * else undefined.
  */
+/**
+ * Whether no auto-approval rule may approve `record` (FAC-102, FAC-112): a write an assigned run
+ * proposed, or one a requested run proposed on a later attempt, after a restart ran it again.
+ */
+export function manualOnly(record: { caller: { from: string }; workflowRun?: { attempt: number } }): boolean {
+  return record.caller.from === "systemRun" || (record.workflowRun !== undefined && record.workflowRun.attempt > 1);
+}
+
 export function autoApprovalRule(
     storage: AutoApprovalStorage, roleOf: EffectiveRoleLookup, gatekeeperId: number,
     description: ActionDescription)
@@ -137,8 +145,9 @@ export class AutoApprovalDrainer {
     for (let record of pending) {
       if (record.type !== "action") continue;
 
-      // A person approves every write an assigned workflow run proposes (FAC-102): a manual gate.
-      let rule = record.caller.from === "systemRun" ? undefined
+      // A person approves every write an assigned workflow run proposes (FAC-102), and every write
+      // a requested run proposes again on a later attempt (FAC-112): a manual gate.
+      let rule = manualOnly(record) ? undefined
           : autoApprovalRule(this.storage, roleOf, gatekeeperId, record.description);
       if (rule === undefined) {
         // A manual gate. Stop rather than skipping ahead to any later auto-eligible action.
