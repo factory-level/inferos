@@ -1,7 +1,8 @@
 import {
   WIDGET_STATE_ERROR_CODES, WidgetStateError, WidgetStateMemory, parseOperateWidgetRef,
-  widgetStateKey, type OperateWidgetRef, type WidgetStateMachine, type WidgetStateSnapshot,
+  widgetStateKey, type OperateWidgetRef, type WidgetStateMachine, type WidgetStateSnapshot, type WidgetNavigation,
 } from "@gadgets/workshop-shared/widget-state";
+import { canvasPageEffects } from "@gadgets/workshop-shared/canvas-model";
 import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import type { OperateReadRun } from "@gadgets/workshop-shared/api";
 import { handleOperateAgui } from "./operate-agui.js";
@@ -1047,8 +1048,54 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   async transitionWidget(ref: OperateWidgetRef, event: string, expectedSeq: number): Promise<WidgetStateSnapshot> {
     let machine = await this.#widgetMachine(ref);
     let key = widgetStateKey(ref);
-    if (machine.persistence === "person") return this.user().transitionWidgetState(key, machine, event, expectedSeq);
-    return (await this.#sessionWidgets()).transition(key, machine, event, expectedSeq);
+    let snapshot = machine.persistence === "person"
+      ? await this.user().transitionWidgetState(key, machine, event, expectedSeq)
+      : (await this.#sessionWidgets()).transition(key, machine, event, expectedSeq);
+    let navigation = await this.#wiredNavigation(parseOperateWidgetRef(ref), event);
+    return navigation ? { ...snapshot, navigation } : snapshot;
+  }
+
+  // FAC-94: where `event` on widget `ref` leads, if the published page the person is shown wires it
+  // to `navigate`, and the move made there through the person's own checked dispatch: showScreen
+  // within the open view, else openView of a view showing that screen. The page is read through the
+  // person's own access, from the console open on their page at the widget's revision. Nothing is
+  // navigated for an unwired event, a widget the page doesn't place, a console not open at that
+  // revision, a running flow (it moves by its own routes, FAC-87) or a page that can't be read; the
+  // widget's transition has already happened and stands. Only `navigate` runs: publication refuses
+  // a widget event that leads to a requested action (`publishedPages`), so none grants authority.
+  async #wiredNavigation(ref: OperateWidgetRef, event: string): Promise<WidgetNavigation | null> {
+    let page = await this.user().getOperatePage();
+    let run = page.state.console;
+    if (!run || page.state.flow || run.source !== "published" || run.workspaceId !== ref.workspaceId ||
+        run.consoleId !== ref.consoleId || run.revision !== ref.revision) {
+      return null;
+    }
+    let saved, shown;
+    try {
+      using workspace = await this.openConsoleWorkspace(run.workspaceId);
+      saved = await workspace.getConsole(run.consoleId, "published");
+      let view = saved?.views.find(candidate => candidate.id === run.viewId);
+      let screenId = run.screenId ?? (view?.type === "screen" ? view.screen : null);
+      shown = saved && saved.revision === run.revision && screenId !== null
+        ? await workspace.getConsolePage(run.consoleId, screenId, "published") : null;
+    } catch {
+      return null;
+    }
+    if (!saved || !shown) return null;
+    let target = canvasPageEffects(shown, `gadget:${ref.gadgetId}`, event).find(effect => effect.kind === "navigate");
+    if (!target) return null;
+    let screenId = target.page;
+    let view = saved.views.find(candidate => candidate.id === run.viewId);
+    let within = view?.type === "rollup" ? view.screens.includes(screenId) : view?.screen === screenId;
+    let other = saved.views.find(candidate => candidate.type === "screen" && candidate.screen === screenId);
+    let move: OperateEvent | null = within ? { type: "showScreen", screenId } : other ? { type: "openView", viewId: other.id } : null;
+    if (!move) return { screenId, outcome: "refused" };
+    try {
+      await this.dispatch(move, page.seq);
+      return { screenId, outcome: "shown" };
+    } catch {
+      return { screenId, outcome: "refused" };
+    }
   }
 
   /**

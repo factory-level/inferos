@@ -8,8 +8,9 @@ import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
-  WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure,
+  WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
 } from "@gadgets/workshop-shared/workflow-definition";
+import { WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS } from "@gadgets/workshop-shared/workflow-definition";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
@@ -61,7 +62,7 @@ import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeC
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
 import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
-import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
+import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionOutcome, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
@@ -193,6 +194,22 @@ export async function requireWorkflowInvoke(
  * The fixed category stored for a run that threw `error` (FAC-112): known refusals by their own
  * words, anything else `runtime-error`. Never stores the words themselves.
  */
+/**
+ * What a run's code returned, kept as its report (FAC-114): plain JSON of at most
+ * `WORKFLOW_RUN_REPORT_MAX_CHARS`, `{ truncated: true }` when larger, nothing when it returned
+ * nothing or something that isn't JSON.
+ */
+export function boundedRunReport(returned: unknown): unknown {
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(returned);
+  } catch {
+    return undefined;
+  }
+  if (text === undefined) return undefined;
+  return text.length > WORKFLOW_RUN_REPORT_MAX_CHARS ? { truncated: true } : JSON.parse(text);
+}
+
 export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
   let message = error instanceof Error ? error.message : "";
   if (message === RUN_REQUESTER_REVOKED) return "requester-revoked";
@@ -1953,6 +1970,12 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
         },
 
         nonUniqueIndexes: {
+          // Sparse (FAC-114): every write a requested run proposed, by its run, so the run's result
+          // weighs them and the person who asked reads them by id.
+          byRun(record: ActionRecord) {
+            if (record.type !== "action") return null;
+            return record.workflowRun?.runId ?? record.executedAs?.runId ?? null;
+          },
           // Sparse index over just the pending records, keyed by gatekeeper, so the auto-approval
           // drain is O(pending on that gatekeeper) rather than a full-log scan.
           pendingByGatekeeper(record: ActionRecord) {
@@ -6529,8 +6552,13 @@ class OverseerImpl implements AgentHooks {
   // does not succeed is recorded before it throws (see #recordUnsuccessfulApply).
   async applyPendingAction(record: ActionRecord & {type: "action"},
                            resolvedBy: AiChatAuthorInfo, autoApproved: boolean): Promise<void> {
-    await this.withActionClaim(record.id,
-        () => this.#applyPendingAction(record, resolvedBy, autoApproved));
+    try {
+      await this.withActionClaim(record.id,
+          () => this.#applyPendingAction(record, resolvedBy, autoApproved));
+    } finally {
+      // Whatever the apply came to, a requested run that proposed it is weighed again (FAC-114).
+      this.settleRunOfAction(record.id);
+    }
   }
 
   // Runs `decide` as the one decision under way for a pending action: an apply (applyPendingAction)
@@ -6568,6 +6596,8 @@ class OverseerImpl implements AgentHooks {
         outcome: "unknown", message: INTERRUPTED_APPLY_MESSAGE, retryable: false, startedAt, at: new Date(),
       };
       this.storage.actions.put(record);
+      // A requested run that proposed it may now be uncertain (FAC-114).
+      this.settleRunOfAction(record.id);
     }
   }
 
@@ -7054,17 +7084,18 @@ class OverseerImpl implements AgentHooks {
     if (!delivery) return;
     let { hookId, deliveryId, method, args } = queued;
     let error: unknown;
+    let returned: unknown;
     try {
       this.startWorkflowRunProposals(deliveryId);
       if (delivery.executedAs) {
-        await this.runAssignedDelivery(hookId,
+        returned = await this.runAssignedDelivery(hookId,
             { deliveryId, commitId: delivery.commitId, credentialRef: delivery.executedAs.credentialRef }, method, args);
       } else {
         // The manager's (a): from the pinned commit, in a run-scoped worker over the gadget's own
         // connections, naming the run, never the gadget's live hook code.
         let requester = await requireRunRequester(this, hookId, deliveryId);
         requester.revalidate();
-        await runGadgetBindingsDelivery(this.#systemRunHost(), hookId,
+        returned = await runGadgetBindingsDelivery(this.#systemRunHost(), hookId,
             { deliveryId, commitId: delivery.commitId }, method, args, requester);
       }
     } catch (thrown) {
@@ -7076,10 +7107,94 @@ class OverseerImpl implements AgentHooks {
     // executor may see, so its words stay in this log.
     let failure = error === undefined ? undefined : workflowRunFailureOf(error);
     store.endRun(deliveryId, failure);
+    // Its completion (FAC-114): the code's settled call, with what it returned as the report.
+    this.#settleRun(deliveryId, error === undefined ? boundedRunReport(returned) : undefined);
     let run = delivery.run;
     let fields = { hookId, deliveryId, ...(run ? { runId: run.runId } : {}), attempts: delivery.execution?.attempts };
     if (error === undefined) logger.info("workflow run finished", { event: "workflow.run.finished", ...fields });
     else logger.warn("workflow run failed", { event: "workflow.run.failed", ...fields, runFailure: failure, error });
+  }
+
+  // A write a run proposed, as its outcome stands now (FAC-114): `actionOutcome`'s reading, with an
+  // apply under way (started durably, or claimed here) as `running`.
+  #runWriteOutcome(record: ActionRecord & {type: "action"}): ActionOutcome {
+    return actionOutcome({
+      ...record, applying: record.applyStartedAt !== undefined || this.#claimedActions.has(record.id),
+    } as unknown as Extract<ActionLogEntry, { type: "action" }>);
+  }
+
+  #runWrites(runId: string): (ActionRecord & {type: "action"})[] {
+    return [...this.storage.actions.byRun.get(runId)].filter(
+        (record): record is ActionRecord & {type: "action"} => record.type === "action");
+  }
+
+  // Evaluate requested run `deliveryId`'s result (FAC-114; inferos ADR 0012 §3, proposed) from its
+  // execution and its own writes, and record it with run history delivered. `succeeded` needs its
+  // code to have finished and none of its writes to be waiting, applying or unknown; any unknown
+  // write makes it `uncertain`, as does a throw after it proposed a write; a throw before any is
+  // `failed`. Called as the run ends (with its report) and as each of its writes settles, so a run
+  // waiting on a write moves on when that write does, and an uncertain one when it's reconciled.
+  #settleRun(deliveryId: number, report?: unknown): void {
+    let store = this.workflowDefinitionStore();
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    let execution = delivery?.execution;
+    if (!delivery?.run || !execution || (execution.state !== "finished" && execution.state !== "failed")) return;
+    let outcomes = this.#runWrites(delivery.run.runId).map(record => this.#runWriteOutcome(record));
+    let kept = report === undefined ? delivery.result?.report : report;
+    let result: Omit<WorkflowRunResult, "settledAt">;
+    if (execution.state === "failed") {
+      result = outcomes.length > 0
+        ? { outcome: "uncertain", reason: "lost-after-write" }
+        : { outcome: "failed", ...(execution.failure ? { reason: execution.failure } : {}) };
+    } else if (outcomes.includes("unknown")) {
+      result = { outcome: "uncertain", reason: "action-unknown" };
+    } else if (outcomes.includes("waiting") || outcomes.includes("running")) {
+      result = { outcome: "waiting" };
+    } else {
+      result = { outcome: "succeeded" };
+    }
+    store.recordResult(deliveryId, { ...result, ...(kept !== undefined ? { report: kept } : {}) });
+  }
+
+  /**
+   * Re-evaluate the result of the requested run that proposed action `actionId`, if one did
+   * (FAC-114): called whenever that action's state changes (applied, refused, rejected, or found
+   * unknown after a restart).
+   */
+  settleRunOfAction(actionId: number): void {
+    let record = this.storage.actions.get(actionId);
+    if (record?.type !== "action") return;
+    let deliveryId = record.workflowRun?.deliveryId ?? record.executedAs?.deliveryId;
+    if (deliveryId !== undefined) this.#settleRun(deliveryId);
+  }
+
+  /**
+   * What `profileId`, who asked for run `invocationId`, reads of it (FAC-114): null for anyone
+   * else, and for a request that made no run. A run admitted and never queued within
+   * `WORKFLOW_RUN_START_WINDOW_MS` reads `uncertain` (`not-started`); before that, `queued`.
+   */
+  getRequestedRun(profileId: string, invocationId: string): RequestedRun | null {
+    let delivery = this.workflowDefinitionStore().deliveryOfInvocation(invocationId);
+    if (!delivery?.run || delivery.invocation?.requestedBy !== profileId) return null;
+    let outcome: WorkflowRunOutcome;
+    let reason: RequestedRun["reason"];
+    if (delivery.result) {
+      ({ outcome, reason } = delivery.result);
+    } else if (delivery.execution) {
+      outcome = delivery.execution.state === "running" ? "running" : "queued";
+    } else if (Date.now() - delivery.at.getTime() > WORKFLOW_RUN_START_WINDOW_MS) {
+      outcome = "uncertain";
+      reason = "not-started";
+    } else {
+      outcome = "queued";
+    }
+    return {
+      runId: delivery.run.runId, invocationId, revision: delivery.revision, requestedAt: delivery.at,
+      outcome, ...(reason ? { reason } : {}),
+      actions: this.#runWrites(delivery.run.runId).map(record => ({
+        actionId: record.id, outcome: this.#runWriteOutcome(record),
+      })),
+    };
   }
 
   // What identifies the write run `runId` (delivery `deliveryId`) proposes now (FAC-112): the
@@ -14072,6 +14187,9 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
     return this.impl.invokeTrigger(this.clientUserId, this.clientProfileId, hookId);
   }
+  async getRequestedRun(invocationId: string): Promise<RequestedRun | null> {
+    return this.impl.getRequestedRun(this.clientProfileId, invocationId);
+  }
 
   #consoleStore(): WorkspaceConsoleStore {
     if (!this.impl.ownerId) throw new Error("Workspace has been deleted.");
@@ -15631,6 +15749,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       });
     });
     this.impl.traceAgentActionApproval(action, "denied");
+    // A requested run that proposed it is weighed again (FAC-114).
+    this.impl.settleRunOfAction(id);
 
     // Deny leaves the turn ended, like denyConnectionRequest. The rejected record also prevents a
     // sibling approval from resuming this turn. Like an approval, though, clearing this manual gate
@@ -16710,6 +16830,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
     return this.impl.invokeTrigger(this.clientUserId, this.clientProfileId, hookId);
   }
+  async getRequestedRun(invocationId: string): Promise<RequestedRun | null> {
+    return this.impl.getRequestedRun(this.clientProfileId, invocationId);
+  }
   // An operator granted "use" reaches the published consoles of the workspace without Build,
   // read-only: a console is references and presentation, and grants nothing. Drafts, and every
   // write, stay build-only.
@@ -17355,6 +17478,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> { this.#deny(); }
   async invokeTrigger(_hookId: number): Promise<WorkflowInvocation> { this.#deny(); }
+  async getRequestedRun(_invocationId: string): Promise<RequestedRun | null> { this.#deny(); }
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent)
@@ -18181,6 +18305,15 @@ export async function invokeWorkflowTrigger(
     // `invoke`, our own refusal when we gave one, and otherwise that it couldn't run just now.
     let taken = impl.takenInvocations.get(invocation.id) === true;
     store.cancelInvocation(invocation.id);
+    // Taken and queued, the run is the workspace's own from here (FAC-112): a lost answer from the
+    // gatekeeper is no refusal, so the person gets the request back and reads its result later
+    // (getRequestedRun, FAC-114).
+    if (taken && store.deliveryOfInvocation(invocation.id)?.execution) {
+      logger.warn("on-request run queued; the gatekeeper's answer was lost", {
+        event: "workflow.invoke.answer_lost", hookId, error,
+      });
+      return invocation;
+    }
     if (taken) throw error;
     // The replaced error stays here, in the log: a fixed refusal carries no `cause`, since RPC
     // would send it to the invoker along with the words meant to replace it (#374 re-QA).

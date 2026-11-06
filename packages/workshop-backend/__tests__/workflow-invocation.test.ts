@@ -242,6 +242,25 @@ describe("through the Overseer", () => {
     }
   });
 
+  // FAC-114: an acknowledgement lost after the run was queued is not a refusal: the run is the
+  // workspace's own from the queue on (FAC-112), so the person gets their request back, and reads
+  // its result later (getRequestedRun), rather than being told it didn't run.
+  it("answers with the request, not a refusal, when the gatekeeper's answer is lost after the run was queued", async () => {
+    let made: Awaited<ReturnType<typeof session>> | undefined;
+    made = await session("use", {
+      invoke: async (...args: unknown[]) => {
+        let { invocationId } = args[0] as { invocationId: string };
+        made!.takenInvocations.set(invocationId, true);
+        let delivery = made!.store.fire(HOOK, GADGET, headOf, everyoneBuilds, invocationId)!;
+        made!.store.queueRun(HOOK, delivery.deliveryId, "onSchedule", [{ firedAt: "now" }]);
+        throw new Error("internal: the connection dropped before the answer");
+      },
+    });
+    let invocation = await made.overseer.invokeTrigger(HOOK);
+    expect(invocation).toMatchObject({ hookId: HOOK, id: expect.any(String) });
+    expect(made.store.queuedRuns()).toHaveLength(1);
+  });
+
   // Re-QA on #374: a fixed refusal must not carry the error it replaced. RPC serialises `cause`, so
   // a refusal built with one handed the invoker the gatekeeper's own words after all.
   it("never sends the replaced error along with a fixed refusal", async () => {

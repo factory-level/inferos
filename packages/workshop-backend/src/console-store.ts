@@ -1,7 +1,7 @@
 import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
-import { canvasDefinitionProjection, canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import { canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasWidgetEventsHeard, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
 import { nestedPage, readCanvasDefinition } from "./canvas-store";
 import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
@@ -453,7 +453,7 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
   let { publishedBy, checkWidgets = false } = options;
   let { id, revision, published: _, ...content } = stored;
   checkConsoleWidgets(storage, content, commits);
-  let screens = publishedPages(storage, content, checkWidgets);
+  let screens = publishedPages(storage, content, checkWidgets, commits);
   let flows = publishedFlows(storage, content);
   // Apps are fenced, not copied: they keep their storage and bindings (see `ConsolePublishedApp`).
   let apps = placedApps(storage, content).flatMap(({ gadgetId, commitId }): ConsolePublishedApp[] =>
@@ -504,14 +504,18 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
 
 // Each screen `content` shows that exists, with its row and the page it stands for now, for its
 // publication. Behavior on a page may navigate only to a page the console also shows, so an
-// operator is never sent to one the publication has no copy of; otherwise nothing is published.
+// operator is never sent to one the publication has no copy of, and may listen for a gadget
+// widget's own event only when that gadget's current commit, one of `commits`, declares it in its
+// states (FAC-94), so a wired event the frozen widget can never raise isn't published, and only if
+// that event leads to no requested action, since a widget event runs only navigation; otherwise
+// nothing is published.
 // With `checkWidgets` (the publish path only), each screen's widgets must also still parse
 // (FAC-99): a widget's typed read binding (FAC-92)
 // must be valid, match its widget and name its widget's own reference, and that reference must be
 // well formed. Storage written outside the editor, or before those rules, is refused here, before
 // anything is copied, rather than released to operators.
-function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages">, content: OperateConsoleContent,
-    checkWidgets: boolean) {
+function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages" | "gadgets">, content: OperateConsoleContent,
+    checkWidgets: boolean, commits?: SourceCommits) {
   let shown = new Set(consoleScreens(content));
   return consoleScreens(content).flatMap(screenId => {
     let row = storage.canvases.get(screenId);
@@ -534,8 +538,27 @@ function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages"
         }
       }
     }
+    for (let heard of page ? canvasWidgetEventsHeard(page) : []) {
+      let gadgetId = Number(CANVAS_GADGET_REF.exec(heard.targetRef)![1]);
+      if (!widgetDeclaresEvent(storage, commits, gadgetId, heard.event)) {
+        throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId} listens for "${heard.event}", which gadget ${gadgetId} doesn't declare.`);
+      }
+      // Only navigation runs from a widget event, so none can reach a capability (FAC-94).
+      if (canvasPageEffects(page!, heard.targetRef, heard.event).some(effect => effect.kind === "request-action")) {
+        throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId}'s event "${heard.event}" leads to a requested action, which a widget event can't run.`);
+      }
+    }
     return [{ screenId, row, page }];
   });
+}
+
+// Whether gadget `gadgetId`'s current commit, one of `commits`, declares `event` among its states
+// transitions. Without `commits`, or for a gadget that has no such commit, it declares none.
+function widgetDeclaresEvent(storage: Pick<ConsoleStorage, "gadgets">, commits: SourceCommits | undefined,
+    gadgetId: WorkpieceId, event: string): boolean {
+  let record = storage.gadgets.get(gadgetId);
+  let commit = record?.type === "gadget" && record.commitId ? commits?.get(record.commitId) : undefined;
+  return commit?.states?.transitions.some(transition => transition.event === event) ?? false;
 }
 
 // The flows `content` lists, each copied as it is now, for its publication. Each must still exist,

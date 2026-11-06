@@ -344,9 +344,14 @@ function checkAttachments(page: CanvasPage, byId: ReadonlyMap<string, CanvasNode
   }
   for (const owner of owners) {
     const emits = owner.node?.nodeType === "widget" && CANVAS_WIDGET_ACTIONS[owner.node.kind].length > 0;
+    // A gadget widget raises its own declared events (FAC-86 states). Which it declares is in its
+    // commit, not this page, so here any well-formed name that isn't an action event is accepted,
+    // and publication checks it against the frozen widget (FAC-94, `canvasWidgetEventsHeard`).
+    const ownEvents = owner.node?.nodeType === "widget" && owner.node.kind === "inferos.gadget";
     for (const attachment of owner.attachments) {
       const declared = emits && actionEvents.includes(attachment.on);
-      if (!declared && !raised.has(key(owner.id, attachment.on))) return reject("unknown-event", attachment.id);
+      const own = ownEvents && !actionEvents.includes(attachment.on);
+      if (!declared && !own && !raised.has(key(owner.id, attachment.on))) return reject("unknown-event", attachment.id);
     }
   }
   const finished = new Set<string>();
@@ -360,6 +365,68 @@ function checkAttachments(page: CanvasPage, byId: ReadonlyMap<string, CanvasNode
     finished.add(from);
   };
   for (const from of edges.keys()) if (!finished.has(from)) visit(from, new Set());
+}
+
+/** One attachment on a gadget widget that listens for the widget's own declared event (FAC-94). */
+export interface CanvasWidgetEventHeard {
+  /** The widget node the attachment is on. */
+  nodeId: string;
+  /** The widget's `gadget:<id>` reference. */
+  targetRef: string;
+  /** The event it listens for, which the widget's states must declare. */
+  event: string;
+  /** The attachment's ID. */
+  attachmentId: string;
+}
+
+/**
+ * Every attachment on a parsed page's gadget widgets that listens for the widget's own event: one
+ * no attachment on the page raises on that widget. Publication checks each against the frozen
+ * widget's declared events (FAC-94); the page itself can't know them.
+ */
+export function canvasWidgetEventsHeard(page: CanvasPage): CanvasWidgetEventHeard[] {
+  const raised = new Set<string>();
+  for (const owner of [page, ...page.nodes]) {
+    for (const attachment of owner.attachments) {
+      if (attachment.effect.kind === "raise-event") raised.add(`${attachment.effect.target}\n${attachment.effect.event}`);
+    }
+  }
+  const actionEvents: readonly string[] = CANVAS_ACTION_EVENTS;
+  return page.nodes.flatMap(node => node.nodeType !== "widget" || node.kind !== "inferos.gadget" ? [] :
+    node.attachments
+      .filter(attachment => !actionEvents.includes(attachment.on) && !raised.has(`${node.id}\n${attachment.on}`))
+      .map(attachment => ({ nodeId: node.id, targetRef: node.targetRef, event: attachment.on, attachmentId: attachment.id })));
+}
+
+/** A page effect an event leads to: what the page runs, as opposed to a raised event it follows. */
+export type CanvasPageEffect = CanvasNavigateEffect | CanvasRequestActionEffect;
+
+/**
+ * The page effects that `event` on every widget of a parsed page placing `targetRef` leads to, in
+ * order (FAC-94). Only attachments wired to the event count: an event nothing is wired to has no
+ * effect, and nothing propagates to a parent on its own. A `raise-event` effect is followed to the
+ * attachments of the node it names for that event; the page's validation keeps those chains free
+ * of loops, and at most `CANVAS_MODEL_LIMITS.attachments` steps are taken regardless. A page effect
+ * grants nothing: a requested action still needs the person's own grant and approval.
+ */
+export function canvasPageEffects(page: CanvasPage, targetRef: string, event: string): CanvasPageEffect[] {
+  const owners = new Map<string, CanvasAttachment[]>([[page.id, page.attachments], ...page.nodes.map(node => [node.id, node.attachments] as [string, CanvasAttachment[]])]);
+  const pending: { node: string; event: string }[] = page.nodes
+    .filter(node => node.nodeType === "widget" && node.targetRef === targetRef)
+    .map(node => ({ node: node.id, event }));
+  const effects: CanvasPageEffect[] = [];
+  let steps = 0;
+  while (pending.length > 0 && steps < CANVAS_MODEL_LIMITS.attachments) {
+    const { node, event: heard } = pending.shift()!;
+    for (const attachment of owners.get(node) ?? []) {
+      if (attachment.on !== heard) continue;
+      steps++;
+      const effect = attachment.effect;
+      if (effect.kind === "raise-event") pending.push({ node: effect.target, event: effect.event });
+      else effects.push(effect);
+    }
+  }
+  return effects;
 }
 
 /**

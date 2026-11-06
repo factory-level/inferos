@@ -4,7 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
-import type { Overseer } from '@gadgets/workshop-shared/api'
+import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { DEFAULT_CANVAS_CATALOG, type CanvasCatalog, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { canvasPageFromDefinition, type CanvasPage, type CanvasPageOperation } from '@gadgets/workshop-shared/canvas-model'
 import { CanvasWorkspacePane } from './CanvasWorkspacePane'
@@ -20,11 +20,20 @@ const overseer = {
   subscribeToActions: async () => ({ [Symbol.dispose]: () => {} }),
   listActions: async () => ({ entries: [] }),
   getGatekeeperByResourceUrl: async () => null,
+  // A gadget widget's declared events (FAC-94) come from its head commit's states.json.
+  listTree: async () => [],
+  getGadget: () => Object.assign(new Promise(() => {}), { [Symbol.dispose]: () => {} }),
+  readFilesAtCommit: async (commitId: string, paths: string[]) => paths.map(path => [path,
+    commitId === 'fac94-stateful' && path === 'states.json' ? { kind: 'text', text: JSON.stringify({
+      version: 1, initial: 'editing', persistence: 'session', states: ['editing', 'submitted'],
+      transitions: [{ event: 'submit', from: 'editing', to: 'submitted' }, { event: 'reopen', from: 'submitted', to: 'editing' }],
+    }) } : { kind: 'absent' }]),
 } as unknown as RpcStub<Overseer>
 const onOpenWidgetChange = vi.fn<(widgetId: string | null) => void>()
 const render = async (storage: CanvasStorage, catalog: CanvasCatalog = DEFAULT_CANVAS_CATALOG,
-    onAskAgent = vi.fn<(request: string) => Promise<void>>(async () => {}), openWidgetId: string | null = null) => {
-  await act(async () => root.render(<CanvasWorkspacePane storage={storage} overseer={overseer} gadgets={new Map()}
+    onAskAgent = vi.fn<(request: string) => Promise<void>>(async () => {}), openWidgetId: string | null = null,
+    gadgets: ReadonlyMap<WorkpieceId, GadgetSummary> = new Map()) => {
+  await act(async () => root.render(<CanvasWorkspacePane storage={storage} overseer={overseer} gadgets={gadgets}
     catalog={catalog} viewId={null} onViewChange={() => {}} openWidgetId={openWidgetId} onOpenWidgetChange={onOpenWidgetChange} onAskAgent={onAskAgent} />))
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
@@ -363,6 +372,40 @@ it('removes a nested object from the view only, saying records stay, and edits i
   expect(api.editCanvasPage).toHaveBeenLastCalledWith('ops', '1', [{ type: 'removeNode', nodeId: 'inner' }])
   // What held it is selected.
   expect(breadcrumb()).toContain('page:ops/node:main')
+})
+
+// FAC-94: a gadget widget's attachments listen for the events its states.json declares.
+const gadgetView = (gadgetId: number): CanvasDefinition => ({ ...saved, sections: [{ id: 'main', title: 'Main', columns: 1,
+  widgets: [{ id: 'g', kind: 'inferos.gadget', version: 1, targetRef: `gadget:${gadgetId}`, size: 'normal', params: {} }] }] })
+const gadgetsWith = (commitId: string) => new Map<WorkpieceId, GadgetSummary>([[7, { id: 7, type: 'gadget', title: 'Intake form', commitId } as GadgetSummary]])
+const pickWidget = async () => {
+  const item = [...tree().querySelectorAll('button')].find(entry => entry.textContent?.includes('Intake form'))
+  if (!item) throw new Error('No gadget widget in the tree')
+  await act(async () => item.click()); await settle()
+}
+
+it('offers a gadget widget\'s own declared events, not action events, and wires one to a view', async () => {
+  const { api, storage } = editable([gadgetView(7)])
+  api.editCanvasPage.mockImplementation(async () => ({ ...canvasPageFromDefinition(gadgetView(7)), revision: '1' }))
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-stateful'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  await choose('When', 'submit')
+  // The list offered was the widget's own events, in declaration order, and no action event.
+  expect([...document.querySelectorAll('[role="option"]')].map(item => item.textContent)).toEqual(['submit', 'reopen'])
+  await choose('Open', 'Ops')
+  await act(async () => { button('Add attachment')!.click() })
+  expect(api.editCanvasPage).toHaveBeenLastCalledWith('ops', '0', [{ type: 'setAttachments', target: 'g',
+    attachments: [{ id: expect.any(String), version: 1, on: 'submit', effect: { kind: 'navigate', page: 'ops' } }] }])
+})
+
+it('says a gadget widget with no states declares no events, and offers none', async () => {
+  const { storage } = editable([gadgetView(7)])
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-plain'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  expect(inspector().textContent).toContain('This widget declares no events, so nothing on the page can listen for one.')
+  expect(button('Add attachment')).toBeUndefined()
 })
 
 it('reads the nested page only in edit mode, so viewing (as the use role does) never asks for it', async () => {
