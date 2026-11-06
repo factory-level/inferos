@@ -2194,6 +2194,8 @@ export type BlueprintInstall = {
   version: number;
   /** The kind the pinned version was published as. An upgrade must keep it. */
   kind: WorkspaceKind;
+  /** Present only when this pinned Widget version was compiled from authored client.tsx. */
+  authoredWidgetBuild?: true;
   /**
    * The data contract the pinned version declared (see `BlueprintMetadata.dataContract`). Absent
    * means unknown. An upgrade is allowed only to a version declaring the same contract: a

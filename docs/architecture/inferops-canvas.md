@@ -48,8 +48,8 @@ Current-state baseline inspected at InferOS `1045d2e1ceac7be29e1a6f056c936fb31aa
 
 | Path | Responsibility |
 | --- | --- |
-| `packages/workshop-frontend/src/GadgetUI.tsx` | Sandboxed iframe host and RPC handshake; also hosts gadget widgets on the canvas page. |
-| `packages/workshop-frontend/src/GadgetEditor.tsx` | Workspace editor; its right pane and resize handle become inert and leave keyboard navigation while the pane is closed. |
+| `packages/workshop-frontend/src/GadgetUI.tsx` | Sandboxed iframe host and RPC handshake; also hosts gadget widgets on the canvas page. It also runs the authored-widget build preview, through a stand-in client ([agent authoring](agent-authoring.md#authoring-ui-fac-8)). |
+| `packages/workshop-frontend/src/GadgetEditor.tsx` | Workspace editor; its right pane and resize handle become inert and leave keyboard navigation while the pane is closed. With `authored-widgets` on it adds the **Build preview** tab ([agent authoring](agent-authoring.md#authoring-ui-fac-8)). |
 | `packages/workshop-frontend/src/PaneTab.tsx` | Accessible button behavior for the editor's app, code, connections, and activity tabs. |
 | `packages/workshop-frontend/src/pages/inferops-canvas/InferOpsCanvasPage.tsx` | InferOps Canvas page at `/workspace/$id/inferops-canvas`: workspace chat beside the composed views. |
 | `packages/workshop-frontend/src/pages/inferops-canvas/InferOpsCanvasHome.tsx` | Top-level InferOps Canvas page at `/inferops-canvas` (sidebar entry): screens across workspaces and screen creation. |
