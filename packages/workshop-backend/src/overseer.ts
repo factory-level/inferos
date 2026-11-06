@@ -883,6 +883,8 @@ function connectionTypeFromCreationSpec(
 type BlueprintGadgetRecord = {
   id: string;
   metadata: BlueprintMetadata;
+  /** Set only for a version compiled from an authored Widget client.tsx. */
+  authoredWidgetBuild?: true;
 
   // Which gadget this blueprint exports. If omitted, use `defaultGadgetId`.
   gadgetId?: WorkpieceId;
@@ -3468,10 +3470,21 @@ class OverseerImpl implements AgentHooks {
   // blueprintPublishRefusals): a widget on any violation, since what a console registers must be
   // the widget its files make; an app or workflow only on a view.json or tools.json. A widget's
   // view.json and tools.json are classified from their strict UTF-8 text.
-  async assertPublishableKind(kind: WorkspaceKind | undefined, commitId: string): Promise<void> {
+  async assertPublishableKind(kind: WorkspaceKind | undefined, commitId: string,
+      authoredSourceCommitId?: string): Promise<void> {
     kind ??= DEFAULT_WORKSPACE_KIND;
     let files = await this.#classifiedFiles(kind, commitId);
-    let refusals = blueprintPublishRefusals(kind, classifyGadgetFiles(kind, files).violations);
+    let violations = classifyGadgetFiles(kind, files).violations;
+    if (kind === "widget" && authoredSourceCommitId !== undefined &&
+        files.has("client.js") && !files.has("server.js")) {
+      let sourcePaths = new Set(await this.gitStore.readCommitPaths(authoredSourceCommitId));
+      // Only a successful authored build can supply the UI; widgets with server source or
+      // callable tools still have to provide the server module as usual.
+      if (sourcePaths.has("client.tsx") && !sourcePaths.has("server.js")) {
+        violations = violations.filter(({code}) => code !== "missingServer");
+      }
+    }
+    let refusals = blueprintPublishRefusals(kind, violations);
     if (refusals.length > 0) {
       let article = kind === "app" ? "an" : "a";
       throw new Error(`This gadget cannot be published as ${article} ${kind}: ` +
@@ -9796,7 +9809,8 @@ class OverseerImpl implements AgentHooks {
       await this.env.BLUEPRINT_CONTENT.put(
         `${record.id}/${record.metadata.version}`,
         codeSnapshot,
-        { customMetadata: blueprintVersionMetadata(record.metadata.kind, record.metadata.dataContract) },
+        { customMetadata: blueprintVersionMetadata(record.metadata.kind, record.metadata.dataContract,
+          record.authoredWidgetBuild === true) },
       );
     }
 
@@ -15604,6 +15618,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let bindings: Record<string, BlueprintBinding> | undefined;
     let nextCommitId: string | undefined;
     let nextKind: WorkspaceKind | undefined;
+    let nextAuthoredWidgetBuild: true | undefined;
     let nextVersion = record.metadata.version;
     let nextDataContract = record.metadata.dataContract;
     if (options.updateCode || options.updateBindings) {
@@ -15614,10 +15629,19 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       if (options.updateCode) {
         let commitId = await this.impl.assertPublishableCommit(
             this.impl.getGadgetRecord(gadgetId).commitId);
-        await this.impl.assertPublishableKind(this.impl.storage.kind.get(), commitId);
-        commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+        let kind = this.impl.storage.kind.get();
+        if (kind === "widget" && this.impl.env.AUTHORED_WIDGET_BUILD_ENABLED === "true") {
+          let sourceCommitId = commitId;
+          commitId = await this.impl.compileAuthoredWidgetCommit(sourceCommitId);
+          if (commitId !== sourceCommitId) nextAuthoredWidgetBuild = true;
+          await this.impl.assertPublishableKind(kind, commitId,
+              commitId === sourceCommitId ? undefined : sourceCommitId);
+        } else {
+          await this.impl.assertPublishableKind(kind, commitId);
+          commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+        }
         nextCommitId = commitId;
-        nextKind = this.impl.storage.kind.get();
+        nextKind = kind;
         nextVersion++;
         // Each version declares its own contract; one published without is unknown.
         nextDataContract = dataContract;
@@ -15650,6 +15674,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       delete record.codeVersion;
       record.metadata.version = nextVersion;
       record.metadata.kind = nextKind!;
+      if (nextAuthoredWidgetBuild) record.authoredWidgetBuild = true;
+      else delete record.authoredWidgetBuild;
       if (nextDataContract !== undefined) record.metadata.dataContract = nextDataContract;
       else delete record.metadata.dataContract;
     }
@@ -16874,8 +16900,18 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     // would be useless, so refuse rather than publish an empty archive.
     let commitId = await this.impl.assertPublishableCommit(
         this.impl.getGadgetRecord(this.id).commitId);
-    await this.impl.assertPublishableKind(this.impl.storage.kind.get(), commitId);
-    commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+    let kind = this.impl.storage.kind.get();
+    let authoredWidgetBuild = false;
+    if (kind === "widget" && this.impl.env.AUTHORED_WIDGET_BUILD_ENABLED === "true") {
+      let sourceCommitId = commitId;
+      commitId = await this.impl.compileAuthoredWidgetCommit(sourceCommitId);
+      authoredWidgetBuild = commitId !== sourceCommitId;
+      await this.impl.assertPublishableKind(kind, commitId,
+          commitId === sourceCommitId ? undefined : sourceCommitId);
+    } else {
+      await this.impl.assertPublishableKind(kind, commitId);
+      commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+    }
     let now = new Date();
 
     let metadata: BlueprintMetadata = {
@@ -16893,7 +16929,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     if (gadget.output) {
       metadata.output = gadget.output;
     }
-    metadata.kind = this.impl.storage.kind.get();
+    metadata.kind = kind;
     if (dataContract !== undefined) metadata.dataContract = dataContract;
 
     let record: BlueprintGadgetRecord = {
@@ -16901,6 +16937,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
       metadata,
       gadgetId: this.id,
       commitId,
+      ...(authoredWidgetBuild ? {authoredWidgetBuild: true as const} : {}),
     };
 
     let screenshot = screenshotUpload ? validateBlueprintScreenshotUpload(screenshotUpload) : undefined;
