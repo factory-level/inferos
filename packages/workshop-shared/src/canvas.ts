@@ -8,6 +8,8 @@ export interface CanvasProjectBoardWidget {
   version: 1;
   /** Canonical InferOps project board reference, resolved through a separately granted capability. */
   targetRef: string;
+  /** Typed read source, normalized from `targetRef` by `parseCanvasWidget`; it grants no authority. */
+  dataBinding?: CanvasDataBinding;
   /** Curated column span; the renderer clamps it to the section's column count. */
   size: "normal" | "wide" | "full";
   /** Presentation filters, never authorization constraints. */
@@ -56,6 +58,8 @@ export interface CanvasWikiWidget {
   version: 1;
   /** Canonical Wiki reference, `inferops://<tenant>.<workspace>/knowledge/wiki`. */
   targetRef: string;
+  /** Typed read source, normalized from `targetRef` by `parseCanvasWidget`; it grants no authority. */
+  dataBinding?: CanvasDataBinding;
   /** Curated column span; the renderer clamps it to the section's column count. */
   size: "normal" | "wide" | "full";
   /** Presentation only, never an authorization constraint. */
@@ -67,6 +71,16 @@ export interface CanvasWikiWidget {
 
 /** Registered widget instance; unknown kinds and versions are rejected. */
 export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget | CanvasWikiWidget;
+
+/** A schema-versioned read reference to one supported InferOps resource. */
+export interface CanvasDataBinding {
+  /** Resource kind, which must match the consuming widget. */
+  resource: "project/board" | "knowledge/wiki";
+  /** Canonical URI; identifies the resource but does not authorize reading it. */
+  ref: string;
+  /** Version of the typed data-binding contract. */
+  schemaVersion: 1;
+}
 
 /** A registered widget kind name. */
 export type CanvasWidgetKind = CanvasWidget["kind"];
@@ -167,28 +181,44 @@ const columns = (value: unknown): 1 | 2 | 3 => value === 1 || value === 2 || val
 const position = (value: unknown, length: number): number => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= length ? value : invalid("position");
 
 function widget(value: unknown): CanvasWidget {
-  const w = record(value, ["id", "kind", "version", "targetRef", "size", "params"], "widget");
+  if (!value || typeof value !== "object" || Array.isArray(value)) return invalid("widget");
+  const raw = value as Record<string, unknown>;
+  const w = record(value, Object.hasOwn(raw, "dataBinding")
+    ? ["id", "kind", "version", "targetRef", "size", "params", "dataBinding"]
+    : ["id", "kind", "version", "targetRef", "size", "params"], "widget");
   if (w.version !== 1) return invalid("widget kind/version");
   if (w.size !== "normal" && w.size !== "wide" && w.size !== "full") return invalid("widget size");
   if (typeof w.targetRef !== "string" || w.targetRef.length > 512) return invalid("target reference");
   if (w.kind === "inferos.gadget") {
+    if (Object.hasOwn(w, "dataBinding")) return invalid("data binding incompatible with gadget widget");
     if (!CANVAS_GADGET_REF.test(w.targetRef)) return invalid("target reference");
     record(w.params, [], "widget parameters");
     return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size, params: {} };
   }
   if (w.kind === "inferops.wiki") {
     if (!CANVAS_WIKI_REF.test(w.targetRef)) return invalid("target reference");
+    const dataBinding = parseDataBinding(w.dataBinding, "knowledge/wiki", w.targetRef);
     const params = record(w.params, ["page"], "widget parameters");
     if (params.page !== null && (typeof params.page !== "string" || !CANVAS_WIKI_PAGE.test(params.page))) return invalid("wiki page");
-    return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size, params: { page: params.page } };
+    return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, dataBinding, size: w.size, params: { page: params.page } };
   }
   if (w.kind !== "inferops.project-board") return invalid("widget kind/version");
   if (!/^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/project\/board\/[A-Za-z0-9_-]+$/.test(w.targetRef)) return invalid("target reference");
+  const dataBinding = parseDataBinding(w.dataBinding, "project/board", w.targetRef);
   const params = record(w.params, ["workflow", "showCompleted"], "widget parameters");
   if (params.workflow !== "software" && params.workflow !== "content") return invalid("workflow");
   if (typeof params.showCompleted !== "boolean") return invalid("completed filter");
-  return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size,
+  return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, dataBinding, size: w.size,
     params: { workflow: params.workflow, showCompleted: params.showCompleted } };
+}
+
+function parseDataBinding(value: unknown, resource: CanvasDataBinding["resource"], ref: string): CanvasDataBinding {
+  if (value === undefined) return { resource, ref, schemaVersion: 1 };
+  const binding = record(value, ["resource", "ref", "schemaVersion"], "data binding");
+  if (binding.resource !== resource) return invalid("data binding incompatible with widget resource");
+  if (binding.ref !== ref) return invalid("data binding reference must match target reference");
+  if (binding.schemaVersion !== 1) return invalid("data binding schema version");
+  return { resource, ref, schemaVersion: 1 };
 }
 
 /** Validate and detach one widget instance under the registered kind and version rules. It resolves nothing. */

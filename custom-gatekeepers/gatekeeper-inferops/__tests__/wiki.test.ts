@@ -878,8 +878,9 @@ describe("Wiki proposal approval", () => {
     expect(await mock.proposalCounts(P_EDIT)).toEqual({ approvals: 1, enqueues: 1, publications: 1 });
   });
 
-  it("A3: a Viewer or Member is refused FORBIDDEN with the publish message, stays pending, and passes once granted", async () => {
+  it("FAC-92: a Wiki read binding grants no write; only the person's own publish grant can approve", async () => {
     const { props, hooks, mock, id } = await staged();
+    const before = await mock.readDocument(RELEASE);
     for (const role of ["viewer", "member"] as const) {
       await mock.setProposalRole(role);
       expect(await hooks.applyOutcome(props, id, "wiki")).toEqual({
@@ -888,6 +889,7 @@ describe("Wiki proposal approval", () => {
           "Approving for publication needs knowledge:publish (Owner or Admin).",
       });
       expect(await hooks.getWikiRaw(props, `action:${id}`)).toMatchObject({ status: "pending", attempts: {} });
+      expect(await mock.readDocument(RELEASE)).toEqual(before);
     }
     expect((await mock.readProposal(P_EDIT)).proposal.state).toBe("in_review");
     expect(await mock.proposalCounts(P_EDIT)).toMatchObject({ approvals: 0 });

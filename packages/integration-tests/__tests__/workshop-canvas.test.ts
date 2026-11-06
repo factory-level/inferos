@@ -191,7 +191,10 @@ it("keeps a private Kanban view with a live board reference through stale edits,
       expect(String(lost[0])).toMatch(/Canvas changed/);
       const view = won[0]!;
       expect(view).toMatchObject({ id: created.id, revision: "2" });
-      expect(view.sections[0]?.widgets).toEqual([boardCard(true)]);
+      expect(view.sections[0]?.widgets).toEqual([{
+        ...boardCard(true),
+        dataBinding: { ref: DEMO_BOARD, resource: "project/board", schemaVersion: 1 },
+      }]);
       expect(await secondWindow.getCanvas(created.id)).toEqual(view);
 
       // Another account cannot open the workspace, and its own workspaces do not hold the view.

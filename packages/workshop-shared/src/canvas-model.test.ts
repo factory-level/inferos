@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
 import {
-  CANVAS_MODEL_LIMITS, CanvasModelError, canvasDefinitionFromPage, canvasPageFromDefinition, canvasTargetPath, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
+  CANVAS_MODEL_LIMITS, CANVAS_WIDGET_ACTIONS, CanvasModelError, canvasDefinitionFromPage, canvasPageFromDefinition, canvasTargetPath, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
   resolveCanvasTarget, type CanvasModelErrorCode, type CanvasNode, type CanvasPage, type CanvasTarget,
 } from "./canvas-model";
 import rejected from "./canvas-model-fixtures/rejected.json";
@@ -17,6 +17,12 @@ const rejection = (run: () => unknown): { code: CanvasModelErrorCode; at: string
   }
   throw new Error("Expected a rejection");
 };
+
+const canvasBoardAt = (page: CanvasPage) => page.nodes.find((node): node is Extract<CanvasNode, {nodeType: "widget"}> =>
+  node.nodeType === "widget" && node.kind === "inferops.project-board")!;
+const canvasAuthorityFields = (widget: CanvasNode) => JSON.stringify(Object.fromEntries(
+  Object.entries(widget).filter(([key]) => ["permission", "permissions", "grant", "grants", "capability", "capabilities", "scope", "scopes", "role", "roles", "principal", "runAs", "credential", "credentials", "token", "apiKey", "secret", "owner", "ownership", "sharing", "authority"].includes(key)),
+));
 
 /**
  * Read a page back as sections. It checks the documented mapping from the other direction, so a
@@ -44,7 +50,8 @@ const asSections = (page: CanvasPage): CanvasDefinition => {
 
 describe("valid fixtures", () => {
   test.each(valid)("$name", ({ page }) => {
-    expect(parseCanvasPage(page)).toEqual(page);
+    // Legacy board/Wiki pages gain their typed binding while preserving their existing fields.
+    expect(parseCanvasPage(page)).toMatchObject(page);
   });
 
   test("returns a detached copy", () => {
@@ -56,6 +63,62 @@ describe("valid fixtures", () => {
 
   test("keeps every stable ID across a second parse", () => {
     for (const { page } of valid) expect(parseCanvasPage(parseCanvasPage(page))).toEqual(parseCanvasPage(page));
+  });
+
+  test("normalizes board and Wiki references into typed read bindings", () => {
+    const page = canvasPageFromDefinition({ schemaVersion: 1, id: "p", revision: "0", title: "P", sections: [{
+      id: "s", title: "S", columns: 1, widgets: [
+        { id: "b", kind: "inferops.project-board", version: 1, targetRef: "inferops://acme.operations/project/board/ENG", size: "normal",
+          params: { workflow: "software", showCompleted: false } },
+        { id: "w", kind: "inferops.wiki", version: 1, targetRef: "inferops://acme.knowledge/knowledge/wiki", size: "normal", params: { page: null } },
+        { id: "g", kind: "inferos.gadget", version: 1, targetRef: "gadget:1", size: "normal", params: {} },
+      ],
+    }] });
+    const byId = new Map(page.nodes.map(node => [node.id, node]));
+    expect((byId.get("b") as Extract<CanvasNode, {nodeType: "widget"}>).dataBinding)
+      .toEqual({ resource: "project/board", ref: "inferops://acme.operations/project/board/ENG", schemaVersion: 1 });
+    expect((byId.get("w") as Extract<CanvasNode, {nodeType: "widget"}>).dataBinding)
+      .toEqual({ resource: "knowledge/wiki", ref: "inferops://acme.knowledge/knowledge/wiki", schemaVersion: 1 });
+    expect((byId.get("g") as Extract<CanvasNode, {nodeType: "widget"}>).dataBinding).toBeUndefined();
+  });
+
+  test("adding, changing, or removing a read binding leaves the stored widget's authority unchanged", () => {
+    const source = structuredClone(valid[2].page) as { nodes: Record<string, unknown>[] };
+    const initial = parseCanvasPage(source);
+    const initialBoard = canvasBoardAt(initial);
+    const actionListBytes = JSON.stringify(CANVAS_WIDGET_ACTIONS[initialBoard.kind]);
+    const initialAuthorityBytes = canvasAuthorityFields(initialBoard);
+    expect(Object.keys(initialBoard.dataBinding ?? {}).toSorted()).toEqual(["ref", "resource", "schemaVersion"]);
+
+    // Legacy input without a binding is normalized; changing a binding means changing its target
+    // and matching typed reference together. In neither case does it add widget authority.
+    const withoutBinding = structuredClone(source);
+    delete withoutBinding.nodes.find(node => node.id === "board-1")!.dataBinding;
+    const otherTarget = "inferops://acme.operations/project/board/OTHER";
+    const changedBinding = structuredClone(source);
+    const changed = changedBinding.nodes.find(node => node.id === "board-1")!;
+    changed.targetRef = otherTarget;
+    changed.dataBinding = { resource: "project/board", ref: otherTarget, schemaVersion: 1 };
+
+    for (const input of [source, withoutBinding, changedBinding]) {
+      const stored = canvasBoardAt(parseCanvasPage(input));
+      expect(JSON.stringify(CANVAS_WIDGET_ACTIONS[stored.kind])).toBe(actionListBytes);
+      expect(canvasAuthorityFields(stored)).toBe(initialAuthorityBytes);
+    }
+    expect(CANVAS_WIDGET_ACTIONS["inferos.gadget"]).toEqual([]);
+  });
+
+  test.each([
+    ["a Wiki resource on a board widget", { resource: "knowledge/wiki", ref: "inferops://acme.operations/project/board/ENG", schemaVersion: 1 }, "incompatible-data-binding"],
+    ["a reference different from targetRef", { resource: "project/board", ref: "inferops://other.operations/project/board/ENG", schemaVersion: 1 }, "invalid-data-binding"],
+    ["an unsupported schema version", { resource: "project/board", ref: "inferops://acme.operations/project/board/ENG", schemaVersion: 2 }, "invalid-data-binding"],
+    ["an authority field", { resource: "project/board", ref: "inferops://acme.operations/project/board/ENG", schemaVersion: 1, workflow: "invoke" }, "invalid-data-binding"],
+    ["an action-capability field", { resource: "project/board", ref: "inferops://acme.operations/project/board/ENG", schemaVersion: 1, actionCapabilities: ["create-issue"] }, "invalid-data-binding"],
+  ] as const)("rejects %s", (_name, dataBinding, code) => {
+    const page = structuredClone(valid[2].page) as { nodes: Record<string, unknown>[] };
+    const board = page.nodes.find(node => node.id === "board-1")!;
+    board.dataBinding = dataBinding;
+    expect(rejection(() => parseCanvasPage(page)).code).toBe(code);
   });
 
   test("accepts the largest version 1 canvas", () => {
@@ -293,7 +356,7 @@ describe("section-based canvases", () => {
   });
 
   test.each(sectionMapping)("$name converts both ways, and converting again changes nothing", ({ sections, page }) => {
-    expect(canvasPageFromDefinition(sections)).toEqual(page);
+    expect(canvasPageFromDefinition(sections)).toEqual(parseCanvasPage(page));
     expect(canvasPageFromDefinition(sections)).toEqual(canvasPageFromDefinition(sections));
     expect(canvasDefinitionFromPage(parseCanvasPage(page))).toEqual(parseCanvasDefinition(sections));
   });
