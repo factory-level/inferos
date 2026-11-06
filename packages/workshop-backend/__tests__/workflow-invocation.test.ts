@@ -414,7 +414,7 @@ describe("what an invoker sees, and what reaches the gatekeeper", () => {
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
     let impl = {
       env: {}, storage: { boundHooks: { get: () => hook } }, assertGatekeeperUsable: () => {},
-      workflowDefinitionStore: () => store, takenInvocations: new Map<string, boolean>(),
+      workflowDefinitionStore: () => store, takenInvocations: new Map<string, boolean>(), getGadgetHead: headOf,
     };
     let direct = invokeWorkflowTrigger as unknown as (...args: unknown[]) => Promise<unknown>;
     await direct(impl, "viewer-id", OPERATOR, HOOK, { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" });
@@ -433,7 +433,8 @@ const CONNECTIONS: Record<number, { vendorId: string; resourceUrl: string }> = {
 };
 
 async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolean | { holds: boolean; company: string | null }>,
-                             bindings: [string, { target: number }][] = [["BOARD", { target: 50 }]]) {
+                             bindings: [string, { target: number }][] = [["BOARD", { target: 50 }]],
+                             head: (id: number) => string | undefined = headOf) {
   let { store } = pinned();
   store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
   let invoke = vi.fn(async () => {});
@@ -444,7 +445,7 @@ async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolea
     takenInvocations: new Map<string, boolean>(),
     isSharedConfiguration: async () => true,
     workflowDefinitionStore: () => store,
-    getGadgetHead: headOf,
+    getGadgetHead: head,
     defaultGadgetId: GADGET,
     assertGatekeeperUsable: () => {},
     getGadgetRecord: () => ({}),
@@ -666,6 +667,16 @@ describe("admission refuses before anything reaches the runtime (FAC-111)", () =
     expect(() => store.fire(HOOK, GADGET, headNow, everyoneBuilds, admitted.id))
       .toThrow("That run request is unknown or already ran.");
     expect(store.deliveries(ADA.id, definitionId)).toEqual([]);
+  });
+
+  it("for a stale revision asked for through invokeTrigger: no gatekeeper call, the reason given", async () => {
+    // The gadget's code moved on from the pinned revision's commit.
+    let { overseer, store, invoke, askedInvoke } = await invokeSession(async () => true, undefined,
+        id => (id === GADGET ? commit(2) : undefined));
+    await expect(overseer.invokeTrigger(HOOK)).rejects.toThrow("The workflow changed since revision 1 was saved.");
+    // It got as far as the stale-revision check: the person's grant was asked, and the control admits them.
+    expect(askedInvoke).toHaveLength(1);
+    nothingRan(store, invoke, definitionOf(store));
   });
 
   it("for an assignment while assignments are off, or one retired automatically", async () => {

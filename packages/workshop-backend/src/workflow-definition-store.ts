@@ -202,16 +202,9 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowInvocations.delete(invocation.id);
       throw new Error("That run request was for another revision of this workflow. Ask again.");
     }
-    let stored = this.storage.workflowDefinitions.get(pin.definitionId);
-    let revision = stored?.revisions.find(r => r.revision === pin.revision);
-    if (!stored || !revision) throw new Error("This trigger's workflow definition revision no longer exists.");
+    let { stored, revision } = this.#pinnedRevision(pin, hookGadgetId, headOf);
     if (stored.published?.revision !== pin.revision && !ownerCanBuild(stored.owner.id)) {
       throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
-    }
-    if (hookGadgetId === null || revision.source.gadgetId !== hookGadgetId ||
-        headOf(hookGadgetId) !== revision.source.commitId) {
-      throw new Error(
-          `The workflow changed since revision ${pin.revision} was saved. Save it, then move the trigger.`);
     }
     return this.durableStorage.transactionSync(() => {
       let id = this.storage.nextWorkflowDeliveryId.get();
@@ -242,6 +235,33 @@ export class WorkspaceWorkflowDefinitionStore {
       let { id: _, ...shown } = delivery;
       return { ...shown, deliveryId: id };
     });
+  }
+
+  /**
+   * Refuses unless trigger `hookId` is pinned to a revision that still exists and is still the
+   * code its gadget runs: the revision's gadget is the hook's, and the gadget's head is exactly the
+   * revision's commit (FAC-111: checked at admission, before the trigger's gatekeeper is asked to
+   * run anything, and again by `fire`). Same words as `fire`.
+   */
+  requireCurrentRevision(hookId: number, hookGadgetId: WorkpieceId | null,
+      headOf: (gadgetId: WorkpieceId) => string | undefined): void {
+    let pin = this.storage.workflowTriggerPins.get(hookId);
+    if (!pin) throw new Error(CANNOT_RUN);
+    this.#pinnedRevision(pin, hookGadgetId, headOf);
+  }
+
+  // The pin's stored definition and revision, refusing a missing revision or one whose code moved.
+  #pinnedRevision(pin: StoredTriggerPin, hookGadgetId: WorkpieceId | null,
+      headOf: (gadgetId: WorkpieceId) => string | undefined) {
+    let stored = this.storage.workflowDefinitions.get(pin.definitionId);
+    let revision = stored?.revisions.find(r => r.revision === pin.revision);
+    if (!stored || !revision) throw new Error("This trigger's workflow definition revision no longer exists.");
+    if (hookGadgetId === null || revision.source.gadgetId !== hookGadgetId ||
+        headOf(hookGadgetId) !== revision.source.commitId) {
+      throw new Error(
+          `The workflow changed since revision ${pin.revision} was saved. Save it, then move the trigger.`);
+    }
+    return { stored, revision };
   }
 
   /**
