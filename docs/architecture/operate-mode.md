@@ -2,6 +2,8 @@
 title: Operate mode
 design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md
 covers:
+  - packages/workshop-backend/__tests__/console-widget-events.test.ts
+  - packages/workshop-backend/__tests__/widget-event-navigation.test.ts
   - packages/workshop-backend/src/handover-delivery.ts
   - packages/workshop-backend/__tests__/handover-delivery.test.ts
   - packages/workshop-backend/__tests__/personal-state-partition.test.ts
@@ -576,14 +578,14 @@ A widget may declare its own local states and transitions (FAC-86, [workspaces a
     - `WIDGET_TRANSITION_NOT_PERMITTED` for one it doesn't accept in the current state, naming the events it does accept;
     - `WIDGET_STATE_CONFLICT` for a stale `expectedSeq`;
     - `WIDGET_HAS_NO_STATES` for a widget that declares none.
-- **It never changes the page.** A widget transition reads and writes only `widgetStates`, never `operatePage` or `operateEvents`, and a page event never touches a widget's state.
+- **It changes the page only through an explicit wire.** A widget transition reads and writes only `widgetStates`, and a page event never touches a widget's state. The one exception is a transition whose event the published page wires to `navigate` (FAC-94, [Wired widget events](#wired-widget-events)): that moves the page through the person's own checked dispatch, a separate operate event. An unwired event never touches `operatePage` or `operateEvents`.
 - **In Operate (FAC-86 part 2).** `CanvasGadgetWidget` shows `WidgetStateBar` under a published console's frozen widget when it renders inside an operate session. The screen passes the console's `workspaceId` in `offeredBy`, from `ConsolePage`, `FlowScreen` and `ConsoleWidgetView`.
   - The bar shows the state and only the events `getWidgetState` says it accepts from there.
   - Pressing one calls `transitionWidget` with the snapshot's `seq`. It never dispatches an operate event.
   - A refusal shows the server's words. On `WIDGET_STATE_CONFLICT` it reads the state again and says it now shows the latest; it never resends.
   - A widget with no states (`WIDGET_HAS_NO_STATES`) shows no bar.
   - `WidgetStateBar.test.tsx` covers these.
-  - **Not built here:** connecting a widget event to the page is an explicitly configured attachment (`canvas-model.ts`), which page states (FAC-87) will run. Outcome-driven transitions from a domain action would take FAC-97's `ActionOutcome`; console widgets have no domain actions today. 
+  - Connecting a widget event to the page is an explicitly configured attachment; see [Wired widget events](#wired-widget-events). **Not built here:** outcome-driven transitions from a domain action would take FAC-97's `ActionOutcome`; console widgets have no domain actions today.
 - **The widget is told its state (FAC-86 part 3).** The bar reports the state it shows (`onStateChange`, null while none is known), and `CanvasGadgetWidget` passes it to `GadgetUI` as `widgetState`. `GadgetUI` posts `{type: 'widget-state', state}` into the gadget's frame once its handshake connects and on each change, and never while no state is known. The frame's origin is opaque, so the message is posted with `'*'`; it carries only the state's name, which the person already sees. It is one way: the frame changes nothing by it and moves the widget only through the host's bar. `GadgetUI.integration.test.tsx` and `WidgetStateBar.test.tsx` cover it.
 - **The sample status widget (FAC-86 part 3).** `packages/bundled-blueprints/blueprints/inferos-status-widget` (`inferos.status-widget`) is bundled as a widget (`"kind": "widget"`, never promoted to a format). Its `states.json` declares idle, working, done and failed, with `start`, `finish`, `fail`, `retry` and `reset`, kept per person. Its client draws the InferOS mark, a copy of `workshop-frontend/public/favicon.svg` imported as an asset (`lib/mark.svg`, inlined as text by the bundle's `.svg` loader, never fetched), and recolours it for the state the host names. Outside Operate it says so and stays neutral. Its tests cover the copy matching the app's favicon and the look for every declared state; the backend's `bundled-blueprints.test.ts` installs it as a widget and `console-tool-surfaces.test.ts` freezes its `states.json` at publication.
 - **Tests.**
@@ -591,6 +593,19 @@ A widget may declare its own local states and transitions (FAC-86, [workspaces a
   - `__tests__/widget-state.test.ts`: transitions leave the operate page and its log untouched, page events leave the widget alone, the refusals and their codes, recovery for the person, and a fresh start for another person and another revision.
   - `__tests__/console-tool-surfaces.test.ts`: the freeze, the candidate surface, an invalid `states.json` refused, and the console-tools switch.
 
+
+### Wired widget events
+
+A widget's own event drives a page effect only through an attachment someone configured on the page (FAC-94, [workspaces and canvases](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/workspaces-and-canvases.md)). The rules are deliberately few:
+
+- **Explicit wiring only.** An attachment on an `inferos.gadget` widget may listen for the widget's own event: one its `states.json` declares as a transition event. `parseCanvasPage` accepts such an `on` (it can't know the widget's events; it still refuses action events on a gadget widget and unknown events on a board or Wiki widget), and `canvasWidgetEventsHeard` lists them.
+- **No propagation.** An event nothing is wired to stays with the widget. Nothing bubbles to the object or page holding it; a parent hears an event only when an attachment raises it there (`raise-event`). `canvasPageEffects(page, targetRef, event)` follows those raises from every widget placing `targetRef` and returns the `navigate` and `request-action` effects reached, in order, within `CANVAS_MODEL_LIMITS.attachments` steps.
+- **No overrides.** No attachment replaces or suppresses another, and a parent can't override what a widget is wired to. When an event reaches several navigations, the first in page order is applied, since a page shows one screen.
+- **Bounded.** Raise-event chains must be acyclic (`reference-cycle`), as before. A retry or return loop is a widget transition back to an earlier state (FAC-86) or a flow route back to an earlier page (FAC-87), never an attachment cycle.
+- **Checked at publication** (`publishedPages` in `console-store.ts`). Each heard event must be declared by the widget's current commit, whose `states.json` the publication freezes, and must lead to no `request-action`. Otherwise publication is refused, naming the screen, the widget and the event, and nothing is published. A widget with no states declares no events. A publication without commits (the storage migration) refuses any heard event.
+- **Run only as navigation.** After `OperateSession.transitionWidget` moves the widget, `#wiredNavigation` reads the published page shown through the person's own access, from the console open on their page at the widget's revision, and applies the first wired `navigate`. It uses `showScreen` when the open view holds that screen, otherwise `openView` of the screen view that shows it, sent through the person's own `dispatch` with its console checks and the page's sequence. The snapshot then carries `navigation: {screenId, outcome}`, where the outcome is `shown` or `refused` (the console doesn't show it, or the page moved meanwhile). Nothing is navigated, and `navigation` is absent, for an unwired event, a widget the page doesn't place, another console or revision, a running flow (it moves by its own routes), or a page that can't be read. The widget's transition stands either way.
+- **No authority.** A wired effect grants nothing. Navigation is only the person's own page move, checked as if they had made it, and no widget event can reach a requested action, so none reaches a capability. The person's own grant and approval still decide every action (FAC-92).
+- **Tests.** `canvas-model.test.ts` ("widget events drive page effects") covers the model and the resolver. `console-widget-events.test.ts` covers publication: a declared event published on the frozen widget, and refusals for an undeclared event, a widget with no states and an event leading to an action. `widget-event-navigation.test.ts` covers the runtime: a screen of another view, a screen in place, an unwired event leaving the page and its log unchanged, nothing navigated for another widget, revision or a running flow, and a refused target.
 ### Personal presentation state, by person and company
 
 FAC-88. A person's presentation state is theirs alone, and it belongs to the company they work in. Business records stay canonical and shared: they are never copied into this state.
