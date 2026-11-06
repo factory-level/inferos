@@ -1528,6 +1528,28 @@ describe("Wiki proposals over HTTP", () => {
   });
 });
 
+describe("company service queries and comments", () => {
+  it("injects the bound project ID and keeps query version distinct from CLI version", async () => {
+    const fake = fakeInferOps(call => call.path.startsWith("/object/queries/")
+      ? Response.json({ name: "service-job-status-counts", version: 1, rows: [{ group: "started", count: 4 }], nextCursor: null })
+      : undefined);
+    expect(await fake.client.readServiceQuery("DEMO", "service-job-status-counts")).toMatchObject({ rows: [{ count: 4 }] });
+    const call = fake.calls.find(item => item.path.startsWith("/object/queries/"))!;
+    const query = new URL(`https://example.test${call.path}`).searchParams;
+    expect(query.get("projectId")).toBe(DEMO.id);
+    expect(query.get("queryVersion")).toBe("1");
+  });
+  it("never comments on another project's issue and sends the exact head with its replay key", async () => {
+    const fake = fakeInferOps(call => call.path.endsWith("/comments") ? Response.json({ comment: { id: UNKNOWN } }) : undefined);
+    await expect(fake.client.commentIssue("DEMO", ENG_41, "No", "977", "wrong-project")).rejects.toThrow("NOT_FOUND");
+    expect(fake.calls.some(call => call.path.endsWith("/comments"))).toBe(false);
+    await fake.client.commentIssue("DEMO", DEMO_1, "Synthetic comment", "1041", "same-action");
+    const call = fake.calls.find(item => item.path.endsWith("/comments"))!;
+    expect(call.headers.get("X-Idempotency-Key")).toBe("same-action");
+    expect(call.body).toEqual({ body: "Synthetic comment", kind: "comment", expectedIssueHeadSeq: "1041" });
+  });
+});
+
 // The widget index (FAC-11 slice 2): `widget.publish` and `widget.withdraw` as the connection's
 // own person, in its own workspace, for the company, with nothing but the pointer and its words.
 describe("widget index writes", () => {

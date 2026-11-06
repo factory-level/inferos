@@ -7,5 +7,5 @@
     "paths": { "@gadgets/workshop-shared/*": ["../workshop-shared/src/*"] }
   },
   "include": [
-    "scripts/propose-recipe.ts","scripts/initialize-consumer-profile.ts", "scripts/dev-setup.ts", "scripts/dev-verify.ts", "scripts/dev-workshop.ts", "scripts/upload-consumer-skills.ts"]
+    "scripts/company-data-dashboard-proof.ts", "scripts/propose-recipe.ts","scripts/initialize-consumer-profile.ts", "scripts/dev-setup.ts", "scripts/dev-verify.ts", "scripts/dev-workshop.ts", "scripts/upload-consumer-skills.ts"]
 }

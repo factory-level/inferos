@@ -5,6 +5,11 @@ covers:
   - custom-gatekeepers/gatekeeper-inferops
   - packages/bundled-blueprints/blueprints/inferops-kanban
   - packages/bundled-blueprints/blueprints/inferops-records
+  - packages/bundled-blueprints/libraries/service-dashboard
+  - packages/bundled-blueprints/blueprints/inferops-service-jobs
+  - packages/bundled-blueprints/blueprints/inferops-service-job-status-counts
+  - packages/bundled-blueprints/blueprints/inferops-service-job-recent-activities
+  - packages/bundled-blueprints/blueprints/inferops-service-dashboard
   - packages/bundled-blueprints/blueprints/inferops-members
   - packages/bundled-blueprints/blueprints/inferops-workflow-policy
   - packages/gatekeeper-kit
@@ -21,8 +26,9 @@ covers:
   - packages/integration-tests/src/inferops-fake.ts
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
+  - packages/workshop-backend/scripts/company-data-dashboard-proof.ts
   - scripts/run-dev-server.ts
-updated: 2026-11-05
+updated: 2026-11-06
 ---
 
 # InferOps gatekeeper
@@ -32,8 +38,8 @@ updated: 2026-11-05
 `custom-gatekeepers/gatekeeper-inferops` (package `@inferos/gatekeeper-inferops`, vendor id
 `inferops`) implements the reviewed agent-facing API from the
 [design](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/inferops-gatekeeper.md). Its `src/types.d.ts` is the design's
-`inferops-gatekeeper-api.d.ts` verbatim, plus `findBoards` (below): `InferOpsProjectSession` (`readBoard`, `openIssue`,
-`createIssue`, `findBoards`) and `InferOpsIssueSession` (`read`, `transition`, `update`, `activity`), with `Issue.pending`
+`inferops-gatekeeper-api.d.ts`, extended by `findBoards` and the FAC-172 service-query/comment surface (below): `InferOpsProjectSession` (`readBoard`, `openIssue`,
+`createIssue`, `findBoards`, `readServiceQuery`) and `InferOpsIssueSession` (`read`, `transition`, `update`, `activity`, `comment`), with `Issue.pending`
 marking simulated changes. The gatekeeper code is written against a data-source
 contract (`src/inferops-client.ts`) with two implementations: `src/mock-inferops.ts` (**demo data**,
 the default, and what the tests and the demo use) and `src/http-inferops.ts` (the InferOps HTTP
@@ -1205,3 +1211,40 @@ The journal stores person/thread/initial-run/interrupt/proposal correlation and 
 Unchanged approval/rejection reuse approveAction/rejectAction and the existing action claim. The facet rechecks scope/request fingerprint and uses the original provider key/revision; InferOps rechecks current permissions/workflow policy. Identical replies reconcile the recorded outcome; conflicting replies refuse. A lost response remains unknown until an authoritative receipt, including after a later refusal. External action decisions reconcile on a fresh-client reload. Successful transport does not mean applied.
 
 Edited target arguments validate against the current issue/revision/workflow, stage a fresh transition and invalidate the old facet proposal without applying it. A durable replacement link recovers an interrupted edit; the existing journal records the replacement and emits a new interrupt with a new key/fingerprint. The prior answer never approves changed arguments. No multi-action atomicity, implicit guards, new role engine, frontend, deployment or live-identity proof is claimed.
+
+
+## Company service dashboard (FAC-172)
+
+The `inferops.service-jobs`, `inferops.service-job-status-counts`, and `inferops.service-job-recent-activities` blueprints share `libraries/service-dashboard` and compose as three separate `inferos.gadget` instances on an ordinary saved canvas. The combined `inferops.service-dashboard` blueprint also offers all three panels over one
+project connection: `service-jobs`, `service-job-status-counts`, and
+`service-job-recent-activities`. `InferOpsProjectSession.readServiceQuery` accepts only those names,
+a bounded limit and an opaque cursor. The HTTP adapter supplies `queryVersion=1` and resolves the
+bound project's ID itself; caller-supplied scope is refused. Response fields are projected and a
+job outside the project is refused. A project connection latches owner-only before attempting a joined read, so even a later or concurrently admitted collaborator cannot inherit joined data; account connections use their existing withheld-observation tracker. Each read reuses the existing current-credential request
+path and is an observation withheld from board-only collaborators, because their board grant
+cannot authorize joined company data. The mock refuses these reads; it supplies no fake proof.
+
+The dashboard stores no records. Failed/denied/missing connections remain distinct from empty
+results, pages expose the next cursor, and stale client responses cannot replace newer reads.
+Its comment form narrows to the selected issue and calls `InferOpsIssueSession.comment` with the
+exact `headSeq` read by the query. The existing action store fingerprints the body and expected
+head, queues the action, and sends `X-Idempotency-Key` plus `expectedIssueHeadSeq` only on apply.
+The API rechecks authorization and the head. An uncertain response uses the existing replayable
+write policy; no exactly-once claim is made. Comments are not revertible here and are not shown
+as recorded activity before approval. The blueprint disables export.
+
+This code requires the FAC-172 InferOps provider implementation; the repository-wide provider
+pin continues to describe the existing stable board contract until the coordinated provider
+merge. Tests use synthetic responses. Live browser, provider load and restore evidence are
+separate gates and are not implied by the unit tests.
+
+
+These widgets run as isolated DOM blueprint clients, like the existing members and workflow-policy blueprints, rather than in Workshop React. They use native controls and CSS system colors (`Canvas`, `CanvasText`, `ButtonBorder`, `GrayText`) to inherit the browser accessibility palette without a feature-local color system.
+
+The local proof installer is `packages/workshop-backend/scripts/company-data-dashboard-proof.ts`.
+Given a localhost Workshop URL and the synthetic company's board reference, it installs the
+three separate blueprints into one new workspace and creates a saved canvas with three
+`inferos.gadget` references. Its report contains only IDs, success states and row counts; the
+local browser session is stored in a restricted `/tmp` file. It must run against the live
+company fixture; there is no mock fallback. The proof uses a local catalog enabling
+`inferos.gadget` and those three blueprints, without changing any deployed catalog.

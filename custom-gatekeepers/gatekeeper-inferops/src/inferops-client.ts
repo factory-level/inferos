@@ -1,3 +1,4 @@
+import type { ServiceQueryName, ServiceQueryOptions, ServiceQueryPage } from "./types";
 // The data-source contract the gatekeeper is written against. `mock-inferops.ts` implements it with
 // seeded fixture data in a Durable Object (the default, and what the tests and the demo use);
 // `http-inferops.ts` implements it over the InferOps HTTP API. `clientFor` in inferops.ts is the one
@@ -291,6 +292,10 @@ export type ProjectSummary = Pick<Project, "identifier" | "name">;
  * props, so a caller can never widen scope through it.
  */
 export interface InferOpsClient {
+  /** Add a comment to an issue in the bound project, with a replayable key and exact head. */
+  commentIssue(projectKey: string, issueId: string, body: string, expectedRevision: Revision, idempotencyKey: string): Promise<void>;
+  /** Published joined reads, narrowed to the bound project by the HTTP adapter. */
+  readServiceQuery(projectKey: string, name: ServiceQueryName, options?: ServiceQueryOptions): Promise<ServiceQueryPage>;
   /** Projects this account may open, for the resource picker. */
   listProjects(): Promise<ProjectSummary[]>;
 

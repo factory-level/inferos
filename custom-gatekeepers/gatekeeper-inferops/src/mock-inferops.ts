@@ -1060,6 +1060,8 @@ export function openInferOpsClient(
   return {
     listProjects: () => stub.listProjects(),
     readProject: projectKey => stub.readProject(projectKey),
+    commentIssue: async () => { throw new InferOpsError("UNAVAILABLE", "Governed comments require a live company data plane."); },
+    readServiceQuery: async () => { throw new InferOpsError("UNAVAILABLE", "Published service queries require a live company data plane."); },
     readIssue: (projectKey, issueId) => stub.readIssue(projectKey, issueId),
     readIssueActivity: (projectKey, issueId) => stub.readIssueActivity(projectKey, issueId),
     transition: (projectKey, issueId, toStateId, expectedRevision, idempotencyKey) =>
