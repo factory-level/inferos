@@ -17350,7 +17350,7 @@ export function retireAssignmentsUsing(
  * cause attached. Records who gave it and when. Callers check the role and authority first.
  */
 export async function provisionWorkflowTriggerCredential(
-    impl: Pick<OverseerImpl, "env" | "storage" | "workflowDefinitionStore">,
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">,
     caller: AiChatAuthorInfo, hookId: number, key: string): Promise<TriggerAssignment> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   let assignment = impl.workflowDefinitionStore().assignmentOf(hookId);
@@ -17377,26 +17377,38 @@ export async function provisionWorkflowTriggerCredential(
   try {
     marked = impl.workflowDefinitionStore().markProvisioned(hookId, assignment.credentialRef, caller);
   } catch (error) {
-    await forgetProvisioned(vendor, hookId, assignment.credentialRef);
+    await forgetProvisioned(impl, vendor, assignment);
     throw error;
   }
   // The assignment changed while the key was being checked: what was stored is for a dead reference.
   if (!marked) {
-    await forgetProvisioned(vendor, hookId, assignment.credentialRef);
+    await forgetProvisioned(impl, vendor, assignment);
     throw new Error("This trigger's assignment changed. Assign it again, then give the key.");
   }
   return marked;
 }
 
-/** Forgets the key just stored for `credentialRef`, logging by hook only if the vendor can't. */
+/**
+ * Forgets the key just stored for `assignment`'s reference. If the vendor can't (#374, review.r2's
+ * recheck), fails closed: an assignment still on that reference is retired and removed, its
+ * facets aborted and its waiting runs dropped, so no run can act with a key provisioning refused.
+ * Logs by hook only, never the key or the reference.
+ */
 async function forgetProvisioned(
-    vendor: Pick<GatekeeperVendor, "forgetSystemCredential">, hookId: number, credentialRef: string): Promise<void> {
+    impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">,
+    vendor: Pick<GatekeeperVendor, "forgetSystemCredential">, assignment: TriggerAssignment): Promise<void> {
   try {
-    await vendor.forgetSystemCredential?.(credentialRef);
+    if (!vendor.forgetSystemCredential) throw new Error("This connection can't forget a credential.");
+    await vendor.forgetSystemCredential(assignment.credentialRef);
   } catch {
     logger.warn("system credential could not be forgotten", {
-      event: "workflow.system_credential.forget.failed", hookId,
+      event: "workflow.system_credential.forget.failed", hookId: assignment.hookId,
     });
+    let store = impl.workflowDefinitionStore();
+    if (store.assignmentOf(assignment.hookId)?.credentialRef === assignment.credentialRef) {
+      retireAssignment(impl, assignment);
+      store.removeAssignment(assignment.hookId);
+    }
   }
 }
 
