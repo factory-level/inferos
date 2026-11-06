@@ -92,6 +92,60 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
    * as the actor; `invocation.requestedBy` stays a claim beside it.
    */
   executedAs?: { credentialRef: string };
+  /**
+   * The durable run this firing admitted (FAC-111, ADR 0012's correlation record): written in the
+   * same transaction as the delivery, before anything runs. Absent on deliveries recorded before
+   * FAC-111.
+   */
+  run?: WorkflowRunAuthority;
+};
+
+/**
+ * Who asked for a run (FAC-111, inferops ADR 0011's requester): the person whose control press
+ * admitted it, or the trigger itself for a firing no person asked for. A record, never authority.
+ */
+export type WorkflowRunRequester = { kind: "person"; profileId: string } | { kind: "trigger" };
+
+/**
+ * Who a run executes as (FAC-111, inferops ADR 0011's execution principal): the trigger's assigned
+ * service account (FAC-102), named by its connection and credential reference, or the gadget's own
+ * configured bindings when the trigger has no assignment.
+ */
+export type WorkflowRunExecutor =
+  | { kind: "service_account"; gatekeeperId: number; credentialRef: string }
+  | { kind: "gadget_bindings" };
+
+/**
+ * A run's identity and authority, fixed at admission and stored with its delivery (FAC-111). It is
+ * what a run is reloaded from after a restart: never an editable page, a chat or the current pin.
+ */
+export type WorkflowRunAuthority = {
+  /** Server-minted, opaque, never reused (ADR 0012 `runId`). */
+  runId: string;
+  /**
+   * What ties the run to what asked for it: the person's invocation id for an on-request run (the
+   * id their request and the trigger's gatekeeper already carry), else the run id. Sent to a service
+   * it is a correlation claim and authorizes nothing (ADR 0012).
+   */
+  correlationId: string;
+  /**
+   * The InferOps company (tenant id) the person's `workflow:invoke` was answered in at admission,
+   * or null when no person asked (a firing the trigger made itself) or the deployment names no
+   * such authority.
+   */
+  company: string | null;
+  requester: WorkflowRunRequester;
+  executor: WorkflowRunExecutor;
+};
+
+/**
+ * One admitted run as reloaded (FAC-111): its authority, the definition revision and commit it
+ * started on, and when it was admitted. Read from the stored delivery only.
+ */
+export type WorkflowRunRecord = WorkflowRunAuthority & WorkflowDefinitionRef & {
+  hookId: number;
+  commitId: string;
+  admittedAt: Date;
 };
 
 /**

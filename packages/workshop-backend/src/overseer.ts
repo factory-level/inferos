@@ -149,12 +149,16 @@ export const WORKFLOW_INVOKE_REFUSED =
  * must say yes, and a workflow with none is refused, since nothing scopes the question (the manager,
  * 2026-11-05). Where the deployment names no such authority there is nothing to ask, as for shared
  * configuration. It admits nothing alone: the trigger's own control must list the person too.
+ *
+ * Returns the InferOps company every answer was given in (FAC-111), which the admitted run records
+ * as its scope, or null where the deployment names no such authority. Answers given in different
+ * companies refuse: a run has one company.
  */
 export async function requireWorkflowInvoke(
     workspace: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
-    userId: string, hookId: number): Promise<void> {
+    userId: string, hookId: number): Promise<string | null> {
   let vendorId = getSharedConfigurationGatekeeper(workspace.env);
-  if (!vendorId) return;
+  if (!vendorId) return null;
   let hook = workspace.storage.boundHooks.get(hookId);
   let gadgetId = hook ? hook.gadgetId ?? workspace.defaultGadgetId : undefined;
   let boards = new Set<string>();
@@ -169,9 +173,17 @@ export async function requireWorkflowInvoke(
   }
   if (boards.size === 0) throw new Error(WORKFLOW_INVOKE_REFUSED);
   let user = workspace.users.get(workspace.users.idFromString(userId));
+  let companies = new Set<string>();
   for (let resourceUrl of boards) {
-    if (!(await user.holdsWorkflowInvoke(resourceUrl))) throw new Error(WORKFLOW_INVOKE_REFUSED);
+    let answer = await user.workflowInvokeAnswer(resourceUrl);
+    if (answer?.holds !== true || typeof answer.company !== "string" || answer.company === "") {
+      throw new Error(WORKFLOW_INVOKE_REFUSED);
+    }
+    companies.add(answer.company);
   }
+  if (companies.size !== 1) throw new Error(WORKFLOW_INVOKE_REFUSED);
+  let [company] = companies;
+  return company!;
 }
 
 /**
@@ -17650,14 +17662,15 @@ export async function invokeWorkflowTrigger(
   requireLiveHook(impl as OverseerImpl, hookId);
   // The person's own InferOps grant (workflow:invoke), asked freshly at every request, so a removed
   // grant stops the next run. Before anything is minted or handed on.
-  await requireWorkflowInvoke(impl, userId, hookId);
+  let company = await requireWorkflowInvoke(impl, userId, hookId);
   // Re-read after the await: the input gate was open, so the hook may have been disabled meanwhile.
   let record = requireLiveHook(impl as OverseerImpl, hookId);
   let store = impl.workflowDefinitionStore();
   // Assignments off (FAC-102): a trigger assigned before is refused here, before anything is minted.
   if (!workflowAssignmentsEnabled(impl.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
   if (store.autoRetiredOf(hookId)) throw new Error(TRIGGER_AUTO_RETIRED);
-  let invocation = store.beginInvocation(profileId, hookId);
+  // The company the person was answered in becomes the run's scope (FAC-111).
+  let invocation = store.beginInvocation(profileId, hookId, company);
   // What startHook reads to tell this call's delivery taken (see takenInvocations).
   impl.takenInvocations.set(invocation.id, false);
   try {

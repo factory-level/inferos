@@ -5,7 +5,9 @@
 // to the workflow, its trigger, its bindings or its configuration. The run itself is the trigger's
 // own delivery (startHook), recorded with who asked as a claim, never as authority.
 import { describe, expect, it, vi } from "vitest";
-import { invokeWorkflowTrigger, makeOverseerStorage, WORKFLOW_INVOKE_REFUSED } from "../src/overseer.js";
+import {
+  invokeWorkflowTrigger, makeOverseerStorage, TRIGGER_AUTO_RETIRED, WORKFLOW_ASSIGNMENTS_DISABLED, WORKFLOW_INVOKE_REFUSED,
+} from "../src/overseer.js";
 import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { openFakeOverseer } from "./fixtures.js";
 import { makeMockStorage } from "./mock-storage.js";
@@ -28,6 +30,14 @@ function pinned() {
   store.publish(ADA, saved.id, 1);
   store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1 });
   return { durable, storage, store, definitionId: saved.id };
+}
+
+/** The InferOps company the stubbed accounts answer in (FAC-111). */
+const COMPANY_A = "0b7e2c3a-1f00-4a00-8000-00000000000a";
+
+/** A stub's `workflowInvokeAnswer`: a bare yes or no is given in COMPANY_A; an answer passes as is. */
+function invokeAnswer(answer: boolean | { holds: boolean; company: string | null }) {
+  return typeof answer === "boolean" ? { holds: answer, company: answer ? COMPANY_A : null } : answer;
 }
 
 describe("a trigger's control", () => {
@@ -87,7 +97,7 @@ describe("through the Overseer", () => {
 
   async function session(role: "build" | "use", opts: { invoke?: (...args: unknown[]) => Promise<void>;
                                                           canBuild?: boolean;
-                                                          mayInvoke?: () => Promise<boolean>;
+                                                          mayInvoke?: () => Promise<boolean | { holds: boolean; company: string | null }>;
                                                           assignmentsEnabled?: boolean } = {}) {
     let { durable, storage, store } = pinned();
     store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
@@ -120,9 +130,9 @@ describe("through the Overseer", () => {
         get: (id: string) => ({
           whoami: async () => ADA, recordSharedGadgetOpen: async () => {},
           holdsSharedConfiguration: async () => opts.canBuild ?? true,
-          holdsWorkflowInvoke: async () => {
+          workflowInvokeAnswer: async () => {
             askedInvoke.push(id);
-            return opts.mayInvoke ? opts.mayInvoke() : true;
+            return invokeAnswer(opts.mayInvoke ? await opts.mayInvoke() : true);
           },
         }),
       },
@@ -422,7 +432,7 @@ const CONNECTIONS: Record<number, { vendorId: string; resourceUrl: string }> = {
   60: { vendorId: "mail", resourceUrl: "mail://ops" },
 };
 
-async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolean>,
+async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolean | { holds: boolean; company: string | null }>,
                              bindings: [string, { target: number }][] = [["BOARD", { target: 50 }]]) {
   let { store } = pinned();
   store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
@@ -455,9 +465,9 @@ async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolea
       get: (id: string) => ({
         whoami: async () => ADA, recordSharedGadgetOpen: async () => {},
         holdsSharedConfiguration: async () => true,
-        holdsWorkflowInvoke: async (resourceUrl: string) => {
+        workflowInvokeAnswer: async (resourceUrl: string) => {
           askedInvoke.push(`${id} ${resourceUrl}`);
-          return mayInvoke ? mayInvoke(resourceUrl) : true;
+          return invokeAnswer(mayInvoke ? await mayInvoke(resourceUrl) : true);
         },
       }),
     },
@@ -466,7 +476,7 @@ async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolea
     return (invokeWorkflowTrigger as (...a: unknown[]) => unknown).call(undefined, this, ...args);
   };
   let overseer = await openFakeOverseer({}, { role: "use", impl });
-  return { overseer, store, invoke, askedInvoke };
+  return { overseer, store, invoke, askedInvoke, impl };
 }
 
 describe("the invoker's own InferOps grant (workflow:invoke, inferops ADR 0011 D3)", () => {
@@ -543,5 +553,129 @@ describe("the invoker's own InferOps grant (workflow:invoke, inferops ADR 0011 D
     await overseer.invokeTrigger(HOOK);
     expect(askedInvoke).toEqual([]);
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+// FAC-111: an admitted run is durable from admission, with the revision it starts on and the
+// authority it was admitted under, and reloads from that record alone after a restart.
+describe("a durable admitted run (FAC-111)", () => {
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  it("records an on-request run with its revision, company, requester, executor and correlation id", async () => {
+    let { overseer, store } = await invokeSession(async () => true);
+    let invocation = await overseer.invokeTrigger(HOOK);
+    let delivery = store.fire(HOOK, GADGET, headOf, everyoneBuilds, invocation.id);
+    expect(delivery?.run).toEqual({
+      runId: expect.stringMatching(UUID),
+      correlationId: invocation.id,
+      company: COMPANY_A,
+      requester: { kind: "person", profileId: OPERATOR },
+      executor: { kind: "gadget_bindings" },
+    });
+    expect(store.run(delivery!.run!.runId)).toEqual({
+      ...delivery!.run, hookId: HOOK, definitionId: delivery!.definitionId, revision: 1, commitId: commit(1),
+      admittedAt: expect.any(Date),
+    });
+  });
+
+  it("names the trigger's assigned service account as the executor, never the person who asked", () => {
+    let { store } = pinned();
+    store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
+    let assignment = store.setAssignment(ADA, HOOK, 50)!;
+    let invocation = store.beginInvocation(OPERATOR, HOOK, COMPANY_A);
+    let run = store.fire(HOOK, GADGET, headOf, everyoneBuilds, invocation.id)!.run!;
+    expect(run.executor).toEqual({ kind: "service_account", gatekeeperId: 50, credentialRef: assignment.credentialRef });
+    expect(run.requester).toEqual({ kind: "person", profileId: OPERATOR });
+  });
+
+  it("records a firing no person asked for as the trigger's own, with no company", () => {
+    let { store } = pinned();
+    let run = store.fire(HOOK, GADGET, headOf, everyoneBuilds)!.run!;
+    expect(run).toEqual({
+      runId: expect.stringMatching(UUID), correlationId: run.runId, company: null,
+      requester: { kind: "trigger" }, executor: { kind: "gadget_bindings" },
+    });
+  });
+
+  it("reloads after a restart with the same scope and starting revision, whatever the pin and code say now", () => {
+    let { durable, store, definitionId } = pinned();
+    store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
+    let invocation = store.beginInvocation(OPERATOR, HOOK, COMPANY_A);
+    let admitted = store.fire(HOOK, GADGET, headOf, everyoneBuilds, invocation.id)!;
+    let before = store.run(admitted.run!.runId);
+    // A restart: a new store over the same durable storage, nothing carried over in memory.
+    let reopened = new WorkspaceWorkflowDefinitionStore(durable, makeOverseerStorage(durable));
+    expect(reopened.run(admitted.run!.runId)).toEqual(before);
+    // The definition moves on: new code, a new published revision, the trigger re-pinned. The run
+    // still reads the revision and commit it was admitted on, and the company it was admitted in.
+    const headNow = (id: number) => (id === GADGET ? commit(2) : undefined);
+    reopened.save(ADA, { id: definitionId, title: "Refund", gadgetId: GADGET }, headNow);
+    reopened.publish(ADA, definitionId, 2);
+    reopened.pinTrigger(ADA.id, HOOK, GADGET, { definitionId, revision: 2 });
+    let again = new WorkspaceWorkflowDefinitionStore(durable, makeOverseerStorage(durable));
+    expect(again.run(admitted.run!.runId)).toMatchObject({
+      revision: 1, commitId: commit(1), company: COMPANY_A, requester: { kind: "person", profileId: OPERATOR },
+    });
+    expect(again.run("not-a-run")).toBeNull();
+  });
+});
+
+describe("admission refuses before anything reaches the runtime (FAC-111)", () => {
+  /** What reached the trigger's gatekeeper, and whether any run was recorded. */
+  const nothingRan = (store: WorkspaceWorkflowDefinitionStore, invoke: { mock: { calls: unknown[] } }, definitionId: string) => {
+    expect(invoke.mock.calls).toEqual([]);
+    expect(store.deliveries(ADA.id, definitionId)).toEqual([]);
+  };
+  const definitionOf = (store: WorkspaceWorkflowDefinitionStore) => store.list(ADA.id)[0]!.id;
+
+  it("without the person's workflow:invoke", async () => {
+    let { overseer, store, invoke } = await invokeSession(async () => false);
+    await expect(overseer.invokeTrigger(HOOK)).rejects.toThrow(WORKFLOW_INVOKE_REFUSED);
+    nothingRan(store, invoke, definitionOf(store));
+  });
+
+  it("for the wrong company: an account of another company, or answers given in two companies", async () => {
+    // The connection's gatekeeper answers no, with no company, for a session in another company.
+    let other = await invokeSession(async () => ({ holds: false, company: null }));
+    await expect(other.overseer.invokeTrigger(HOOK)).rejects.toThrow(WORKFLOW_INVOKE_REFUSED);
+    nothingRan(other.store, other.invoke, definitionOf(other.store));
+    // A yes without a company is no scope to run in.
+    let unscoped = await invokeSession(async () => ({ holds: true, company: null }));
+    await expect(unscoped.overseer.invokeTrigger(HOOK)).rejects.toThrow(WORKFLOW_INVOKE_REFUSED);
+    nothingRan(unscoped.store, unscoped.invoke, definitionOf(unscoped.store));
+    // Two of the workflow's boards answered in different companies: a run has one company.
+    let split = await invokeSession(
+        async url => ({ holds: true, company: url === OPS_BOARD ? COMPANY_A : "0b7e2c3a-1f00-4a00-8000-00000000000b" }),
+        [["BOARD", { target: 50 }], ["OTHER", { target: 51 }]]);
+    await expect(split.overseer.invokeTrigger(HOOK)).rejects.toThrow(WORKFLOW_INVOKE_REFUSED);
+    nothingRan(split.store, split.invoke, definitionOf(split.store));
+  });
+
+  it("for a stale revision: the trigger moved on, or the code changed, after the request was admitted", () => {
+    let { store, definitionId } = pinned();
+    store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
+    let admitted = store.beginInvocation(OPERATOR, HOOK, COMPANY_A);
+    const headNow = (id: number) => (id === GADGET ? commit(2) : undefined);
+    // The code changed under the pinned revision: refused, nothing recorded.
+    expect(() => store.fire(HOOK, GADGET, headNow, everyoneBuilds, admitted.id))
+      .toThrow("The workflow changed since revision 1 was saved.");
+    // The trigger moved to another revision: the waiting request is dropped and can't start a run.
+    store.save(ADA, { id: definitionId, title: "Refund", gadgetId: GADGET }, headNow);
+    store.publish(ADA, definitionId, 2);
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId, revision: 2 });
+    expect(() => store.fire(HOOK, GADGET, headNow, everyoneBuilds, admitted.id))
+      .toThrow("That run request is unknown or already ran.");
+    expect(store.deliveries(ADA.id, definitionId)).toEqual([]);
+  });
+
+  it("for an assignment while assignments are off, or one retired automatically", async () => {
+    let disabled = await invokeSession(async () => true);
+    disabled.store.setAssignment(ADA, HOOK, 50);
+    await expect(disabled.overseer.invokeTrigger(HOOK)).rejects.toThrow(WORKFLOW_ASSIGNMENTS_DISABLED);
+    nothingRan(disabled.store, disabled.invoke, definitionOf(disabled.store));
+    let retired = await invokeSession(async () => true);
+    retired.store.markAutoRetired(HOOK);
+    await expect(retired.overseer.invokeTrigger(HOOK)).rejects.toThrow(TRIGGER_AUTO_RETIRED);
+    nothingRan(retired.store, retired.invoke, definitionOf(retired.store));
   });
 });
