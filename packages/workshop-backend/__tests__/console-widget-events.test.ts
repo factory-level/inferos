@@ -61,14 +61,14 @@ const BOARD = { nodeType: "widget", id: "eng", kind: "inferops.project-board", v
  * Screen "floor" as a nested page whose widget listens for `event`, navigating to "done", or with
  * `requesting`, asking the board beside it to create an issue.
  */
-function wire(storage: ReturnType<typeof setUp>["storage"], event: string, requesting = false, trigger?: number) {
+function wire(storage: ReturnType<typeof setUp>["storage"], event: string, requesting = false) {
   let row = storage.canvases.get("floor")!;
   let page = canvasPageFromDefinition(row);
   let effect = requesting ? { kind: "request-action" as const, target: "eng", action: "create-issue" }
     : { kind: "navigate" as const, page: "done" };
   let nested = { ...page, nodes: [
     ...page.nodes.map(node => node.nodeType === "object" ? { ...node, children: ["inner", ...(requesting ? ["eng"] : [])] }
-      : { ...node, attachments: [{ id: "next", version: 1 as const, on: event, ...(trigger === undefined ? {} : { trigger }), effect }] }),
+      : { ...node, attachments: [{ id: "next", version: 1 as const, on: event, effect }] }),
     { nodeType: "object", id: "inner", title: "Inner", columns: 1, children: ["w1"], attachments: [] },
     ...(requesting ? [BOARD] : []),
   ] } as CanvasPage;
@@ -136,11 +136,11 @@ describe("a run's result at publication (FAC-116)", () => {
   it("publishes an attachment hearing a trigger of the widget's own gadget, on the frozen widget", () => {
     let t = setUp("stateful");
     hook(t.storage, 11, 1);
-    wire(t.storage, "run-succeeded", false, 11);
+    wire(t.storage, "run-succeeded-11");
     let published = publish(t).run();
     let page = t.consoles.page(published.id, "floor", "published")!;
     let widget = page.nodes.find(node => node.nodeType === "widget")!;
-    expect(widget).toMatchObject({ attachments: [{ id: "next", on: "run-succeeded", trigger: 11 }] });
+    expect(widget).toMatchObject({ attachments: [{ id: "next", on: "run-succeeded-11" }] });
   });
 
   it.for([
@@ -149,7 +149,7 @@ describe("a run's result at publication (FAC-116)", () => {
   ] as const)("refuses %s, publishing nothing", ([, gadgetId]) => {
     let t = setUp("plain");
     if (gadgetId !== null) hook(t.storage, 11, gadgetId);
-    wire(t.storage, "run-failed", false, 11);
+    wire(t.storage, "run-failed-11");
     let { draft, run } = publish(t);
     expect(run).toThrow("Screen floor can't be published: its widget w1 hears the runs of trigger 11, which isn't a trigger of gadget 1.");
     expect(t.storage.consoles.get(draft.id)!.published).toBeNull();
@@ -159,7 +159,7 @@ describe("a run's result at publication (FAC-116)", () => {
   it("refuses a run's result that leads to a requested action, publishing nothing", () => {
     let t = setUp("plain");
     hook(t.storage, 11, 1);
-    wire(t.storage, "run-succeeded", true, 11);
+    wire(t.storage, "run-succeeded-11", true);
     let { draft, run } = publish(t);
     expect(run).toThrow(`Screen floor can't be published: its widget w1's "run-succeeded" for trigger 11 leads to a requested action, which a run's result can't run.`);
     expect(t.storage.consoles.get(draft.id)!.published).toBeNull();

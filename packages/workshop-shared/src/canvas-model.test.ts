@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
 import {
-  canvasPageEffects, canvasRunEffects, canvasRunEventsHeard,
+  canvasPageEffects, canvasRunEffects, canvasRunEvent, canvasRunEventsHeard, parseCanvasRunEvent,
   canvasWidgetEventsHeard,
   CANVAS_MODEL_LIMITS, CANVAS_WIDGET_ACTIONS, CanvasModelError, applyCanvasPageOperations, canvasDefinitionFromPage, canvasPageFromDefinition, canvasTargetPath, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
   resolveCanvasTarget, type CanvasModelErrorCode, type CanvasNode, type CanvasPage, type CanvasTarget,
@@ -435,7 +435,7 @@ describe("widget events drive page effects (FAC-94)", () => {
 });
 
 // FAC-116: a run a person asked a trigger for can drive a page effect through an explicit attachment
-// on the trigger's gadget widget, naming the trigger; nothing else raises or hears a run's events.
+// on the trigger's gadget widget, its event naming the trigger; nothing else raises or hears it.
 describe("a requested run's result drives page effects (FAC-116)", () => {
   const runPage = (widgetAttachments: unknown[], objectAttachments: unknown[] = [], pageAttachments: unknown[] = []) => ({
     schemaVersion: 2, id: "p", revision: "0", title: "P", children: ["a"], attachments: pageAttachments, nodes: [
@@ -444,7 +444,16 @@ describe("a requested run's result drives page effects (FAC-116)", () => {
         attachments: widgetAttachments },
     ],
   });
-  const done = { id: "done", version: 1, on: "run-succeeded", trigger: 11, effect: { kind: "navigate", page: "q" } };
+  const done = { id: "done", version: 1, on: canvasRunEvent("run-succeeded", 11), effect: { kind: "navigate", page: "q" } };
+
+  test("names the trigger inside the event, and reads it back", () => {
+    expect(done.on).toBe("run-succeeded-11");
+    expect(parseCanvasRunEvent("run-uncertain-42")).toEqual({ event: "run-uncertain", trigger: 42 });
+    expect(parseCanvasRunEvent("finish")).toBeNull();
+    for (const on of ["run-succeeded", "run-failed-0", "run-failed-01", "run-failed-x", "run-uncertain-99999999999999999"]) {
+      expect(parseCanvasRunEvent(on), on).toBe("malformed");
+    }
+  });
 
   test("a gadget widget's attachment may hear one trigger's run results, checked at publish", () => {
     const page = parseCanvasPage(runPage([done]));
@@ -454,24 +463,32 @@ describe("a requested run's result drives page effects (FAC-116)", () => {
     expect(canvasWidgetEventsHeard(page)).toEqual([]);
   });
 
-  test("a run event names its trigger, only a run event names one, and only a gadget widget hears it", () => {
-    const at = (attachment: unknown) => rejection(() => parseCanvasPage(runPage([attachment])));
-    expect(at({ ...done, trigger: undefined })).toEqual({ code: "invalid-attachment", at: "done" });
-    expect(at({ ...done, on: "finish" })).toEqual({ code: "invalid-attachment", at: "done" });
-    for (const trigger of [0, -1, 1.5, "11"]) expect(at({ ...done, trigger })).toEqual({ code: "invalid-attachment", at: "done" });
+  test("is stored in exactly the fields an earlier reader accepts, so a rollback still reads the page", () => {
+    // The reader before FAC-116 accepts an attachment with exactly these fields, its event matching
+    // this pattern, and reads a gadget widget's event it can't know as the widget's own, which
+    // publication then refuses as undeclared and nothing raises.
+    const stored = JSON.parse(JSON.stringify(parseCanvasPage(runPage([done])))) as CanvasPage;
+    const attachment = stored.nodes[1]!.attachments[0]!;
+    expect(Object.keys(attachment).toSorted()).toEqual(["effect", "id", "on", "version"]);
+    expect(attachment.on).toMatch(/^[a-z][a-z0-9-]{0,63}$/);
+  });
+
+  test("a run event names a well-formed trigger, only a gadget widget hears it, and nothing raises it", () => {
+    const at = (on: string) => rejection(() => parseCanvasPage(runPage([{ ...done, on }])));
+    for (const on of ["run-succeeded", "run-failed-0", "run-failed-01", "run-uncertain-x"]) expect(at(on), on).toEqual({ code: "invalid-attachment", at: "done" });
     expect(rejection(() => parseCanvasPage(runPage([], [{ ...done, id: "o" }])))).toEqual({ code: "unknown-event", at: "o" });
     expect(rejection(() => parseCanvasPage(runPage([], [], [{ ...done, id: "pg" }])))).toEqual({ code: "unknown-event", at: "pg" });
     // Nobody can claim a run's result by raising it.
     expect(rejection(() => parseCanvasPage(runPage(
-      [{ id: "fake", version: 1, on: "finish", effect: { kind: "raise-event", target: "g", event: "run-succeeded" } }],
+      [{ id: "fake", version: 1, on: "finish", effect: { kind: "raise-event", target: "g", event: "run-succeeded-11" } }],
     )))).toEqual({ code: "reserved-event", at: "fake" });
   });
 
   test("resolves one trigger's run event to its page effects, following raised events, and nothing else to them", () => {
     const page = parseCanvasPage(runPage(
       [{ ...done, effect: { kind: "raise-event", target: "a", event: "refunds-done" } },
-        { id: "failed", version: 1, on: "run-failed", trigger: 11, effect: { kind: "navigate", page: "help" } },
-        { id: "other", version: 1, on: "run-succeeded", trigger: 12, effect: { kind: "navigate", page: "other" } }],
+        { id: "failed", version: 1, on: "run-failed-11", effect: { kind: "navigate", page: "help" } },
+        { id: "other", version: 1, on: "run-succeeded-12", effect: { kind: "navigate", page: "other" } }],
       [{ id: "next", version: 1, on: "refunds-done", effect: { kind: "navigate", page: "q" } }],
     ));
     expect(canvasRunEffects(page, 11, "run-succeeded")).toEqual([{ kind: "navigate", page: "q" }]);
@@ -480,7 +497,7 @@ describe("a requested run's result drives page effects (FAC-116)", () => {
     expect(canvasRunEffects(page, 12, "run-succeeded")).toEqual([{ kind: "navigate", page: "other" }]);
     expect(canvasRunEffects(page, 13, "run-succeeded")).toEqual([]);
     // A widget's own events never reach a run's attachments.
-    expect(canvasPageEffects(page, "gadget:7", "run-succeeded")).toEqual([]);
+    expect(canvasPageEffects(page, "gadget:7", "run-succeeded-11")).toEqual([]);
   });
 });
 
