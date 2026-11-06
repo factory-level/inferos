@@ -189,43 +189,6 @@ function gatekeeperResourceUrl(record: GatekeeperRecord | undefined): string | u
   return spec && "resourceUrl" in spec && typeof spec.resourceUrl === "string" ? spec.resourceUrl : undefined;
 }
 
-/** The refusal when the invoker's own InferOps grant doesn't include `workflow:invoke` (FAC-102). */
-export const WORKFLOW_INVOKE_REFUSED =
-  "You don't have permission to run workflows here. Ask an Admin for it.";
-
-/**
- * Refuses unless the deployment's shared-configuration authority says the user may ask trigger
- * `hookId`'s workflow to run (FAC-102, InferOps' `workflow:invoke`, inferops ADR 0011 D3), asked
- * freshly through their own connected account in the workspace of each connection of that vendor the
- * trigger's gadget binds, read from the connection's own record, never from the request; every one
- * must say yes, and a workflow with none is refused, since nothing scopes the question (the manager,
- * 2026-11-05). Where the deployment names no such authority there is nothing to ask, as for shared
- * configuration. It admits nothing alone: the trigger's own control must list the person too.
- */
-export async function requireWorkflowInvoke(
-    workspace: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
-    userId: string, hookId: number): Promise<void> {
-  let vendorId = getSharedConfigurationGatekeeper(workspace.env);
-  if (!vendorId) return;
-  let hook = workspace.storage.boundHooks.get(hookId);
-  let gadgetId = hook ? hook.gadgetId ?? workspace.defaultGadgetId : undefined;
-  let boards = new Set<string>();
-  if (gadgetId !== undefined) {
-    for (let [, edge] of workspace.visibleBindings(workspace.getGadgetRecord(gadgetId))) {
-      let record = workspace.storage.gatekeepers.get(edge.target);
-      let spec = record?.creationSpec;
-      if (gatekeeperVendorId(record) === vendorId && spec && "resourceUrl" in spec && typeof spec.resourceUrl === "string") {
-        boards.add(spec.resourceUrl);
-      }
-    }
-  }
-  if (boards.size === 0) throw new Error(WORKFLOW_INVOKE_REFUSED);
-  let user = workspace.users.get(workspace.users.idFromString(userId));
-  for (let resourceUrl of boards) {
-    if (!(await user.holdsWorkflowInvoke(resourceUrl))) throw new Error(WORKFLOW_INVOKE_REFUSED);
-  }
-}
-
 /**
  * Refuses unless the deployment's shared-configuration authority says the user may `action`,
  * asked freshly through their own connected account. `scope: "shared"` asks only while the
