@@ -3,10 +3,13 @@ import { useKumoToastManager } from '@cloudflare/kumo'
 import { LightningIcon } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { BoundHookInfo, CollaboratorInfo, GadgetSummary, Overseer } from '@gadgets/workshop-shared/api'
-import type { TriggerControl, WorkflowDefinition, WorkflowDefinitionRef } from '@gadgets/workshop-shared/workflow-definition'
+import type {
+  TriggerAssignment, TriggerControl, WorkflowDefinition, WorkflowDefinitionRef,
+} from '@gadgets/workshop-shared/workflow-definition'
 import { HookToggle } from '../../components/HookToggle'
 import { WorkshopButton } from '../../components/WorkshopControls'
 import { reportIssue } from '../../errorReporting'
+import { type AssignableConnection, TriggerAssignmentEditor } from './TriggerAssignmentEditor'
 import { TriggerControlEditor } from './TriggerControlEditor'
 import { WorkflowDefinitionsSection } from './WorkflowDefinitionsSection'
 
@@ -33,6 +36,12 @@ type Loaded =
       controls: ReadonlyMap<number, TriggerControl>
       // Who a control can list: the workspace's collaborators.
       collaborators: CollaboratorInfo[]
+      // Each pinned hook's service-account assignment, by hook id; absent when it has none.
+      assignments: ReadonlyMap<number, TriggerAssignment>
+      // Whether this instance has assignments on, as the server reads it (off by default).
+      assignmentsEnabled: boolean
+      // The connections each pinned hook's gadget binds, which an assignment can choose, by hook id.
+      connections: ReadonlyMap<number, AssignableConnection[] | null>
     }
 
 // The definition revision a trigger could run: the published one for the gadget it wakes.
@@ -44,6 +53,25 @@ const publishedFor = (definitions: readonly WorkflowDefinition[], gadgetId: numb
       ? [{ definition, ref: { definitionId: definition.id, revision: revision.revision } }]
       : []
   })
+
+// The connections a trigger's gadget binds, once each, for choosing who its runs act as. The server
+// checks the choice. A gadget that can't be read gives null, which the editor shows as an error
+// with a retry, rather than as having no connections or failing the whole panel.
+const connectionsOf = async (overseer: RpcStub<Overseer>, gadgetId: number): Promise<AssignableConnection[] | null> => {
+  const gadget = overseer.getGadget(gadgetId)
+  try {
+    const bindings = await gadget.listBindings()
+    const seen = new Map<number, AssignableConnection>()
+    for (const b of bindings) {
+      if (b.vendorId !== undefined && !seen.has(b.target)) seen.set(b.target, { id: b.target, title: b.resourceTitle })
+    }
+    return [...seen.values()]
+  } catch {
+    return null
+  } finally {
+    gadget[Symbol.dispose]()
+  }
+}
 
 /**
  * A workflow's output pane: what wakes it, in place of an app preview. Lists the workspace's bound
@@ -76,7 +104,17 @@ export const WorkflowTriggersPanel = ({
       const pins = new Map<number, WorkflowDefinitionRef>()
       refs.forEach((ref, i) => { if (ref) pins.set(hooks[i]!.id, ref) })
       const controls = new Map(controlList.map(control => [control.hookId, control]))
-      return { hooks, definitions, pins, controls, collaborators }
+      const pinned = hooks.filter(h => pins.has(h.id))
+      const [assignmentList, connectionList] = await Promise.all([
+        Promise.all(pinned.map(h => overseer.getTriggerAssignment(h.id))),
+        Promise.all(pinned.map(h => connectionsOf(overseer, h.gadgetId))),
+      ])
+      const assignments = new Map<number, TriggerAssignment>()
+      assignmentList.forEach((state, i) => { if (state.assignment) assignments.set(pinned[i]!.id, state.assignment) })
+      // One instance-wide switch; every read reports the same.
+      const assignmentsEnabled = assignmentList.some(state => state.enabled)
+      const connections = new Map(pinned.map((h, i) => [h.id, connectionList[i]!]))
+      return { hooks, definitions, pins, controls, collaborators, assignments, assignmentsEnabled, connections }
     }
     load()
       .then(ready => {
@@ -232,6 +270,18 @@ export const WorkflowTriggersPanel = ({
                         pin={pin}
                         control={loaded.controls.get(hook.id) ?? null}
                         collaborators={loaded.collaborators}
+                        onChanged={() => setReloadTick(t => t + 1)}
+                      />
+                    )}
+                    {pin && (
+                      <TriggerAssignmentEditor
+                        // An assigned, given or removed key remounts the editor with what the server kept.
+                        key={`${hook.id}:${JSON.stringify(loaded.assignments.get(hook.id) ?? null)}`}
+                        overseer={overseer}
+                        hookId={hook.id}
+                        enabled={loaded.assignmentsEnabled}
+                        assignment={loaded.assignments.get(hook.id) ?? null}
+                        connections={loaded.connections.get(hook.id) ?? null}
                         onChanged={() => setReloadTick(t => t + 1)}
                       />
                     )}
