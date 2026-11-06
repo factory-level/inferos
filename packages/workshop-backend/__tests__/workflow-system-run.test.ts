@@ -547,6 +547,22 @@ describe("provisioning an assignment's key (FAC-102, the lead's option a)", () =
     await expect(provisionWorkflowTriggerCredential(made.impl, ADA, HOOK, KEY)).rejects.toThrow();
     expect(forget).toHaveBeenCalledWith(assignment.credentialRef);
   });
+
+  // #374, review.r2's recheck: a key provisioning refused must not stay usable because the vendor
+  // couldn't forget it.
+  it("retires the assignment when recording fails and the key can't be forgotten either", async () => {
+    let forget = vi.fn(async (_ref: string) => { throw new Error("vendor unavailable"); });
+    let made = provisionImpl({ forgetSystemCredential: forget, provisionSystemCredential: async () => {} });
+    let assignment = setWorkflowTriggerAssignment(made.impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    made.running(assignment.credentialRef);
+    made.store.markProvisioned = () => { throw new Error("storage reset"); };
+    let { text, result } = await consoleDuring(() => provisionWorkflowTriggerCredential(made.impl, ADA, HOOK, KEY));
+    expect(result).toBeInstanceOf(Error);
+    expect(made.store.assignmentOf(HOOK)).toBeNull();
+    expect(made.aborted).toEqual([systemGatekeeperFacetName(assignment.credentialRef, 7)]);
+    expect(text).not.toContain(KEY);
+    expect(text).not.toContain(assignment.credentialRef);
+  });
 });
 
 describe("who may provision", () => {
