@@ -44,6 +44,12 @@ export type AssignedExecution = {
    * person's profile id, or null when the trigger fired it itself. A record, never authority.
    */
   requestedBy?: string | null;
+  /**
+   * What identifies the write within its run (FAC-112): the connection, its description's digest
+   * and which identical write of the attempt it is. A run that runs again after a restart proposes
+   * the same write with the same key, and it is matched to this one rather than recorded again.
+   */
+  writeKey?: string;
 };
 
 /**
@@ -133,6 +139,66 @@ export class SystemRunRegistry {
   }
 }
 
+/**
+ * The caller an unassigned requested run's bindings carry (FAC-112): the gadget's own, as for any
+ * of its calls, naming the run, so every session it opens and every write it proposes is the run's.
+ * Set server-side in the loopback's props, never by the worker.
+ */
+export type GadgetRunCaller = { from: "gadget"; gadgetId: number; run: { hookId: number; deliveryId: number } };
+
+/** Refusal: an unassigned run's binding asked for anything but one of its gadget's connections. */
+export const GADGET_RUN_WRONG_CONNECTION = "A workflow run reaches only its gadget's own connections.";
+
+/**
+ * The unassigned requested runs in flight, by delivery id (FAC-112), as `SystemRunRegistry` keeps
+ * the assigned ones: present only while the run's `WorkflowRun` call runs. Memory only.
+ */
+export class GadgetRunRegistry {
+  #runs = new Map<number, { hookId: number; gadgetId: number }>();
+
+  /** Records `deliveryId` as running; refuses one already running. */
+  begin(deliveryId: number, run: { hookId: number; gadgetId: number }): void {
+    if (this.#runs.has(deliveryId)) throw new Error("This run already started.");
+    this.#runs.set(deliveryId, { ...run });
+  }
+
+  /** Ends `deliveryId`'s run. */
+  end(deliveryId: number): void {
+    this.#runs.delete(deliveryId);
+  }
+
+  /** Refuses unless the run `caller` names is running, for that hook and gadget. */
+  require(caller: GadgetRunCaller): void {
+    let run = this.#runs.get(caller.run.deliveryId);
+    if (!run || run.hookId !== caller.run.hookId || run.gadgetId !== caller.gadgetId) throw new Error(SYSTEM_RUN_ENDED);
+  }
+
+  /** Whether `deliveryId` is running. */
+  has(deliveryId: number): boolean {
+    return this.#runs.has(deliveryId);
+  }
+}
+
+// `value` with every object's keys in sorted order, at every level: one JSON text per value.
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).toSorted().map(key => [key, canonical((value as Record<string, unknown>)[key])]));
+  }
+  return value;
+}
+
+/**
+ * What identifies a write a requested run proposes, apart from the provider's action key (FAC-112
+ * round 3): the SHA-256, in hex, of its description in canonical JSON (object keys sorted at every
+ * level), so the same write described the same way has the same digest whenever it is proposed.
+ */
+export async function actionDescriptionDigest(description: unknown): Promise<string> {
+  let bytes = new TextEncoder().encode(JSON.stringify(canonical(description)));
+  let digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 /** The binding names of a gadget that reach `gatekeeperId`: the only ones a run's `env` holds. */
 export function systemRunBindingNames(bindings: Iterable<[string, { target: number }]>, gatekeeperId: number): string[] {
   let names: string[] = [];
@@ -150,7 +216,11 @@ export interface SystemRunHost {
   /** The gadget's bindings, by name. */
   bindingsOf(gadgetId: number): Iterable<[string, { target: number }]>;
   /** The binding loopback a run's env holds for `gatekeeperId`. */
-  makeLoopback(gatekeeperId: number, caller: SystemRunCaller): unknown;
+  makeLoopback(gatekeeperId: number, caller: SystemRunCaller | GadgetRunCaller): unknown;
+  /** The unassigned requested runs in flight (FAC-112). */
+  gadgetRuns: GadgetRunRegistry;
+  /** Opens a session on connection `gatekeeperId`'s own facet for an unassigned run's `caller` (FAC-112). */
+  openGadgetSession(gatekeeperId: number, caller: GadgetRunCaller): Promise<unknown>;
   /** The gadget modules of `commitId`. */
   readModules(commitId: string): Promise<Record<string, string>>;
   /** Loads code as a fresh dynamic worker. */
@@ -170,6 +240,71 @@ export interface SystemRunHost {
   abortFacet(name: string): void;
   /** Makes the revocable wrapper an RPC capability (a stub over it), so every call reaches it. */
   wrapSession(wrapper: object): unknown;
+}
+
+/**
+ * Runs one admitted delivery of an unassigned trigger that a person asked for (FAC-112; the
+ * manager's decision (a)), as `runAssignedDelivery` runs an assigned one: the delivery's pinned
+ * commit, loaded fresh, so an edit of the gadget's code meanwhile never reaches it, whose `env`
+ * holds a loopback for each of the gadget's connections, each with the gadget's own caller naming
+ * the run (`GadgetRunCaller`), so every write it proposes is the run's. No `GADGET`, `GIT` or other
+ * binding is there, and the worker has no outbound network. Calls the code's `WorkflowRun`
+ * entrypoint: `method` on it, or `run`. `requester` is FAC-104's re-check, in the same order: the
+ * last await (the code's load), then `recheck`, then the synchronous `revalidate` just before the
+ * run registers.
+ */
+export async function runGadgetBindingsDelivery(host: SystemRunHost, hookId: number,
+                                                delivery: { deliveryId: number; commitId: string },
+                                                method: string | null, args: unknown[],
+                                                requester: SystemRunRequester = NO_REQUESTER): Promise<unknown> {
+  if (host.assignmentOf(hookId)) throw new Error(SYSTEM_RUN_ASSIGNMENT_CHANGED);
+  if (host.gadgetRuns.has(delivery.deliveryId)) throw new Error("This run already started.");
+  let gadgetId = host.liveHookGadget(hookId);
+  let caller: GadgetRunCaller = { from: "gadget", gadgetId, run: { hookId, deliveryId: delivery.deliveryId } };
+  let env: Record<string, unknown> = {};
+  for (let [name, edge] of host.bindingsOf(gadgetId)) {
+    if (host.vendorIdOf(edge.target) !== undefined) env[name] = host.makeLoopback(edge.target, caller);
+  }
+  let modules = await host.readModules(delivery.commitId);
+  // The requester's remote authority, asked again once the code has loaded: the last await.
+  await requester.recheck();
+  if (host.assignmentOf(hookId)) throw new Error(SYSTEM_RUN_ASSIGNMENT_CHANGED);
+  requester.revalidate();
+  host.gadgetRuns.begin(delivery.deliveryId, { hookId, gadgetId });
+  try {
+    let worker = host.loadWorker({ mainModule: "server.js", modules, env });
+    let entry = worker.getEntrypoint("WorkflowRun") as Record<string, (...a: unknown[]) => Promise<unknown>>;
+    return await entry[method ?? "run"](...args);
+  } finally {
+    host.gadgetRuns.end(delivery.deliveryId);
+  }
+}
+
+/**
+ * The session an unassigned run's binding gets (FAC-112): the gadget's own session on one of its
+ * connections, wrapped so every call first checks that the run is still running, its hook live and
+ * its gadget still bound to that connection. A stub the worker kept fails once the run ends.
+ */
+export async function openGadgetRunSession(host: SystemRunHost, target: { type: string; id?: number },
+                                           caller: GadgetRunCaller): Promise<unknown> {
+  if (target.type !== "gatekeeper" || target.id === undefined) throw new Error(GADGET_RUN_WRONG_CONNECTION);
+  let gatekeeperId = target.id;
+  const assertLive = () => {
+    let gadgetId: number;
+    try {
+      host.gadgetRuns.require(caller);
+      gadgetId = host.liveHookGadget(caller.run.hookId);
+    } catch {
+      throw new Error(SYSTEM_RUN_ENDED);
+    }
+    if (gadgetId !== caller.gadgetId || systemRunBindingNames(host.bindingsOf(gadgetId), gatekeeperId).length === 0) {
+      throw new Error(SYSTEM_RUN_ENDED);
+    }
+  };
+  assertLive();
+  let session = await host.openGadgetSession(gatekeeperId, caller);
+  assertLive();
+  return host.wrapSession(revocableSession(session as object, assertLive));
 }
 
 // Refuses unless `caller`'s run is live now: still running, its assignment and credential reference

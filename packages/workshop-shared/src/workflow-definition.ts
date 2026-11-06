@@ -98,7 +98,40 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
    * FAC-111.
    */
   run?: WorkflowRunAuthority;
+  /**
+   * How a run a person asked for is executing (FAC-112): present once its firing queued it in the
+   * workspace, and updated there as the workspace runs it, apart from the call that asked. `run`
+   * beside it never changes.
+   */
+  execution?: WorkflowRunExecution;
 };
+
+/**
+ * Where a run a person asked for stands in the workspace that executes it (FAC-112). `queued`: the
+ * firing recorded it, and nothing of it ran yet. `running`: the workspace started it (`attempts`
+ * times; above 1 when a restart interrupted it and it ran again from its start).
+ * `finished` or `failed`: it ended, with why it failed as a fixed category, never the words it
+ * threw. Only this; a run's results, events and delegates aren't recorded here.
+ */
+export type WorkflowRunExecution = {
+  state: "queued" | "running" | "finished" | "failed";
+  attempts: number;
+  queuedAt: Date;
+  startedAt?: Date;
+  endedAt?: Date;
+  failure?: WorkflowRunFailure;
+};
+
+/**
+ * Why a run failed (FAC-112), a fixed category whatever the run threw, whose words can carry what
+ * only its executor may see and stay in the server's log:
+ * - `requester-revoked`: the person who asked may no longer run it;
+ * - `assignment-changed`: the trigger's assignment changed, ended or is off;
+ * - `trigger-gone`: the trigger was disabled or deleted;
+ * - `runtime-error`: anything else the run threw.
+ */
+export type WorkflowRunFailure =
+  "requester-revoked" | "assignment-changed" | "trigger-gone" | "runtime-error";
 
 /**
  * Who asked for a run (FAC-111, inferops ADR 0011's requester): the person whose control press

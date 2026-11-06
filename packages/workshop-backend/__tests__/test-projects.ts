@@ -114,6 +114,7 @@ export const BACKEND: readonly string[] = [
   "personal-state-partition.test.ts",
   "agent-calls.test.ts",
   "workflow-run-restart.test.ts",
+  "workflow-run-execution.test.ts",
   "agent-tracing.test.ts",
   "authored-widget-publish-flow.test.ts",
   "authorize-observation-flags.test.ts",

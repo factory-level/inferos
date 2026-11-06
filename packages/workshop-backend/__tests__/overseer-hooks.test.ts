@@ -66,6 +66,34 @@ describe("OverseerDurableObject.startHook", () => {
     expect(definitions.deliveries(owner.id, saved.id)).toHaveLength(1);
   });
 
+  // FAC-112: a delivery a person asked for runs in the workspace, from its stored record: the
+  // firing's call only queues it and returns, so nothing of the run waits on the caller.
+  it("hands a requested firing's call to the workspace's run queue and returns, never calling the hook code", async () => {
+    let durable = makeMockStorage();
+    let definitions = new WorkspaceWorkflowDefinitionStore(durable, makeOverseerStorage(durable));
+    let head = "a".repeat(40);
+    let owner = { type: "user" as const, id: "owner-profile", name: "Owner" };
+    let saved = definitions.save(owner, { title: "Intake", gadgetId: 3 }, () => head);
+    definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1 });
+    definitions.setControl(owner, 1, { label: "Run", invokers: ["operator-profile"] });
+    let invocation = definitions.beginInvocation("operator-profile", 1, null);
+    let onSchedule = vi.fn(async () => "ran in the caller");
+    let overseer = makeOverseer(async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG),
+        { enabled: true, vendorId: "scheduler", callback: { onSchedule } }, undefined, definitions, head);
+    let queued: unknown[] = [];
+    Object.assign((overseer as any).impl, {
+      takenInvocations: new Map(),
+      env: {},
+      queueWorkflowRun: (...args: unknown[]) => { queued.push(args); },
+    });
+    let { callback } = await overseer.startHook(1, { invocationId: invocation.id });
+    await expect((callback as any).onSchedule({ firedAt: "now" })).resolves.toBeUndefined();
+    expect(onSchedule).not.toHaveBeenCalled();
+    let [delivery] = definitions.deliveries(owner.id, saved.id) as any[];
+    expect(queued).toEqual([[1, expect.any(Number), "onSchedule", [{ firedAt: "now" }]]]);
+    expect(delivery.invocation.requestedBy).toBe("operator-profile");
+  });
+
   it.each([
     ["ordinary", DEFAULT_ADMIN_CONFIG, "email"],
     ["ambient", {

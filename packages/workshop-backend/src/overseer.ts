@@ -8,17 +8,19 @@ import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
-  WorkflowDefinitionSave, WorkflowInvocation,
+  WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
-  SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
-  systemGatekeeperFacetName, type AssignedDelivery, type AssignedExecution, type SystemRunHost,
+  SYSTEM_RUN_ASSIGNMENT_CHANGED, SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
+  GadgetRunRegistry, SYSTEM_RUN_ENDED, actionDescriptionDigest, openGadgetRunSession, runGadgetBindingsDelivery,
+  systemGatekeeperFacetName, type AssignedDelivery, type AssignedExecution, type GadgetRunCaller, type SystemRunHost,
   type SystemRunRequester,
 } from "./system-run.js";
 import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
+  type QueuedWorkflowRun,
 } from "./workflow-definition-store";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
@@ -113,7 +115,7 @@ import { refreshCachedBalance } from "./ai-gateway-billing/cloudflare/connection
 import { SharingManager, SharingCaller, CollaboratorRecord, ShareKeyRecord, roleRank,
     bumpAuthzGeneration, readAuthzGeneration, watchAuthzCollection, watchAuthzSingleton,
     watchSharingAuthzInputs } from "./sharing";
-import { AutoApprovalDrainer, autoApprovalRule, enablerHasBuild, NO_ROLES, type EffectiveRoleLookup }
+import { AutoApprovalDrainer, autoApprovalRule, enablerHasBuild, manualOnly, NO_ROLES, type EffectiveRoleLookup }
     from "./auto-approval";
 import { collectSlashCommands, invokeSlashCommand } from "./slash-commands";
 import { createWorkshopLogger, obsContext } from "./observability";
@@ -185,6 +187,19 @@ export async function requireWorkflowInvoke(
   if (companies.size !== 1) throw new Error(WORKFLOW_INVOKE_REFUSED);
   let [company] = companies;
   return company!;
+}
+
+/**
+ * The fixed category stored for a run that threw `error` (FAC-112): known refusals by their own
+ * words, anything else `runtime-error`. Never stores the words themselves.
+ */
+export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
+  let message = error instanceof Error ? error.message : "";
+  if (message === RUN_REQUESTER_REVOKED) return "requester-revoked";
+  if (message === SYSTEM_RUN_ASSIGNMENT_CHANGED || message === WORKFLOW_ASSIGNMENTS_DISABLED ||
+      message === TRIGGER_AUTO_RETIRED) return "assignment-changed";
+  if (message === "Hook has been deleted or disabled.") return "trigger-gone";
+  return "runtime-error";
 }
 
 /**
@@ -1156,6 +1171,27 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
   }
 }
 
+/** Which requested run proposed a write, and where (FAC-112; `ActionRecord.workflowRun`). */
+export type WorkflowRunWrite = { runId: string; hookId: number; deliveryId: number; writeKey?: string; attempt: number };
+
+/**
+ * A copy of a write a workflow run proposed again after a restart (FAC-112), which the gatekeeper
+ * staged under `action` and the workspace matched to its first proposal (`duplicateOf`), keyed by
+ * the facet it lives on and that key (`<facet>:<action>`, since each facet numbers its own): kept until
+ * the gatekeeper withdraws it, retried by the alarm at `nextAttemptAt`, and shown to a person to
+ * reject once `REPLAY_WITHDRAW_TRIES` tries have failed.
+ */
+export type ReplayWithdrawal = {
+  key: string; gatekeeperId: number; action: number; duplicateOf: number; attempts: number; nextAttemptAt: number;
+};
+
+/** How many times the alarm asks a gatekeeper to withdraw a replay's copy before a person is shown it. */
+export const REPLAY_WITHDRAW_TRIES = 5;
+
+/** The refusal to apply such a copy: it is the same write as one already proposed. */
+export const REPLAY_DUPLICATE_REFUSED =
+  "This is a duplicate of a write a workflow run proposed again after a restart. Reject it; the first one stands.";
+
 export type ActionRecord = {
   id: number,
   gatekeeperId: WorkpieceId;
@@ -1200,6 +1236,19 @@ export type ActionRecord = {
    * while that assignment still holds (see openAssignedActionFacet).
    */
   executedAs?: AssignedExecution;
+  /**
+   * Set when an unassigned requested workflow run proposed it (FAC-112), through its gadget's own
+   * connection: the run, what identifies the write within it (`AssignedExecution.writeKey`; absent
+   * when its description is incomplete, so it is never matched), and the attempt. It applies
+   * through the connection's own facet, once the person who asked may still run it.
+   */
+  workflowRun?: WorkflowRunWrite;
+  /**
+   * Set on a copy a gatekeeper staged when a workflow run proposed a write again (FAC-112) and that
+   * it could not be made to withdraw: the action it duplicates. A person can reject it; it is never
+   * applied (`REPLAY_DUPLICATE_REFUSED`).
+   */
+  replayDuplicateOf?: number;
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -1770,6 +1819,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // (FAC-102 follow-up B; see WorkspaceWorkflowDefinitionStore.markAutoRetired).
       workflowTriggerAutoRetired: collection<{ hookId: number; retiredAt: Date }>()({ primaryKey: "hookId" }),
       workflowInvocations: collection<StoredWorkflowInvocation>()({ primaryKey: "id" }),
+      // Runs a person asked for, queued here until they end (FAC-112; see
+      // WorkspaceWorkflowDefinitionStore.queueRun): what the alarm runs, or runs again after a reset.
+      workflowRunQueue: collection<QueuedWorkflowRun>()({ primaryKey: "deliveryId" }),
       // The newest on-request runs, which the run rates count (see workflow-definition-store.ts).
       workflowInvocationLog: collection<StoredWorkflowInvocationRecord>()({ primaryKey: "id" }),
       // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).
@@ -1785,6 +1837,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Withdrawals the widget index still owes, for the whole workspace (a deleted console's
       // included), retried on the next publication or delete and by the alarm.
       widgetIndexOwed: collection<OwedWithdrawal>()({ primaryKey: "key" }),
+      // Copies a gatekeeper staged when a workflow run proposed a write again, still to withdraw
+      // (FAC-112; see OverseerImpl.retryReplayWithdrawals).
+      replayWithdrawals: collection<ReplayWithdrawal>()({ primaryKey: "key" }),
       // An operate session workspace's host-board selections, by target; its selection requests,
       // by request key (settled ones kept as tombstones); and its audited reads (see host-boards.ts).
       hostBoardSelections: collection<HostBoardSelectionRecord>()({ primaryKey: "target" }),
@@ -1885,6 +1940,12 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           // reconnect replays only the records changed during the gap.
           byLastChanged: actionLastChangedKey,
           // Sparse: only new bridge records carry this field, so legacy actions need no backfill.
+          // Sparse (FAC-112): a requested run's writes, by what identifies each within its run
+          // (`writeKey`), so a run that runs again after a restart finds the writes it proposed.
+          byRunWrite(record: ActionRecord) {
+            if (record.type !== "action") return null;
+            return record.workflowRun?.writeKey ?? record.executedAs?.writeKey ?? null;
+          },
           byApprovalThread(record: ActionRecord) {
             return record.type === "action" && record.aguiApproval && record.aguiApproval.replacement === undefined
               ? JSON.stringify([record.aguiApproval.person, record.aguiApproval.threadId]) : null;
@@ -2289,6 +2350,16 @@ class OverseerImpl implements AgentHooks {
   // #agentKeepAliveTime) and lets `alarm()` wait for all agents to finish.
   #runningAgents = new Set<number>();
 
+  // Queued workflow runs (FAC-112) executing in this instance, by delivery id: what the alarm waits
+  // for, and what keeps a run from starting twice here. A reset empties it, so the next alarm runs
+  // each queued run again from its start.
+  #runningWorkflowRuns = new Map<number, Promise<void>>();
+
+  // For each requested run's current attempt (FAC-112), by delivery id: how many writes of each
+  // description digest it has proposed, which numbers its next identical one. Emptied as an
+  // attempt starts; absent when no attempt of it runs here.
+  #workflowRunProposals = new Map<number, Map<string, number>>();
+
   // Ambient connections whose getAgentCatalog() answered null, which the contract makes permanent
   // for the connection. Held in memory only: a gatekeeper that gains a catalog in a later version
   // is asked again on the next activation, so every chat converges. Ids are never reused, so an
@@ -2520,8 +2591,16 @@ class OverseerImpl implements AgentHooks {
     let times: number[] = [];
 
     // Outstanding agent work: see #agentKeepAliveTime for why it is set once and held.
-    let hasAgentWork = this.#runningAgents.size > 0 ||
+    let hasAgentWork = this.#runningAgents.size > 0 || this.#runningWorkflowRuns.size > 0 ||
         Array.from(this.storage.pendingAgentCalls.list({ limit: 1 })).length > 0;
+
+    // A queued workflow run not running here yet (FAC-112) is started as soon as possible.
+    for (let queued of this.storage.workflowRunQueue.list()) {
+      if (!this.#runningWorkflowRuns.has(queued.deliveryId)) {
+        times.push(Date.now());
+        break;
+      }
+    }
     if (!hasAgentWork) {
       this.#agentKeepAliveTime = undefined;
     } else {
@@ -2541,6 +2620,9 @@ class OverseerImpl implements AgentHooks {
     if (nextDeliveredRecord?.status === "delivered") {
       times.push(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
     }
+
+    // A replay's staged copies still to withdraw (FAC-112), each at its next try.
+    for (let entry of this.storage.replayWithdrawals.list()) times.push(entry.nextAttemptAt);
 
     // Owed widget index withdrawals, each until its alarm tries run out (see console-widget-index.ts).
     for (let owed of this.storage.widgetIndexOwed.list()) {
@@ -2575,16 +2657,18 @@ class OverseerImpl implements AgentHooks {
     try {
       this.toolLane.sweep();
       await this.#retryDueWidgetWithdrawals();
+      await this.retryReplayWithdrawals();
       do {
         let results = await Promise.allSettled([
           this.waitForAllAgentsToComplete(),
           this.drainAllPendingAgentCalls(),
           this.deliverReadyExternalMessageResponses(),
+          this.runQueuedWorkflowRuns(),
         ]);
         for (let result of results) {
           if (result.status === "rejected") throw result.reason;
         }
-      } while (this.#runningAgents.size > 0 || this.#pendingCallDrains.size > 0);
+      } while (this.#runningAgents.size > 0 || this.#pendingCallDrains.size > 0 || this.#runningWorkflowRuns.size > 0);
     } finally {
       this.#inAlarmHandler = false;
       this.#agentKeepAliveTime = undefined;
@@ -6493,6 +6577,8 @@ class OverseerImpl implements AgentHooks {
     // another attempt is safe (`retryable: true`). A thrown error, an attempt recorded without the
     // flag and a recovered interruption say nothing of the kind, so nothing is sent and nothing is
     // recorded: the person checks the provider and rejects it.
+    // A replay's copy of a write already proposed (FAC-112) is the same write again: never applied.
+    if (record.replayDuplicateOf !== undefined) throw new Error(REPLAY_DUPLICATE_REFUSED);
     let stored = this.storage.actions.get(record.id);
     let last = stored?.type === "action" ? stored.lastAttempt : undefined;
     if (last && last.retryable !== true) {
@@ -6536,6 +6622,12 @@ class OverseerImpl implements AgentHooks {
         assigned.close();
         throw error;
       }
+    }
+    // An unassigned requested run's write is a protected point too (FAC-104, FAC-112): the person
+    // who asked must still be allowed to now. Asked, then re-read synchronously before it is sent.
+    if (!record.executedAs && record.workflowRun) {
+      let requester = await requireRunRequester(this, record.workflowRun.hookId, record.workflowRun.deliveryId);
+      requester.revalidate();
     }
     let gatekeeper = assigned?.facet ?? this.getGatekeeperFacet(record.gatekeeperId);
     // An artifact publisher publishes as the person approving (see publishApprovedArtifact); an
@@ -6848,6 +6940,23 @@ class OverseerImpl implements AgentHooks {
   /** The admitted, assigned runs in flight (FAC-102; see system-run.ts). */
   systemRuns = new SystemRunRegistry();
 
+  /** The unassigned requested runs in flight (FAC-112; see system-run.ts). */
+  gadgetRuns = new GadgetRunRegistry();
+
+  /** The gadget modules of `commitId`, which a run-scoped worker loads (FAC-102, FAC-112). */
+  async workflowRunModules(commitId: string): Promise<Record<string, string>> {
+    let modules: Record<string, string> = {};
+    for (let [file, content] of await this.gitStore.readCommitFiles(commitId)) {
+      if (isGadgetModule(file)) modules[file] = content;
+    }
+    return modules;
+  }
+
+  /** Loads a run-scoped worker: fresh, with no outbound network (FAC-102, FAC-112). */
+  loadWorkflowRunWorker(code: { mainModule: string; modules: Record<string, string>; env: Record<string, unknown> }) {
+    return this.env.LOADER.load({compatibilityDate: "2026-02-01", ...code, globalOutbound: null});
+  }
+
   /**
    * Invocations a delivery has taken while their `invokeTrigger` call is still waiting (#374):
    * startHook adds one as `fire` consumes it, and invokeWorkflowTrigger reads and removes it to
@@ -6868,14 +6977,11 @@ class OverseerImpl implements AgentHooks {
       },
       bindingsOf: gadgetId => this.visibleBindings(this.getGadgetRecord(gadgetId)),
       makeLoopback: (gatekeeperId, caller) => this.makeBindingLoopback({type: "gatekeeper", id: gatekeeperId}, caller),
-      readModules: async commitId => {
-        let modules: Record<string, string> = {};
-        for (let [file, content] of await this.gitStore.readCommitFiles(commitId)) {
-          if (isGadgetModule(file)) modules[file] = content;
-        }
-        return modules;
-      },
-      loadWorker: code => this.env.LOADER.load({compatibilityDate: "2026-02-01", ...code, globalOutbound: null}),
+      readModules: commitId => this.workflowRunModules(commitId),
+      loadWorker: code => this.loadWorkflowRunWorker(code),
+      gadgetRuns: this.gadgetRuns,
+      openGadgetSession: (gatekeeperId, caller) =>
+          this.openGatekeeperSession(gatekeeperId, this.getGatekeeperFacet(gatekeeperId), caller),
       vendorIdOf: gatekeeperId => gatekeeperVendorId(this.storage.gatekeepers.get(gatekeeperId)),
       resourceUrlOf: gatekeeperId => gatekeeperResourceUrl(this.storage.gatekeepers.get(gatekeeperId)),
       vendor: vendorId => buildGatekeeperVendorMap(this.env).get(vendorId) as unknown as
@@ -6911,10 +7017,187 @@ class OverseerImpl implements AgentHooks {
     return runAssignedDelivery(this.#systemRunHost(), hookId, delivery, method, args, requester);
   }
 
+  /**
+   * Queues the run delivery `deliveryId` admitted for a person (FAC-112), with its firing's one call,
+   * and arms the alarm that runs it. Synchronous: the firing's call returns once the run is recorded
+   * as queued, so nothing of it waits on whoever asked. Refuses as
+   * `WorkspaceWorkflowDefinitionStore.queueRun` does.
+   */
+  queueWorkflowRun(hookId: number, deliveryId: number, method: string | null, args: unknown[]): void {
+    this.workflowDefinitionStore().queueRun(hookId, deliveryId, method, args);
+    this.#updateAlarm();
+  }
+
+  /**
+   * The alarm's part in workflow runs (FAC-112): starts every queued run not already running here,
+   * each from its stored record, and waits for them all. A run queued while these run is started on
+   * the alarm's next pass.
+   */
+  async runQueuedWorkflowRuns(): Promise<void> {
+    for (let queued of this.workflowDefinitionStore().queuedRuns()) {
+      if (this.#runningWorkflowRuns.has(queued.deliveryId)) continue;
+      this.#runningWorkflowRuns.set(queued.deliveryId,
+          this.#executeWorkflowRun(queued).finally(() => this.#runningWorkflowRuns.delete(queued.deliveryId)));
+    }
+    await Promise.all(this.#runningWorkflowRuns.values());
+  }
+
+  // Runs one queued workflow run (FAC-112) from its delivery alone: the run record's executor
+  // decides how, and nothing the request or a page holds now is read. Either kind runs its pinned
+  // commit in a run-scoped worker, with FAC-104's re-checks: an assigned run as its service account
+  // (runAssignedDelivery), any other over the gadget's own connections (runGadgetBindingsDelivery).
+  // The outcome is recorded either way; a reset meanwhile leaves the run queued, to run again from
+  // its start, and the writes it already proposed are matched rather than repeated (submitActionNow).
+  async #executeWorkflowRun(queued: QueuedWorkflowRun): Promise<void> {
+    let store = this.workflowDefinitionStore();
+    let delivery = store.startRun(queued.deliveryId);
+    if (!delivery) return;
+    let { hookId, deliveryId, method, args } = queued;
+    let error: unknown;
+    try {
+      this.startWorkflowRunProposals(deliveryId);
+      if (delivery.executedAs) {
+        await this.runAssignedDelivery(hookId,
+            { deliveryId, commitId: delivery.commitId, credentialRef: delivery.executedAs.credentialRef }, method, args);
+      } else {
+        // The manager's (a): from the pinned commit, in a run-scoped worker over the gadget's own
+        // connections, naming the run, never the gadget's live hook code.
+        let requester = await requireRunRequester(this, hookId, deliveryId);
+        requester.revalidate();
+        await runGadgetBindingsDelivery(this.#systemRunHost(), hookId,
+            { deliveryId, commitId: delivery.commitId }, method, args, requester);
+      }
+    } catch (thrown) {
+      error = thrown ?? new Error("The run failed.");
+    } finally {
+      this.#workflowRunProposals.delete(deliveryId);
+    }
+    // Only a fixed category is stored and shown: what the run threw can carry data only its
+    // executor may see, so its words stay in this log.
+    let failure = error === undefined ? undefined : workflowRunFailureOf(error);
+    store.endRun(deliveryId, failure);
+    let run = delivery.run;
+    let fields = { hookId, deliveryId, ...(run ? { runId: run.runId } : {}), attempts: delivery.execution?.attempts };
+    if (error === undefined) logger.info("workflow run finished", { event: "workflow.run.finished", ...fields });
+    else logger.warn("workflow run failed", { event: "workflow.run.failed", ...fields, runFailure: failure, error });
+  }
+
+  // What identifies the write run `runId` (delivery `deliveryId`) proposes now (FAC-112): the
+  // connection, its description's digest and which identical write of this attempt it is, and the
+  // action already recorded with that identity, if any. A run that runs again after a restart
+  // proposes the same writes, so each one already recorded is the answer, not a second one; the
+  // provider's own action key, which a gatekeeper never reuses, plays no part. Nothing when the run
+  // isn't counting (its attempt didn't start here).
+  #runWrite(runId: string, deliveryId: number, gatekeeperId: number, digest: string | undefined,
+            description: ActionDescription):
+      { counting: boolean; writeKey?: string; already?: ActionRecord & {type: "action"} } {
+    let counts = this.#workflowRunProposals.get(deliveryId);
+    if (!counts) return { counting: false };
+    // A description that doesn't reproduce everything the write sends can read the same for two
+    // different operations, so such a write is never matched (round 4): recorded every time it is
+    // proposed, and on a replay left for a person (manualOnly), so no write is ever dropped.
+    if (description.descriptionIsComplete !== true) return { counting: true };
+    if (digest === undefined) throw new Error("A workflow run's write reached the workspace without its digest.");
+    let occurrence = counts.get(digest) ?? 0;
+    counts.set(digest, occurrence + 1);
+    let writeKey = `${runId}:${gatekeeperId}:${digest}:${occurrence}`;
+    let already = this.storage.actions.byRunWrite.get(writeKey);
+    return already?.type === "action" ? { counting: true, writeKey, already } : { counting: true, writeKey };
+  }
+
+  // A replay's write matched to the one its run already proposed (FAC-112): the gatekeeper staged
+  // it again under a new key, which must be withdrawn there so it holds no second copy. Recorded
+  // durably now, in the step that returns the match, and withdrawn by the alarm
+  // (retryReplayWithdrawals), which retries until the gatekeeper takes it.
+  #withdrawReplayedStage(already: ActionRecord & {type: "action"}, action: number): void {
+    if (already.action === action) return;
+    // Keyed by the facet the copy lives on, which numbers its own actions: an assigned run's own per
+    // delivery (systemGatekeeperFacetName), else the connection's. Two assigned deliveries on one
+    // connection can stage the same key, each on its own facet (round 5).
+    let facet = already.executedAs
+      ? systemGatekeeperFacetName(already.executedAs.credentialRef, already.executedAs.deliveryId)
+      : `gatekeeper-${already.gatekeeperId}`;
+    let key = `${facet}:${action}`;
+    if (this.storage.replayWithdrawals.get(key)) return;
+    this.storage.replayWithdrawals.put({
+      key, gatekeeperId: already.gatekeeperId, action, duplicateOf: already.id, attempts: 0, nextAttemptAt: Date.now(),
+    });
+    this.#updateAlarm();
+  }
+
+  /**
+   * The alarm's part in a replay's staged copies (FAC-112): asks the gatekeeper to withdraw each one
+   * due by `now`, on the facet the write it duplicates lives on, and forgets it once that succeeds.
+   * A failure is tried again later, with a growing delay. After `REPLAY_WITHDRAW_TRIES` failures the
+   * copy is shown to a person instead: a pending action marked `replayDuplicateOf`, which they can
+   * reject and which never applies.
+   */
+  async retryReplayWithdrawals(now = Date.now()): Promise<void> {
+    // Materialized first: the loop deletes and rewrites entries as it goes.
+    for (let entry of Array.from(this.storage.replayWithdrawals.list())) {
+      if (entry.nextAttemptAt > now) continue;
+      let first = this.storage.actions.get(entry.duplicateOf);
+      if (first?.type !== "action") {
+        this.storage.replayWithdrawals.delete(entry.key);
+        continue;
+      }
+      try {
+        let assigned = first.executedAs ? await this.openAssignedActionFacet(first) : undefined;
+        try {
+          await (assigned?.facet ?? this.getGatekeeperFacet(entry.gatekeeperId)).rejectAction(entry.action);
+        } finally {
+          assigned?.close();
+        }
+        this.storage.replayWithdrawals.delete(entry.key);
+      } catch (error) {
+        let attempts = entry.attempts + 1;
+        logger.warn("replayed workflow write not withdrawn", {
+          event: "workflow.run.replay_withdraw_failed", actionId: first.id, failureCount: attempts, error,
+        });
+        if (attempts < REPLAY_WITHDRAW_TRIES) {
+          this.storage.replayWithdrawals.put({ ...entry, attempts, nextAttemptAt: now + 60_000 * 2 ** attempts });
+          continue;
+        }
+        this.#surfaceReplayDuplicate(entry, first);
+      }
+    }
+    this.#updateAlarm();
+  }
+
+  // A copy the gatekeeper never withdrew (FAC-112), shown to a person as a pending action that
+  // names the write it duplicates, with its connection and run, so they can reject it there.
+  #surfaceReplayDuplicate(entry: ReplayWithdrawal, first: ActionRecord & {type: "action"}): void {
+    let id = this.storage.nextActionId.get();
+    let { writeKey: _writeKey, ...executedAs } = first.executedAs ?? {} as AssignedExecution;
+    let duplicate: ActionRecord = {
+      id, gatekeeperId: first.gatekeeperId, caller: first.caller, resourceTitle: first.resourceTitle,
+      resourceUrl: first.resourceUrl, action: entry.action, createdAt: new Date(), state: "pending",
+      type: "action", description: first.description, replayDuplicateOf: first.id,
+      ...(first.executedAs ? { executedAs: executedAs as AssignedExecution } : {}),
+    };
+    this.storage.transaction(() => {
+      this.storage.nextActionId.put(id + 1);
+      this.storage.actions.put(duplicate);
+      this.storage.replayWithdrawals.delete(entry.key);
+    });
+  }
+
+  /**
+   * Starts counting the writes queued run `deliveryId` proposes (FAC-112), afresh: called as each
+   * attempt starts, so a run that runs again numbers its identical writes from the first again.
+   */
+  startWorkflowRunProposals(deliveryId: number): void {
+    this.#workflowRunProposals.set(deliveryId, new Map());
+  }
+
   // Open the session behind a binding loopback.
   startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
     // A run-scoped worker's binding: only the assigned connection's system session (FAC-102).
     if (caller.from === "systemRun") return openSystemRunSession(this.#systemRunHost(), target, caller);
+    // An unassigned requested run's binding: its gadget's own session, live only while the run runs (FAC-112).
+    if (caller.from === "gadget" && caller.run) {
+      return openGadgetRunSession(this.#systemRunHost(), target, caller as GadgetRunCaller);
+    }
     // Before every case, so a tainted chat's agent reaches no gadget, worktree, git or
     // non-allowlisted gatekeeper code, whenever the mark landed (see chat-taint.ts).
     if (caller.from === "agent") this.#assertUsableWhileTainted(caller.chatId, target);
@@ -7387,7 +7670,7 @@ class OverseerImpl implements AgentHooks {
   // the enabler roles first (resolveEnablerRoles), or no auto-approval rule can fire here. Returns
   // the journal id it minted, which only an `ActionReceiptImpl` hands out (as a capability).
   submitActionNow(gatekeeperId: number, action: number,
-                     description: ActionDescription, caller: GatekeeperCaller)
+                     description: ActionDescription, caller: GatekeeperCaller, writeDigest?: string)
       : number {
     // An in-flight facet RPC can outlive removeGatekeeper, and a pending action on a removed
     // connection could never be approved or rejected (both dereference the facet).
@@ -7427,12 +7710,40 @@ class OverseerImpl implements AgentHooks {
       if (run.gatekeeperId !== gatekeeperId) throw new Error("This workflow run can't propose actions on that connection.");
       // Both actors, for the audit (FAC-104): who asked for the run, and who it acts as.
       let admitted = this.workflowDefinitionStore().deliveryRun(caller.deliveryId)?.run;
+      let write: { writeKey?: string; already?: ActionRecord & {type: "action"} } =
+          admitted ? this.#runWrite(admitted.runId, caller.deliveryId, gatekeeperId, writeDigest, description) : {};
+      if (write.already) {
+        this.#withdrawReplayedStage(write.already, action);
+        return write.already.id;
+      }
+      let writeKey = write.writeKey;
       executedAs = {
         hookId: caller.hookId, deliveryId: caller.deliveryId, credentialRef: run.credentialRef,
         ...(admitted ? {
           runId: admitted.runId,
           requestedBy: admitted.requester.kind === "person" ? admitted.requester.profileId : null,
+          ...(writeKey !== undefined ? { writeKey } : {}),
         } : {}),
+      };
+    }
+
+    // An unassigned requested run's write (FAC-112): only while the run runs, recorded with the run
+    // and its place, and matched, as an assigned run's is, when a replay proposes it again.
+    let workflowRun: WorkflowRunWrite | undefined;
+    if (caller.from === "gadget" && caller.run) {
+      this.gadgetRuns.require(caller as GadgetRunCaller);
+      let { hookId, deliveryId } = caller.run;
+      let admitted = this.workflowDefinitionStore().deliveryRun(deliveryId)?.run;
+      if (!admitted) throw new Error(RUN_REQUESTER_REVOKED);
+      let write = this.#runWrite(admitted.runId, deliveryId, gatekeeperId, writeDigest, description);
+      if (write.already) {
+        this.#withdrawReplayedStage(write.already, action);
+        return write.already.id;
+      }
+      if (!write.counting) throw new Error(SYSTEM_RUN_ENDED);
+      let attempt = this.storage.workflowDeliveries.get(deliveryId)?.execution?.attempts ?? 1;
+      workflowRun = {
+        runId: admitted.runId, hookId, deliveryId, attempt, ...(write.writeKey ? { writeKey: write.writeKey } : {}),
       };
     }
 
@@ -7451,6 +7762,7 @@ class OverseerImpl implements AgentHooks {
       type: "action",
       description,
       ...(executedAs ? { executedAs } : {}),
+      ...(workflowRun ? { workflowRun } : {}),
     };
 
     // The marking walk stamps the verified push closure "pending push" -- the read grant that
@@ -7467,8 +7779,9 @@ class OverseerImpl implements AgentHooks {
     // Same auto-approval gate the drainer uses, named because awaitDecision uses it too. The drain
     // is deferred because applying calls back into the gatekeeper facet still awaiting submitAction.
     let roleOf = this.enablerRoles();
-    // A person approves every write an assigned run proposes; no rule approves it (FAC-102).
-    let willAutoApprove = caller.from !== "systemRun" &&
+    // A person approves every write an assigned run proposes, and every write a requested run
+    // proposes again on a later attempt; no rule approves them (FAC-102, FAC-112).
+    let willAutoApprove = !manualOnly(record) &&
         autoApprovalRule(this.storage, roleOf, gatekeeperId, description) !== undefined;
     if (!willAutoApprove) this.traceAgentActionApproval(record, "requested");
 
@@ -7876,6 +8189,9 @@ class OverseerImpl implements AgentHooks {
     let gadgetId: WorkpieceId;
     if (caller.from === "gadget") {
       if (caller.gadgetId === undefined) throw new Error("Agent spawner has no calling gadget scope.");
+      // A requested run's worker (FAC-112) delegates nothing, as an assigned run's can't: the
+      // spawner would start an agent outside the run, on no run's authority.
+      if (caller.run) throw new Error("Agent spawner has no calling gadget scope.");
       gadgetId = caller.gadgetId;
       let gadget = this.getGadgetRecord(gadgetId);
       allowed = new Set([gadgetId,
@@ -12974,15 +13290,17 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
       this.impl.takenInvocations.set(delivery.invocation.id, true);
     }
 
-    // An admitted request for an assigned trigger runs as its service account (FAC-102), in a
-    // run-scoped worker, never through the gadget's own callback and the bindings people connected.
-    if (delivery?.invocation && delivery.executedAs) {
-      let caller: GatekeeperCaller = {from: "systemRun", hookId, deliveryId: delivery.deliveryId};
+    // A delivery a person asked for runs in this workspace, from its stored record (FAC-112): the
+    // firing's one call queues it and returns, and the alarm runs it (OverseerImpl.queueWorkflowRun),
+    // so nothing of the run waits on the caller. An assigned trigger's run executes as its service
+    // account (FAC-102), in a run-scoped worker, never through the gadget's own callback and the
+    // bindings people connected; either kind re-checks the person when it starts (FAC-104).
+    if (delivery?.invocation) {
+      let caller: GatekeeperCaller = delivery.executedAs
+        ? {from: "systemRun", hookId, deliveryId: delivery.deliveryId}
+        : {from: "hook"};
       return {
-        callback: makeSystemRunCallback(this.impl, hookId, {
-          deliveryId: delivery.deliveryId, commitId: delivery.commitId,
-          credentialRef: delivery.executedAs.credentialRef,
-        }),
+        callback: makeQueuedRunCallback(this.impl, hookId, delivery.deliveryId),
         approvalQueue: new ApprovalQueueImpl(this.impl, record.gatekeeperId, caller, hookId),
       };
     }
@@ -12991,10 +13309,9 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // they are held outside this DO (even across resets -- the stored callback is a persistent
     // stub), so this is what ties them to the firing, per the session contract documented on
     // Gatekeeper.bindHook (workshop-shared/gatekeeper.ts).
-    // A run a person asked for, on the gadget's own bindings, starts at the callback's first call;
-    // that call re-checks the person first (FAC-104). A scheduled firing has nobody to re-check.
+    // A scheduled firing: nobody asked, so there is nobody to re-check.
     return {
-      callback: makeHookFiringCallback(this.impl, hookId, delivery?.invocation ? delivery.deliveryId : undefined),
+      callback: makeHookFiringCallback(this.impl, hookId),
       approvalQueue: new ApprovalQueueImpl(this.impl, record.gatekeeperId, {from: "hook"}, hookId),
     };
   }
@@ -13179,6 +13496,11 @@ type GatekeeperCaller = {
   // ActionRecords persisted before multi-gadget support have no gadgetId. `defaultGadgetId`
   // should be assumed when `gadgetId` is absent.
   gadgetId?: WorkpieceId;
+
+  // Set only on the bindings of an unassigned requested run's worker (FAC-112, GadgetRunCaller):
+  // the run that made the call, so its sessions live only while it runs and its writes name it.
+  // Server-set in the loopback's props, never by the worker.
+  run?: { hookId: number; deliveryId: number };
 } | {
   from: "user";
   chatId?: number;
@@ -17859,17 +18181,15 @@ function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {
 // firing as independent stubs (the bindHook contract permits hooks to pass and return them) and
 // are not re-checked per call. That is deliberate: the holder is a gatekeeper bound by the session
 // contract, and this is a guard against a stale firing by mistake, not a revocable membrane.
-// The callback startHook returns for an admitted, assigned delivery (FAC-102): any call on it runs
-// the delivery once in its run-scoped worker (OverseerImpl.runAssignedDelivery), as its `WorkflowRun`
-// entrypoint's method of the same name (`run` when the callback itself is called). A second call is
-// refused, so a stored callback is no standing route to the service account.
-function makeSystemRunCallback(impl: OverseerImpl, hookId: number,
-    delivery: {deliveryId: number; commitId: string; credentialRef: string}): NativeRpcStub<RpcTarget> {
-  let used = false;
-  let once = (method: string | null, args: unknown[]) => {
-    if (used) throw new Error("This run already started.");
-    used = true;
-    return impl.runAssignedDelivery(hookId, delivery, method, args);
+// The callback startHook returns for a delivery a person asked for (FAC-112): its one call queues
+// the run in this workspace (OverseerImpl.queueWorkflowRun) and returns, and the workspace's alarm
+// runs it later -- an assigned delivery in its run-scoped worker (FAC-102) as its `WorkflowRun`
+// entrypoint's method of the same name (`run` when the callback itself is called), any other on the
+// gadget's own hook code. A second call is refused, so a stored callback is no standing route to
+// the service account or to another run.
+function makeQueuedRunCallback(impl: OverseerImpl, hookId: number, deliveryId: number): NativeRpcStub<RpcTarget> {
+  let once = (method: string | null, args: unknown[]): void => {
+    impl.queueWorkflowRun(hookId, deliveryId, method, args);
   };
   // TODO: Same workerd bug as makeHookFiringCallback: wrap the Proxy in a stub manually.
   return new NativeRpcStub(new Proxy((() => {}) as unknown as RpcTarget, {
@@ -17886,18 +18206,8 @@ function makeSystemRunCallback(impl: OverseerImpl, hookId: number,
   }));
 }
 
-// `requestedDelivery` names the delivery of a run a person asked for (FAC-104): its first call
-// re-checks that person (requireRunRequester, then its synchronous revalidate right before the
-// call goes through), so a request whose delivery starts after a revocation never runs. Later
-// calls of the same firing don't ask InferOps again, but each re-reads the local state
-// (revalidate) and checks the hook.
-function makeHookFiringCallback(impl: OverseerImpl, hookId: number, requestedDelivery?: number): NativeRpcStub<RpcTarget> {
-  let checked: Promise<RunRequesterCheck> | undefined;
-  const requester = async () => {
-    if (requestedDelivery === undefined) return;
-    checked ??= requireRunRequester(impl, hookId, requestedDelivery);
-    (await checked).revalidate();
-  };
+// A firing no person asked for; a requested run takes makeQueuedRunCallback instead (FAC-112).
+function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcStub<RpcTarget> {
   // The proxy target must be callable for the `apply` trap to ever fire (a Proxy over a
   // non-callable target is itself non-callable), and the bindHook contract allows the bound
   // callback to be a function type, invoked by calling the firing's callback directly. An arrow
@@ -17909,7 +18219,6 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number, requestedDel
     // escaping into the RPC machinery that invokes the function (workerd reports that as
     // uncaught, too).
     async apply(_target, _thisArg, args: unknown[]) {
-      await requester();
       let record = requireLiveHook(impl, hookId);
       return Reflect.apply(record.callback as any, undefined, args);
     },
@@ -17919,7 +18228,6 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number, requestedDel
       // dispositions as getGadgetFacet's proxy over the gadget facet.
       if (typeof prop === "symbol" || prop === "then") return undefined;
       return async (...args: unknown[]) => {
-        await requester();
         let record = requireLiveHook(impl, hookId);
         return Reflect.apply((record.callback as any)[prop], record.callback, args);
       };
@@ -17983,9 +18291,14 @@ class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   }
 
   async submitAction(action: number, description: ActionDescription): Promise<ActionReceipt> {
+    // A requested run's write is identified by its content (FAC-112): digested here, before the
+    // checks below, which then hold through to the write.
+    let caller = this.caller;
+    let fromRun = caller.from === "systemRun" || (caller.from === "gadget" && caller.run !== undefined);
+    let writeDigest = fromRun ? await actionDescriptionDigest(description) : undefined;
     await this.impl.resolveEnablerRoles();
     if (this.hookId !== undefined) requireLiveHook(this.impl, this.hookId);
-    let id = this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller);
+    let id = this.impl.submitActionNow(this.gatekeeperId, action, description, this.caller, writeDigest);
     return actionReceipt(this.impl, this.gatekeeperId, id);
   }
 

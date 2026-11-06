@@ -7,7 +7,6 @@ import { RpcStub, RpcTarget } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
 import {
-  RUN_REQUESTER_REVOKED,
   OverseerDurableObject, PROVISION_REFUSED, makeOverseerStorage, provisionWorkflowTriggerCredential,
   TRIGGER_AUTO_RETIRED, WORKFLOW_ASSIGNMENTS_DISABLED, retireAssignmentsUsing, retireTriggerAssignment, retireUnboundAssignments,
   setWorkflowTriggerAssignment,
@@ -16,7 +15,8 @@ import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SYSTEM_RUN_ENDED, SYSTEM_RUN_UNSUPPORTED, SYSTEM_RUN_WRONG_CONNECTION,
   ASSIGNED_ACTION_STALE, SystemRunRegistry, assignedActionProblem, openSystemRunSession, revocableSession,
   runAssignedDelivery, systemGatekeeperFacetName,
-  type SystemRunCaller, type SystemRunHost,
+  GADGET_RUN_WRONG_CONNECTION, GadgetRunRegistry, openGadgetRunSession, runGadgetBindingsDelivery,
+  type GadgetRunCaller, type SystemRunCaller, type SystemRunHost,
 } from "../src/system-run.js";
 import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { openFakeOverseer } from "./fixtures.js";
@@ -54,6 +54,8 @@ function host(opts: {
     unbindConnection(): void;
   } = {
     systemRuns: new SystemRunRegistry(),
+    gadgetRuns: new GadgetRunRegistry(),
+    openGadgetSession: async (gatekeeperId: number) => ({ session: gatekeeperId, read: async () => "read" }),
     assignmentOf: () => assignment && { ...assignment, assignedBy: ADA, assignedAt: new Date(0) },
     liveHookGadget: () => {
       if (!hookLive) throw new Error("Hook has been deleted or disabled.");
@@ -114,6 +116,7 @@ function host(opts: {
 }
 
 const DELIVERY = { deliveryId: 7, commitId: commit(1), credentialRef: "ref-1" };
+const GADGET_CALLER: GadgetRunCaller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: 7 } };
 const CALLER: SystemRunCaller = { from: "systemRun", hookId: HOOK, deliveryId: 7 };
 
 describe("a run-scoped worker", () => {
@@ -330,6 +333,9 @@ function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled
       getGadgetHead: headOf,
       defaultGadgetId: GADGET,
       runAssignedDelivery: runSpy,
+      // FAC-112: a requested firing's call queues the run in the workspace's own store.
+      queueWorkflowRun: (hookId: number, deliveryId: number, method: string | null, args: unknown[]) =>
+        store.queueRun(hookId, deliveryId, method, args),
       storage: {
         boundHooks: { get: () => ({ id: HOOK, enabled: true, vendorId: "scheduler", gatekeeperId: 1, gadgetId: GADGET, callback: gadgetCallback }) },
         gatekeepers: { get: () => undefined },
@@ -340,23 +346,27 @@ function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled
 }
 
 describe("startHook for a trigger with an assignment", () => {
-  it("runs an admitted request as the assignment, once, and never through the gadget's own callback", async () => {
+  // FAC-112: the firing's call queues the run, which the workspace's alarm runs as the assignment
+  // from its record (workflow-run-execution.test.ts); nothing runs in the call itself.
+  it("queues an admitted request as the assignment's run, once, and never through the gadget's own callback", async () => {
     let { store } = pinnedStore();
     let assignment = store.setAssignment(ADA, HOOK, INFEROPS)!;
     let { overseer, gadgetCallback, runSpy } = overseerFor(store);
     let invocation = store.beginInvocation("operator", HOOK);
     let { callback } = await overseer.startHook(HOOK, { invocationId: invocation.id });
-    await expect((callback as any).onSchedule({ runId: "x" })).resolves.toBe("as the service account");
+    await expect((callback as any).onSchedule({ runId: "x" })).resolves.toBeUndefined();
     expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
-    expect(runSpy).toHaveBeenCalledWith(HOOK,
-        expect.objectContaining({ commitId: commit(1), credentialRef: assignment.credentialRef }),
-        "onSchedule", [{ runId: "x" }]);
+    expect(runSpy).not.toHaveBeenCalled();
+    let [queued] = store.queuedRuns();
+    expect(queued).toMatchObject({ hookId: HOOK, method: "onSchedule", args: [{ runId: "x" }] });
+    expect(store.deliveryRun(queued!.deliveryId)?.run?.executor)
+      .toEqual({ kind: "service_account", gatekeeperId: INFEROPS, credentialRef: assignment.credentialRef });
     // A stored callback is no standing route to the service account.
     // Awaited directly (as overseer-hooks.test.ts does): an RPC rejection handled late reads as unhandled.
     let refusal: unknown;
     try { await (callback as any).onSchedule({ runId: "y" }); } catch (error) { refusal = error; }
     expect(String(refusal)).toMatch("This run already started.");
-    expect(runSpy).toHaveBeenCalledTimes(1);
+    expect(store.queuedRuns()).toHaveLength(1);
   });
 
   it("keeps a scheduled firing on the gadget's own callback, as before", async () => {
@@ -369,19 +379,9 @@ describe("startHook for a trigger with an assignment", () => {
     expect(gadgetCallback.onSchedule).toHaveBeenCalled();
   });
 
-  // FAC-104 (r1): a run a person asked for, on the gadget's own bindings, re-checks the person when
-  // it starts; a delivery that starts after they were taken off the control never runs.
-  it("doesn't start an unassigned request whose person was taken off the control before it started", async () => {
-    let { store } = pinnedStore();
-    let { overseer, gadgetCallback, runSpy } = overseerFor(store);
-    let { callback } = await overseer.startHook(HOOK, { invocationId: store.beginInvocation("operator", HOOK).id });
-    store.setControl(ADA, HOOK, { label: "Run", invokers: ["someone-else"] });
-    let refusal: unknown;
-    try { await (callback as any).onSchedule({ runId: "late" }); } catch (error) { refusal = error; }
-    expect(String(refusal)).toContain(RUN_REQUESTER_REVOKED);
-    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
-    expect(runSpy).not.toHaveBeenCalled();
-  });
+  // FAC-104 (r1) and FAC-112: a run a person asked for, on the gadget's own bindings, re-checks the
+  // person when the workspace starts it (workflow-run-execution.test.ts), so a person taken off the
+  // control after asking runs nothing; the firing's call only queues it.
 
   it("leaves a scheduled firing, which no person asked for, unaffected by the control", async () => {
     let { store } = pinnedStore();
@@ -392,13 +392,15 @@ describe("startHook for a trigger with an assignment", () => {
     expect(gadgetCallback.onSchedule).toHaveBeenCalled();
   });
 
-  it("keeps an unassigned trigger's request on the gadget's own callback, as before", async () => {
+  it("queues an unassigned trigger's request for the gadget's own code, which the firing never calls", async () => {
     let { store } = pinnedStore();
     let { overseer, gadgetCallback, runSpy } = overseerFor(store);
     let { callback } = await overseer.startHook(HOOK, { invocationId: store.beginInvocation("operator", HOOK).id });
-    await expect((callback as any).onSchedule({ runId: "r" })).resolves.toBe("gadget's own");
+    await expect((callback as any).onSchedule({ runId: "r" })).resolves.toBeUndefined();
     expect(runSpy).not.toHaveBeenCalled();
-    expect(gadgetCallback.onSchedule).toHaveBeenCalled();
+    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
+    let [queued] = store.queuedRuns();
+    expect(store.deliveryRun(queued!.deliveryId)?.run?.executor).toEqual({ kind: "gadget_bindings" });
   });
 });
 
@@ -988,5 +990,54 @@ describe("a late delivery", () => {
     takenInvocations.set(waited.id, false);
     await overseer.startHook(HOOK, { invocationId: waited.id });
     expect(takenInvocations.get(waited.id)).toBe(true);
+  });
+});
+
+// FAC-112 round 2 (the manager's (a)): an unassigned requested run executes like an assigned one,
+// from its pinned commit in a run-scoped worker, but over the gadget's own connections, each
+// binding carrying the run, and its sessions live only while it runs.
+describe("an unassigned requested run's worker", () => {
+  it("loads the pinned commit with a binding per gadget connection, each the run's, after the re-checks", async () => {
+    let made = host();
+    made.h.setAssignment(null);
+    let order: string[] = [];
+    let read = made.h.readModules;
+    made.h.readModules = async commitId => { order.push(`read ${commitId}`); return read(commitId); };
+    let result = await runGadgetBindingsDelivery(made.h, HOOK, { deliveryId: 7, commitId: commit(1) }, null, ["go"], {
+      recheck: async () => { order.push("recheck"); },
+      revalidate: () => { order.push("revalidate"); },
+    });
+    expect(result).toEqual({ ran: ["go"] });
+    expect(order).toEqual([`read ${commit(1)}`, "recheck", "revalidate"]);
+    expect(Object.keys(made.loaded[0]!.env).toSorted()).toEqual(["BOARD", "INFEROPS", "MAIL", "TABLES"]);
+    expect(new Set(made.loopbacks.map(([, caller]) => JSON.stringify(caller)))).toEqual(new Set([JSON.stringify(GADGET_CALLER)]));
+    expect(made.h.gadgetRuns.has(7)).toBe(false);
+  });
+
+  it("refuses an assigned trigger, and a remote re-check that refuses, loading nothing", async () => {
+    let assigned = host();
+    await expect(runGadgetBindingsDelivery(assigned.h, HOOK, { deliveryId: 7, commitId: commit(1) }, null, []))
+      .rejects.toThrow(SYSTEM_RUN_ASSIGNMENT_CHANGED);
+    let revoked = host();
+    revoked.h.setAssignment(null);
+    await expect(runGadgetBindingsDelivery(revoked.h, HOOK, { deliveryId: 7, commitId: commit(1) }, null, [],
+        { recheck: async () => { throw new Error("revoked remotely"); }, revalidate: () => {} })).rejects.toThrow("revoked remotely");
+    expect(revoked.loaded).toEqual([]);
+  });
+
+  it("opens the gadget's own session only while the run runs, on a connection the gadget binds", async () => {
+    let made = host();
+    await expect(openGadgetRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, GADGET_CALLER)).rejects.toThrow(SYSTEM_RUN_ENDED);
+    made.h.gadgetRuns.begin(7, { hookId: HOOK, gadgetId: GADGET });
+    let session = await openGadgetRunSession(made.h, { type: "gatekeeper", id: INFEROPS }, GADGET_CALLER) as any;
+    await expect(session.read()).resolves.toBe("read");
+    for (let target of [{ type: "gatekeeper", id: 99 }, { type: "gadget", id: GADGET }, { type: "git" }]) {
+      await expect(openGadgetRunSession(made.h, target, GADGET_CALLER)).rejects.toThrow(target.type === "gatekeeper" ? SYSTEM_RUN_ENDED : GADGET_RUN_WRONG_CONNECTION);
+    }
+    await expect(openGadgetRunSession(made.h, { type: "gatekeeper", id: INFEROPS },
+        { ...GADGET_CALLER, run: { hookId: HOOK, deliveryId: 8 } })).rejects.toThrow(SYSTEM_RUN_ENDED);
+    // A stub the worker kept fails once the run ends.
+    made.h.gadgetRuns.end(7);
+    await expect(session.read()).rejects.toThrow(SYSTEM_RUN_ENDED);
   });
 });

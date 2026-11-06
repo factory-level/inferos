@@ -33,6 +33,8 @@ export type WorkshopObservabilityFields = {
   initiator: string;
   /** Who a workflow run acts as (FAC-104): `service_account:<connection id>` or `gadget_bindings`. */
   executor: string;
+  /** Why a workflow run failed (FAC-112): its fixed category (`WorkflowRunFailure`), never its words. */
+  runFailure: string;
   logBytes: number;
   modelId: string;
   observerId: string;

@@ -172,6 +172,8 @@ describe("configured agents", () => {
     seedGadget(impl, 300, {});
     for (const caller of [
       { from: "systemRun", hookId: 3, deliveryId: 41 },
+      // FAC-112: a requested run's worker, on its gadget's own bindings, delegates nothing either.
+      { from: "gadget", gadgetId: 100, run: { hookId: 3, deliveryId: 41 } },
       { from: "hook" },
       { from: "user", userId: "u", profileId: "p" },
     ]) {
