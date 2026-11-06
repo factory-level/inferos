@@ -465,6 +465,14 @@ export interface InferOpsClient {
   readTable(host: string, tableId: string, options: TableReadOptions): Promise<TableRead>;
 
   /**
+   * One custom table's definition alone, with no rows (`table.get`, the client's own workspace,
+   * which `host` names), for checking a request before any row is read. NOT_FOUND, as `readTable`
+   * says it, for a table that is missing or not readable. Its personal columns are included and
+   * marked; the caller projects them out.
+   */
+  readTableDefinition(host: string, tableId: string): Promise<TableRecordSchema>;
+
+  /**
    * One row and its table, read the same way through `inferops://<host>/object/record-card/<id>`.
    * The caller checks that the row belongs to its table; `rows` holds exactly that row.
    */

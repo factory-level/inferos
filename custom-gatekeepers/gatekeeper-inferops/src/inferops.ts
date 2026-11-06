@@ -1,5 +1,6 @@
 import type { ServiceQueryName, ServiceQueryOptions, ServiceQueryPage } from "./types";
 import type { ApprovalEdit, ApprovalProposal } from "@gadgets/workshop-shared/operate-approval";
+import { GovernedRequestError, listGoverned, parseGovernedListRequest } from "@gadgets/workshop-shared/governed-data";
 // InferOps gatekeeper: scoped project-board reads and approved issue creates, updates and
 // transitions.
 //
@@ -145,7 +146,7 @@ import {
   InferOpsCredentials, WIKI_SEARCHES_PER_MINUTE, type InferOpsWorkspace, type WorkspaceProduct,
 } from "./inferops-credentials";
 import {
-  assertTablesEnabled, describeTable, projectRows, tableReadOptions, tablesEnabled, whileTablesEnabled,
+  MAX_TABLE_ROWS, assertTablesEnabled, describeTable, projectRows, tableReadOptions, tablesEnabled, whileTablesEnabled,
 } from "./table";
 import {
   assertMembersEnabled, membersEnabled, membersNotFound, projectMembers, whileMembersEnabled,
@@ -187,6 +188,7 @@ import type {
   InferOpsWorkflowPolicySession, Issue, IssueActivity, IssueChanges, ListRecordsOptions, NewIssue, Repo,
   WorkflowPolicyHead, WorkspaceMembers,
   Revision, Run, TableDescription, TableRecord, WikiDocument,
+  GovernedDescription, GovernedListQuery, GovernedListResult, GovernedRow,
   WikiDocumentNode, WikiProposal, WikiProposalDetail, WikiProposalState, WikiSearchHit, WikiSection, WikiStructure,
 } from "./types";
 import type { NewIssueRequest, WikiSectionRecord } from "./inferops-client";
@@ -4444,6 +4446,19 @@ export class InferOpsTableGatekeeper
   }
 }
 
+/** Run a governed-request check, its refusal becoming the session's own INVALID_REQUEST (FAC-9). */
+function governedRequest<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (error) {
+    if (error instanceof GovernedRequestError) {
+      throw new InferOpsError("INVALID_REQUEST",
+          error.code === "INVALID_REQUEST" ? error.message : `${error.code}: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
 /** What a table session reads with: its data source and the bound host and table. */
 type TableScope = { client: InferOpsClient; host: string; tableId: string };
 
@@ -4489,6 +4504,75 @@ class TableSessionImpl extends RpcTarget implements InferOpsTableSession {
         `${relatedTo === undefined ? "" : ", linked to one endpoint"}.`,
     });
     return result;
+  }
+
+  // The table as a governed resource (FAC-9), from one read's own definition: its visible columns
+  // (describeTable never includes a personal one), each filterable and sortable, and no commands.
+  #governed(read: TableRead): GovernedDescription {
+    return {
+      resource: "object/table",
+      fields: describeTable(read).columns.map(column => ({
+        name: column.name, label: column.label,
+        type: column.type === "integer" || column.type === "number" ? "number"
+          : column.type === "timestamp" || column.type === "date" ? "date" : column.type,
+        filterable: true, sortable: true,
+      })),
+      commands: [],
+    };
+  }
+
+  /** The bound table's definition alone, with no rows (`readTableDefinition`). */
+  async #definition(): Promise<TableRead> {
+    const { client, host, tableId } = this.#scope;
+    return { table: await client.readTableDefinition(host, tableId), rows: [] };
+  }
+
+  async describe(): Promise<GovernedDescription> {
+    const definition = await this.#definition();
+    const description = this.#governed(definition);
+    await this.#queue.authorizeObservation({
+      title: "Describe InferOps custom table",
+      description: `Read the definition of the custom table ${plainInline(describeTable(definition).label)} on ` +
+        `${this.#scope.host}: ${description.fields.length} fields.`,
+    });
+    return description;
+  }
+
+  async list(query?: GovernedListQuery): Promise<GovernedListResult> {
+    // Checked before any row is read: the request's shape, then its fields and types against the
+    // table's definition alone, so an unknown, a personal and a wrong-typed field are each refused
+    // at the same step, reading no row and logging nothing.
+    governedRequest(() => parseGovernedListRequest(query ?? {}, null));
+    const definition = await this.#definition();
+    governedRequest(() => parseGovernedListRequest(query ?? {}, this.#governed(definition)));
+    const read = await this.#read(MAX_TABLE_ROWS);
+    // And again against the definition the rows came with: a column that turned personal between
+    // the two reads is refused here, before anything is returned or logged.
+    const request = governedRequest(() => parseGovernedListRequest(query ?? {}, this.#governed(read)));
+    const { table, records } = projectRows(read);
+    const result = listGoverned(records.map(record => ({ id: record.id, values: record.values })), request);
+    await this.#queue.authorizeObservation({
+      title: "List InferOps custom table rows",
+      // Filter values are caller input: only how many there were is logged.
+      description: `Read ${result.rows.length} of ${result.total} matching rows of the custom table ` +
+        `${plainInline(table.label)} on ${this.#scope.host}` +
+        `${request.filters.length ? `, with ${request.filters.length} filter(s)` : ""}.`,
+    });
+    return {
+      rows: result.rows as GovernedListResult["rows"], nextCursor: result.nextCursor, total: result.total,
+      // One read returns at most MAX_TABLE_ROWS rows: a full read may have left newer-than-oldest rows out.
+      truncated: result.truncated || read.rows.length >= MAX_TABLE_ROWS,
+    };
+  }
+
+  async get(id: string): Promise<GovernedRow | null> {
+    try {
+      const { record } = await this.getRecord(id);
+      return { id: record.id, values: record.values };
+    } catch (error) {
+      if (inferOpsErrorCode(error) === "NOT_FOUND") return null;
+      throw error;
+    }
   }
 
   async getRecord(id: string): Promise<{ table: TableDescription; record: TableRecord }> {

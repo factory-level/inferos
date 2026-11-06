@@ -196,6 +196,16 @@ FAC-95 makes the design's two configuration levels explicit ([ADR 0017](../adr/0
   - the workspace's gatekeeper hooks, read-only, owned by their gatekeeper and gadget, with any workflow revision they're pinned to.
 
   Every entry says it grants nothing.
+- **In the builder.** On a saved view (durable storage only; unsaved views say they have no workspace settings):
+  - **Selecting the workspace** in the target tree opens `WorkspaceSettingsEditor`. It shows each setting set or left at its default (*Default (Off)*), with what it permits, and saves all of them as one `setWorkspaceConfiguration` at the revision it read. A refusal (another company, a stale revision) shows in the server's words, keeps the choices, and offers **Reload settings**.
+  - **A selected page** shows `PageConfigurationPanel`, read from `traceConfiguration` again at each page revision:
+    - each setting with the value the page gets and a badge for its owner: *Overridden on this page*, *Workspace setting* or *Default*;
+    - an override select and **Reset to workspace**, each one `setSettings` edit through the page's own `editCanvasPage`;
+    - the page hooks with the page or object holding them and what each permits;
+    - the workspace hooks, read-only.
+
+    A trace that can't be read is an alert, never an empty list.
+  - `WorkspaceSettingsEditor.test.tsx` and `PageConfigurationPanel.test.tsx` cover these.
 - **Tests.**
   - `workspace-settings.test.ts` and `configuration-trace.test.ts` in `workshop-shared`.
   - `canvas-model.test.ts`, "a page's settings".
@@ -606,12 +616,12 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
 - **A governed session,** `GovernedReadSession`, is fixed to its connection, workspace and person where it was opened. It offers `describe()` (fields and declared commands), `list(request)` and `get(id)`, and the connector logs each read as an observation.
 - **Requests,** `parseGovernedListRequest`, are validated against the resource's own description before anything is read:
   - **Keys:** only `filters`, `sort`, `pageSize` and `cursor`. A URL, a method or a `meta` is refused (`INVALID_REQUEST`).
-  - **Filters:** at most 4, all of which must hold. Each is on a declared filterable field with `eq` or `contains`, against one scalar value.
+  - **Filters:** at most 4, all of which must hold. Each is on a declared filterable field: `eq` against a value of the field's own type or null, or `contains` on a text field only. A value that can't match is refused, never read as empty.
   - **Sort:** one key, on a sortable field.
   - **Page size:** 1 to 50, 25 by default.
   - **Personal fields** are never filterable or sortable, so they can't be probed (`FIELD_NOT_FILTERABLE`, `FIELD_NOT_SORTABLE`).
   - Every refusal is a fixed code (`GovernedRequestError`) and names no data.
-- **Listing runs on the server,** in the connector (`listGoverned`), over a snapshot of at most 200 rows the connector already reads under its own authority. It filters, then sorts stably with ties broken by id, then pages. `truncated` says when the snapshot hit its bound. A cursor is bound to its request's filters and sort, so a cursor made for one request, or not made here, is refused (`INVALID_CURSOR`).
+- **Listing runs on the server,** in the connector (`listGoverned`), over a snapshot of at most 200 rows the connector already reads under its own authority. It filters, then sorts stably with ties broken by id, then pages. `truncated` says when the snapshot hit its bound. A cursor is bound to its request's filters and sort, so another request's cursor, or one that doesn't decode, is refused (`INVALID_CURSOR`). It is not signed: it carries only an offset into what the same request may already read, so an altered one can only skip within that.
 - **Writes** are only a resource's declared commands (`GovernedCommand`, ADR 0013 W4 to W6). Each is proposed, decided, and applied by the connector. There is no generic create, update or delete.
 - **It grants nothing:** a request can only narrow what the session already returns.
 - **Tests:** `governed-data.test.ts`.
