@@ -114,6 +114,15 @@ describe("authored widget publication through the Overseer client", () => {
         ["client.tsx", "export default function Widget(){ return <div>workerd preview</div> }"],
       ]));
 
+      // Load the build runtime's modules before the timed build. In this pool, the build Durable
+      // Object's dynamic `import()` of the runtime goes through Vite's on-demand transform of the
+      // esbuild-wasm wrapper and the generated 1.6 MB dependency module: about 9 s on an idle
+      // 14-core machine, and more than the 15 s preview deadline on a CI runner running every
+      // package's tests at once. The deployed Worker is bundled, so it never pays that transform
+      // (the first preview on a local wrangler stack takes 1-2 s in total). After this, the call
+      // below still runs the real build Durable Object, the esbuild-wasm initialization and the
+      // build itself, all inside the product's deadline (FAC-8).
+      await import("../src/authored-widget-build-runtime.js");
       await expect(client.previewAuthoredWidget(1, 51)).resolves.toMatchObject({
         jsCode: expect.stringContaining("workerd preview"),
         measurements: { clientBytes: expect.any(Number), durationMs: expect.any(Number) },
