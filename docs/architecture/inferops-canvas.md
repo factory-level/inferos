@@ -606,12 +606,12 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
 - **A governed session,** `GovernedReadSession`, is fixed to its connection, workspace and person where it was opened. It offers `describe()` (fields and declared commands), `list(request)` and `get(id)`, and the connector logs each read as an observation.
 - **Requests,** `parseGovernedListRequest`, are validated against the resource's own description before anything is read:
   - **Keys:** only `filters`, `sort`, `pageSize` and `cursor`. A URL, a method or a `meta` is refused (`INVALID_REQUEST`).
-  - **Filters:** at most 4, all of which must hold. Each is on a declared filterable field with `eq` or `contains`, against one scalar value.
+  - **Filters:** at most 4, all of which must hold. Each is on a declared filterable field: `eq` against a value of the field's own type or null, or `contains` on a text field only. A value that can't match is refused, never read as empty.
   - **Sort:** one key, on a sortable field.
   - **Page size:** 1 to 50, 25 by default.
   - **Personal fields** are never filterable or sortable, so they can't be probed (`FIELD_NOT_FILTERABLE`, `FIELD_NOT_SORTABLE`).
   - Every refusal is a fixed code (`GovernedRequestError`) and names no data.
-- **Listing runs on the server,** in the connector (`listGoverned`), over a snapshot of at most 200 rows the connector already reads under its own authority. It filters, then sorts stably with ties broken by id, then pages. `truncated` says when the snapshot hit its bound. A cursor is bound to its request's filters and sort, so a cursor made for one request, or not made here, is refused (`INVALID_CURSOR`).
+- **Listing runs on the server,** in the connector (`listGoverned`), over a snapshot of at most 200 rows the connector already reads under its own authority. It filters, then sorts stably with ties broken by id, then pages. `truncated` says when the snapshot hit its bound. A cursor is bound to its request's filters and sort, so another request's cursor, or one that doesn't decode, is refused (`INVALID_CURSOR`). It is not signed: it carries only an offset into what the same request may already read, so an altered one can only skip within that.
 - **Writes** are only a resource's declared commands (`GovernedCommand`, ADR 0013 W4 to W6). Each is proposed, decided, and applied by the connector. There is no generic create, update or delete.
 - **It grants nothing:** a request can only narrow what the session already returns.
 - **Tests:** `governed-data.test.ts`.

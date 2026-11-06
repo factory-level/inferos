@@ -17,7 +17,7 @@ import {
 import type { RejectionVerdict } from "@gadgets/gatekeeper-kit/credentials";
 import {
   InferOpsError, type IssueChanges, type NewIssueRequest, type WikiProposalApproval, type WikiProposalRecord,
-  type WorkspaceMembersRead,
+  type TableRead, type TableReadOptions, type WorkspaceMembersRead,
 } from "../src/inferops-client.js";
 import type { MockTables } from "../src/mock-inferops.js";
 import type { Issue, Revision } from "../src/types.js";
@@ -65,6 +65,17 @@ export class MockInferOps extends BaseMockInferOps {
    */
   async setWorkflowAnswers(answers: Record<string, unknown>): Promise<void> {
     this.ctx.storage.kv.put("workflow:v1", answers);
+  }
+
+  /** Counts every read of a table's rows, for asserting a refusal read none. */
+  override async readTable(tableId: string, options: TableReadOptions): Promise<TableRead> {
+    this.ctx.storage.kv.put("test:table-reads", (this.ctx.storage.kv.get<number>("test:table-reads") ?? 0) + 1);
+    return super.readTable(tableId, options);
+  }
+
+  /** How many times a table's rows were read. */
+  async tableReads(): Promise<number> {
+    return this.ctx.storage.kv.get<number>("test:table-reads") ?? 0;
   }
 
   /** This account's demo tables as stored (seeded by the first table read). */

@@ -845,6 +845,70 @@ export interface InferOpsTableSession {
   describeTable(): Promise<TableDescription>;
   listRecords(options?: ListRecordsOptions): Promise<{ table: TableDescription; records: TableRecord[] }>;
   getRecord(id: string): Promise<{ table: TableDescription; record: TableRecord }>;
+  /**
+   * The table as a governed resource (FAC-9): its fields (never a personal column) and its declared
+   * commands (none: a table binding is read-only). Logged as an observation.
+   */
+  describe(): Promise<GovernedDescription>;
+  /**
+   * One page of the table's rows, filtered, sorted and paged here, over the newest 50 rows one read
+   * returns (`truncated` when the table holds more). Only the declared fields can be filtered or
+   * sorted on, a filter's value must have the field's type, and anything else is refused with
+   * INVALID_REQUEST before rows are returned or anything is logged. Logged as an observation; no
+   * filter value is repeated into it.
+   */
+  list(query?: GovernedListQuery): Promise<GovernedListResult>;
+  /** One row of the bound table by id, or null when it has no such row. Logged as an observation. */
+  get(id: string): Promise<GovernedRow | null>;
+}
+
+/** A field of a governed resource (FAC-9). A personal column is never one. */
+export interface GovernedField {
+  name: string;
+  label: string;
+  type: "text" | "number" | "boolean" | "date";
+  filterable: boolean;
+  sortable: boolean;
+  personal?: boolean;
+}
+
+/** A write a governed resource declares: the only writes it takes, each proposed for a decision. */
+export interface GovernedCommand {
+  name: string;
+  label: string;
+  fields: string[];
+}
+
+/** What a governed resource offers. */
+export interface GovernedDescription {
+  resource: "object/table" | "tickets/queue";
+  fields: GovernedField[];
+  commands: GovernedCommand[];
+}
+
+/** A governed list request: at most 4 filters (all hold), one sort key, 1 to 50 rows a page. */
+export interface GovernedListQuery {
+  /** `eq` against a value of the field's type or null; `contains` on a text field. */
+  filters?: { field: string; op: "eq" | "contains"; value: string | number | boolean | null }[];
+  sort?: { field: string; order: "asc" | "desc" };
+  pageSize?: number;
+  /** The `nextCursor` a previous page of this same request returned. */
+  cursor?: string;
+}
+
+/** One row of a governed resource. */
+export interface GovernedRow {
+  id: string;
+  values: Record<string, string | number | boolean | null>;
+  revision?: string;
+}
+
+/** One page of a governed list. */
+export interface GovernedListResult {
+  rows: GovernedRow[];
+  nextCursor: string | null;
+  total: number;
+  truncated: boolean;
 }
 
 /** One member of the workspace: a person or agent holding access there. */
