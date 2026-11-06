@@ -13,7 +13,7 @@ import { makeMockStorage } from "./mock-storage";
 type CanvasEnv = ConstructorParameters<typeof WorkspaceCanvasStore>[2];
 type ConsoleEnv = ConstructorParameters<typeof WorkspaceConsoleStore>[2];
 const ENV = { COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true", CANVAS_CATALOG: undefined } as unknown as CanvasEnv & ConsoleEnv;
-const ADMIN = { type: "user" as const, id: "admin-profile", name: "Ada Admin" };
+const ADMIN = { id: "admin-profile", name: "Ada Admin" };
 const BOARD_REF = "inferops://acme.operations/project/board/ENG";
 const BOARD = {
   kind: "inferops.project-board", version: 1, targetRef: BOARD_REF,
@@ -75,6 +75,34 @@ describe("a console publication (FAC-99)", () => {
     // No partial release: not even the good screen is copied.
     nothingPublished(stores, draft.id, good.id, draft.revision);
     expect(stores.consoles.screen(draft.id, bad.id, "published")).toBeNull();
+  });
+
+  // FAC-99 round 1: the same holds inside a nested page.
+  it("refuses a screen whose nested page holds an incompatible binding, publishing nothing", () => {
+    const stores = setUp();
+    const good = stores.canvases.create(screenContent("Good"));
+    const nested = stores.canvases.create(screenContent("Nested"));
+    // Nested for real: the widget one object deeper, which version 1 can't hold.
+    const page = stores.canvases.getPage(nested.id)!;
+    const [work] = page.children;
+    const widget = page.nodes.find(node => node.nodeType === "widget")!;
+    stores.canvases.savePage({
+      ...page,
+      nodes: [
+        ...page.nodes.map(node => node.id === work && node.nodeType === "object" ? { ...node, children: [`${work}-inner`] } : node),
+        { nodeType: "object", id: `${work}-inner`, title: "Inner", columns: 1, children: [widget.id], attachments: [] },
+      ],
+    }, page.revision);
+    // The draft is saved first: saving it reads each page, and would refuse the bad one.
+    const draft = stores.consoles.create(consoleOver(good.id, nested.id));
+    const stored = stores.storage.canvasPages.get(nested.id)! as unknown as { page: { nodes: Record<string, unknown>[] } };
+    const nodes = stored.page.nodes.map(node => node.nodeType === "widget"
+      ? { ...node, dataBinding: { resource: "knowledge/wiki", ref: BOARD_REF, schemaVersion: 1 } } : node);
+    stores.storage.canvasPages.put({ ...stored, page: { ...stored.page, nodes } } as never);
+    expect(() => stores.consoles.publish(draft.id, draft.revision,
+      stores.consoles.capture(draft.id, draft.revision), new Map(), ADMIN)).toThrow();
+    nothingPublished(stores, draft.id, good.id, draft.revision);
+    expect(stores.consoles.screen(draft.id, nested.id, "published")).toBeNull();
   });
 
   it("refuses a stale draft revision, publishing nothing", () => {

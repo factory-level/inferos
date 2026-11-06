@@ -1,9 +1,9 @@
-import type { AiChatAuthorInfo, BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
+import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
 import { canvasDefinitionProjection, canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
 import { nestedPage, readCanvasDefinition } from "./canvas-store";
-import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleWidgetFreeze, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleWidgetFreeze, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
@@ -441,14 +441,19 @@ function frozenSurfaces(commit: SourceCommit): Pick<ConsoleWidgetFreeze, "ui" | 
  * Everything is checked before anything is created, except the stored record's size, which is
  * checked last. Call inside a storage transaction, which undoes the installs if that refuses.
  * Shared by publishing and the storage migration that publishes consoles saved before publication
- * existed, which have no widgets, bound views or flows. `publishedBy`, when given, is recorded as
- * who published it (FAC-99).
+ * existed, which have no widgets, bound views or flows. With `options.checkWidgets`, which only
+ * the publish path passes, every widget on every screen must still parse (see `publishedPages`);
+ * the storage migration never passes it, so a console saved before today's widget rules is still
+ * migrated and its workspace still starts. `options.publishedBy`, when given, is recorded as who
+ * published it (FAC-99).
  */
 export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateConsole, publishedAt: string,
-    frozen?: FrozenInstalls, commits?: SourceCommits, publishedBy?: AiChatAuthorInfo): OperateConsole {
+    frozen?: FrozenInstalls, commits?: SourceCommits,
+    options: { publishedBy?: ConsolePublisher; checkWidgets?: boolean } = {}): OperateConsole {
+  let { publishedBy, checkWidgets = false } = options;
   let { id, revision, published: _, ...content } = stored;
   checkConsoleWidgets(storage, content, commits);
-  let screens = publishedPages(storage, content);
+  let screens = publishedPages(storage, content, checkWidgets);
   let flows = publishedFlows(storage, content);
   // Apps are fenced, not copied: they keep their storage and bindings (see `ConsolePublishedApp`).
   let apps = placedApps(storage, content).flatMap(({ gadgetId, commitId }): ConsolePublishedApp[] =>
@@ -500,23 +505,27 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
 // Each screen `content` shows that exists, with its row and the page it stands for now, for its
 // publication. Behavior on a page may navigate only to a page the console also shows, so an
 // operator is never sent to one the publication has no copy of; otherwise nothing is published.
-// Each screen's widgets must also still parse (FAC-99): a widget's typed read binding (FAC-92)
+// With `checkWidgets` (the publish path only), each screen's widgets must also still parse
+// (FAC-99): a widget's typed read binding (FAC-92)
 // must be valid, match its widget and name its widget's own reference, and that reference must be
 // well formed. Storage written outside the editor, or before those rules, is refused here, before
 // anything is copied, rather than released to operators.
-function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages">, content: OperateConsoleContent) {
+function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages">, content: OperateConsoleContent,
+    checkWidgets: boolean) {
   let shown = new Set(consoleScreens(content));
   return consoleScreens(content).flatMap(screenId => {
     let row = storage.canvases.get(screenId);
     if (!row) return [];
     // Only a nested page has behavior; a version 1 row has none.
     let page = nestedPage(storage, row);
-    try {
-      // A nested page is parsed whole when read (`nestedPage`); the row's own widgets are checked
-      // here, each as the editor would accept it.
-      for (let section of row.sections ?? []) for (let widget of section.widgets ?? []) parseCanvasWidget(widget);
-    } catch (error) {
-      throw new Error(`Screen ${screenId} can't be published: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+    if (checkWidgets) {
+      try {
+        // A nested page is parsed whole when read (`nestedPage`); the row's own widgets are checked
+        // here, each as the editor would accept it.
+        for (let section of row.sections ?? []) for (let widget of section.widgets ?? []) parseCanvasWidget(widget);
+      } catch (error) {
+        throw new Error(`Screen ${screenId} can't be published: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      }
     }
     for (let owner of page ? [page, ...page.nodes] : []) {
       for (let attachment of owner.attachments) {
@@ -933,7 +942,7 @@ export class WorkspaceConsoleStore {
    * recorded as who published it (FAC-99); every screen must still parse (see `publishedPages`).
    */
   publish(id: string, expectedRevision: string, capture?: ConsoleCapture, commits?: SourceCommits,
-      publishedBy?: AiChatAuthorInfo): OperateConsole {
+      publishedBy?: ConsolePublisher): OperateConsole {
     this.#requireEnabled();
     return this.durableStorage.transactionSync(() => {
       let current = this.#current(id, expectedRevision);
@@ -952,7 +961,8 @@ export class WorkspaceConsoleStore {
       }
       let raised = { ...current, revision: String(BigInt(current.revision) + 1n) };
       let surfaces = commits && (consoleToolsEnabled(this.env) ? commits : withoutTools(commits));
-      return publishConsoleRecord(this.storage, raised, new Date().toISOString(), this.frozen, capture && surfaces, publishedBy);
+      return publishConsoleRecord(this.storage, raised, new Date().toISOString(), this.frozen, capture && surfaces,
+          { checkWidgets: true, ...(publishedBy ? { publishedBy } : {}) });
     });
   }
 

@@ -1,4 +1,4 @@
-import type { AiChatAuthorInfo, WorkpieceId } from "./api.js";
+import type { WorkpieceId } from "./api.js";
 import type { WidgetIndexOutcome } from "./gatekeeper.js";
 import { MAX_WORKSPACE_FLOWS, type OperateFlow } from "./operate-flow.js";
 import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
@@ -334,6 +334,9 @@ export type ConsoleSource = "published" | "draft";
 /** Every `ConsoleSource` value. */
 export const CONSOLE_SOURCES: readonly ConsoleSource[] = ["published", "draft"];
 
+/** Who published a console (FAC-99): the person's id and display name, nothing more. */
+export type ConsolePublisher = { id: string; name: string };
+
 /** The revision of a console operators use, frozen when a builder published it. */
 export type ConsolePublication = {
   /** The draft revision that was published. */
@@ -341,11 +344,11 @@ export type ConsolePublication = {
   /** When it was published, as an ISO 8601 timestamp. */
   publishedAt: string;
   /**
-   * Who published it (FAC-99): the person whose session published, whose authority the
+   * Who published it (FAC-99), by id and name only: the person whose session published, whose authority the
    * deployment's shared-configuration service confirmed for a shared workspace. Absent on
    * publications made before it was recorded, and on consoles the storage migration published.
    */
-  publishedBy?: AiChatAuthorInfo;
+  publishedBy?: ConsolePublisher;
   /** The console's content as published. */
   content: OperateConsoleContent;
   /**
