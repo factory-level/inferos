@@ -4,7 +4,7 @@
 // on a widget with no states, refuses the publication with nothing published. Over mock Durable
 // Object storage, with the real console store.
 import { describe, expect, it } from "vitest";
-import { canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import { canvasPageFromDefinition, canvasRunEvent, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
 import type { ConsoleWidgetEntry, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import { parseWidgetStates } from "@gadgets/workshop-shared/widget-state";
 import { classifyGadgetFiles } from "@gadgets/workshop-shared/workspace-kind";
@@ -136,11 +136,11 @@ describe("a run's result at publication (FAC-116)", () => {
   it("publishes an attachment hearing a trigger of the widget's own gadget, on the frozen widget", () => {
     let t = setUp("stateful");
     hook(t.storage, 11, 1);
-    wire(t.storage, "run-succeeded-11");
+    wire(t.storage, canvasRunEvent("run-succeeded", 11));
     let published = publish(t).run();
     let page = t.consoles.page(published.id, "floor", "published")!;
     let widget = page.nodes.find(node => node.nodeType === "widget")!;
-    expect(widget).toMatchObject({ attachments: [{ id: "next", on: "run-succeeded-11" }] });
+    expect(widget).toMatchObject({ attachments: [{ id: "next", on: canvasRunEvent("run-succeeded", 11) }] });
   });
 
   it.for([
@@ -149,7 +149,7 @@ describe("a run's result at publication (FAC-116)", () => {
   ] as const)("refuses %s, publishing nothing", ([, gadgetId]) => {
     let t = setUp("plain");
     if (gadgetId !== null) hook(t.storage, 11, gadgetId);
-    wire(t.storage, "run-failed-11");
+    wire(t.storage, canvasRunEvent("run-failed", 11));
     let { draft, run } = publish(t);
     expect(run).toThrow("Screen floor can't be published: its widget w1 hears the runs of trigger 11, which isn't a trigger of gadget 1.");
     expect(t.storage.consoles.get(draft.id)!.published).toBeNull();
@@ -159,7 +159,7 @@ describe("a run's result at publication (FAC-116)", () => {
   it("refuses a run's result that leads to a requested action, publishing nothing", () => {
     let t = setUp("plain");
     hook(t.storage, 11, 1);
-    wire(t.storage, "run-succeeded-11", true);
+    wire(t.storage, canvasRunEvent("run-succeeded", 11), true);
     let { draft, run } = publish(t);
     expect(run).toThrow(`Screen floor can't be published: its widget w1's "run-succeeded" for trigger 11 leads to a requested action, which a run's result can't run.`);
     expect(t.storage.consoles.get(draft.id)!.published).toBeNull();

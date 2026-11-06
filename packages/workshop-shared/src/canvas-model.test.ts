@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
 import {
-  canvasPageEffects, canvasRunEffects, canvasRunEvent, canvasRunEventsHeard, parseCanvasRunEvent,
+  CANVAS_RUN_EVENTS, canvasPageEffects, canvasRunEffects, canvasRunEvent, canvasRunEventsHeard, parseCanvasRunEvent,
   canvasWidgetEventsHeard,
   CANVAS_MODEL_LIMITS, CANVAS_WIDGET_ACTIONS, CanvasModelError, applyCanvasPageOperations, canvasDefinitionFromPage, canvasPageFromDefinition, canvasTargetPath, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
   resolveCanvasTarget, type CanvasModelErrorCode, type CanvasNode, type CanvasPage, type CanvasTarget,
@@ -447,10 +447,13 @@ describe("a requested run's result drives page effects (FAC-116)", () => {
   const done = { id: "done", version: 1, on: canvasRunEvent("run-succeeded", 11), effect: { kind: "navigate", page: "q" } };
 
   test("names the trigger inside the event, and reads it back", () => {
-    expect(done.on).toBe("run-succeeded-11");
-    expect(parseCanvasRunEvent("run-uncertain-42")).toEqual({ event: "run-uncertain", trigger: 42 });
+    expect(done.on).toBe("run-result-succeeded-000000000000000000000011");
+    expect(parseCanvasRunEvent(canvasRunEvent("run-uncertain", 42))).toEqual({ event: "run-uncertain", trigger: 42 });
     expect(parseCanvasRunEvent("finish")).toBeNull();
-    for (const on of ["run-succeeded", "run-failed-0", "run-failed-01", "run-failed-x", "run-uncertain-99999999999999999"]) {
+    // The earlier encoding is an ordinary widget event now, nothing reserved.
+    expect(parseCanvasRunEvent("run-succeeded-11")).toBeNull();
+    for (const on of ["run-result-succeeded", "run-result-failed-000000000000000000000000", "run-result-failed-11",
+      "run-result-done-000000000000000000000011", "run-result-uncertain-999999999999999999999999"]) {
       expect(parseCanvasRunEvent(on), on).toBe("malformed");
     }
   });
@@ -475,20 +478,20 @@ describe("a requested run's result drives page effects (FAC-116)", () => {
 
   test("a run event names a well-formed trigger, only a gadget widget hears it, and nothing raises it", () => {
     const at = (on: string) => rejection(() => parseCanvasPage(runPage([{ ...done, on }])));
-    for (const on of ["run-succeeded", "run-failed-0", "run-failed-01", "run-uncertain-x"]) expect(at(on), on).toEqual({ code: "invalid-attachment", at: "done" });
+    for (const on of ["run-result-succeeded", "run-result-failed-11", "run-result-x"]) expect(at(on), on).toEqual({ code: "invalid-attachment", at: "done" });
     expect(rejection(() => parseCanvasPage(runPage([], [{ ...done, id: "o" }])))).toEqual({ code: "unknown-event", at: "o" });
     expect(rejection(() => parseCanvasPage(runPage([], [], [{ ...done, id: "pg" }])))).toEqual({ code: "unknown-event", at: "pg" });
     // Nobody can claim a run's result by raising it.
     expect(rejection(() => parseCanvasPage(runPage(
-      [{ id: "fake", version: 1, on: "finish", effect: { kind: "raise-event", target: "g", event: "run-succeeded-11" } }],
+      [{ id: "fake", version: 1, on: "finish", effect: { kind: "raise-event", target: "g", event: canvasRunEvent("run-succeeded", 11) } }],
     )))).toEqual({ code: "reserved-event", at: "fake" });
   });
 
   test("resolves one trigger's run event to its page effects, following raised events, and nothing else to them", () => {
     const page = parseCanvasPage(runPage(
       [{ ...done, effect: { kind: "raise-event", target: "a", event: "refunds-done" } },
-        { id: "failed", version: 1, on: "run-failed-11", effect: { kind: "navigate", page: "help" } },
-        { id: "other", version: 1, on: "run-succeeded-12", effect: { kind: "navigate", page: "other" } }],
+        { id: "failed", version: 1, on: canvasRunEvent("run-failed", 11), effect: { kind: "navigate", page: "help" } },
+        { id: "other", version: 1, on: canvasRunEvent("run-succeeded", 12), effect: { kind: "navigate", page: "other" } }],
       [{ id: "next", version: 1, on: "refunds-done", effect: { kind: "navigate", page: "q" } }],
     ));
     expect(canvasRunEffects(page, 11, "run-succeeded")).toEqual([{ kind: "navigate", page: "q" }]);
@@ -497,7 +500,21 @@ describe("a requested run's result drives page effects (FAC-116)", () => {
     expect(canvasRunEffects(page, 12, "run-succeeded")).toEqual([{ kind: "navigate", page: "other" }]);
     expect(canvasRunEffects(page, 13, "run-succeeded")).toEqual([]);
     // A widget's own events never reach a run's attachments.
-    expect(canvasPageEffects(page, "gadget:7", "run-succeeded-11")).toEqual([]);
+    expect(canvasPageEffects(page, "gadget:7", done.on)).toEqual([]);
+  });
+
+  test("a widget's own event never collides with a run event, either way", () => {
+    // A gadget may declare the earlier encoding as its own event: it stays the widget's, and no run reaches it.
+    const own = parseCanvasPage(runPage([{ id: "mine", version: 1, on: "run-succeeded-11", effect: { kind: "navigate", page: "q" } }]));
+    expect(canvasWidgetEventsHeard(own)).toEqual([{ nodeId: "g", targetRef: "gadget:7", event: "run-succeeded-11", attachmentId: "mine" }]);
+    expect(canvasRunEventsHeard(own)).toEqual([]);
+    expect(canvasPageEffects(own, "gadget:7", "run-succeeded-11")).toEqual([{ kind: "navigate", page: "q" }]);
+    expect(canvasRunEffects(own, 11, "run-succeeded")).toEqual([]);
+    // And a run event is longer than any event a widget can declare (at most 40 characters).
+    for (const event of CANVAS_RUN_EVENTS) for (const trigger of [1, Number.MAX_SAFE_INTEGER]) {
+      expect(canvasRunEvent(event, trigger).length).toBeGreaterThan(40);
+      expect(canvasRunEvent(event, trigger).length).toBeLessThanOrEqual(64);
+    }
   });
 });
 

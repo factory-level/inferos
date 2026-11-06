@@ -634,9 +634,11 @@ A widget's own event drives a page effect only through an attachment someone con
 - **No authority.** A wired effect grants nothing. Navigation is only the person's own page move, checked as if they had made it, and no widget event can reach a requested action, so none reaches a capability. The person's own grant and approval still decide every action (FAC-92).
 - **A run's result** (FAC-116, built against the proposed ADR 0012), a reserved set of events.
   - **The events:** `CANVAS_RUN_EVENTS` are `run-succeeded`, `run-failed` and `run-uncertain`, a run's first final outcome. `waiting` raises none.
-  - **Who hears them:** an attachment on an `inferos.gadget` widget, whose event names the trigger (bound hook id) whose requested runs it hears. That's `canvasRunEvent(event, hookId)`, for example `run-succeeded-11`, and `parseCanvasRunEvent` reads it back.
-  - **The trigger sits inside the existing `on` field,** so an attachment keeps exactly the fields an earlier reader accepts. On a rollback, the earlier build still reads the page. It treats the attachment as a gadget widget's own event, which its publication refuses as undeclared and nothing raises.
-  - **Malformed run events** (a bare `run-succeeded`, or a malformed trigger) are refused (`invalid-attachment`).
+  - **Who hears them:** an attachment on an `inferos.gadget` widget, whose event names the trigger (bound hook id) whose requested runs it hears. That's `canvasRunEvent(event, hookId)`, `run-result-<outcome>-<hookId as 24 digits>`, and `parseCanvasRunEvent` reads it back.
+  - **The trigger sits inside the existing `on` field,** so an attachment keeps exactly the fields an earlier reader accepts.
+  - **It can never collide with a widget's own event:** the event is 42 to 45 characters, but a widget's declared event has at most 40 (`widget-state.ts`). `widget-state.ts` also refuses a declared event starting `run-result-`.
+  - **On a rollback,** the earlier build still reads the page. Its publication refuses the attachment as an undeclared widget event, and no transition can carry that name, so it never fires.
+  - **Malformed run events** (a `run-result-` event of another shape) are refused (`invalid-attachment`).
   - **They can't be faked:** no attachment can raise one (`reserved-event`), and none on another node may hear one (`unknown-event`).
   - **Resolving:** `canvasRunEventsHeard` lists them, and `canvasRunEffects(page, trigger, event)` follows them as `canvasPageEffects` does. A widget's own events never reach them.
   - **Checked at publication:** the trigger must be bound on the widget's own gadget, and the result must lead to no `request-action`. Otherwise publication is refused, naming the screen, the widget and the trigger.

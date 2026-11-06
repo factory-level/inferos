@@ -41,16 +41,24 @@ export const CANVAS_RUN_EVENTS = ["run-succeeded", "run-failed", "run-uncertain"
 /** One of `CANVAS_RUN_EVENTS`. */
 export type CanvasRunEvent = (typeof CANVAS_RUN_EVENTS)[number];
 
-// A run event names its trigger inside the event itself, `<event>-<hookId>` (`run-succeeded-11`), so
-// an attachment keeps exactly the fields an earlier reader accepts and a rollback still reads the page.
-const RUN_EVENT = /^(run-succeeded|run-failed|run-uncertain)(?:-([1-9][0-9]{0,15}))?$/;
+// A run event names its trigger inside the event itself: `run-result-<outcome>-<hookId as 24 digits>`,
+// 42 to 45 characters. So an attachment keeps exactly the fields an earlier reader accepts (its `on`
+// takes up to 64), and no widget event can ever be one: a declared event has at most 40 characters
+// (widget-state.ts), and `run-result-` is reserved there too. An earlier build reads the page, its
+// publication refuses the attachment as undeclared, and no transition can be named that, so on a
+// rollback it never fires.
+const RUN_EVENT_PREFIX = "run-result-";
+const RUN_EVENT = /^run-result-(succeeded|failed|uncertain)-([0-9]{24})$/;
 
 // Whether `event` is a run event, well formed or not: one no attachment may raise.
 const isRunEvent = (event: string): boolean => parseCanvasRunEvent(event) !== null;
 
-/** The attachment event that hears trigger `trigger`'s `event` (FAC-116): `run-succeeded-11`. */
+/**
+ * The attachment event that hears trigger `trigger`'s `event` (FAC-116), e.g.
+ * `run-result-succeeded-000000000000000000000011`.
+ */
 export function canvasRunEvent(event: CanvasRunEvent, trigger: number): string {
-  return `${event}-${trigger}`;
+  return `${RUN_EVENT_PREFIX}${event.slice("run-".length)}-${String(trigger).padStart(24, "0")}`;
 }
 
 /**
@@ -58,10 +66,10 @@ export function canvasRunEvent(event: CanvasRunEvent, trigger: number): string {
  * `"malformed"` for a run event without a well-formed trigger, which no attachment may hear.
  */
 export function parseCanvasRunEvent(on: string): { event: CanvasRunEvent; trigger: number } | null | "malformed" {
+  if (!on.startsWith(RUN_EVENT_PREFIX)) return null;
   const match = RUN_EVENT.exec(on);
-  if (!match) return on.startsWith("run-succeeded") || on.startsWith("run-failed") || on.startsWith("run-uncertain") ? "malformed" : null;
-  const trigger = match[2] === undefined ? Number.NaN : Number(match[2]);
-  return Number.isSafeInteger(trigger) ? { event: match[1] as CanvasRunEvent, trigger } : "malformed";
+  const trigger = match ? Number(match[2]) : Number.NaN;
+  return match && Number.isSafeInteger(trigger) && trigger > 0 ? { event: `run-${match[1]}` as CanvasRunEvent, trigger } : "malformed";
 }
 
 /**
