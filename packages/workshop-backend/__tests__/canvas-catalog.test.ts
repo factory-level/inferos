@@ -10,6 +10,7 @@ import { readCanvasCatalog } from "../src/canvas-catalog.js";
 
 const board: CanvasWidget = {
   id: "eng", kind: "inferops.project-board", version: 1, targetRef: "inferops://demo.local/project/board/ENG",
+  dataBinding: { resource: "project/board", ref: "inferops://demo.local/project/board/ENG", schemaVersion: 1 },
   size: "wide", params: { workflow: "software", showCompleted: false },
 };
 const gadget: CanvasWidget = { id: "kanban", kind: "inferos.gadget", version: 1, targetRef: "gadget:7", size: "normal", params: {} };
@@ -39,7 +40,8 @@ describe("parseCanvasCatalog", () => {
   });
 
   it("accepts a template with a Wiki, which, like a board, is a reference rather than a workspace-local ID", () => {
-    const wiki: CanvasWidget = { id: "sops", kind: "inferops.wiki", version: 1, targetRef: "inferops://demo.local/knowledge/wiki", size: "full", params: { page: "handbook" } };
+    const wiki: CanvasWidget = { id: "sops", kind: "inferops.wiki", version: 1, targetRef: "inferops://demo.local/knowledge/wiki",
+      dataBinding: { resource: "knowledge/wiki", ref: "inferops://demo.local/knowledge/wiki", schemaVersion: 1 }, size: "full", params: { page: "handbook" } };
     const screens = [{ id: "knowledge", content: { title: "Knowledge", sections: [{ id: "s", title: "S", columns: 1, widgets: [board, wiki] }] } }];
     expect(parseCanvasCatalog({ ...catalog, screens }).screens[0].content.sections[0].widgets).toEqual([board, wiki]);
   });
