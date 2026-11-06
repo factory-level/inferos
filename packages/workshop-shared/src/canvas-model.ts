@@ -7,7 +7,7 @@
  * A reference identifies a target and an attachment grants nothing; both are checked at use, under
  * the acting person's or run's own authority.
  */
-import { CANVAS_ID, CANVAS_REVISION, parseCanvasDefinition, parseCanvasWidget, type CanvasDefinition, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
+import { CANVAS_ID, CANVAS_REVISION, parseCanvasDefinition, parseCanvasWidget, type CanvasDataBinding, type CanvasDefinition, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
 
 /** The schema version this module reads. `CanvasDefinition`, with sections, is version 1. */
 export const CANVAS_MODEL_SCHEMA_VERSION = 2;
@@ -104,6 +104,8 @@ export interface CanvasObjectNode {
 export type CanvasWidgetNode = CanvasWidget & {
   /** Node type. */
   nodeType: "widget";
+  /** Typed, read-only data source. This is a reference only; it carries no write or workflow authority. */
+  dataBinding?: CanvasDataBinding;
   /** Behavior attached to this instance. */
   attachments: CanvasAttachment[];
 };
@@ -139,7 +141,7 @@ export type CanvasModelErrorCode =
   | "duplicate-id" | "limit-exceeded" | "missing-reference"
   | "containment-cycle" | "multiple-parents" | "orphan-node" | "invalid-nesting" | "nesting-too-deep"
   | "invalid-attachment" | "unknown-effect" | "invalid-target" | "unavailable-action"
-  | "unknown-event" | "reserved-event" | "reference-cycle";
+  | "unknown-event" | "reserved-event" | "reference-cycle" | "invalid-data-binding" | "incompatible-data-binding";
 
 /** A rejected page. Its message and `at` hold only validated IDs and known field names, never submitted values. */
 export class CanvasModelError extends Error {
@@ -234,7 +236,9 @@ function parseNode(value: unknown, index: number): CanvasNode {
   }
   if (raw.nodeType !== "widget") return reject("unknown-node-type", id);
   if (Object.hasOwn(raw, "children")) return reject("invalid-nesting", id);
-  const w = fields(value, ["nodeType", "id", "kind", "version", "targetRef", "size", "params", "attachments"], id);
+  const w = fields(value, ["nodeType", "id", "kind", "version", "targetRef", "size", "params", "attachments",
+    ...(Object.hasOwn(raw, "dataBinding") ? ["dataBinding"] : [])], id);
+  if (Object.hasOwn(w, "dataBinding")) validateDataBinding(w.dataBinding, w.kind, w.targetRef, id);
   if (w.params && typeof w.params === "object") {
     for (const key of Object.keys(w.params)) {
       if (INHERITANCE_FIELDS.has(key) || AUTHORITY_FIELDS.has(key) || ENTITY_FIELDS.has(key)) refuseField(key, `${id}.params`);
@@ -242,11 +246,28 @@ function parseNode(value: unknown, index: number): CanvasNode {
   }
   let widget: CanvasWidget;
   try {
-    widget = parseCanvasWidget({ id, kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size, params: w.params });
+    widget = parseCanvasWidget({ id, kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size, params: w.params,
+      ...(Object.hasOwn(w, "dataBinding") ? { dataBinding: w.dataBinding } : {}) });
   } catch {
     return reject("invalid-widget", id);
   }
   return { ...widget, nodeType: "widget", attachments: parseAttachments(w.attachments, id) };
+}
+
+function validateDataBinding(value: unknown, kind: unknown, targetRef: unknown, at: string): void {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return reject("invalid-data-binding", at);
+  const binding = value as Record<string, unknown>;
+  const resource = binding.resource;
+  const expected = kind === "inferops.project-board" ? "project/board"
+    : kind === "inferops.wiki" ? "knowledge/wiki" : null;
+  if (expected === null || (resource !== "project/board" && resource !== "knowledge/wiki")) {
+    return reject("invalid-data-binding", at);
+  }
+  if (resource !== expected) return reject("incompatible-data-binding", at);
+  if (Object.keys(binding).some(key => !["resource", "ref", "schemaVersion"].includes(key)) ||
+      binding.ref !== targetRef || typeof targetRef !== "string" || binding.schemaVersion !== 1) {
+    return reject("invalid-data-binding", at);
+  }
 }
 
 /** Containment must be one tree under the page, within the depth limit. Cycles are named before anything they'd also break. */
