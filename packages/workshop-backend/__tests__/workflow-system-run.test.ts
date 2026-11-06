@@ -523,6 +523,30 @@ describe("provisioning an assignment's key (FAC-102, the lead's option a)", () =
     setWorkflowTriggerAssignment(impl, ADA, HOOK, null);
     await vi.waitFor(() => expect(forget.mock.calls.map(c => c[0])).toEqual([first.credentialRef, second.credentialRef]));
   });
+
+  // #375 round 2: the vendor stores before the Workshop confirms the assignment is unchanged, so a
+  // failure after the store must forget what was stored rather than leave a key at rest.
+  it("forgets the key it just stored when the assignment changed while the key was being checked", async () => {
+    let forget = vi.fn(async (_ref: string) => {});
+    let made = provisionImpl({ forgetSystemCredential: forget, provisionSystemCredential: async () => {
+      // Gone meanwhile without a retire, so only provisioning itself can forget the reference.
+      made.store.removeAssignment(HOOK);
+    } });
+    let assignment = setWorkflowTriggerAssignment(made.impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    let { text, result } = await consoleDuring(() => provisionWorkflowTriggerCredential(made.impl, ADA, HOOK, KEY));
+    expect(String(result)).toContain("assignment changed");
+    expect(forget).toHaveBeenCalledWith(assignment.credentialRef);
+    expect(text).not.toContain(KEY);
+  });
+
+  it("forgets the key it just stored when recording who gave it fails", async () => {
+    let forget = vi.fn(async (_ref: string) => {});
+    let made = provisionImpl({ forgetSystemCredential: forget, provisionSystemCredential: async () => {} });
+    let assignment = setWorkflowTriggerAssignment(made.impl, ADA, HOOK, { gatekeeperId: INFEROPS })!;
+    made.store.markProvisioned = () => { throw new Error("storage reset"); };
+    await expect(provisionWorkflowTriggerCredential(made.impl, ADA, HOOK, KEY)).rejects.toThrow();
+    expect(forget).toHaveBeenCalledWith(assignment.credentialRef);
+  });
 });
 
 describe("who may provision", () => {

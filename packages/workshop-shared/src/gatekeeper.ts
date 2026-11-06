@@ -649,7 +649,11 @@ export interface GatekeeperVendor extends WorkerEntrypoint {
    */
   provisionSystemCredential?(credentialRef: string, connection: { resourceUrl: string }, key: string): Promise<void>;
 
-  /** Delete the credential stored for `credentialRef`, if any (its assignment changed or went). Kernel-only. */
+  /**
+   * Delete the credential stored for `credentialRef`, if any (its assignment changed or went), and
+   * retire the reference: a store for it arriving later, from a provisioning that was still checking
+   * its key, must store nothing. The Workshop never reuses a reference. Kernel-only.
+   */
   forgetSystemCredential?(credentialRef: string): Promise<void>;
 }
 
