@@ -47,4 +47,37 @@ describe("the version 4 -> 5 published-consoles migration", () => {
       });
     });
   });
+
+  // FAC-99 round 1: the publish path's widget check never runs in this migration. A console whose
+  // screen holds a widget today's parser rejects (here a Wiki binding on a board) is still migrated,
+  // so the Overseer starts; publishing it again through the publish path is what refuses it
+  // (console-publication-authority.test.ts).
+  it("migrates a console whose screen holds a widget today's parser rejects, so the Overseer starts", async () => {
+    let ref = "inferops://acme.operations/project/board/ENG";
+    let screen = {
+      schemaVersion: 1, id: "legacy", revision: "1", title: "Legacy",
+      sections: [{ id: "work", title: "Work", columns: 1, widgets: [{
+        id: "eng", kind: "inferops.project-board", version: 1, targetRef: ref, size: "wide",
+        params: { workflow: "software", showCompleted: false },
+        dataBinding: { resource: "knowledge/wiki", ref, schemaVersion: 1 },
+      }] }],
+    };
+    await withImpl("consoles-migration-legacy-widget", async impl => {
+      impl.storage.canvases.put(screen);
+      impl.storage.consoles.put({
+        id: "floor", revision: "4", title: "Floor", fullChat: "off",
+        views: [{ id: "legacy", title: "Legacy", type: "screen", screen: "legacy" }],
+      });
+      impl.storage.version.put(4);
+    });
+
+    await abortAllDurableObjects();
+
+    await withImpl("consoles-migration-legacy-widget", async impl => {
+      expect(impl.storage.version.get()).toBe(5);
+      expect(impl.storage.consoles.get("floor").published).toMatchObject({ revision: "4" });
+      expect(impl.storage.consoleScreens.get("floor/legacy")).toMatchObject({ consoleId: "floor", screenId: "legacy" });
+    });
+  });
 });
+

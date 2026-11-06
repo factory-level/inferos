@@ -334,12 +334,21 @@ export type ConsoleSource = "published" | "draft";
 /** Every `ConsoleSource` value. */
 export const CONSOLE_SOURCES: readonly ConsoleSource[] = ["published", "draft"];
 
+/** Who published a console (FAC-99): the person's id and display name, nothing more. */
+export type ConsolePublisher = { id: string; name: string };
+
 /** The revision of a console operators use, frozen when a builder published it. */
 export type ConsolePublication = {
   /** The draft revision that was published. */
   revision: string;
   /** When it was published, as an ISO 8601 timestamp. */
   publishedAt: string;
+  /**
+   * Who published it (FAC-99), by id and name only: the person whose session published, whose authority the
+   * deployment's shared-configuration service confirmed for a shared workspace. Absent on
+   * publications made before it was recorded, and on consoles the storage migration published.
+   */
+  publishedBy?: ConsolePublisher;
   /** The console's content as published. */
   content: OperateConsoleContent;
   /**
