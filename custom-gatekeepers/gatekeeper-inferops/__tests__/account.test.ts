@@ -2118,6 +2118,24 @@ describe("system credentials (FAC-102)", () => {
   // #375 round 2: the Workshop forgets a reference when it retires the assignment, and that can
   // reach here before a provisioning still checking the key stores it. A store after the forget
   // must not land, whatever the order the two arrive in.
+  // #375 round 3: a store and a forget for one reference, issued together in either order, never
+  // leave a key behind once the forget has returned.
+  it("never keeps a key past a forget issued at the same time as a store, in either order", async () => {
+    type Credentials = { store: (c: unknown) => Promise<boolean>; forget: () => Promise<void>; authority: (h: string) => Promise<unknown> };
+    const ns = (env as unknown as { INFEROPS_SYSTEM_CREDENTIALS: DurableObjectNamespace }).INFEROPS_SYSTEM_CREDENTIALS;
+    const credential = { key: KEY, workspaceId: OPS, host: "acme.operations", tenantId: COMPANY, provisionedAt: 0 };
+    for (let round = 0; round < 20; round++) {
+      const stub = ns.get(ns.newUniqueId()) as unknown as Credentials;
+      const [stored] = round % 2 === 0
+        ? await Promise.all([stub.store(credential), stub.forget()])
+        : (await Promise.all([stub.forget(), stub.store(credential)])).toReversed() as [boolean, void];
+      expect(await stub.authority("acme.operations")).toBeNull();
+      // Whichever ran first, a later store is refused.
+      expect(await stub.store(credential)).toBe(false);
+      expect(typeof stored).toBe("boolean");
+    }
+  });
+
   it("never stores a key for a reference once it is forgotten, even a store that arrives late", async () => {
     const RETIRED = "5b2c1d8e-0000-4000-8000-0000000000a5";
     serviceKey();

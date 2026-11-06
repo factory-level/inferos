@@ -20,6 +20,10 @@ export type StoredSystemCredential = {
   provisionedAt: number;
 };
 
+/** Where the stored key and the reference's tombstone live in each object's storage. */
+const CREDENTIAL_KEY = "credential";
+const RETIRED_KEY = "retired";
+
 /** A credential reference: the UUID the Workshop minted for one assignment. */
 export const CREDENTIAL_REF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -33,28 +37,35 @@ export class InferOpsSystemCredentials extends DurableObject<Cloudflare.Env> {
    * reference stores nothing (#375 round 2): the Workshop forgets a reference only when it retires
    * its assignment and mints a fresh one for any new assignment, so a store arriving after the
    * forget, from a provisioning still checking the key meanwhile, is late and must not leave a key
-   * at rest. One object per reference runs one call at a time, so the check and the write can't
-   * interleave with a forget.
+   * at rest. The check and the write are one synchronous transaction with no await between them
+   * (#375 round 3), so no forget can run between the two.
    */
-  async store(credential: StoredSystemCredential): Promise<boolean> {
-    if (await this.ctx.storage.get<boolean>("retired")) return false;
-    await this.ctx.storage.put("credential", credential);
-    return true;
+  store(credential: StoredSystemCredential): boolean {
+    return this.ctx.storage.transactionSync(() => {
+      if (this.ctx.storage.kv.get<boolean>(RETIRED_KEY)) return false;
+      this.ctx.storage.kv.put(CREDENTIAL_KEY, credential);
+      return true;
+    });
   }
 
   /**
    * The authority a system session sends for `host`: the key and its workspace, or null when
    * nothing is provisioned or the key was checked for another host.
    */
-  async authority(host: string): Promise<InferOpsAuthority | null> {
-    const stored = await this.ctx.storage.get<StoredSystemCredential>("credential");
+  authority(host: string): InferOpsAuthority | null {
+    const stored = this.ctx.storage.kv.get<StoredSystemCredential>(CREDENTIAL_KEY);
     if (!stored || stored.host !== host) return null;
     return { token: stored.key, workspaceId: stored.workspaceId };
   }
 
-  /** Deletes the stored key, if any, and retires the reference: nothing is stored for it again. */
-  async forget(): Promise<void> {
-    await this.ctx.storage.deleteAll();
-    await this.ctx.storage.put("retired", true);
+  /**
+   * Retires the reference and deletes the stored key, if any, in one synchronous transaction
+   * (#375 round 3): nothing is stored for it again.
+   */
+  forget(): void {
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.kv.put(RETIRED_KEY, true);
+      this.ctx.storage.kv.delete(CREDENTIAL_KEY);
+    });
   }
 }
