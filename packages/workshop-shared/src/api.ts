@@ -701,6 +701,23 @@ export const OPERATE_SESSION_ERROR_CODES = {
   recipientUnavailable: "OPERATE_SESSION_RECIPIENT_UNAVAILABLE",
   /** The flow named is in neither the open published console nor the caller's own flows. */
   flowUnavailable: "OPERATE_SESSION_FLOW_UNAVAILABLE",
+  /**
+   * A flow navigation's destination page is one the caller can no longer open: its screen was
+   * removed, or isn't one their access shows (FAC-87). It names no page and no workspace.
+   */
+  flowPageUnavailable: "OPERATE_SESSION_FLOW_PAGE_UNAVAILABLE",
+  /**
+   * A flow navigation couldn't check its destination page just now (the workspace was unreachable,
+   * or the read failed for another reason), so it didn't move. Transient: try again. Like
+   * `flowPageUnavailable`, it names no page and no workspace.
+   */
+  flowNavigationFailed: "OPERATE_SESSION_FLOW_NAVIGATION_FAILED",
+  /**
+   * The company the person works in couldn't be told from their connected accounts just now
+   * (FAC-88), so their page and widget states weren't read or written: they belong to one company,
+   * and a guess could show another's. Transient: try again. It names no company.
+   */
+  companyUnavailable: "OPERATE_SESSION_COMPANY_UNAVAILABLE",
 } as const;
 
 /** An expected `OperateSession.dispatch()` failure code. */
@@ -715,6 +732,10 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
   [OPERATE_SESSION_ERROR_CODES.consoleChanged]:
       "That view or screen is not part of the console as it is now saved, or the console is no " +
       "longer available to you. Reload the console.",
+  [OPERATE_SESSION_ERROR_CODES.flowPageUnavailable]:
+      "That page of the flow isn't available to you any more. Go back, or leave the flow.",
+  [OPERATE_SESSION_ERROR_CODES.flowNavigationFailed]:
+      "Couldn't move to that page of the flow just now. Try again.",
   [OPERATE_SESSION_ERROR_CODES.boardUnavailable]:
       "That board is not connected for you here, or is no longer available to you. Connect it or " +
       "choose another board.",
@@ -722,6 +743,8 @@ const operateSessionErrors = codedErrorFamily<OperateSessionErrorCode>({
       "There is no other person with that id here to hand this over to.",
   [OPERATE_SESSION_ERROR_CODES.flowUnavailable]:
       "That flow is not offered by the console you have open, and is not one of your own flows.",
+  [OPERATE_SESSION_ERROR_CODES.companyUnavailable]:
+      "Couldn't check which company you're working in just now. Try again.",
 });
 
 /** Creates an `OperateSession.dispatch()` failure with a machine-readable code. */
@@ -2170,6 +2193,8 @@ export type BlueprintInstall = {
   version: number;
   /** The kind the pinned version was published as. An upgrade must keep it. */
   kind: WorkspaceKind;
+  /** Present only when this pinned Widget version was compiled from authored client.tsx. */
+  authoredWidgetBuild?: true;
   /**
    * The data contract the pinned version declared (see `BlueprintMetadata.dataContract`). Absent
    * means unknown. An upgrade is allowed only to a version declaring the same contract: a

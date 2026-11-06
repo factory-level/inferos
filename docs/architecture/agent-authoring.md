@@ -93,6 +93,14 @@ allows 64 MiB uncompressed per Worker, and the reported gzip size is information
 reporting is not exposed through this Worker runtime path, and deployed memory headroom and continued
 work after timeout remain unmeasured; keep the flag off until those measurements are available.
 
+For a Widget-kind Blueprint, publication validates the compiled child commit after a successful
+authored build, so its generated `client.js` supplies the UI. The missing-server check is waived only
+when that child contains `client.js`, its source commit contains `client.tsx` and no `server.js`, and
+the child itself has no `server.js`. A source with `server.js` still follows the regular Widget
+rules, including the server requirement for `tools.json`. When the build flag is off, the source
+commit is validated with the existing rules unchanged; non-authored Widgets and failed builds do
+not receive the waiver.
+
 ### Native operations available today
 
 | Operation | Existing API | What it does not do |
@@ -251,12 +259,12 @@ then its commits, so closing and reopening the editor shows the same source, and
   bindings. A console registers each install separately under its own name
   (`ConsoleWidgetRegistry`), and shows for each only the surfaces the kernel's
   `listConsoleWidgetCandidates` declares for its commit. Only installs of a **Widget**-kind version
-  are console candidates, and today an authored widget can't be published as one:
-  `assertPublishableKind` checks the source commit, which has `client.tsx` rather than `client.js`
-  and no `server.js`, so it refuses ("A Widget needs a UI, but this gadget has no client.js…"). An
-  authored widget is therefore registered as an App, and its installs run the compiled `client.js`
-  as apps; placing them as console widgets waits on that kernel check. In the authoring workspace
-  the accepted gadget's App tab has no `client.js` to show; Build preview and installs show it.
+  are console candidates. Since #371 an authored widget can be registered as one: publication
+  checks the compiled child commit, whose `client.js` is the UI (see "Authored widget compiler (FAC-8)"), so two
+  installs of one version can sit on one console screen as two console widgets. A kind the gadget
+  can't satisfy is still refused in the kernel's words, shown as the publish result. In the
+  authoring workspace the accepted gadget's App tab has no `client.js` to show; Build preview and
+  installs show it.
 
 `AuthoredWidgetPreview.test.tsx`, `editorTabs.test.ts`, `BlueprintModal.test.tsx` and
 `ConsoleWidgetRegistry.test.tsx` cover these. Params and events beyond the declared bindings and

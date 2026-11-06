@@ -602,7 +602,7 @@ function backendDeps(root: string, apiPort: number, overrides: Partial<Lifecycle
     processAlive: () => true,
     fetchImpl: (async (input: string | URL | Request) => {
       const url = new URL(String(input instanceof Request ? input.url : input));
-      if (url.pathname === "/health/ready") return new Response("{}", { status: 200 });
+      if (url.pathname === "/health/ready") return new Response(JSON.stringify({ status: "ok", checks: [] }), { status: 200 });
       if (url.pathname === "/auth/inferlab-login") return new Response(JSON.stringify({ token: "owner-token", user: { workspaces: [] } }), { status: 200 });
       if (url.pathname === "/workspaces") return new Response("[]", { status: 200 });
       return new Response("no", { status: 404 });
@@ -731,7 +731,7 @@ test("status recognises the sign-in wiring and reports the backend row", async (
   const root = tempRoot();
   try {
     withBackend(root, 18787, { wiring: "sign-in" });
-    const { deps } = backendDeps(root, 18787, { isPortListening: async () => true, devServerRecord: () => ours(), fetchImpl: (async () => new Response("{}", { status: 200 })) as typeof fetch });
+    const { deps } = backendDeps(root, 18787, { isPortListening: async () => true, devServerRecord: () => ours(), fetchImpl: (async () => new Response(JSON.stringify({ status: "ok", checks: [] }), { status: 200 })) as typeof fetch });
     const result = await runLifecycle(["status", "--json"], deps);
     const inferops = result.report.inferops as Record<string, unknown>;
     assert.deepEqual(inferops.backend, { apiUrl: "http://localhost:18787", revision: "3dae0f50d5b4fa467d734cbb2adf857f39942b31", wiring: "sign-in", healthy: true });

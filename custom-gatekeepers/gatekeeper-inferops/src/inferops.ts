@@ -223,6 +223,27 @@ const OPTION_LIMIT = 100;
 /** HTTP serves only the InferLab sign-in legs; everything else is RPC. */
 export default {
   async fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname.endsWith("/health/ready")) {
+      const endpoint = inferOpsApiEndpoint(env);
+      if (!endpoint) return Response.json({ status: "down", checks: [{ name: "inferops-config", status: "down" }] }, { status: 503 });
+      try {
+        const response = await inferLabFetch(env)(`${endpoint.baseUrl}/health/ready`, {
+          headers: { accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(5_000),
+        });
+        const body = await response.json().catch(() => null) as { status?: unknown; checks?: unknown } | null;
+        const ready = response.status === 200 && (body?.status === "ok" || body?.status === "degraded");
+        const checks = Array.isArray(body?.checks) ? body.checks.flatMap((item) => {
+          if (!item || typeof item !== "object") return [];
+          const check = item as { name?: unknown; status?: unknown };
+          return typeof check.name === "string" && typeof check.status === "string"
+            ? [{ name: check.name, status: check.status }] : [];
+        }) : [];
+        return Response.json({ status: ready ? body?.status : "down", checks }, { status: ready ? 200 : 503 });
+      } catch {
+        return Response.json({ status: "down", checks: [{ name: "inferops-api", status: "unreachable" }] }, { status: 503 });
+      }
+    }
     const response = await handleInferLabLogin(request, env, ctx.exports.InferLabLogin);
     return response ?? new Response("Not Found", { status: 404 });
   },
@@ -1068,8 +1089,47 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
    * than guessing. Workspaces granted since the person connected count after they reconnect.
    */
   async holdsSharedConfiguration(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer> {
+    if (action !== "build" && action !== "publish") return { holds: false, scope: null };
+    return this.#holdsInCompany(`configuration:${action}`);
+  }
+
+  /**
+   * Whether the connected person may ask a configured system workflow to run against the board
+   * `resourceUrl` names: InferOps' `workflow:invoke` (FAC-102; a person's `member`, `admin` or
+   * `owner` grant holds it, a grant deny removes it, a service account never does), asked in that
+   * board's own InferOps workspace only (the manager, 2026-11-05). The workspace is the board host's,
+   * among the person's own InferOps memberships: an InferMind workspace, another workspace, a host
+   * that isn't theirs or a reference that isn't a board answers no, asking nothing. The company
+   * scope and its refusals are `holdsSharedConfiguration`'s; unlike it, no other workspace's grant
+   * counts.
+   */
+  async holdsWorkflowInvoke(resourceUrl: string): Promise<SharedConfigurationAnswer> {
+    const endpoint = inferOpsApiEndpoint(this.env);
+    if (!this.ctx.props.connected || !endpoint) return { holds: false, scope: null };
+    const company = deploymentCompany(this.env);
+    if (!company) throw new InferOpsError("UNAVAILABLE", COMPANY_MISCONFIGURED);
+    const identity = await this.#credentials().identity();
+    if (!identity?.tenantId || !companyAdmits(company, identity.tenantId)) return { holds: false, scope: null };
+    const scope = identity.tenantId.toLowerCase();
+    let host: string;
+    try {
+      host = parseProjectBoardUrl(resourceUrl).host;
+    } catch {
+      return { holds: false, scope };
+    }
+    const labels = parseHost(host);
+    const workspaceId = labels ? await this.#credentials().resolveWorkspace(labels.workspace, "inferops") : null;
+    if (!workspaceId) return { holds: false, scope };
+    const client = whileInferOpsEnabled(this.env, () =>
+      accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
+    return { holds: await client.holdsPermission("workflow:invoke"), scope };
+  }
+
+  // The person's own answer to one InferOps permission, in this deployment's company (see
+  // holdsSharedConfiguration). `permission` is one of the fixed names above, never a caller's.
+  async #holdsInCompany(permission: "configuration:build" | "configuration:publish"):
+      Promise<SharedConfigurationAnswer> {
     const nothing = { holds: false, scope: null };
-    if (action !== "build" && action !== "publish") return nothing;
     const endpoint = inferOpsApiEndpoint(this.env);
     if (!this.ctx.props.connected || !endpoint) return nothing;
     const company = deploymentCompany(this.env);
@@ -1080,9 +1140,25 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     for (const { workspaceId } of identity.workspaces) {
       const client = whileInferOpsEnabled(this.env, () =>
         accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
-      if (await client.holdsPermission(`configuration:${action}`)) return { holds: true, scope };
+      if (await client.holdsPermission(permission)) return { holds: true, scope };
     }
     return { holds: false, scope };
+  }
+
+  /**
+   * The company the connected person works in here (FAC-88): their session's tenant id, as
+   * `holdsSharedConfiguration` scopes its answer, read from the identity stored at connect without
+   * asking InferOps anything. Null for an account without a connected person (demo data, a
+   * sign-in) and for a session in a company `INFEROPS_COMPANY` doesn't admit; a malformed
+   * `INFEROPS_COMPANY` throws, so the Workshop refuses rather than guessing.
+   */
+  async presentationCompany(): Promise<string | null> {
+    if (!this.ctx.props.connected) return null;
+    const company = deploymentCompany(this.env);
+    if (!company) throw new InferOpsError("UNAVAILABLE", COMPANY_MISCONFIGURED);
+    const identity = await this.#credentials().identity();
+    if (!identity?.tenantId || !companyAdmits(company, identity.tenantId)) return null;
+    return identity.tenantId.toLowerCase();
   }
 
   /**

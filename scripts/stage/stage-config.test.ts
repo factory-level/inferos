@@ -3,6 +3,10 @@
 // not covered here.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { gatekeeperShortName, isGatekeeperPackage, readDeployablePackages } from "../release/manifest-lib.ts";
 import { ROOT, gatekeeperBindingName, type StagingConfig } from "../preview/staging-config.ts";
@@ -12,7 +16,7 @@ import {
   stageWorkerHost, stageWorkerName, resolveStageAdmins,
 } from "./stage-config.ts";
 import { STAGES, resolveStage, stageDefinitionProblems, type StageDefinition } from "./stages.ts";
-import { parseStageArgs } from "./stage.ts";
+import { parseStageArgs, resolveInferOpsReleaseTag } from "./stage.ts";
 
 const ACCOUNT_ID = "0".repeat(32);
 const ALL_PACKAGES = readDeployablePackages(ROOT);
@@ -279,15 +283,42 @@ test("destructive Durable Object migrations are found; the committed ones have n
 test("the CLI parses its flags and refuses anything else", () => {
   assert.deepEqual(parseStageArgs(["deploy", "dev", "--dry-run", "--allow-dirty"]), {
     command: "deploy", stage: "dev", wrapper: undefined, dryRun: true, allowDirty: true,
-    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined,
+    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined, inferopsSha: undefined,
   });
   assert.deepEqual(parseStageArgs(["deploy", "--wrapper", "/w", "--dry-run"]), {
     command: "deploy", stage: "", wrapper: "/w", dryRun: true, allowDirty: false,
-    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined,
+    allowDestructiveMigrations: false, skipSmoke: false, confirm: undefined, inferopsSha: undefined,
   });
   assert.throws(() => parseStageArgs(["deploy", "dev", "--wrapper", "/w"]), /not both or neither/);
   assert.throws(() => parseStageArgs(["deploy", "--wrapper", "/w", "--allow-dirty"]), /clean tree/);
   assert.equal(parseStageArgs(["delete", "prod", "--confirm", "os.factorylevel.dev"]).confirm, "os.factorylevel.dev");
+  assert.equal(parseStageArgs(["deploy", "dev", "--inferops-sha", "a".repeat(40)]).inferopsSha, "a".repeat(40));
   assert.throws(() => parseStageArgs(["deploy"]), /Usage/);
   assert.throws(() => parseStageArgs(["deploy", "dev", "--force"]), /unknown argument: --force/);
+  assert.throws(() => parseStageArgs(["deploy", "dev", "--inferops-sha", "short-sha"]), /full 40-character commit SHA/);
+});
+
+test("the deployed InferOps release tag resolves after fetching tags, and a missing tag fails closed", () => {
+  const root = mkdtempSync(join(tmpdir(), "inferops-release-tag-"));
+  const remote = join(root, "origin.git");
+  const source = join(root, "source");
+  const deploy = join(root, "deploy");
+  try {
+    execFileSync("git", ["init", "--bare", remote], { stdio: "ignore" });
+    execFileSync("git", ["clone", remote, source], { stdio: "ignore" });
+    execFileSync("git", ["clone", remote, deploy], { stdio: "ignore" });
+    execFileSync("git", ["-C", source, "config", "user.name", "InferOS test"]);
+    execFileSync("git", ["-C", source, "config", "user.email", "inferos-test@example.invalid"]);
+    writeFileSync(join(source, "revision.txt"), "release\n");
+    execFileSync("git", ["-C", source, "add", "revision.txt"]);
+    execFileSync("git", ["-C", source, "commit", "-m", "release"]);
+    execFileSync("git", ["-C", source, "tag", "v1.2.3"]);
+    const expected = execFileSync("git", ["-C", source, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", source, "push", "origin", "HEAD:main", "--tags"]);
+
+    assert.equal(resolveInferOpsReleaseTag(deploy, "v1.2.3"), expected);
+    assert.throws(() => resolveInferOpsReleaseTag(deploy, "v9.9.9"), /release tag v9\.9\.9 does not resolve/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

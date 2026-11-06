@@ -131,6 +131,43 @@ import {
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
 
+/** The refusal when the invoker's own InferOps grant doesn't include `workflow:invoke` (FAC-102). */
+export const WORKFLOW_INVOKE_REFUSED =
+  "You don't have permission to run workflows here. Ask an Admin for it.";
+
+/**
+ * Refuses unless the deployment's shared-configuration authority says the user may ask trigger
+ * `hookId`'s workflow to run (FAC-102, InferOps' `workflow:invoke`, inferops ADR 0011 D3), asked
+ * freshly through their own connected account in the workspace of each connection of that vendor the
+ * trigger's gadget binds, read from the connection's own record, never from the request; every one
+ * must say yes, and a workflow with none is refused, since nothing scopes the question (the manager,
+ * 2026-11-05). Where the deployment names no such authority there is nothing to ask, as for shared
+ * configuration. It admits nothing alone: the trigger's own control must list the person too.
+ */
+export async function requireWorkflowInvoke(
+    workspace: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
+    userId: string, hookId: number): Promise<void> {
+  let vendorId = getSharedConfigurationGatekeeper(workspace.env);
+  if (!vendorId) return;
+  let hook = workspace.storage.boundHooks.get(hookId);
+  let gadgetId = hook ? hook.gadgetId ?? workspace.defaultGadgetId : undefined;
+  let boards = new Set<string>();
+  if (gadgetId !== undefined) {
+    for (let [, edge] of workspace.visibleBindings(workspace.getGadgetRecord(gadgetId))) {
+      let record = workspace.storage.gatekeepers.get(edge.target);
+      let spec = record?.creationSpec;
+      if (gatekeeperVendorId(record) === vendorId && spec && "resourceUrl" in spec && typeof spec.resourceUrl === "string") {
+        boards.add(spec.resourceUrl);
+      }
+    }
+  }
+  if (boards.size === 0) throw new Error(WORKFLOW_INVOKE_REFUSED);
+  let user = workspace.users.get(workspace.users.idFromString(userId));
+  for (let resourceUrl of boards) {
+    if (!(await user.holdsWorkflowInvoke(resourceUrl))) throw new Error(WORKFLOW_INVOKE_REFUSED);
+  }
+}
+
 /**
  * Refuses unless the deployment's shared-configuration authority says the user may `action`,
  * asked freshly through their own connected account. `scope: "shared"` asks only while the
@@ -846,6 +883,8 @@ function connectionTypeFromCreationSpec(
 type BlueprintGadgetRecord = {
   id: string;
   metadata: BlueprintMetadata;
+  /** Set only for a version compiled from an authored Widget client.tsx. */
+  authoredWidgetBuild?: true;
 
   // Which gadget this blueprint exports. If omitted, use `defaultGadgetId`.
   gadgetId?: WorkpieceId;
@@ -1490,6 +1529,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Set, never cleared, when the session first opens it; from then on every open is the
       // owner's, through OperateOverseerInterface, and its chats run with the operate tool set.
       operateSession: false,
+      // Whether its owner's company change retired this operate session workspace (FAC-88; see
+      // retireOperateSession). Set, never cleared: from then on nothing opens it, every held
+      // operate capability refuses, and no agent turn runs or resumes in it.
+      operateSessionRetired: false,
 
       // If present, this gadget was migrated from version zero, when a workspace had only one
       // gadget. Many stored records that normally contain a `gadgetId` might be missing it; they
@@ -1914,6 +1957,7 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
   watchAuthzSingleton(typed, typed.containsRestrictedData);
   watchAuthzSingleton(typed, typed.ownerInvitesOnly);
   watchAuthzSingleton(typed, typed.operateSession);
+  watchAuthzSingleton(typed, typed.operateSessionRetired);
   return typed;
 }
 
@@ -2229,12 +2273,18 @@ class OverseerImpl implements AgentHooks {
     subscriber = subscriber.dup();
     let token = {};
     this.#presenceSubscribers.set(token, subscriber);
+    // Ended with every other stream by a retirement (FAC-88; trackStream).
+    let stream = this.trackStream(() => remove());
+    let remove = () => {
+      stream.untrack();
+      this.#removePresenceSubscriber(token);
+    };
     let snapshot = [...this.#presence.keys()].map(id => this.#toParticipant(id));
-    subscriber.init(snapshot).catch(() => this.#removePresenceSubscriber(token));
-    subscriber.onRpcBroken(() => this.#removePresenceSubscriber(token));
+    subscriber.init(snapshot).catch(remove);
+    subscriber.onRpcBroken(remove);
     // @ts-expect-error Bugs in native RPC types make this not work currently.
     return new NativeRpcStub<{}>({
-      [Symbol.dispose]: () => this.#removePresenceSubscriber(token),
+      [Symbol.dispose]: remove,
     });
   }
 
@@ -2590,6 +2640,19 @@ class OverseerImpl implements AgentHooks {
   // any blocked event is delivered) so that if we were called at the start of the alarm handler,
   // it'll recognize that agents are running and wait for them.
   #resumeInterruptedAgents(): void {
+    // A retired operate session workspace (FAC-88) resumes nothing: its turns were started for a
+    // company the owner no longer works in. Dropping their records leaves the chats to the
+    // compatibility pass below, which reports each as interrupted, and no pending call is drained.
+    if (this.storage.operateSessionRetired.get()) {
+      for (let record of Array.from(this.storage.activeAgents.list())) this.storage.activeAgents.delete(record.chatId);
+      for (let thread of Array.from(this.storage.chatMeta.list())) {
+        if (!thread.activeAgent) continue;
+        this.postAgentErrorMessage(thread.id, thread.activeAgent, "Agent stopped: this operate session has ended.");
+        delete thread.activeAgent;
+        this.storage.chatMeta.put(thread);
+      }
+      return;
+    }
     for (let record of Array.from(this.storage.activeAgents.list())) {
       // Register the running agent immediately (see above), and create the LiveChatContext
       // synchronously, so that cancellations are immediately respected.
@@ -3407,10 +3470,21 @@ class OverseerImpl implements AgentHooks {
   // blueprintPublishRefusals): a widget on any violation, since what a console registers must be
   // the widget its files make; an app or workflow only on a view.json or tools.json. A widget's
   // view.json and tools.json are classified from their strict UTF-8 text.
-  async assertPublishableKind(kind: WorkspaceKind | undefined, commitId: string): Promise<void> {
+  async assertPublishableKind(kind: WorkspaceKind | undefined, commitId: string,
+      authoredSourceCommitId?: string): Promise<void> {
     kind ??= DEFAULT_WORKSPACE_KIND;
     let files = await this.#classifiedFiles(kind, commitId);
-    let refusals = blueprintPublishRefusals(kind, classifyGadgetFiles(kind, files).violations);
+    let violations = classifyGadgetFiles(kind, files).violations;
+    if (kind === "widget" && authoredSourceCommitId !== undefined &&
+        files.has("client.js") && !files.has("server.js")) {
+      let sourcePaths = new Set(await this.gitStore.readCommitPaths(authoredSourceCommitId));
+      // Only a successful authored build can supply the UI; widgets with server source or
+      // callable tools still have to provide the server module as usual.
+      if (sourcePaths.has("client.tsx") && !sourcePaths.has("server.js")) {
+        violations = violations.filter(({code}) => code !== "missingServer");
+      }
+    }
+    let refusals = blueprintPublishRefusals(kind, violations);
     if (refusals.length > 0) {
       let article = kind === "app" ? "an" : "a";
       throw new Error(`This gadget cannot be published as ${article} ${kind}: ` +
@@ -3598,9 +3672,12 @@ class OverseerImpl implements AgentHooks {
     let unsubscribe = () => {
       if (disposed) return;
       disposed = true;
+      stream.untrack();
       gadgets.unsubscribe(dbSubscriber);
       subscriber[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; trackStream).
+    let stream = this.trackStream(unsubscribe);
 
     // Whether the record is published to this subscriber (see above for what is withheld).
     let published = (record: WorkpieceRecord): boolean =>
@@ -8321,6 +8398,17 @@ class OverseerImpl implements AgentHooks {
              initiator: AiChatAuthorInfo, initiatorUserId: string,
              callbackInitiated: boolean = false,
              keepAlive: boolean = false): void {
+    // No turn starts in a retired operate session workspace (FAC-88), however it was asked for (a
+    // held capability before the restart, or the alarm draining a pending agent call after it).
+    if (this.storage.operateSessionRetired.get()) {
+      let meta = this.storage.chatMeta.get(chatId);
+      if (meta?.activeAgent) {
+        this.postAgentErrorMessage(chatId, meta.activeAgent, "Agent stopped: this operate session has ended.");
+        delete meta.activeAgent;
+        this.storage.chatMeta.put(meta);
+      }
+      return;
+    }
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -9721,7 +9809,8 @@ class OverseerImpl implements AgentHooks {
       await this.env.BLUEPRINT_CONTENT.put(
         `${record.id}/${record.metadata.version}`,
         codeSnapshot,
-        { customMetadata: blueprintVersionMetadata(record.metadata.kind, record.metadata.dataContract) },
+        { customMetadata: blueprintVersionMetadata(record.metadata.kind, record.metadata.dataContract,
+          record.authoredWidgetBuild === true) },
       );
     }
 
@@ -10265,6 +10354,63 @@ class OverseerImpl implements AgentHooks {
     return this.storage.operateSession.get();
   }
 
+  /** Whether this operate session workspace was retired by its owner's company change (FAC-88). */
+  isRetiredOperateSession(): boolean {
+    return this.storage.operateSessionRetired.get();
+  }
+
+  /**
+   * Retires this operate session workspace (FAC-88): marks it, which raises the authorization
+   * generation; cancels every agent turn running here; and schedules the access restart, which
+   * drops every connection, held capability and subscription within about 100 ms. Until then each
+   * OperateOverseerInterface call refuses on the mark, and after it nothing opens the workspace or
+   * resumes a turn in it (#resumeInterruptedAgents). Idempotent.
+   */
+  retireOperateSession(): void {
+    if (this.storage.operateSessionRetired.get()) return;
+    this.storage.operateSessionRetired.put(true);
+    // Every open stream ends before this returns: nothing more reaches any subscriber, whatever
+    // the workspace writes from here on (see trackStream).
+    this.closeAllStreams();
+    for (let chatId of Array.from(this.#liveChats.keys())) this.cancelAgent(chatId);
+    void this.scheduleAccessRestart("This operate session has ended.");
+  }
+
+  // Every subscription this workspace delivers to, by the closer that ends it (FAC-88). Each
+  // subscribe site registers its own unsubscribe here (trackStream) and removes it when it ends, so
+  // a retirement can end every one synchronously instead of waiting for the access restart.
+  #openStreams = new Set<() => void>();
+
+  /**
+   * Registers `close`, a subscription's own idempotent unsubscribe, so closeAllStreams() can end
+   * it. The subscription calls the returned `untrack` when it ends by itself.
+   */
+  trackStream(close: () => void): { untrack(): void } {
+    this.#openStreams.add(close);
+    return { untrack: () => { this.#openStreams.delete(close); } };
+  }
+
+  /**
+   * Ends every open subscription synchronously: each one's storage subscribers are removed and its
+   * subscriber stub disposed, so no later write or delivery reaches it. Used by a retirement.
+   */
+  closeAllStreams(): void {
+    let closers = Array.from(this.#openStreams);
+    this.#openStreams.clear();
+    for (let close of closers) {
+      try {
+        close();
+      } catch (err) {
+        this.logger.warn("a subscription failed to close", { event: "subscription.close.failed", error: err });
+      }
+    }
+  }
+
+  /** How many subscriptions are open (see trackStream), for tests. */
+  openStreamCount(): number {
+    return this.#openStreams.size;
+  }
+
   isConsoleToolTainted(chatId: number): boolean {
     return isConsoleToolTainted(this.storage, chatId);
   }
@@ -10705,10 +10851,16 @@ class OverseerImpl implements AgentHooks {
     this.#tailSubscribers.add(sub);
 
     let self = this;
+    let ended = false;
     function unsubscribe() {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       self.#tailSubscribers.delete(sub);
       sub[Symbol.dispose]();
     }
+    // Ended with every other stream by a retirement (FAC-88; trackStream).
+    let stream = this.trackStream(unsubscribe);
 
     // @ts-expect-error Bugs in native RPC types make this not work currently.
     return new NativeRpcStub<{}>({
@@ -11319,8 +11471,8 @@ class OverseerImpl implements AgentHooks {
 
   /** This workspace's workflow definitions, their trigger pins and deliveries. */
   /** See invokeWorkflowTrigger. */
-  async invokeTrigger(profileId: string, hookId: number): Promise<WorkflowInvocation> {
-    return invokeWorkflowTrigger(this, profileId, hookId);
+  async invokeTrigger(userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
+    return invokeWorkflowTrigger(this, userId, profileId, hookId);
   }
 
   workflowDefinitionStore(): WorkspaceWorkflowDefinitionStore {
@@ -11896,6 +12048,20 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return this.impl.outputsSnapshot();
   }
 
+  /**
+   * Retires this workspace as `ownerId`'s operate session (FAC-88; OverseerImpl.retireOperateSession).
+   * Reached only by the owner's user DO, from Worker code holding the namespace, when their company
+   * changes. True once nothing held here can act for the owner: retired now or before, or never
+   * opened (so nothing was ever handed out, and open() refuses it from now on). False for anyone
+   * but the owner, or for a workspace that isn't an operate session.
+   */
+  async retireOperateSession(ownerId: string): Promise<boolean> {
+    if (!this.impl.ownerId) return true;
+    if (this.impl.ownerId !== ownerId || !this.impl.storage.operateSession.get()) return false;
+    this.impl.retireOperateSession();
+    return true;
+  }
+
   // The host-board kernel path (server.ts OperateSessionImpl). Reached only by Worker code holding
   // the namespace, never by a client, and only for the owner's own operate session workspace.
   #hostBoardDesk(ownerId: string): HostBoardDesk {
@@ -11936,10 +12102,16 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // Kept past this call, which would otherwise dispose the stub when it returns.
     let kept = (subscriber as unknown as NativeRpcStub<typeof subscriber>).dup();
     deliver = kept as unknown as typeof subscriber;
+    let ended = false;
     let end = () => {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       unsubscribe();
       kept[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(end);
     return { snapshot, subscription: new HostBoardSubscriptionImpl(end) };
   }
 
@@ -12021,6 +12193,18 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let operateSession = this.impl.storage.operateSession.get();
     if (operateSession && !isOwner) {
       throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceAccessDenied);
+    }
+    // Nor does its owner open it once it is no longer their recorded operate session: a company
+    // change retires it (FAC-88), and its chat stays with the company it was held in.
+    // A retired one (its mark is set by retireOperateSession) is refused without asking anyone.
+    if (operateSession && this.impl.isRetiredOperateSession()) {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+    }
+    if (operateSession && isOwner) {
+      let owner = this.impl.users.get(this.impl.users.idFromString(userId));
+      if (await owner.operateSessionWorkspaceId() !== this.ctx.id.toString() || this.impl.isRetiredOperateSession()) {
+        throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+      }
     }
 
     // Cache the owner's profileId in memory when the owner opens.
@@ -12138,7 +12322,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let client = new OverseerClientInterface(
         this.impl, profileId, userId, isOwner, notifyClosed.dup(),
         ensureCapsules);
-    return operateSession ? new OperateOverseerInterface(client) : client;
+    return operateSession ? new OperateOverseerInterface(client, () => this.impl.isRetiredOperateSession()) : client;
   }
 
   #getExternalChat(externalChatKey: string): ExternalChatRecord | undefined {
@@ -13147,7 +13331,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.impl.workflowDefinitionStore().controls(null);
   }
   async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
-    return this.impl.invokeTrigger(this.clientProfileId, hookId);
+    return this.impl.invokeTrigger(this.clientUserId, this.clientProfileId, hookId);
   }
 
   #consoleStore(): WorkspaceConsoleStore {
@@ -13635,7 +13819,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       }
     };
 
+    let ended = false;
     let unsubscribe = () => {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.kind.unsubscribe(kindSubscriber);
       this.impl.storage.installedFrom.unsubscribe(installedFromSubscriber);
@@ -13645,6 +13833,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       this.impl.storage.ownerInvitesOnly.unsubscribe(ownerInvitesOnlySubscriber);
       callback[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(unsubscribe);
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.kind.subscribe(kindSubscriber);
@@ -14899,6 +15089,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     subscriber = subscriber.dup();  // keep stub after return
     let subscribed = false;
     let disposed = false;
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(() => unsubscribe());
     subscriber.onRpcBroken(_ => unsubscribe());
 
     let dbSubscriber = {
@@ -14916,6 +15108,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     function unsubscribe() {
       if (disposed) return;
       disposed = true;
+      stream.untrack();
       if (subscribed) actions.unsubscribe(dbSubscriber);
       subscriber[Symbol.dispose]();
     };
@@ -15073,6 +15266,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let replayCount = 0;
 
     subscriber = subscriber.dup();  // keep stub after return
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(() => unsubscribe());
     this.impl.addChatSubscriber(subscriber);
     subscriber.onRpcBroken(_ => unsubscribe());
 
@@ -15117,6 +15312,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     function unsubscribe() {
       if (disposed) return;
       disposed = true;
+      stream.untrack();
       chats.unsubscribe(msgSubscriber);
       chatMeta.unsubscribe(metaSubscriber);
       self.impl.removeChatSubscriber(subscriber);
@@ -15422,6 +15618,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let bindings: Record<string, BlueprintBinding> | undefined;
     let nextCommitId: string | undefined;
     let nextKind: WorkspaceKind | undefined;
+    let nextAuthoredWidgetBuild: true | undefined;
     let nextVersion = record.metadata.version;
     let nextDataContract = record.metadata.dataContract;
     if (options.updateCode || options.updateBindings) {
@@ -15432,10 +15629,19 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       if (options.updateCode) {
         let commitId = await this.impl.assertPublishableCommit(
             this.impl.getGadgetRecord(gadgetId).commitId);
-        await this.impl.assertPublishableKind(this.impl.storage.kind.get(), commitId);
-        commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+        let kind = this.impl.storage.kind.get();
+        if (kind === "widget" && this.impl.env.AUTHORED_WIDGET_BUILD_ENABLED === "true") {
+          let sourceCommitId = commitId;
+          commitId = await this.impl.compileAuthoredWidgetCommit(sourceCommitId);
+          if (commitId !== sourceCommitId) nextAuthoredWidgetBuild = true;
+          await this.impl.assertPublishableKind(kind, commitId,
+              commitId === sourceCommitId ? undefined : sourceCommitId);
+        } else {
+          await this.impl.assertPublishableKind(kind, commitId);
+          commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+        }
         nextCommitId = commitId;
-        nextKind = this.impl.storage.kind.get();
+        nextKind = kind;
         nextVersion++;
         // Each version declares its own contract; one published without is unknown.
         nextDataContract = dataContract;
@@ -15468,6 +15674,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       delete record.codeVersion;
       record.metadata.version = nextVersion;
       record.metadata.kind = nextKind!;
+      if (nextAuthoredWidgetBuild) record.authoredWidgetBuild = true;
+      else delete record.authoredWidgetBuild;
       if (nextDataContract !== undefined) record.metadata.dataContract = nextDataContract;
       else delete record.metadata.dataContract;
     }
@@ -15740,7 +15948,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     return this.impl.workflowDefinitionStore().controls(this.clientProfileId);
   }
   async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
-    return this.impl.invokeTrigger(this.clientProfileId, hookId);
+    return this.impl.invokeTrigger(this.clientUserId, this.clientProfileId, hookId);
   }
   // An operator granted "use" reaches the published consoles of the workspace without Build,
   // read-only: a console is references and presentation, and grants nothing. Drafts, and every
@@ -15896,12 +16104,18 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
       }
     };
 
+    let ended = false;
     let unsubscribe = () => {
+      if (ended) return;
+      ended = true;
+      stream.untrack();
       this.impl.storage.title.unsubscribe(titleSubscriber);
       this.impl.storage.kind.unsubscribe(kindSubscriber);
       this.impl.storage.testOnly.unsubscribe(testOnlySubscriber);
       callback[Symbol.dispose]();
     };
+    // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
+    let stream = this.impl.trackStream(unsubscribe);
 
     this.impl.storage.title.subscribe(titleSubscriber);
     this.impl.storage.kind.subscribe(kindSubscriber);
@@ -16184,8 +16398,15 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
 // Overseer method fails to compile here until someone decides whether operate may call it.
 @validateRpc()
 class OperateOverseerInterface extends RpcTarget implements Overseer {
-  constructor(private owner: OverseerClientInterface) {
+  constructor(private owner: OverseerClientInterface, private retired: () => boolean) {
     super();
+  }
+
+  // Every allowed call checks the workspace's retired mark first (FAC-88): a capability held from
+  // before its owner's company change refuses from the moment the mark is set, until the access
+  // restart drops it. The refusal names nothing.
+  #live(): void {
+    if (this.retired()) throw new Error("This operate session has ended. Reload to start a new one.");
   }
 
   [Symbol.dispose]() {
@@ -16198,130 +16419,130 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
 
   // --- Allowed: the page around the chat ---
 
-  async getMetadata(): Promise<GadgetMetadata> { return this.owner.getMetadata(); }
+  async getMetadata(): Promise<GadgetMetadata> { this.#live(); return this.owner.getMetadata(); }
   async subscribeToMetadata(callback: RpcStub<(metadata: GadgetMetadata) => void>)
       : Promise<RpcStub<{}>> {
-    return this.owner.subscribeToMetadata(callback);
+    this.#live(); return this.owner.subscribeToMetadata(callback);
   }
   async subscribeToPresence(subscriber: RpcStub<PresenceSubscriber>): Promise<RpcStub<{}>> {
-    return this.owner.subscribeToPresence(subscriber);
+    this.#live(); return this.owner.subscribeToPresence(subscriber);
   }
   async subscribeToWorkpieces(subscriber: RpcStub<WorkpiecesSubscriber>): Promise<RpcStub<{}>> {
-    return this.owner.subscribeToWorkpieces(subscriber);
+    this.#live(); return this.owner.subscribeToWorkpieces(subscriber);
   }
   async subscribeToConsoleLogs(subscriber: RpcStub<ConsoleLogSubscriber>): Promise<RpcStub<{}>> {
-    return this.owner.subscribeToConsoleLogs(subscriber);
+    this.#live(); return this.owner.subscribeToConsoleLogs(subscriber);
   }
   async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> { this.#deny(); }
   async previewAuthoredWidget(_gadgetId: WorkpieceId, _chatId: number): Promise<AuthoredWidgetPreview> { this.#deny(); }
-  async listCanvases(): Promise<CanvasDefinition[]> { return this.owner.listCanvases(); }
-  async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.owner.getCanvas(id); }
-  async listFlows(): Promise<OperateFlow[]> { return this.owner.listFlows(); }
-  async listConsoles(): Promise<OperateConsole[]> { return this.owner.listConsoles(); }
+  async listCanvases(): Promise<CanvasDefinition[]> { this.#live(); return this.owner.listCanvases(); }
+  async getCanvas(id: string): Promise<CanvasDefinition | null> { this.#live(); return this.owner.getCanvas(id); }
+  async listFlows(): Promise<OperateFlow[]> { this.#live(); return this.owner.listFlows(); }
+  async listConsoles(): Promise<OperateConsole[]> { this.#live(); return this.owner.listConsoles(); }
   async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
-    return this.owner.getConsole(id, source);
+    this.#live(); return this.owner.getConsole(id, source);
   }
   async getConsoleScreen(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
-    return this.owner.getConsoleScreen(consoleId, screenId, source);
+    this.#live(); return this.owner.getConsoleScreen(consoleId, screenId, source);
   }
   async getConsolePage(consoleId: string, screenId: string, source: ConsoleSource): Promise<CanvasPage | null> {
-    return this.owner.getConsolePage(consoleId, screenId, source);
+    this.#live(); return this.owner.getConsolePage(consoleId, screenId, source);
   }
 
   // --- Allowed: the chat ---
 
-  async listChats(): Promise<AiChatMetadata[]> { return this.owner.listChats(); }
-  async listModels(): Promise<AiChatAuthorInfo[]> { return this.owner.listModels(); }
+  async listChats(): Promise<AiChatMetadata[]> { this.#live(); return this.owner.listChats(); }
+  async listModels(): Promise<AiChatAuthorInfo[]> { this.#live(); return this.owner.listModels(); }
   async getChatHistory(chatId: number, beforeSequence?: number): Promise<AiChatHistoryPage> {
-    return this.owner.getChatHistory(chatId, beforeSequence);
+    this.#live(); return this.owner.getChatHistory(chatId, beforeSequence);
   }
   async getChatMessage(chatId: number, sequence: number): Promise<AiChatMessage | undefined> {
-    return this.owner.getChatMessage(chatId, sequence);
+    this.#live(); return this.owner.getChatMessage(chatId, sequence);
   }
-  async listSlashCommands(): Promise<SlashCommandChoice[]> { return this.owner.listSlashCommands(); }
+  async listSlashCommands(): Promise<SlashCommandChoice[]> { this.#live(); return this.owner.listSlashCommands(); }
   async subscribeToChat(subscriber: RpcStub<AiChatSubscriber>, startAfter?: Date)
       : Promise<RpcStub<{}>> {
-    return this.owner.subscribeToChat(subscriber, startAfter);
+    this.#live(); return this.owner.subscribeToChat(subscriber, startAfter);
   }
   async getReadConsole(chatId: number): Promise<OperateConsoleRead | null> {
-    return this.owner.getReadConsole(chatId);
+    this.#live(); return this.owner.getReadConsole(chatId);
   }
   async newOperateReadChat(message: string, consoleRead = false): Promise<number> {
-    return this.owner.newOperateReadChat(message, consoleRead);
+    this.#live(); return this.owner.newOperateReadChat(message, consoleRead);
   }
   async newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[])
       : Promise<number> {
-    return this.owner.newChat(initialMessage, modelId, capsules, attachments);
+    this.#live(); return this.owner.newChat(initialMessage, modelId, capsules, attachments);
   }
   async sendChatMessage(chatId: number, message: string | SlashCommandRequest,
                         modelId: string | null,
                         capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[])
       : Promise<void> {
-    return this.owner.sendChatMessage(chatId, message, modelId, capsules, attachments);
+    this.#live(); return this.owner.sendChatMessage(chatId, message, modelId, capsules, attachments);
   }
   async uploadChatAttachment(attachment: ChatAttachmentUpload, modelId: string | null)
       : Promise<ChatAttachmentHandle> {
-    return this.owner.uploadChatAttachment(attachment, modelId);
+    this.#live(); return this.owner.uploadChatAttachment(attachment, modelId);
   }
   async getChatAttachmentContent(chatId: number, id: string): Promise<Uint8Array> {
-    return this.owner.getChatAttachmentContent(chatId, id);
+    this.#live(); return this.owner.getChatAttachmentContent(chatId, id);
   }
-  async deleteChatAttachment(id: string): Promise<void> { return this.owner.deleteChatAttachment(id); }
+  async deleteChatAttachment(id: string): Promise<void> { this.#live(); return this.owner.deleteChatAttachment(id); }
   async setChatTitle(chatId: number, title: string): Promise<void> {
-    return this.owner.setChatTitle(chatId, title);
+    this.#live(); return this.owner.setChatTitle(chatId, title);
   }
-  async deleteChat(chatId: number): Promise<void> { return this.owner.deleteChat(chatId); }
-  async stopAgent(chatId: number): Promise<void> { return this.owner.stopAgent(chatId); }
+  async deleteChat(chatId: number): Promise<void> { this.#live(); return this.owner.deleteChat(chatId); }
+  async stopAgent(chatId: number): Promise<void> { this.#live(); return this.owner.stopAgent(chatId); }
   async retryAgent(chatId: number, modelId: string): Promise<void> {
-    return this.owner.retryAgent(chatId, modelId);
+    this.#live(); return this.owner.retryAgent(chatId, modelId);
   }
 
   // --- Allowed: actions and connections, which wait for the person as they do in Build ---
 
   async subscribeToActions(subscriber: RpcStub<ActionsSubscriber>, startAfter?: Date)
       : Promise<RpcStub<{}>> {
-    return this.owner.subscribeToActions(subscriber, startAfter);
+    this.#live(); return this.owner.subscribeToActions(subscriber, startAfter);
   }
   async listActions(options?: {beforeId?: number, filter?: ActionHistoryFilter})
       : Promise<ActionHistoryPage> {
-    return this.owner.listActions(options);
+    this.#live(); return this.owner.listActions(options);
   }
-  async approveAction(id: number): Promise<void> { return this.owner.approveAction(id); }
+  async approveAction(id: number): Promise<void> { this.#live(); return this.owner.approveAction(id); }
   async operateApproval(request: OperateApprovalRequest): Promise<OperateApprovalSnapshot> {
-    return this.owner.operateApproval(request);
+    this.#live(); return this.owner.operateApproval(request);
   }
-  async rejectAction(id: number): Promise<void> { return this.owner.rejectAction(id); }
+  async rejectAction(id: number): Promise<void> { this.#live(); return this.owner.rejectAction(id); }
   async listPreApprovableActions(): Promise<PreApprovableAction[]> {
-    return this.owner.listPreApprovableActions();
+    this.#live(); return this.owner.listPreApprovableActions();
   }
   async setAutoApprovedActionKind(gatekeeperId: WorkpieceId, actionKind: ActionKind)
       : Promise<void> {
-    return this.owner.setAutoApprovedActionKind(gatekeeperId, actionKind);
+    this.#live(); return this.owner.setAutoApprovedActionKind(gatekeeperId, actionKind);
   }
   async removeAutoApprovedActionKind(gatekeeperId: WorkpieceId, tag: string): Promise<void> {
-    return this.owner.removeAutoApprovedActionKind(gatekeeperId, tag);
+    this.#live(); return this.owner.removeAutoApprovedActionKind(gatekeeperId, tag);
   }
   async listAutoApprovedActionKinds()
       : Promise<Array<{ gatekeeperId: WorkpieceId; actionKind: ActionKind }>> {
-    return this.owner.listAutoApprovedActionKinds();
+    this.#live(); return this.owner.listAutoApprovedActionKinds();
   }
   async acceptConnectionRequest(requestId: string, result: {gatekeeperId: number})
       : Promise<void> {
-    return this.owner.acceptConnectionRequest(requestId, result);
+    this.#live(); return this.owner.acceptConnectionRequest(requestId, result);
   }
   async denyConnectionRequest(requestId: string): Promise<void> {
-    return this.owner.denyConnectionRequest(requestId);
+    this.#live(); return this.owner.denyConnectionRequest(requestId);
   }
   async newGatekeeper(accountId: number, resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> {
-    return this.owner.newGatekeeper(accountId, resourceUrl);
+    this.#live(); return this.owner.newGatekeeper(accountId, resourceUrl);
   }
   async getGatekeeperById(id: number): Promise<GatekeeperClient<any>> {
-    return this.owner.getGatekeeperById(id);
+    this.#live(); return this.owner.getGatekeeperById(id);
   }
   async getGatekeeperByResourceUrl(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
-    return this.owner.getGatekeeperByResourceUrl(resourceUrl);
+    this.#live(); return this.owner.getGatekeeperByResourceUrl(resourceUrl);
   }
 
   // --- Denied: authoring ---
@@ -16679,8 +16900,18 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     // would be useless, so refuse rather than publish an empty archive.
     let commitId = await this.impl.assertPublishableCommit(
         this.impl.getGadgetRecord(this.id).commitId);
-    await this.impl.assertPublishableKind(this.impl.storage.kind.get(), commitId);
-    commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+    let kind = this.impl.storage.kind.get();
+    let authoredWidgetBuild = false;
+    if (kind === "widget" && this.impl.env.AUTHORED_WIDGET_BUILD_ENABLED === "true") {
+      let sourceCommitId = commitId;
+      commitId = await this.impl.compileAuthoredWidgetCommit(sourceCommitId);
+      authoredWidgetBuild = commitId !== sourceCommitId;
+      await this.impl.assertPublishableKind(kind, commitId,
+          commitId === sourceCommitId ? undefined : sourceCommitId);
+    } else {
+      await this.impl.assertPublishableKind(kind, commitId);
+      commitId = await this.impl.compileAuthoredWidgetCommit(commitId);
+    }
     let now = new Date();
 
     let metadata: BlueprintMetadata = {
@@ -16698,7 +16929,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
     if (gadget.output) {
       metadata.output = gadget.output;
     }
-    metadata.kind = this.impl.storage.kind.get();
+    metadata.kind = kind;
     if (dataContract !== undefined) metadata.dataContract = dataContract;
 
     let record: BlueprintGadgetRecord = {
@@ -16706,6 +16937,7 @@ class GadgetClientImpl extends RpcTarget implements GadgetClient {
       metadata,
       gadgetId: this.id,
       commitId,
+      ...(authoredWidgetBuild ? {authoredWidgetBuild: true as const} : {}),
     };
 
     let screenshot = screenshotUpload ? validateBlueprintScreenshotUpload(screenshotUpload) : undefined;
@@ -16949,15 +17181,22 @@ class SlashCommandAuthorizerImpl extends NativeRpcTarget implements ObservationA
 // at a connection pending re-verification (see #gatekeepersPendingRestart).
 /**
  * Admit `profileId`'s request to run trigger `hookId` now, then ask the trigger's gatekeeper to
- * deliver it once (Overseer.invokeTrigger). The hook must be live and the control must admit the
- * caller first; the gatekeeper gets only the minted invocation id, and its delivery goes through
+ * deliver it once (Overseer.invokeTrigger). The hook must be live, the person (`userId`) must hold
+ * InferOps' `workflow:invoke` through their own account where the deployment names that authority
+ * (`requireWorkflowInvoke`), and the control must list them; the gatekeeper gets only the minted invocation id, and its delivery goes through
  * startHook like any other, which runs the pinned revision with the gadget's own bindings. A
  * gatekeeper that can't run on request, or refuses now, leaves no invocation behind.
  */
 export async function invokeWorkflowTrigger(
-    impl: Pick<OverseerImpl, "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore">,
-    profileId: string, hookId: number): Promise<WorkflowInvocation> {
+    impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
+        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
+    userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
+  requireLiveHook(impl as OverseerImpl, hookId);
+  // The person's own InferOps grant (workflow:invoke), asked freshly at every request, so a removed
+  // grant stops the next run. Before anything is minted or handed on.
+  await requireWorkflowInvoke(impl, userId, hookId);
+  // Re-read after the await: the input gate was open, so the hook may have been disabled meanwhile.
   let record = requireLiveHook(impl as OverseerImpl, hookId);
   let store = impl.workflowDefinitionStore();
   let invocation = store.beginInvocation(profileId, hookId);

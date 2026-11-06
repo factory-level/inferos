@@ -79,3 +79,25 @@ describe("an agent's startFlow", () => {
     expect(after.events.filter(record => record.actor === "agent")).toEqual([]);
   });
 });
+
+// FAC-87: nor may an agent move between a flow's named pages; only the person path re-checks the
+// destination page against what the caller may open.
+describe("an agent's page navigation", () => {
+  it("is refused by the user DO itself, storing nothing, while the person's is applied", async () => {
+    const user = env.TEST_USER.get(env.TEST_USER.idFromName("agent-navigate-flow"));
+    const start: OperateEvent = { ...VALID, pages: [
+      { name: "fill", states: ["empty", "filled"], routes: [{ label: "Check", to: "check" }] },
+      { name: "check", routes: [{ label: "Finish", to: "finish" }] },
+      { name: "finish" },
+    ] };
+    await user.dispatchOperateEvent(start, 0, "person");
+    const before = await pageAndLog(user);
+    for (const event of [{ type: "navigateFlow", to: "check" }, { type: "backFlow" },
+      { type: "setFlowPageState", state: "filled" }] satisfies OperateEvent[]) {
+      expect(await refusal(user.dispatchOperateEvent(event, null, "agent"))).toBe(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+    }
+    expect(await pageAndLog(user)).toEqual(before);
+    expect((await user.dispatchOperateEvent({ type: "navigateFlow", to: "check" }, before.page.seq, "person")).state.flow)
+      .toMatchObject({ index: 1, history: [0] });
+  });
+});

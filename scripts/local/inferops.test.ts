@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   API_PORT_SHIFT, apiEntrypoint, BACKEND_USAGE, backendChildEnv, backendDatabase, backendPaths, backendPorts, existingWiring, forbiddenCredentials,
-  initDbPath, migrationCommands, pinnedRevision, readBackendRecord, signInSupported, ssoLayer, wiringEnv, writeBackendRecord,
+  healthy, initDbPath, migrationCommands, pinnedRevision, readBackendRecord, signInSupported, ssoLayer, wiringEnv, writeBackendRecord,
   type BackendRecord,
 } from "./inferops.ts";
 
@@ -199,6 +199,19 @@ import { runInferopsBackend, type BackendDeps, type BackendOptions } from "./inf
 import type { LocalStack } from "./stack.ts";
 
 const SHA = "3dae0f50d5b4fa467d734cbb2adf857f39942b31";
+
+test("local backend readiness accepts ok and degraded rollups, and rejects down or unreadable bodies", async () => {
+  for (const [body, httpStatus, expected] of [
+    ['{"status":"ok"}', 200, true],
+    ['{"status":"degraded"}', 200, true],
+    ['{"status":"down"}', 503, false],
+    ['not json', 200, false],
+    ['{}', 200, false],
+  ] as const) {
+    const deps = { fetchImpl: async () => new Response(body, { status: httpStatus }) } as unknown as BackendDeps;
+    assert.equal(await healthy("https://inferops.example", deps), expected, `${httpStatus} ${body}`);
+  }
+});
 
 interface Harness {
   deps: BackendDeps;
