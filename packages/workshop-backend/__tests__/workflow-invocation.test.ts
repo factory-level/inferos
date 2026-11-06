@@ -180,6 +180,18 @@ describe("through the Overseer", () => {
     await expect(legacy.overseer.invokeTrigger(HOOK)).rejects.toThrow("This trigger can't be run on request.");
   });
 
+  // QA on #374: a run whose own binding call fails must fail with that cause, not read as a
+  // gatekeeper that can't run on request.
+  it("passes a run's own failure through, even one that names a missing method", async () => {
+    let failing = await session("use", {
+      invoke: async () => { throw new Error('The RPC receiver does not implement the method "readBoard".'); },
+    });
+    let refused: unknown;
+    try { await failing.overseer.invokeTrigger(HOOK); } catch (error) { refused = error; }
+    expect(String(refused)).toContain('does not implement the method "readBoard"');
+    expect(String(refused)).not.toContain("can't be run on request");
+  });
+
   it("refuses to run a disabled trigger", async () => {
     let { overseer, hook, invoke } = await session("use");
     hook.enabled = false;
