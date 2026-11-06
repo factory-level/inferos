@@ -122,9 +122,11 @@ import {
   BOARD_WRITES, CheckRefused, PROPOSAL_APPROVE, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
 } from "./apply-attempts";
 import {
-  WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, openHttpInferOpsClient, tableNotFound,
+  WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, listWorkspaceSlugs, openHttpInferOpsClient,
+  readCallerPrincipal, tableNotFound,
   type BoardSnapshotAnswer, type InferOpsAuthority, type InferOpsEndpoint,
 } from "./http-inferops";
+import { CREDENTIAL_REF, InferOpsSystemCredentials } from "./system-credentials";
 import { inferLabFetch } from "./edge-header";
 import type {
   HostBoardConnectionFence, HostBoardFence, HostBoardRead, HostBoardReader,
@@ -196,7 +198,7 @@ import MEMBERS_CONFIGURATOR_HTML from "./generated/members-ui.txt";
 import WORKFLOW_CONFIGURATOR_HTML from "./generated/workflow-ui.txt";
 import ACCOUNT_CONFIGURATOR_HTML from "./generated/account-ui.txt";
 
-export { InferLabLogin, InferOpsCredentials, MockInferOps };
+export { InferLabLogin, InferOpsCredentials, InferOpsSystemCredentials, MockInferOps };
 
 const VENDOR_ID = "inferops";
 
@@ -258,10 +260,18 @@ export default {
  * account was minted by a sign-in or a connect that proved it. Auto-provisioned accounts carry no
  * identity.
  */
-type AccountProps = { accountId: string; email?: string; connected?: boolean };
+type AccountProps = {
+  accountId: string; email?: string; connected?: boolean;
+  /**
+   * Set only on a configured system workflow's binding (FAC-102, `getSystemGatekeeperClass`): the
+   * Workshop's assignment reference whose stored service-account key the binding acts as. Such a
+   * binding never reaches a person's token, the stopgap connection or the mock.
+   */
+  systemCredentialRef?: string;
+};
 
 /** What `clientFor` needs to know about an account. */
-type AccountRef = Pick<AccountProps, "accountId" | "connected">;
+type AccountRef = Pick<AccountProps, "accountId" | "connected" | "systemCredentialRef">;
 
 /**
  * One project-board binding, fixed when the Workshop mints it. `host` is the URL's
@@ -304,7 +314,34 @@ type AccountGatekeeperProps = AccountRef & { tenant: string };
 type ExportsWithStores = {
   MockInferOps: DurableObjectNamespace<MockInferOps>;
   InferOpsCredentials: DurableObjectNamespace<InferOpsCredentials>;
+  InferOpsSystemCredentials: DurableObjectNamespace<InferOpsSystemCredentials>;
 };
+
+function systemCredentialsOf(exports: ExportsWithStores, credentialRef: string) {
+  return exports.InferOpsSystemCredentials.get(exports.InferOpsSystemCredentials.idFromName(credentialRef));
+}
+
+/** What a system run's call is refused with when nothing usable is provisioned for it (FAC-102). */
+const NO_SYSTEM_CREDENTIAL = "No service account is provisioned for this workflow's runs.";
+
+/**
+ * A system workflow run's client (FAC-102): its authority is the service-account key stored for
+ * `credentialRef`, read per request, and only for the `host` it was checked for. Nothing provisioned
+ * is UNAUTHORIZED; there is no fallback to anyone's token, the stopgap or the mock. InferOps refusing
+ * the key (revoked) fails the call as any refused credential does.
+ */
+function systemClient(env: Cloudflare.Env, exports: ExportsWithStores, credentialRef: string, host: string): InferOpsClient {
+  const endpoint = inferOpsApiEndpoint(env);
+  if (!endpoint || host === DEMO_HOST) throw new InferOpsError("UNAUTHORIZED", NO_SYSTEM_CREDENTIAL);
+  return openHttpInferOpsClient({
+    ...endpoint,
+    async authorize(operation) {
+      const authority = await systemCredentialsOf(exports, credentialRef).authority(host);
+      if (!authority) throw new InferOpsError("UNAUTHORIZED", NO_SYSTEM_CREDENTIAL);
+      return operation(authority);
+    },
+  }, inferLabFetch(env));
+}
 
 function credentialsOf(exports: ExportsWithStores, accountId: string) {
   return exports.InferOpsCredentials.get(exports.InferOpsCredentials.idFromName(accountId));
@@ -426,6 +463,8 @@ function openClientFor(
   env: Cloudflare.Env, exports: ExportsWithStores, account: AccountRef, host: string,
   workspaceId?: string,
 ): InferOpsClient {
+  // A system run's binding acts only as its stored service account (FAC-102), never anything below.
+  if (account.systemCredentialRef !== undefined) return systemClient(env, exports, account.systemCredentialRef, host);
   const mock = () => openInferOpsClient(exports.MockInferOps, { accountId: account.accountId, host });
   if (host === DEMO_HOST) return mock();
   if (account.connected) {
@@ -719,7 +758,77 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
   async getTypeScriptTypes(): Promise<string> {
     return TYPES_CODE;
   }
+
+  /**
+   * Check `key` and store it as the service account for `credentialRef` (FAC-102), replacing any
+   * stored before (a rotation). Kernel-only: the Workshop relays an Admin's key once and keeps
+   * nothing of it. Before storing, InferOps itself must say the key is a service account in this
+   * deployment's company (`auth.me`) with the board host's workspace among its own
+   * (`GET /workspaces`). Any refusal is the one fixed `KEY_NOT_ACCEPTED`, never saying why or
+   * repeating the key, which is never logged or returned. Boards only.
+   */
+  async provisionSystemCredential(credentialRef: string, connection: { resourceUrl: string }, key: string): Promise<void> {
+    if (!CREDENTIAL_REF.test(credentialRef) || typeof key !== "string" || !key) throw new Error(KEY_NOT_ACCEPTED);
+    const endpoint = inferOpsApiEndpoint(this.env);
+    const company = deploymentCompany(this.env);
+    let host: string;
+    try {
+      host = parseProjectBoardUrl(connection.resourceUrl).host;
+    } catch {
+      throw new Error(KEY_NOT_ACCEPTED);
+    }
+    const labels = parseHost(host);
+    if (!endpoint || !company || !labels) throw new Error(KEY_NOT_ACCEPTED);
+    let checked: { workspaceId: string; tenantId: string };
+    try {
+      const fetcher = inferLabFetch(this.env);
+      const workspace = (await listWorkspaceSlugs(endpoint.baseUrl, key, fetcher)).find(w => w.slug === labels.workspace);
+      if (!workspace) throw new Error("workspace");
+      const me = await readCallerPrincipal(endpoint.baseUrl, key, workspace.workspaceId, fetcher);
+      if (me.principalType !== "service_account" || !companyAdmits(company, me.tenantId)) throw new Error("principal");
+      checked = { workspaceId: workspace.workspaceId, tenantId: me.tenantId };
+    } catch {
+      logger.warn("system credential not accepted", { event: "system_credential.refused" });
+      throw new Error(KEY_NOT_ACCEPTED);
+    }
+    const stored = await systemCredentialsOf(this.ctx.exports, credentialRef).store({
+      key, workspaceId: checked.workspaceId, host, tenantId: checked.tenantId, provisionedAt: Date.now(),
+    });
+    // The reference was retired while the key was being checked (#375 round 2): nothing was kept.
+    if (!stored) {
+      logger.warn("system credential not stored for a retired reference", { event: "system_credential.retired" });
+      throw new Error(KEY_NOT_ACCEPTED);
+    }
+  }
+
+  /**
+   * Delete the key stored for `credentialRef`, if any, and retire the reference so that no later
+   * store lands for it (FAC-102, #375 round 2). Kernel-only.
+   */
+  async forgetSystemCredential(credentialRef: string): Promise<void> {
+    if (!CREDENTIAL_REF.test(credentialRef)) return;
+    await systemCredentialsOf(this.ctx.exports, credentialRef).forget();
+  }
+
+  /**
+   * The class a configured system workflow's run binds through for `credentialRef` (FAC-102): the
+   * project-board gatekeeper for `connection.resourceUrl`, acting only as the key stored for the
+   * reference. Its props carry the reference, never the key. Boards only; other resources refuse.
+   */
+  @skipRpcValidation()
+  async getSystemGatekeeperClass(credentialRef: string, connection: { resourceUrl: string }):
+      Promise<DurableObjectClass<Gatekeeper<any>>> {
+    if (!CREDENTIAL_REF.test(credentialRef)) throw new Error(NO_SYSTEM_CREDENTIAL);
+    const { host, projectKey } = parseProjectBoardUrl(connection.resourceUrl);
+    const props: ProjectGatekeeperProps = {
+      accountId: `system:${credentialRef}`, connected: false, systemCredentialRef: credentialRef, host, projectKey,
+    };
+    return this.ctx.exports.InferOpsProjectGatekeeper({ props }) as unknown as DurableObjectClass<Gatekeeper<any>>;
+  }
 }
+
+/** The one refusal for a service-account key this gatekeeper won't store (FAC-102). */
+const KEY_NOT_ACCEPTED = "The key wasn't accepted.";
 
 // ---------------------------------------------------------------------------
 // Account
@@ -1709,11 +1818,12 @@ export class InferOpsProjectGatekeeper
     extends DurableObject<Cloudflare.Env, ProjectGatekeeperProps>
     implements Gatekeeper<InferOpsProjectSession>, HostBoardReader, HostBoardConnectionFence {
   #binding(): ProjectBinding {
-    const { accountId, connected, host, workspaceId } = this.ctx.props;
+    const { accountId, connected, systemCredentialRef, host, workspaceId } = this.ctx.props;
     const kv = this.ctx.storage.kv;
     return new ProjectBinding(this.ctx.props, {
       store: new ActionStore(kv),
-      client: clientFor(this.env, this.ctx.exports, { accountId, connected }, host, workspaceId),
+      // A system workflow's binding (FAC-102) keeps its reference, so it acts only as that account.
+      client: clientFor(this.env, this.ctx.exports, { accountId, connected, systemCredentialRef }, host, workspaceId),
       observers: () => admittedObservers(kv),
     }, () => otherWorkspacesOf(this.env, this.ctx.exports, this.ctx.props));
   }

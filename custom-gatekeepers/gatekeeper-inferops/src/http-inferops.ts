@@ -961,6 +961,50 @@ export async function listWorkspaceSlugs(baseUrl: string, token: string,
   }));
 }
 
+/** Who a credential acts as in one workspace, as `GET /auth/me` says: the kind of principal and its company. */
+export type CallerPrincipal = { principalType: "user" | "service_account"; tenantId: string };
+
+/**
+ * Who `token` acts as in `workspaceId` (`GET /auth/me`, the workspace lane). Used to check a
+ * service-account key before it is stored (FAC-102): never logs or returns the token. Throws an
+ * `InferOpsError` like every request, `UNAVAILABLE` for a response that does not match.
+ */
+export async function readCallerPrincipal(baseUrl: string, token: string, workspaceId: string,
+                                          fetcher: typeof fetch): Promise<CallerPrincipal> {
+  const operation = "auth.me";
+  let response: Response;
+  try {
+    response = await fetcher(`${baseUrl}/auth/me`, {
+      method: "GET",
+      headers: { accept: "application/json", authorization: `Bearer ${token}`, "x-workspace-id": workspaceId },
+      redirect: "manual",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    logger.warn("InferOps request failed", {
+      event: "http.request.failed", operation, status: 0, code: "UNAVAILABLE", error,
+    });
+    throw new InferOpsError("UNAVAILABLE", FAILURE_DETAIL.UNAVAILABLE);
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    body = undefined;
+  }
+  if (!response.ok || body === undefined) {
+    const code = response.ok ? "UNAVAILABLE" : failureCode(response.status, wireCode(body));
+    logger.warn("InferOps request failed", { event: "http.request.failed", operation, status: response.status, code });
+    throw new InferOpsError(code, FAILURE_DETAIL[code]);
+  }
+  return parsed(operation, body, raw => {
+    const me = record(raw, "me");
+    const principalType = text(me.principalType, "me.principalType");
+    if (principalType !== "user" && principalType !== "service_account") throw new Malformed("me.principalType is not known");
+    return { principalType, tenantId: text(me.tenantId, "me.tenantId", UUID).toLowerCase() };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Host board snapshot (`project.board_snapshot`), kernel-only: see host-board.ts.
 
