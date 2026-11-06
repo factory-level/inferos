@@ -2105,11 +2105,25 @@ describe("system credentials (FAC-102)", () => {
   });
 
   it("fails a run's call once InferOps revokes the key, and falls back to nothing", async () => {
+    // REF was forgotten above, and a forgotten reference never stores again.
+    const REVOKED = "5b2c1d8e-0000-4000-8000-0000000000a3";
     serviceKey();
-    expect(await hooks().provisionSystem(REF, BOARD_URL, KEY)).toBeNull();
+    expect(await hooks().provisionSystem(REVOKED, BOARD_URL, KEY)).toBeNull();
     inferlab.access.delete(KEY);
     const before = inferlab.apiCalls.length;
-    expect(await systemRead("system-revoked")).not.toBe("");
+    expect(await systemRead("system-revoked", BOARD_URL, REVOKED)).not.toBe("");
     expect(inferlab.apiCalls.slice(before).every(call => call.token === KEY)).toBe(true);
+  });
+
+  // #375 round 2: the Workshop forgets a reference when it retires the assignment, and that can
+  // reach here before a provisioning still checking the key stores it. A store after the forget
+  // must not land, whatever the order the two arrive in.
+  it("never stores a key for a reference once it is forgotten, even a store that arrives late", async () => {
+    const RETIRED = "5b2c1d8e-0000-4000-8000-0000000000a5";
+    serviceKey();
+    expect(await hooks().provisionSystem(RETIRED, BOARD_URL, KEY)).toBeNull();
+    await hooks().forgetSystem(RETIRED);
+    expect(await hooks().provisionSystem(RETIRED, BOARD_URL, KEY)).toBe("The key wasn't accepted.");
+    expect(await systemRead("system-retired", BOARD_URL, RETIRED)).toContain("No service account is provisioned");
   });
 });

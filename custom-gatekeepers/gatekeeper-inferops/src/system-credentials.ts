@@ -23,11 +23,23 @@ export type StoredSystemCredential = {
 /** A credential reference: the UUID the Workshop minted for one assignment. */
 export const CREDENTIAL_REF = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** The service-account key for one credential reference. Replacing it rotates it; forgetting deletes it. */
+/**
+ * The service-account key for one credential reference. Replacing it rotates it; forgetting deletes
+ * it and retires the reference for good.
+ */
 export class InferOpsSystemCredentials extends DurableObject<Cloudflare.Env> {
-  /** Stores `credential`, replacing any stored before. */
-  async store(credential: StoredSystemCredential): Promise<void> {
+  /**
+   * Stores `credential`, replacing any stored before, and says whether it did. A forgotten
+   * reference stores nothing (#375 round 2): the Workshop forgets a reference only when it retires
+   * its assignment and mints a fresh one for any new assignment, so a store arriving after the
+   * forget, from a provisioning still checking the key meanwhile, is late and must not leave a key
+   * at rest. One object per reference runs one call at a time, so the check and the write can't
+   * interleave with a forget.
+   */
+  async store(credential: StoredSystemCredential): Promise<boolean> {
+    if (await this.ctx.storage.get<boolean>("retired")) return false;
     await this.ctx.storage.put("credential", credential);
+    return true;
   }
 
   /**
@@ -40,8 +52,9 @@ export class InferOpsSystemCredentials extends DurableObject<Cloudflare.Env> {
     return { token: stored.key, workspaceId: stored.workspaceId };
   }
 
-  /** Deletes the stored key, if any. */
+  /** Deletes the stored key, if any, and retires the reference: nothing is stored for it again. */
   async forget(): Promise<void> {
     await this.ctx.storage.deleteAll();
+    await this.ctx.storage.put("retired", true);
   }
 }

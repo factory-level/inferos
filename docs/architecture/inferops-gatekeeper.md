@@ -193,14 +193,16 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   one fixed "The key wasn't accepted.", never saying why or repeating the key. It's stored in
   `InferOpsSystemCredentials` (one Durable Object per credential reference, migration `v8`, apart
   from people's `InferOpsCredentials`) with the workspace id and host it was checked for; storing
-  again rotates it and `forgetSystemCredential` deletes it. `getSystemGatekeeperClass(credentialRef,
+  again rotates it and `forgetSystemCredential` deletes it and retires the reference, so a store
+  arriving after it (from a provisioning still checking the key) stores nothing and is refused in
+  the same fixed words; the Workshop never reuses a reference. `getSystemGatekeeperClass(credentialRef,
   {resourceUrl})` returns the project-board gatekeeper class with `systemCredentialRef` in its props
   (never the key); boards only. Such a binding's client (`systemClient`) reads its authority per
   request from the store, sends the key as `Authorization: Bearer` (InferOps routes an `iex_` key to
   its service-account lane), and only for the host it was checked for. With nothing stored it's
   UNAUTHORIZED, and InferOps refusing a revoked key fails the call: there is no fallback to anyone's
   token, the stopgap connection or the mock. `account.test.ts` ("system credentials") covers the
-  check, the refusals, the host, rotation, forgetting and revocation.
+  check, the refusals, the host, rotation, forgetting, a late store after forgetting and revocation.
 - **Running workflows (FAC-102).** `InferOpsAccount.holdsWorkflowInvoke(resourceUrl)` answers whether
   the person may ask a configured system workflow to run against that board: InferOps'
   `workflow:invoke`, asked in the board host's own workspace only, resolved among the person's own

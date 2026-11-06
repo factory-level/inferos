@@ -770,12 +770,20 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
       logger.warn("system credential not accepted", { event: "system_credential.refused" });
       throw new Error(KEY_NOT_ACCEPTED);
     }
-    await systemCredentialsOf(this.ctx.exports, credentialRef).store({
+    const stored = await systemCredentialsOf(this.ctx.exports, credentialRef).store({
       key, workspaceId: checked.workspaceId, host, tenantId: checked.tenantId, provisionedAt: Date.now(),
     });
+    // The reference was retired while the key was being checked (#375 round 2): nothing was kept.
+    if (!stored) {
+      logger.warn("system credential not stored for a retired reference", { event: "system_credential.retired" });
+      throw new Error(KEY_NOT_ACCEPTED);
+    }
   }
 
-  /** Delete the key stored for `credentialRef`, if any (FAC-102). Kernel-only. */
+  /**
+   * Delete the key stored for `credentialRef`, if any, and retire the reference so that no later
+   * store lands for it (FAC-102, #375 round 2). Kernel-only.
+   */
   async forgetSystemCredential(credentialRef: string): Promise<void> {
     if (!CREDENTIAL_REF.test(credentialRef)) return;
     await systemCredentialsOf(this.ctx.exports, credentialRef).forget();
