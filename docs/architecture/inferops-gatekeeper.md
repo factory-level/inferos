@@ -22,7 +22,7 @@ covers:
   - packages/workshop-backend/src/server.ts
   - scripts/release/manifest-lib.ts
   - scripts/run-dev-server.ts
-updated: 2026-11-04
+updated: 2026-11-05
 ---
 
 # InferOps gatekeeper
@@ -184,6 +184,15 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   it asks InferOps' `GET /auth/permissions?permissions=configuration:<build|publish>` with the
   person's own token in each workspace stored at connect, in order, through
   `InferOpsClient.holdsPermission`, and says yes at the first workspace whose decision allows it.
+- **Running workflows (FAC-102).** `InferOpsAccount.holdsWorkflowInvoke(resourceUrl)` answers whether
+  the person may ask a configured system workflow to run against that board: InferOps'
+  `workflow:invoke`, asked in the board host's own workspace only, resolved among the person's own
+  InferOps workspaces (`resolveWorkspace(slug, "inferops")`). An InferMind or other workspace's
+  grant never counts, and a board outside the person's InferOps workspaces is a no, asking nothing
+  (the manager, 2026-11-05). The company scope and its refusals are the shared-configuration
+  question's, which still takes a yes from any workspace. The Workshop asks it before admitting an on-request run (see
+  [Operate mode](operate-mode.md)). A yes isn't shared configuration and grants nothing of the
+  workflow's.
   Only an Admin's grant (`owner`, `admin`) holds those permissions, and a grant deny removes either
   from that grant (factory-level/inferops#2551); a deny on one grant doesn't remove the authority
   while another grant in the company still holds it. The Workshop refuses a person whose

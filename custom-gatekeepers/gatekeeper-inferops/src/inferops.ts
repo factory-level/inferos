@@ -1089,8 +1089,47 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
    * than guessing. Workspaces granted since the person connected count after they reconnect.
    */
   async holdsSharedConfiguration(action: SharedConfigurationAction): Promise<SharedConfigurationAnswer> {
+    if (action !== "build" && action !== "publish") return { holds: false, scope: null };
+    return this.#holdsInCompany(`configuration:${action}`);
+  }
+
+  /**
+   * Whether the connected person may ask a configured system workflow to run against the board
+   * `resourceUrl` names: InferOps' `workflow:invoke` (FAC-102; a person's `member`, `admin` or
+   * `owner` grant holds it, a grant deny removes it, a service account never does), asked in that
+   * board's own InferOps workspace only (the manager, 2026-11-05). The workspace is the board host's,
+   * among the person's own InferOps memberships: an InferMind workspace, another workspace, a host
+   * that isn't theirs or a reference that isn't a board answers no, asking nothing. The company
+   * scope and its refusals are `holdsSharedConfiguration`'s; unlike it, no other workspace's grant
+   * counts.
+   */
+  async holdsWorkflowInvoke(resourceUrl: string): Promise<SharedConfigurationAnswer> {
+    const endpoint = inferOpsApiEndpoint(this.env);
+    if (!this.ctx.props.connected || !endpoint) return { holds: false, scope: null };
+    const company = deploymentCompany(this.env);
+    if (!company) throw new InferOpsError("UNAVAILABLE", COMPANY_MISCONFIGURED);
+    const identity = await this.#credentials().identity();
+    if (!identity?.tenantId || !companyAdmits(company, identity.tenantId)) return { holds: false, scope: null };
+    const scope = identity.tenantId.toLowerCase();
+    let host: string;
+    try {
+      host = parseProjectBoardUrl(resourceUrl).host;
+    } catch {
+      return { holds: false, scope };
+    }
+    const labels = parseHost(host);
+    const workspaceId = labels ? await this.#credentials().resolveWorkspace(labels.workspace, "inferops") : null;
+    if (!workspaceId) return { holds: false, scope };
+    const client = whileInferOpsEnabled(this.env, () =>
+      accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
+    return { holds: await client.holdsPermission("workflow:invoke"), scope };
+  }
+
+  // The person's own answer to one InferOps permission, in this deployment's company (see
+  // holdsSharedConfiguration). `permission` is one of the fixed names above, never a caller's.
+  async #holdsInCompany(permission: "configuration:build" | "configuration:publish"):
+      Promise<SharedConfigurationAnswer> {
     const nothing = { holds: false, scope: null };
-    if (action !== "build" && action !== "publish") return nothing;
     const endpoint = inferOpsApiEndpoint(this.env);
     if (!this.ctx.props.connected || !endpoint) return nothing;
     const company = deploymentCompany(this.env);
@@ -1101,7 +1140,7 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
     for (const { workspaceId } of identity.workspaces) {
       const client = whileInferOpsEnabled(this.env, () =>
         accountClient(this.env, this.ctx.exports, endpoint, this.ctx.props.accountId, workspaceId));
-      if (await client.holdsPermission(`configuration:${action}`)) return { holds: true, scope };
+      if (await client.holdsPermission(permission)) return { holds: true, scope };
     }
     return { holds: false, scope };
   }
