@@ -27,6 +27,12 @@ export type WorkshopObservabilityFields = {
   gatekeeperId: number | string;
   handoffKind: "connect" | "restore";
   hookId: number;
+  /** A workflow run's id (FAC-111), never a secret: what a run's log lines are joined on. */
+  runId: string;
+  /** Who asked for a workflow run (FAC-104): `person:<profile id>` or `trigger`. A record, never authority. */
+  initiator: string;
+  /** Who a workflow run acts as (FAC-104): `service_account:<connection id>` or `gadget_bindings`. */
+  executor: string;
   logBytes: number;
   modelId: string;
   observerId: string;

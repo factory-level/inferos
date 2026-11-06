@@ -14,6 +14,7 @@ import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
   SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
   systemGatekeeperFacetName, type AssignedDelivery, type AssignedExecution, type SystemRunHost,
+  type SystemRunRequester,
 } from "./system-run.js";
 import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
@@ -149,12 +150,16 @@ export const WORKFLOW_INVOKE_REFUSED =
  * must say yes, and a workflow with none is refused, since nothing scopes the question (the manager,
  * 2026-11-05). Where the deployment names no such authority there is nothing to ask, as for shared
  * configuration. It admits nothing alone: the trigger's own control must list the person too.
+ *
+ * Returns the InferOps company every answer was given in (FAC-111), which the admitted run records
+ * as its scope, or null where the deployment names no such authority. Answers given in different
+ * companies refuse: a run has one company.
  */
 export async function requireWorkflowInvoke(
     workspace: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
-    userId: string, hookId: number): Promise<void> {
+    userId: string, hookId: number): Promise<string | null> {
   let vendorId = getSharedConfigurationGatekeeper(workspace.env);
-  if (!vendorId) return;
+  if (!vendorId) return null;
   let hook = workspace.storage.boundHooks.get(hookId);
   let gadgetId = hook ? hook.gadgetId ?? workspace.defaultGadgetId : undefined;
   let boards = new Set<string>();
@@ -169,10 +174,99 @@ export async function requireWorkflowInvoke(
   }
   if (boards.size === 0) throw new Error(WORKFLOW_INVOKE_REFUSED);
   let user = workspace.users.get(workspace.users.idFromString(userId));
+  let companies = new Set<string>();
   for (let resourceUrl of boards) {
-    if (!(await user.holdsWorkflowInvoke(resourceUrl))) throw new Error(WORKFLOW_INVOKE_REFUSED);
+    let answer = await user.workflowInvokeAnswer(resourceUrl);
+    if (answer?.holds !== true || typeof answer.company !== "string" || answer.company === "") {
+      throw new Error(WORKFLOW_INVOKE_REFUSED);
+    }
+    companies.add(answer.company);
   }
+  if (companies.size !== 1) throw new Error(WORKFLOW_INVOKE_REFUSED);
+  let [company] = companies;
+  return company!;
 }
+
+/**
+ * The refusal at a protected point of an assigned run (FAC-104) when the person who asked for it
+ * may no longer: the work stops, and an approved write stays pending. Fixed words, naming no grant.
+ */
+export const RUN_REQUESTER_REVOKED =
+  "The person who asked for this workflow run can't run it now, so this step didn't happen.";
+
+/**
+ * Re-checks, at a protected execution point of a run a person asked for (FAC-104: the run's start,
+ * which a delayed delivery reaches long after the request, and each approved write's apply), that
+ * the person still may: the trigger's control still lists them; their InferOps `workflow:invoke`
+ * (`requireWorkflowInvoke`), asked again now; and the same company the run was admitted in
+ * (FAC-111's record), so a request can't continue in another company. A run the trigger fired
+ * itself has no person to re-check. A delivery a person asked for that has no run record (one
+ * older than FAC-111) is refused: there is no company to compare. Refuses with
+ * RUN_REQUESTER_REVOKED.
+ *
+ * Returns the two re-checks a protected point repeats once its own last await is done, in this
+ * order and with no await after the second (see {@link RunRequesterCheck}).
+ */
+export async function requireRunRequester(
+    impl: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" |
+        "workflowDefinitionStore">,
+    hookId: number, deliveryId: number): Promise<RunRequesterCheck> {
+  let store = impl.workflowDefinitionStore();
+  let recorded = store.deliveryRun(deliveryId);
+  if (!recorded) throw new Error(RUN_REQUESTER_REVOKED);
+  if (!recorded.invoked && recorded.run?.requester.kind !== "person") return NO_RUN_REQUESTER;
+  let run = recorded.run;
+  if (!run || run.requester.kind !== "person") throw new Error(RUN_REQUESTER_REVOKED);
+  let profileId = run.requester.profileId;
+  let executor = run.executor;
+  const revalidate = () => {
+    let assignment = store.assignmentOf(hookId);
+    let sameExecutor = executor.kind === "service_account"
+      ? assignment?.credentialRef === executor.credentialRef && assignment.gatekeeperId === executor.gatekeeperId
+      : assignment === null;
+    if (!sameExecutor || impl.storage.boundHooks.get(hookId)?.enabled !== true ||
+        !store.controls(profileId).some(control => control.hookId === hookId)) {
+      throw new Error(RUN_REQUESTER_REVOKED);
+    }
+  };
+  const recheck = async () => {
+  let company: string | null = null;
+  try {
+    // Only where the deployment names the authority is there anything to ask (as at admission).
+    if (getSharedConfigurationGatekeeper(impl.env)) {
+      company = await requireWorkflowInvoke(impl, impl.users.idFromName(profileId).toString(), hookId);
+    }
+  } catch (error) {
+    logger.warn("run requester re-check refused", {
+      event: "workflow.run.requester_revoked", hookId, runId: run.runId, initiator: `person:${profileId}`, error,
+    });
+    throw new Error(RUN_REQUESTER_REVOKED, { cause: error });
+  }
+  if (company !== run.company) {
+    logger.warn("run requester re-check refused", {
+      event: "workflow.run.requester_revoked", hookId, runId: run.runId, initiator: `person:${profileId}`,
+    });
+    throw new Error(RUN_REQUESTER_REVOKED);
+  }
+  };
+  revalidate();
+  await recheck();
+  return { recheck, revalidate };
+}
+
+/**
+ * What a protected point of a person's run repeats after its own last await (FAC-104), from
+ * {@link requireRunRequester}: first `await recheck()`, the person's InferOps `workflow:invoke` and
+ * company asked again; then `revalidate()`, the synchronous re-read of local state (the control's
+ * listing, the run's executor still being the trigger's assignment or the lack of one, the hook
+ * still live); then the protected work, with no await in between. Both throw
+ * RUN_REQUESTER_REVOKED. The remote answer is itself an await: a revocation that lands while it is
+ * pending is the one this order can't see, and the local re-read right after it is what can't move.
+ */
+export type RunRequesterCheck = SystemRunRequester;
+
+/** A run the trigger fired itself: there is no person to re-check. */
+const NO_RUN_REQUESTER: RunRequesterCheck = { recheck: async () => {}, revalidate: () => {} };
 
 /**
  * The one refusal for a service-account key the Workshop won't relay or the service doesn't accept
@@ -6412,11 +6506,35 @@ class OverseerImpl implements AgentHooks {
     if (record.executedAs) {
       let problem = this.assignedActionProblem(record);
       if (problem) throw new Error(problem);
+      // A queued write is a protected point too (FAC-104): the person who asked for the run must
+      // still be allowed to now, however long ago they asked. The assignment is checked again after.
+      let requester = await requireRunRequester(this, record.executedAs.hookId, record.executedAs.deliveryId);
+      logger.info("assigned workflow action applying", {
+        event: "workflow.assigned_action.applying", actionId: record.id, hookId: record.executedAs.hookId,
+        ...(record.executedAs.runId ? { runId: record.executedAs.runId } : {}),
+        initiator: record.executedAs.requestedBy ? `person:${record.executedAs.requestedBy}` : "trigger",
+        executor: `service_account:${record.gatekeeperId}`,
+      });
+      problem = this.assignedActionProblem(record);
+      if (problem) throw new Error(problem);
       assigned = await this.openAssignedActionFacet(record);
       problem = this.assignedActionProblem(record);
       if (problem) {
         assigned.close();
         throw new Error(problem);
+      }
+      // The facet's open was the last await before the write (FAC-104): the person's InferOps grant
+      // and company are asked again now, then the assignment and their local authority are re-read
+      // synchronously, with no await before the write is sent. A refusal closes the facet and
+      // leaves the write pending.
+      try {
+        await requester.recheck();
+        problem = this.assignedActionProblem(record);
+        if (problem) throw new Error(problem);
+        requester.revalidate();
+      } catch (error) {
+        assigned.close();
+        throw error;
       }
     }
     let gatekeeper = assigned?.facet ?? this.getGatekeeperFacet(record.gatekeeperId);
@@ -6770,9 +6888,27 @@ class OverseerImpl implements AgentHooks {
     };
   }
 
-  /** Runs one admitted delivery of an assigned trigger (FAC-102; see system-run.ts). */
-  runAssignedDelivery(hookId: number, delivery: AssignedDelivery, method: string | null, args: unknown[]): Promise<unknown> {
-    return runAssignedDelivery(this.#systemRunHost(), hookId, delivery, method, args);
+  /**
+   * Runs one admitted delivery of an assigned trigger (FAC-102; see system-run.ts), once the person
+   * who asked for it still may (FAC-104, `requireRunRequester`): a delivery that starts later than
+   * its request is a protected point, so a grant revoked meanwhile stops it before it runs.
+   */
+  async runAssignedDelivery(hookId: number, delivery: AssignedDelivery, method: string | null, args: unknown[]): Promise<unknown> {
+    let requester = await requireRunRequester(this, hookId, delivery.deliveryId);
+    // Once right after the answer, and again inside the run after its last await (below).
+    requester.revalidate();
+    let recorded = this.workflowDefinitionStore().deliveryRun(delivery.deliveryId);
+    let run = recorded?.run;
+    if (run) {
+      logger.info("assigned workflow run started", {
+        event: "workflow.run.started", hookId, runId: run.runId,
+        initiator: run.requester.kind === "person" ? `person:${run.requester.profileId}` : "trigger",
+        executor: run.executor.kind === "service_account" ? `service_account:${run.executor.gatekeeperId}` : "gadget_bindings",
+      });
+    }
+    // Asked again after the code's load, its last await, then re-read synchronously just before the
+    // run registers (FAC-104).
+    return runAssignedDelivery(this.#systemRunHost(), hookId, delivery, method, args, requester);
   }
 
   // Open the session behind a binding loopback.
@@ -7289,7 +7425,15 @@ class OverseerImpl implements AgentHooks {
     if (caller.from === "systemRun") {
       let run = this.systemRuns.require(caller);
       if (run.gatekeeperId !== gatekeeperId) throw new Error("This workflow run can't propose actions on that connection.");
-      executedAs = { hookId: caller.hookId, deliveryId: caller.deliveryId, credentialRef: run.credentialRef };
+      // Both actors, for the audit (FAC-104): who asked for the run, and who it acts as.
+      let admitted = this.workflowDefinitionStore().deliveryRun(caller.deliveryId)?.run;
+      executedAs = {
+        hookId: caller.hookId, deliveryId: caller.deliveryId, credentialRef: run.credentialRef,
+        ...(admitted ? {
+          runId: admitted.runId,
+          requestedBy: admitted.requester.kind === "person" ? admitted.requester.profileId : null,
+        } : {}),
+      };
     }
 
     let actionId = this.storage.nextActionId.get();
@@ -12847,8 +12991,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // they are held outside this DO (even across resets -- the stored callback is a persistent
     // stub), so this is what ties them to the firing, per the session contract documented on
     // Gatekeeper.bindHook (workshop-shared/gatekeeper.ts).
+    // A run a person asked for, on the gadget's own bindings, starts at the callback's first call;
+    // that call re-checks the person first (FAC-104). A scheduled firing has nobody to re-check.
     return {
-      callback: makeHookFiringCallback(this.impl, hookId),
+      callback: makeHookFiringCallback(this.impl, hookId, delivery?.invocation ? delivery.deliveryId : undefined),
       approvalQueue: new ApprovalQueueImpl(this.impl, record.gatekeeperId, {from: "hook"}, hookId),
     };
   }
@@ -17644,20 +17790,25 @@ async function forgetProvisioned(
  */
 export async function invokeWorkflowTrigger(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
-        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations">,
+        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations" | "getGadgetHead">,
     userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
   // The person's own InferOps grant (workflow:invoke), asked freshly at every request, so a removed
   // grant stops the next run. Before anything is minted or handed on.
-  await requireWorkflowInvoke(impl, userId, hookId);
+  let company = await requireWorkflowInvoke(impl, userId, hookId);
   // Re-read after the await: the input gate was open, so the hook may have been disabled meanwhile.
   let record = requireLiveHook(impl as OverseerImpl, hookId);
   let store = impl.workflowDefinitionStore();
   // Assignments off (FAC-102): a trigger assigned before is refused here, before anything is minted.
   if (!workflowAssignmentsEnabled(impl.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
   if (store.autoRetiredOf(hookId)) throw new Error(TRIGGER_AUTO_RETIRED);
-  let invocation = store.beginInvocation(profileId, hookId);
+  // A stale pinned revision (the code moved since it was saved) is refused here, in the words fire
+  // uses, before anything is minted or the trigger's gatekeeper is asked to run it (FAC-111).
+  store.requireCurrentRevision(hookId, record.gadgetId ?? impl.defaultGadgetId ?? null,
+      gadgetId => impl.getGadgetHead(gadgetId));
+  // The company the person was answered in becomes the run's scope (FAC-111).
+  let invocation = store.beginInvocation(profileId, hookId, company);
   // What startHook reads to tell this call's delivery taken (see takenInvocations).
   impl.takenInvocations.set(invocation.id, false);
   try {
@@ -17735,7 +17886,18 @@ function makeSystemRunCallback(impl: OverseerImpl, hookId: number,
   }));
 }
 
-function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcStub<RpcTarget> {
+// `requestedDelivery` names the delivery of a run a person asked for (FAC-104): its first call
+// re-checks that person (requireRunRequester, then its synchronous revalidate right before the
+// call goes through), so a request whose delivery starts after a revocation never runs. Later
+// calls of the same firing don't ask InferOps again, but each re-reads the local state
+// (revalidate) and checks the hook.
+function makeHookFiringCallback(impl: OverseerImpl, hookId: number, requestedDelivery?: number): NativeRpcStub<RpcTarget> {
+  let checked: Promise<RunRequesterCheck> | undefined;
+  const requester = async () => {
+    if (requestedDelivery === undefined) return;
+    checked ??= requireRunRequester(impl, hookId, requestedDelivery);
+    (await checked).revalidate();
+  };
   // The proxy target must be callable for the `apply` trap to ever fire (a Proxy over a
   // non-callable target is itself non-callable), and the bindHook contract allows the bound
   // callback to be a function type, invoked by calling the firing's callback directly. An arrow
@@ -17747,6 +17909,7 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
     // escaping into the RPC machinery that invokes the function (workerd reports that as
     // uncaught, too).
     async apply(_target, _thisArg, args: unknown[]) {
+      await requester();
       let record = requireLiveHook(impl, hookId);
       return Reflect.apply(record.callback as any, undefined, args);
     },
@@ -17756,6 +17919,7 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
       // dispositions as getGadgetFacet's proxy over the gadget facet.
       if (typeof prop === "symbol" || prop === "then") return undefined;
       return async (...args: unknown[]) => {
+        await requester();
         let record = requireLiveHook(impl, hookId);
         return Reflect.apply((record.callback as any)[prop], record.callback, args);
       };

@@ -4,7 +4,7 @@ import {
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, TRIGGER_RUNS_PER_INVOKER, TRIGGER_RUNS_PER_TRIGGER,
   WORKFLOW_INVOCATION_TTL_MS, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
   type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery, type WorkflowDefinitionRef,
-  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation,
+  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunRecord,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 
@@ -29,7 +29,14 @@ export type StoredWorkflowInvocationRecord = { id: number; hookId: number; reque
  * An admitted request to run a trigger, kept until the trigger's gatekeeper delivers it (or the
  * request to it fails), so a delivery can name only an invocation this workspace minted.
  */
-export type StoredWorkflowInvocation = WorkflowInvocation & { requestedBy: string };
+export type StoredWorkflowInvocation = WorkflowInvocation & {
+  requestedBy: string;
+  /**
+   * The InferOps company the person's `workflow:invoke` was answered in (FAC-111), or null where the
+   * deployment names no such authority. Absent on requests admitted before FAC-111: read as null.
+   */
+  company?: string | null;
+};
 
 /** Most admitted requests one trigger may have waiting for delivery. */
 const MAX_WAITING_INVOCATIONS = 20;
@@ -195,27 +202,32 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowInvocations.delete(invocation.id);
       throw new Error("That run request was for another revision of this workflow. Ask again.");
     }
-    let stored = this.storage.workflowDefinitions.get(pin.definitionId);
-    let revision = stored?.revisions.find(r => r.revision === pin.revision);
-    if (!stored || !revision) throw new Error("This trigger's workflow definition revision no longer exists.");
+    let { stored, revision } = this.#pinnedRevision(pin, hookGadgetId, headOf);
     if (stored.published?.revision !== pin.revision && !ownerCanBuild(stored.owner.id)) {
       throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
-    }
-    if (hookGadgetId === null || revision.source.gadgetId !== hookGadgetId ||
-        headOf(hookGadgetId) !== revision.source.commitId) {
-      throw new Error(
-          `The workflow changed since revision ${pin.revision} was saved. Save it, then move the trigger.`);
     }
     return this.durableStorage.transactionSync(() => {
       let id = this.storage.nextWorkflowDeliveryId.get();
       this.storage.nextWorkflowDeliveryId.put(id + 1);
       // A request runs as the trigger's assigned service account, when it has one (FAC-102).
       let assignment = invocation ? this.storage.workflowTriggerAssignments.get(hookId) : undefined;
+      // The durable run (FAC-111): minted here, in the delivery's own transaction, so a run exists
+      // exactly when its delivery does, with the authority it was admitted under.
+      let runId = crypto.randomUUID();
       let delivery: StoredWorkflowDelivery = {
         id, hookId, definitionId: pin.definitionId, revision: pin.revision,
         commitId: revision.source.commitId, at: new Date(),
         ...(invocation ? { invocation: { id: invocation.id, requestedBy: invocation.requestedBy } } : {}),
         ...(assignment ? { executedAs: { credentialRef: assignment.credentialRef } } : {}),
+        run: {
+          runId,
+          correlationId: invocation ? invocation.id : runId,
+          company: invocation?.company ?? null,
+          requester: invocation ? { kind: "person", profileId: invocation.requestedBy } : { kind: "trigger" },
+          executor: assignment
+            ? { kind: "service_account", gatekeeperId: assignment.gatekeeperId, credentialRef: assignment.credentialRef }
+            : { kind: "gadget_bindings" },
+        },
       };
       if (invocation) this.storage.workflowInvocations.delete(invocation.id);
       this.storage.workflowDeliveries.put(delivery);
@@ -223,6 +235,33 @@ export class WorkspaceWorkflowDefinitionStore {
       let { id: _, ...shown } = delivery;
       return { ...shown, deliveryId: id };
     });
+  }
+
+  /**
+   * Refuses unless trigger `hookId` is pinned to a revision that still exists and is still the
+   * code its gadget runs: the revision's gadget is the hook's, and the gadget's head is exactly the
+   * revision's commit (FAC-111: checked at admission, before the trigger's gatekeeper is asked to
+   * run anything, and again by `fire`). Same words as `fire`.
+   */
+  requireCurrentRevision(hookId: number, hookGadgetId: WorkpieceId | null,
+      headOf: (gadgetId: WorkpieceId) => string | undefined): void {
+    let pin = this.storage.workflowTriggerPins.get(hookId);
+    if (!pin) throw new Error(CANNOT_RUN);
+    this.#pinnedRevision(pin, hookGadgetId, headOf);
+  }
+
+  // The pin's stored definition and revision, refusing a missing revision or one whose code moved.
+  #pinnedRevision(pin: StoredTriggerPin, hookGadgetId: WorkpieceId | null,
+      headOf: (gadgetId: WorkpieceId) => string | undefined) {
+    let stored = this.storage.workflowDefinitions.get(pin.definitionId);
+    let revision = stored?.revisions.find(r => r.revision === pin.revision);
+    if (!stored || !revision) throw new Error("This trigger's workflow definition revision no longer exists.");
+    if (hookGadgetId === null || revision.source.gadgetId !== hookGadgetId ||
+        headOf(hookGadgetId) !== revision.source.commitId) {
+      throw new Error(
+          `The workflow changed since revision ${pin.revision} was saved. Save it, then move the trigger.`);
+    }
+    return { stored, revision };
   }
 
   /**
@@ -352,7 +391,7 @@ export class WorkspaceWorkflowDefinitionStore {
    * trigger must still be pinned. Mints the invocation, which the trigger's delivery must name
    * (`fire`). Every refusal reads the same, whether there's no control, no pin or no listing.
    */
-  beginInvocation(profileId: string, hookId: number): WorkflowInvocation {
+  beginInvocation(profileId: string, hookId: number, company: string | null = null): WorkflowInvocation {
     return this.durableStorage.transactionSync(() => {
       let control = this.storage.workflowTriggerControls.get(hookId);
       let pin = this.storage.workflowTriggerPins.get(hookId);
@@ -368,10 +407,10 @@ export class WorkspaceWorkflowDefinitionStore {
       if (logId >= MAX_WORKFLOW_INVOCATIONS) this.storage.workflowInvocationLog.delete(logId - MAX_WORKFLOW_INVOCATIONS);
       let invocation: StoredWorkflowInvocation = {
         id: crypto.randomUUID(), hookId, definitionId: pin.definitionId, revision: pin.revision,
-        requestedAt: new Date(now), requestedBy: profileId,
+        requestedAt: new Date(now), requestedBy: profileId, company,
       };
       this.storage.workflowInvocations.put(invocation);
-      let { requestedBy: _, ...shown } = invocation;
+      let { requestedBy: _, company: __, ...shown } = invocation;
       return shown;
     });
   }
@@ -429,6 +468,37 @@ export class WorkspaceWorkflowDefinitionStore {
         if (invocation.hookId === hookId) this.storage.workflowInvocations.delete(invocation.id);
       }
     });
+  }
+
+  /**
+   * One admitted run, as stored at admission (FAC-111): its authority, and the revision and commit
+   * it started on. Read from the delivery record alone, never from a pin, a definition's current
+   * revisions or a chat, so it reads the same after a restart. Null for an unknown run, or one whose
+   * delivery is older than FAC-111 or was dropped past `MAX_WORKFLOW_DELIVERIES`.
+   */
+  run(runId: string): WorkflowRunRecord | null {
+    for (let delivery of this.storage.workflowDeliveries.list()) {
+      if (delivery.run?.runId !== runId) continue;
+      return {
+        ...delivery.run, hookId: delivery.hookId, definitionId: delivery.definitionId,
+        revision: delivery.revision, commitId: delivery.commitId, admittedAt: delivery.at,
+      };
+    }
+    return null;
+  }
+
+  /**
+   * What delivery `deliveryId` recorded about who asked for it (FAC-104): its admitted run, and
+   * whether a person asked through an invocation. Null when the delivery is unknown or was dropped
+   * past `MAX_WORKFLOW_DELIVERIES`. `run` is absent on a delivery recorded before FAC-111.
+   */
+  deliveryRun(deliveryId: number): { invoked: boolean; run?: WorkflowRunRecord } | null {
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    if (!delivery) return null;
+    return {
+      invoked: delivery.invocation !== undefined,
+      ...(delivery.run ? { run: this.run(delivery.run.runId) ?? undefined } : {}),
+    };
   }
 
   /** The recorded deliveries of a definition visible to `viewer`, oldest first. */
