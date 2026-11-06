@@ -53,7 +53,7 @@ import { consoleScreens, consoleWidgetVersionId, type ConsoleSource, type Consol
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -97,7 +97,8 @@ import { chatChangeStatuses, foldProposedChanges, type ChangeBatch } from "./age
 import { ambientGatekeeperMode } from "./provisioning-policy";
 import { blueprintSnapshotFiles, blueprintVersionKeys, blueprintVersionMetadata, checkDataContract, listFeaturedBlueprintsFromKv, readBlueprintContent, readBlueprintKvRecord, readBlueprintVersionBindings, sanitizeBlueprintOutput, writeBlueprintVersionBindings } from "./blueprint-archive";
 import { assertUpgradeCompatible, createBlueprintBindings, readBlueprintVersionToInstall } from "./blueprint-install";
-import { compileAuthoredWidgetPublication } from "./authored-widget-publication.js";
+import { compileAuthoredWidgetPublication, compileAuthoredWidgetSources, MAX_AUTHORED_WIDGET_PREVIEW_BYTES, type AuthoredWidgetBuildNamespace } from "./authored-widget-publication.js";
+import { isValidAuthoredWidgetCommitPath } from "./authored-widget-path.js";
 import { WebFetchEnv } from "./web-fetch";
 import { UserDurableObject, UserAiModelRecord, type UserChatContext, type WorkspaceOutputEntry } from "./user";
 import type { AgentSpawnerBinding, CallableAgent, SpawnCallableOptions } from "./agent-spawner-binding";
@@ -135,6 +136,43 @@ import {
 
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
+
+/** The refusal when the invoker's own InferOps grant doesn't include `workflow:invoke` (FAC-102). */
+export const WORKFLOW_INVOKE_REFUSED =
+  "You don't have permission to run workflows here. Ask an Admin for it.";
+
+/**
+ * Refuses unless the deployment's shared-configuration authority says the user may ask trigger
+ * `hookId`'s workflow to run (FAC-102, InferOps' `workflow:invoke`, inferops ADR 0011 D3), asked
+ * freshly through their own connected account in the workspace of each connection of that vendor the
+ * trigger's gadget binds, read from the connection's own record, never from the request; every one
+ * must say yes, and a workflow with none is refused, since nothing scopes the question (the manager,
+ * 2026-11-05). Where the deployment names no such authority there is nothing to ask, as for shared
+ * configuration. It admits nothing alone: the trigger's own control must list the person too.
+ */
+export async function requireWorkflowInvoke(
+    workspace: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
+    userId: string, hookId: number): Promise<void> {
+  let vendorId = getSharedConfigurationGatekeeper(workspace.env);
+  if (!vendorId) return;
+  let hook = workspace.storage.boundHooks.get(hookId);
+  let gadgetId = hook ? hook.gadgetId ?? workspace.defaultGadgetId : undefined;
+  let boards = new Set<string>();
+  if (gadgetId !== undefined) {
+    for (let [, edge] of workspace.visibleBindings(workspace.getGadgetRecord(gadgetId))) {
+      let record = workspace.storage.gatekeepers.get(edge.target);
+      let spec = record?.creationSpec;
+      if (gatekeeperVendorId(record) === vendorId && spec && "resourceUrl" in spec && typeof spec.resourceUrl === "string") {
+        boards.add(spec.resourceUrl);
+      }
+    }
+  }
+  if (boards.size === 0) throw new Error(WORKFLOW_INVOKE_REFUSED);
+  let user = workspace.users.get(workspace.users.idFromString(userId));
+  for (let resourceUrl of boards) {
+    if (!(await user.holdsWorkflowInvoke(resourceUrl))) throw new Error(WORKFLOW_INVOKE_REFUSED);
+  }
+}
 
 /**
  * The one refusal for a service-account key the Workshop won't relay or the service doesn't accept
@@ -2111,6 +2149,8 @@ function consoleToolFailure(reason: string): ConsoleToolOutcome {
 class OverseerImpl implements AgentHooks {
   public storage: OverseerStorage;
   readonly logger: ReturnType<typeof createWorkshopLogger>;
+  /** Test seam; production uses this Worker's exported build Durable Object. */
+  authoredWidgetBuildNamespace?: AuthoredWidgetBuildNamespace;
 
   // Identifies this DO instance. Sent to chat subscribers so they can detect a full server
   // restart (see AiChatSubscriber.streamGeneration). A timestamp suffices since a DO won't
@@ -9789,6 +9829,41 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
+  /** Compile an authored-widget chat draft without persisting its output. */
+  async previewAuthoredWidget(gadgetId: WorkpieceId, chatId: number): Promise<AuthoredWidgetPreview> {
+    if (this.env.AUTHORED_WIDGET_BUILD_ENABLED !== "true") {
+      throw new Error("Authored widget preview is disabled.");
+    }
+    this.checkChatExistsAndMaterializeChanges(chatId);
+    let meta = this.getChatMetaOrThrow(chatId);
+    let gadget = this.storage.gadgets.get(gadgetId);
+    if (gadget?.type !== "gadget" || !this.chatDocOwnsGadget(meta, gadgetId)) {
+      throw new Error("This chat has no authored widget draft.");
+    }
+    let files = await this.readGadgetFiles(gadgetId, chatId);
+    for (let path of files.keys()) {
+      if (!isValidAuthoredWidgetCommitPath(path)) throw new Error("Invalid source path.");
+    }
+    let sources = Object.fromEntries([...files].filter(([path]) =>
+      path.endsWith(".tsx") || path.endsWith(".css")));
+    let result = await compileAuthoredWidgetSources({
+      sources,
+      builds: this.authoredWidgetBuildNamespace ?? this.ctx.exports.AuthoredWidgetBuildDurableObject,
+      maxOutputBytes: MAX_AUTHORED_WIDGET_PREVIEW_BYTES,
+      onFailure: durationMs => {
+        this.logger.warn("authored widget preview build refused", {
+          event: "authored_widget.preview.build_refused",
+          durationMs,
+          outcome: "error",
+        });
+      },
+    });
+    return {
+      jsCode: result.clientJs,
+      measurements: { durationMs: result.durationMs, clientBytes: result.clientBytes },
+    };
+  }
+
   // Create a minimal Yjs doc snapshot (no edit history) of the given commit's files, for a
   // blueprint archive. Returns a gzip-compressed Yjs V2 encoded state update. The snapshot
   // always uses the unnamed root "" (the canonical archive root), regardless of which root holds
@@ -13178,6 +13253,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return new WorkspaceCanvasStore(this.impl.ctx.storage, this.impl.storage, this.impl.env);
   }
 
+  async previewAuthoredWidget(gadgetId: WorkpieceId, chatId: number): Promise<AuthoredWidgetPreview> {
+    return this.impl.previewAuthoredWidget(gadgetId, chatId);
+  }
+
   async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> {
     const ACTION_LOG_EXPORT_LIMIT = 500;
     let canvases = (await this.listCanvases()).map(canvas => ({
@@ -15973,6 +16052,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // viewer's own connection, never this workspace's. A screen no published console shows reads as
   // missing.
   async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> { this.#deny(); }
+  async previewAuthoredWidget(_gadgetId: WorkpieceId, _chatId: number): Promise<AuthoredWidgetPreview> { this.#deny(); }
   async listCanvases(): Promise<CanvasDefinition[]> {
     let store = this.#consoleStore();
     let shown = new Set(store.listPublished().flatMap(consoleScreens));
@@ -16501,6 +16581,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
     this.#live(); return this.owner.subscribeToConsoleLogs(subscriber);
   }
   async exportWorkspaceRecords(): Promise<WorkspaceRecordExport> { this.#deny(); }
+  async previewAuthoredWidget(_gadgetId: WorkpieceId, _chatId: number): Promise<AuthoredWidgetPreview> { this.#deny(); }
   async listCanvases(): Promise<CanvasDefinition[]> { this.#live(); return this.owner.listCanvases(); }
   async getCanvas(id: string): Promise<CanvasDefinition | null> { this.#live(); return this.owner.getCanvas(id); }
   async listFlows(): Promise<OperateFlow[]> { this.#live(); return this.owner.listFlows(); }

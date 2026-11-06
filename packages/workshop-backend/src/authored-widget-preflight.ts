@@ -7,7 +7,7 @@ const allowedImports = new Set([
   "@refinedev/core", "@tanstack/react-query", "react", "react-dom/client", "react/jsx-runtime",
 ]);
 
-/** A small parent-side guard; the build DO repeats full AST validation before compiling. */
+/** A small parent-side guard; the build DO repeats path, size and CSS checks before compiling. */
 export function validateAuthoredWidgetPreflight(input: Readonly<Record<string, string>>): void {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Expected source map.");
   const entries = Object.entries(input);
@@ -27,11 +27,11 @@ export function validateAuthoredWidgetPreflight(input: Readonly<Record<string, s
 
 function validateImportSpecifiers(source: string): void {
   // This scanner is intentionally conservative: it is a fast gate, not a TS parser. The isolated
-  // build DO remains authoritative and performs AST-based import validation before compilation.
+  // build DO's esbuild plugin remains authoritative for parsing and resolving the reviewed closure.
   const imports = /\b(?:import|export)\s+(?:type\s+)?(?:[\w*{},\s]+?\s+from\s*)?["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/g;
   for (const match of source.matchAll(imports)) {
     const specifier = match[1] ?? match[2];
     if (specifier.startsWith(".") || allowedImports.has(specifier)) continue;
-    throw new Error("Import is not approved.");
+    throw new Error("Unapproved package import.");
   }
 }

@@ -9,7 +9,6 @@ import { OverseerDurableObject as RealOverseerDurableObject } from "../src/serve
 
 export * from "../src/server.js";
 export { default } from "../src/server.js";
-
 /**
  * The pool stands a proxy class in front of every Durable Object (`createDurableObjectWrapper`) and
  * forwards only string-keyed methods to the instance it constructs, so when the runtime looks up

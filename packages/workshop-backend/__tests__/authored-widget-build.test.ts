@@ -13,9 +13,8 @@ const refusal = (source: Readonly<Record<string, string>>) => {
 };
 
 describe("authored widget publication input", () => {
-  it("refuses invalid TSX and unapproved dependencies", () => {
-    refusal({ "client.tsx": "export default function {" });
-    refusal({ "client.tsx": 'import fs from "node:fs"; export default function Widget(){ return <div/> }' });
+  it("refuses external CSS resources", () => {
+    refusal({ ...valid, "style.css": "a { background: url(https://example.test/image.png) }" });
   });
 
   it("refuses more than the source-file cap", () => {
@@ -29,7 +28,7 @@ describe("authored widget publication input", () => {
     await expect(withBuildDeadline(operation, 0)).rejects.toThrow("compile timeout");
   });
 
-  it("accepts a bounded source tree with a default component export", () => {
+  it("accepts a bounded TSX source tree with valid paths", () => {
     expect(validateAuthoredWidgetSources(valid)).toEqual(new Map(Object.entries(valid)));
     expect(validateAuthoredWidgetSources({
       ...valid,
