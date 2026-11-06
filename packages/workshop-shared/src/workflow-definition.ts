@@ -128,7 +128,15 @@ export type TriggerAssignmentSettings = { gatekeeperId: number };
  * (`WORKFLOW_ASSIGNMENTS_ENABLED`, off by default), and the trigger's assignment, which may be one
  * made before they were turned off and can still be removed.
  */
-export type TriggerAssignmentState = { enabled: boolean; assignment: TriggerAssignment | null };
+export type TriggerAssignmentState = {
+  enabled: boolean;
+  assignment: TriggerAssignment | null;
+  /**
+   * The trigger's assignment was retired automatically (its key was refused and couldn't be
+   * forgotten): runs on request are refused until an Admin assigns it again or removes it.
+   */
+  retiredAutomatically?: boolean;
+};
 
 /** Most people one trigger control lists as allowed to run it. */
 export const MAX_TRIGGER_CONTROL_INVOKERS = 50;

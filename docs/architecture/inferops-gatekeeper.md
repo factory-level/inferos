@@ -201,7 +201,7 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   request from the store, sends the key as `Authorization: Bearer` (InferOps routes an `iex_` key to
   its service-account lane), and only for the host it was checked for. With nothing stored it's
   UNAUTHORIZED, and InferOps refusing a revoked key fails the call: there is no fallback to anyone's
-  token, the stopgap connection or the mock. `account.test.ts` ("system credentials") covers the
+  token, the stopgap connection or the mock. A key InferOps refuses reads as "The assignment's service-account key was refused. An Admin needs to assign it again." (still `UNAUTHORIZED`, without the person-oriented reconnect hint or a class-name prefix), in a run's calls and in a failed apply. `account.test.ts` ("system credentials") covers the
   check, the refusals, the host, rotation, forgetting, a late store after forgetting and revocation.
 - **Running workflows (FAC-102).** `InferOpsAccount.holdsWorkflowInvoke(resourceUrl)` answers whether
   the person may ask a configured system workflow to run against that board: InferOps'

@@ -21,6 +21,48 @@ export const SYSTEM_RUN_UNSUPPORTED =
 /** Refusal: a session asked for by a run that isn't running (ended, or never started here). */
 export const SYSTEM_RUN_ENDED = "This workflow run has ended.";
 
+/** The refusal for assigning, giving a key or an assigned run while assignments are off (FAC-102). */
+export const WORKFLOW_ASSIGNMENTS_DISABLED = "Workflow assignments aren't enabled on this instance.";
+
+/**
+ * Refusal: an approved write an assigned run proposed, whose assignment changed or ended, or whose
+ * connection the trigger's gadget no longer binds, since it was proposed (FAC-102 follow-up). Left
+ * pending, with nothing sent, for a person to reject.
+ */
+export const ASSIGNED_ACTION_STALE =
+  "This action's workflow assignment changed or ended since it was proposed, so it can't be applied. Reject it.";
+
+/** Who an assigned run's proposed action was proposed as: recorded on the action when it is queued. */
+export type AssignedExecution = { hookId: number; deliveryId: number; credentialRef: string };
+
+/**
+ * Why an approved write an assigned run proposed may not apply now, or null when it may (FAC-102
+ * follow-up A): assignments must be on (`enabled`), the trigger's assignment must still be the one
+ * that proposed it (the same `credentialRef`, minted fresh for every assignment) on the same
+ * connection, and the trigger's live gadget must still bind that connection. The run itself may
+ * have ended: approval can come long after it.
+ */
+export function assignedActionProblem(
+    host: Pick<SystemRunHost, "assignmentOf" | "liveHookGadget" | "bindingsOf" | "vendorIdOf">,
+    executedAs: AssignedExecution, gatekeeperId: number, enabled: boolean): string | null {
+  if (!enabled) return WORKFLOW_ASSIGNMENTS_DISABLED;
+  let assignment = host.assignmentOf(executedAs.hookId);
+  if (assignment?.credentialRef !== executedAs.credentialRef || assignment.gatekeeperId !== gatekeeperId) {
+    return ASSIGNED_ACTION_STALE;
+  }
+  let gadgetId: number;
+  try {
+    gadgetId = host.liveHookGadget(executedAs.hookId);
+  } catch {
+    return ASSIGNED_ACTION_STALE;
+  }
+  if (host.vendorIdOf(gatekeeperId) === undefined ||
+      systemRunBindingNames(host.bindingsOf(gadgetId), gatekeeperId).length === 0) {
+    return ASSIGNED_ACTION_STALE;
+  }
+  return null;
+}
+
 /** Refusal: a run's binding asked for anything but the connection its trigger is assigned to. */
 export const SYSTEM_RUN_WRONG_CONNECTION = "A workflow run reaches only the connection its trigger is assigned to.";
 

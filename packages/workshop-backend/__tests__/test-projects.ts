@@ -141,6 +141,7 @@ export const BACKEND: readonly string[] = [
   "tool-lane.test.ts",
   "user-commit-email.test.ts",
   "user-models.test.ts",
+  "workflow-assigned-writes.test.ts",
   "worktree-session.test.ts",
   "worktrees.test.ts",
 ];

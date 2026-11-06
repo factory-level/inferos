@@ -8,12 +8,13 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
 import {
   OverseerDurableObject, PROVISION_REFUSED, makeOverseerStorage, provisionWorkflowTriggerCredential,
-  WORKFLOW_ASSIGNMENTS_DISABLED, retireAssignmentsUsing, retireTriggerAssignment, retireUnboundAssignments,
+  TRIGGER_AUTO_RETIRED, WORKFLOW_ASSIGNMENTS_DISABLED, retireAssignmentsUsing, retireTriggerAssignment, retireUnboundAssignments,
   setWorkflowTriggerAssignment,
 } from "../src/overseer.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SYSTEM_RUN_ENDED, SYSTEM_RUN_UNSUPPORTED, SYSTEM_RUN_WRONG_CONNECTION,
-  SystemRunRegistry, openSystemRunSession, revocableSession, runAssignedDelivery, systemGatekeeperFacetName,
+  ASSIGNED_ACTION_STALE, SystemRunRegistry, assignedActionProblem, openSystemRunSession, revocableSession,
+  runAssignedDelivery, systemGatekeeperFacetName,
   type SystemRunCaller, type SystemRunHost,
 } from "../src/system-run.js";
 import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
@@ -281,7 +282,7 @@ describe("an assignment", () => {
 
 /** An Overseer whose startHook fires HOOK from `store`, with a recording runAssignedDelivery. */
 function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled = true) {
-  let takenInvocations = new Set<string>();
+  let takenInvocations = new Map<string, boolean>();
   let gadgetCallback = { onSchedule: vi.fn(async () => "gadget's own") };
   let runSpy = vi.fn(async (..._args: unknown[]) => "as the service account");
   let overseer = Object.create(OverseerDurableObject.prototype) as OverseerDurableObject;
@@ -830,7 +831,7 @@ describe("WORKFLOW_ASSIGNMENTS_ENABLED off", () => {
     expect(await off.overseer.getTriggerAssignment(HOOK)).toMatchObject({ enabled: false, assignment: { hookId: HOOK } });
     await expect(off.overseer.setTriggerAssignment(HOOK, null)).resolves.toBeNull();
     let on = await assignmentSession("build", true);
-    expect(await on.overseer.getTriggerAssignment(HOOK)).toEqual({ enabled: true, assignment: null });
+    expect(await on.overseer.getTriggerAssignment(HOOK)).toEqual({ enabled: true, assignment: null, retiredAutomatically: false });
   });
 });
 
@@ -841,7 +842,98 @@ describe("a request is taken only when its delivery is (#374, review.r2)", () =>
     await overseer.startHook(HOOK);
     expect(takenInvocations.size).toBe(0);
     let invocation = store.beginInvocation("operator", HOOK);
+    // invokeWorkflowTrigger registers the id it waits on before asking the gatekeeper.
+    takenInvocations.set(invocation.id, false);
     await overseer.startHook(HOOK, { invocationId: invocation.id });
-    expect(takenInvocations.has(invocation.id)).toBe(true);
+    expect(takenInvocations.get(invocation.id)).toBe(true);
+  });
+});
+
+// FAC-102 follow-up A: an approved write from an assigned run applies only while the assignment that
+// proposed it is still the trigger's, its connection still bound, and assignments are on.
+describe("whether an assigned run's write may still apply", () => {
+  const EXECUTED = { hookId: HOOK, deliveryId: 7, credentialRef: "ref-1" };
+
+  it("is fine while the same assignment holds and the connection is bound, the run having ended", () => {
+    let { h } = host();
+    expect(h.systemRuns.has(7)).toBe(false);
+    expect(assignedActionProblem(h, EXECUTED, INFEROPS, true)).toBeNull();
+  });
+
+  it("is refused while assignments are off", () => {
+    let { h } = host();
+    expect(assignedActionProblem(h, EXECUTED, INFEROPS, false)).toBe(WORKFLOW_ASSIGNMENTS_DISABLED);
+  });
+
+  it("is refused once the assignment changed, was retired, the hook went or the connection was unbound", () => {
+    let changed = host();
+    changed.h.setAssignment({ hookId: HOOK, gatekeeperId: INFEROPS, credentialRef: "ref-2" });
+    let retired = host();
+    retired.h.setAssignment(null);
+    let hookGone = host();
+    hookGone.h.deleteHook();
+    let unbound = host();
+    unbound.h.unbindConnection();
+    let otherConnection = host();
+    for (let made of [changed, retired, hookGone, unbound]) {
+      expect(assignedActionProblem(made.h, EXECUTED, INFEROPS, true)).toBe(ASSIGNED_ACTION_STALE);
+    }
+    expect(assignedActionProblem(otherConnection.h, EXECUTED, 60, true)).toBe(ASSIGNED_ACTION_STALE);
+  });
+});
+
+// FAC-102 follow-up B (r1): an automatic retirement leaves a mark that refuses runs on request
+// until an Admin acts; a retirement a person chose leaves none.
+describe("the mark an automatic retirement leaves", () => {
+  it("is left when a refused key can't be forgotten, and an Admin's re-assignment or removal clears it", async () => {
+    let forget = vi.fn(async (_ref: string) => { throw new Error("vendor unavailable"); });
+    let made = provisionImpl({ forgetSystemCredential: forget, provisionSystemCredential: async () => {} });
+    setWorkflowTriggerAssignment(made.impl, ADA, HOOK, { gatekeeperId: INFEROPS });
+    made.store.markProvisioned = () => { throw new Error("storage reset"); };
+    await provisionWorkflowTriggerCredential(made.impl, ADA, HOOK, KEY).catch(() => {});
+    expect(made.store.assignmentOf(HOOK)).toBeNull();
+    expect(made.store.autoRetiredOf(HOOK)).toMatchObject({ hookId: HOOK });
+    setWorkflowTriggerAssignment(made.impl, ADA, HOOK, { gatekeeperId: INFEROPS });
+    expect(made.store.autoRetiredOf(HOOK)).toBeNull();
+    made.store.markAutoRetired(HOOK);
+    setWorkflowTriggerAssignment(made.impl, ADA, HOOK, null);
+    expect(made.store.autoRetiredOf(HOOK)).toBeNull();
+  });
+
+  it("isn't left by a retirement a person chose", () => {
+    let { impl, store } = assignmentImpl({ SHARED_CONFIGURATION_GATEKEEPER: "inferops" });
+    setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS });
+    setWorkflowTriggerAssignment(impl, ADA, HOOK, null);
+    retireTriggerAssignment(impl, HOOK);
+    expect(store.autoRetiredOf(HOOK)).toBeNull();
+  });
+
+  it("refuses a request in startHook before it is taken, as neither the service account nor the gadget", async () => {
+    let { store } = pinnedStore();
+    store.markAutoRetired(HOOK);
+    let { overseer, gadgetCallback, runSpy } = overseerFor(store);
+    let invocation = store.beginInvocation("operator", HOOK);
+    let refused: unknown;
+    try { await overseer.startHook(HOOK, { invocationId: invocation.id }); } catch (error) { refused = error; }
+    expect(String(refused)).toContain(TRIGGER_AUTO_RETIRED);
+    expect(runSpy).not.toHaveBeenCalled();
+    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
+    expect(store.isWaiting(invocation.id)).toBe(true);
+  });
+});
+
+// r1's LOW on the flag recheck: a delivery arriving after its invokeTrigger call returned can't
+// leave its id behind.
+describe("a late delivery", () => {
+  it("records nothing for an invocation no invokeTrigger call is waiting on", async () => {
+    let { store } = pinnedStore();
+    let { overseer, takenInvocations } = overseerFor(store);
+    let invocation = store.beginInvocation("operator", HOOK);
+    await overseer.startHook(HOOK, { invocationId: invocation.id });
+    expect(takenInvocations.has(invocation.id)).toBe(false);
+    let waited = store.beginInvocation("operator", HOOK);
+    takenInvocations.set(waited.id, false);
+    await overseer.startHook(HOOK, { invocationId: waited.id });
+    expect(takenInvocations.get(waited.id)).toBe(true);
   });
 });

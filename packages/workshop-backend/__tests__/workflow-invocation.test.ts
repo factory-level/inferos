@@ -93,7 +93,7 @@ describe("through the Overseer", () => {
     store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
     let invoke = vi.fn(opts.invoke ?? (async () => {}));
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
-    let takenInvocations = new Set<string>();
+    let takenInvocations = new Map<string, boolean>();
     let impl = {
       takenInvocations,
       env: {
@@ -202,7 +202,7 @@ describe("through the Overseer", () => {
     let made: Awaited<ReturnType<typeof session>> | undefined;
     made = await session("use", {
       invoke: async (...args: unknown[]) => {
-        made!.takenInvocations.add((args[0] as { invocationId: string }).invocationId);
+        made!.takenInvocations.set((args[0] as { invocationId: string }).invocationId, true);
         throw new Error(message);
       },
     });
@@ -244,6 +244,16 @@ describe("through the Overseer", () => {
       expect(Object.hasOwn(refused as object, "cause")).toBe(false);
       expect(JSON.stringify(refused, Object.getOwnPropertyNames(refused))).not.toContain(message);
     }
+  });
+
+  // FAC-102 follow-up B: a trigger whose assignment was retired automatically stays refused until an
+  // Admin re-assigns it or removes the assignment.
+  it("refuses at once, asking no gatekeeper, a trigger whose assignment was retired automatically", async () => {
+    let marked = await session("use", { assignmentsEnabled: true });
+    marked.store.markAutoRetired(HOOK);
+    expect(await refusalOf(() => marked.overseer.invokeTrigger(HOOK))).toContain(
+      "This trigger's service-account assignment was retired automatically. An Admin needs to assign it again or remove it.");
+    expect(marked.invoke).not.toHaveBeenCalled();
   });
 
   it("refuses at once, asking no gatekeeper, a trigger assigned while assignments are off", async () => {
@@ -394,7 +404,7 @@ describe("what an invoker sees, and what reaches the gatekeeper", () => {
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
     let impl = {
       env: {}, storage: { boundHooks: { get: () => hook } }, assertGatekeeperUsable: () => {},
-      workflowDefinitionStore: () => store, takenInvocations: new Set<string>(),
+      workflowDefinitionStore: () => store, takenInvocations: new Map<string, boolean>(),
     };
     let direct = invokeWorkflowTrigger as unknown as (...args: unknown[]) => Promise<unknown>;
     await direct(impl, "viewer-id", OPERATOR, HOOK, { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" });
@@ -421,7 +431,7 @@ async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolea
   let askedInvoke: string[] = [];
   let impl = {
     env: mayInvoke ? { SHARED_CONFIGURATION_GATEKEEPER: "inferops" } : {},
-    takenInvocations: new Set<string>(),
+    takenInvocations: new Map<string, boolean>(),
     isSharedConfiguration: async () => true,
     workflowDefinitionStore: () => store,
     getGadgetHead: headOf,
