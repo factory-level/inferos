@@ -196,6 +196,16 @@ FAC-95 makes the design's two configuration levels explicit ([ADR 0017](../adr/0
   - the workspace's gatekeeper hooks, read-only, owned by their gatekeeper and gadget, with any workflow revision they're pinned to.
 
   Every entry says it grants nothing.
+- **In the builder.** On a saved view (durable storage only; unsaved views say they have no workspace settings):
+  - **Selecting the workspace** in the target tree opens `WorkspaceSettingsEditor`. It shows each setting set or left at its default (*Default (Off)*), with what it permits, and saves all of them as one `setWorkspaceConfiguration` at the revision it read. A refusal (another company, a stale revision) shows in the server's words, keeps the choices, and offers **Reload settings**.
+  - **A selected page** shows `PageConfigurationPanel`, read from `traceConfiguration` again at each page revision:
+    - each setting with the value the page gets and a badge for its owner: *Overridden on this page*, *Workspace setting* or *Default*;
+    - an override select and **Reset to workspace**, each one `setSettings` edit through the page's own `editCanvasPage`;
+    - the page hooks with the page or object holding them and what each permits;
+    - the workspace hooks, read-only.
+
+    A trace that can't be read is an alert, never an empty list.
+  - `WorkspaceSettingsEditor.test.tsx` and `PageConfigurationPanel.test.tsx` cover these.
 - **Tests.**
   - `workspace-settings.test.ts` and `configuration-trace.test.ts` in `workshop-shared`.
   - `canvas-model.test.ts`, "a page's settings".
