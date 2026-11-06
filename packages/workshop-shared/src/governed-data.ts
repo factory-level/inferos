@@ -13,14 +13,19 @@
 /** The resources a governed session serves (FAC-9): custom tables, and ticket queues. */
 export type GovernedResource = "object/table" | "tickets/queue";
 
-/** The filter operators a request may use: equality, and case-insensitive substring on text. */
+/**
+ * The filter operators a request may use: `eq`, equality with a value of the field's own type (or
+ * null), and `contains`, case-insensitive substring, on a text field only.
+ */
 export const GOVERNED_FILTER_OPERATORS = ["eq", "contains"] as const;
+/** One of `GOVERNED_FILTER_OPERATORS`. */
 export type GovernedFilterOperator = (typeof GOVERNED_FILTER_OPERATORS)[number];
 
 /** The most rows a list reads from its resource; beyond it, `truncated` says so. */
 export const GOVERNED_SNAPSHOT_MAX = 200;
-/** The most rows one page returns, and the page size when none is asked for. */
+/** The most rows one page returns. */
 export const GOVERNED_PAGE_MAX = 50;
+/** The page size when a request asks for none. */
 export const GOVERNED_PAGE_DEFAULT = 25;
 /** The most filters one request may combine (all must hold). */
 export const GOVERNED_FILTERS_MAX = 4;
@@ -137,12 +142,16 @@ const plain = (value: unknown, keys: readonly string[], what: string): Record<st
 /**
  * Validate a list request against `description`, before anything is read: only `filters`, `sort`,
  * `pageSize` and `cursor`; filters on declared filterable fields with an allowed operator and a
- * scalar value; one sort key on a sortable field; a page size within bounds. Anything else, a URL,
- * a method or a `meta`, is refused.
+ * value of the field's type; one sort key on a sortable field; a page size within bounds. Anything
+ * else, a URL, a method or a `meta`, is refused.
+ *
+ * With `description` null, only the request's shape is checked (keys, counts, operators, plain
+ * values, page size): what a connector checks before it reads, when the fields come from that read.
  */
-export function parseGovernedListRequest(value: unknown, description: GovernedDescription): GovernedListRequest {
+export function parseGovernedListRequest(value: unknown, description: GovernedDescription | null): GovernedListRequest {
   const request = plain(value ?? {}, ["filters", "sort", "pageSize", "cursor"], "request");
-  const fields = new Map(description.fields.map(field => [field.name, field]));
+  const fields = new Map((description?.fields ?? []).map(field => [field.name, field]));
+  const shapeOnly = description === null;
   const filters: GovernedFilter[] = [];
   if (request.filters !== undefined) {
     if (!Array.isArray(request.filters) || request.filters.length > GOVERNED_FILTERS_MAX) {
@@ -150,23 +159,38 @@ export function parseGovernedListRequest(value: unknown, description: GovernedDe
     }
     for (const raw of request.filters as unknown[]) {
       const filter = plain(raw, ["field", "op", "value"], "filter");
-      const field = typeof filter.field === "string" ? fields.get(filter.field) : undefined;
-      if (!field || !field.filterable || field.personal) refuse("FIELD_NOT_FILTERABLE", "That field can't be filtered on.");
+      if (typeof filter.field !== "string") refuse("INVALID_REQUEST", "A filter names one field.");
       if (!GOVERNED_FILTER_OPERATORS.includes(filter.op as GovernedFilterOperator)) {
         refuse("OPERATOR_NOT_ALLOWED", "That filter operator isn't offered.");
       }
-      const scalar = filter.value === null || ["string", "number", "boolean"].includes(typeof filter.value);
-      if (!scalar) refuse("INVALID_REQUEST", "A filter compares with one plain value.");
+      const plainValue = filter.value === null || ["string", "number", "boolean"].includes(typeof filter.value);
+      if (!plainValue) refuse("INVALID_REQUEST", "A filter compares with one plain value.");
+      if (shapeOnly) {
+        filters.push({ field: filter.field as string, op: filter.op as GovernedFilterOperator, value: filter.value as GovernedFilter["value"] });
+        continue;
+      }
+      const field = fields.get(filter.field as string);
+      if (!field || !field.filterable || field.personal) refuse("FIELD_NOT_FILTERABLE", "That field can't be filtered on.");
+      // A value that can't match the field's type is refused, never read as an empty result.
+      if (filter.op === "contains" && field!.type !== "text") {
+        refuse("OPERATOR_NOT_ALLOWED", "Only a text field can be searched for a part of its value.");
+      }
+      const expected = field!.type === "number" ? "number" : field!.type === "boolean" ? "boolean" : "string";
+      const typed = filter.op === "contains"
+        ? typeof filter.value === "string"
+        : filter.value === null || typeof filter.value === expected;
+      if (!typed) refuse("INVALID_REQUEST", "A filter compares with one value of the field's own type.");
       filters.push({ field: field!.name, op: filter.op as GovernedFilterOperator, value: filter.value as GovernedFilter["value"] });
     }
   }
   let sort: GovernedSort | undefined;
   if (request.sort !== undefined) {
     const raw = plain(request.sort, ["field", "order"], "sort");
-    const field = typeof raw.field === "string" ? fields.get(raw.field) : undefined;
-    if (!field || !field.sortable || field.personal) refuse("FIELD_NOT_SORTABLE", "That field can't be sorted on.");
+    if (typeof raw.field !== "string") refuse("INVALID_REQUEST", "A sort names one field.");
     if (raw.order !== "asc" && raw.order !== "desc") refuse("INVALID_REQUEST", "A sort is ascending or descending.");
-    sort = { field: field!.name, order: raw.order as GovernedSort["order"] };
+    const field = fields.get(raw.field as string);
+    if (!shapeOnly && (!field || !field.sortable || field.personal)) refuse("FIELD_NOT_SORTABLE", "That field can't be sorted on.");
+    sort = { field: raw.field as string, order: raw.order as GovernedSort["order"] };
   }
   const pageSize = request.pageSize ?? GOVERNED_PAGE_DEFAULT;
   if (!Number.isInteger(pageSize) || (pageSize as number) < 1 || (pageSize as number) > GOVERNED_PAGE_MAX) {
@@ -180,7 +204,8 @@ export function parseGovernedListRequest(value: unknown, description: GovernedDe
 }
 
 // What a cursor is bound to: the request's filters and sort, so a cursor made for one request
-// can't page another.
+// can't page another. It is not signed: it carries only an offset into what this same request may
+// already read, so an altered one can only skip within that, never reach other rows.
 const fingerprint = (request: GovernedListRequest): string => JSON.stringify([request.filters, request.sort ?? null]);
 
 const encodeCursor = (offset: number, request: GovernedListRequest): string =>
@@ -216,7 +241,8 @@ const compare = (a: unknown, b: unknown): number => {
 /**
  * One page of `snapshot` for a validated `request`, on the server: the first `GOVERNED_SNAPSHOT_MAX`
  * rows the connector read, filtered (every filter must hold), sorted stably (ties by id), and cut
- * at the request's cursor and page size. A cursor not made for this request is refused.
+ * at the request's cursor and page size. A cursor for another request, or one that doesn't decode,
+ * is refused; cursors are unsigned offsets (see `fingerprint`).
  */
 export function listGoverned(snapshot: readonly GovernedRow[], request: GovernedListRequest): GovernedListResult {
   const truncated = snapshot.length > GOVERNED_SNAPSHOT_MAX;
