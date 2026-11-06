@@ -16,8 +16,19 @@ describe("workspace settings", () => {
     expect(() => parseWorkspaceSettings({ "baseUi.alerts": "yes" })).toThrow('Setting "baseUi.alerts" must be one of false, true.');
     expect(() => parseWorkspaceSettings({ "chatPane.widgets": "all" })).toThrow('Setting "chatPane.widgets" must be one of "console", "none".');
     for (const value of [null, [], "x", 1]) expect(() => parseWorkspaceSettings(value)).toThrow("Settings must be an object.");
-    // An inherited key doesn't count as one of its own.
-    expect(() => parseWorkspaceSettings(Object.create({ "baseUi.alerts": true }))).not.toThrow();
+  });
+
+  // r2 round 1 on #395: only a plain record is settings. A Date, Map or other object with no
+  // entries of its own must never read as "no settings", which would clear every one.
+  test("refuse anything but a plain record, whatever entries it has", () => {
+    class Settings { "baseUi.alerts" = true; }
+    for (const value of [new Date(), new Map([["baseUi.alerts", true]]), new Set(), new Settings(), new Uint8Array(2),
+      Object.create({ "baseUi.alerts": true }), /x/]) {
+      expect(() => parseWorkspaceSettings(value)).toThrow("Settings must be an object.");
+    }
+    const bare = Object.create(null) as Record<string, unknown>;
+    bare["baseUi.alerts"] = true;
+    expect(parseWorkspaceSettings(bare)).toEqual({ "baseUi.alerts": true });
   });
 
   test("resolve to the page's override, else the workspace's value, else the default, naming the owner", () => {

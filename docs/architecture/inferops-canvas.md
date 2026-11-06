@@ -177,7 +177,7 @@ FAC-95 makes the design's two configuration levels explicit ([ADR 0017](../adr/0
   - `baseUi.notifications`: whether widgets may raise a notification. Default off. Delivery isn't defined (FAC-114), so this records the choice and its owner only.
   - `chatPane.widgets`: which of the console's widgets the operate chat pane may open, `console` or `none`. Default `console`.
 
-  `parseWorkspaceSettings` refuses an unknown key or value in fixed words. No setting grants authority. Nothing reads them to draw yet: the builder and runtime surfaces that use them are later work.
+  `parseWorkspaceSettings` takes only a plain record (prototype `Object.prototype` or null), so a `Date`, `Map`, class instance or the like, which has no entries of its own, can never read as "no settings" and clear them. It refuses an unknown key or value in fixed words. An empty record is how a builder clears every setting at one level. No setting grants authority. Nothing reads them to draw yet: the builder and runtime surfaces that use them are later work.
 - **Two levels, one shape.**
   - **The workspace's settings** are one revisioned record, `WorkspaceConfiguration`. It lives in the `workspaceConfiguration` storage singleton, and is read and saved by `workspace-configuration.ts`.
   - **A page's overrides** are `CanvasPage.settings`, the same keys. `parseCanvasPage` accepts them and refuses a bad one as `invalid-setting`. They're replaced by one `setSettings` page operation; an empty object removes them. Every other inheritance field is still `undefined-inheritance`.

@@ -172,11 +172,11 @@ async function shared(answers: { build: Answer; publish: Answer }, storage: obje
 
 describe("a build session in a shared workspace", () => {
 
-  // FAC-99: publication is the company Admin's. An Operator (a build collaborator the service says
-  // no to for publish) and another company's Admin (to whom the deployment's service answers no:
+  // FAC-99: publication is the company Admin's. A builder without publish (a build collaborator the
+  // service says no to for publish; in InferOps an Operator has neither, see the FAC-95 case below) and another company's Admin (to whom the deployment's service answers no:
   // gatekeeper-inferops account.test.ts, "answers for nothing in a deployment that names another
   // company") are refused before the console store is touched.
-  it("refuses a console publication by an Operator, or by another company's Admin (FAC-99)", async () => {
+  it("refuses a console publication by a builder without publish, or by another company's Admin (FAC-99)", async () => {
     let operator = await open({
       env: GATED, shared: true, collaborator: true, answer: action => action === "build",
     });
