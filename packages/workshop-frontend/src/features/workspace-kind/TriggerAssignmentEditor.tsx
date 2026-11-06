@@ -23,10 +23,15 @@ const errorText = (err: unknown, fallback: string) =>
  * opt-outs, and sits in no `<form>`, so nothing is ever submitted natively; Enter and the button
  * send it. The editor shows who gave the key and when, never the key. Refusals show in the
  * server's words. `connections` is null when the gadget's connections couldn't be read.
+ *
+ * When the instance has assignments off (`enabled` false, as the server reads it; off by default
+ * until the fail-closed follow-up), the editor says so and offers neither assigning nor a key field,
+ * only Remove for an assignment made before. The server refuses the rest regardless.
  */
-export const TriggerAssignmentEditor = ({ overseer, hookId, assignment, connections, onChanged }: {
+export const TriggerAssignmentEditor = ({ overseer, hookId, enabled, assignment, connections, onChanged }: {
   overseer: RpcStub<Overseer>
   hookId: number
+  enabled: boolean
   assignment: TriggerAssignment | null
   connections: readonly AssignableConnection[] | null
   onChanged: () => void
@@ -68,7 +73,22 @@ export const TriggerAssignmentEditor = ({ overseer, hookId, assignment, connecti
   return (
     <section aria-label="Runs act as" className="mt-2 grid gap-2 rounded-lg border border-kumo-line px-3 py-2.5">
       <p className="m-0 text-[12px] leading-4 font-medium text-kumo-default">Runs act as</p>
-      {assignment ? (
+      {!enabled ? (
+        <>
+          <p className="m-0 text-[12px] leading-4 text-kumo-subtle">
+            Not enabled on this instance. Runs on request can't act as a service account here.
+          </p>
+          {assignment && (
+            <div className="flex items-center justify-between gap-2">
+              <p className="m-0 text-[12px] leading-4 text-kumo-default">
+                Assigned before: a service account in <span className="font-medium">{assigned}</span>
+              </p>
+              <WorkshopButton disabled={busy} onClick={() => run(() => overseer.setTriggerAssignment(hookId, null),
+                "Couldn't remove the assignment.")}>Remove</WorkshopButton>
+            </div>
+          )}
+        </>
+      ) : assignment ? (
         <>
           <p className="m-0 text-[12px] leading-4 text-kumo-default">
             A service account in <span className="font-medium">{assigned}</span>

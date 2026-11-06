@@ -99,7 +99,7 @@ async function render(overseer: Partial<Overseer>, gadgets: GadgetSummary[] = []
     getTriggerDefinition: async () => null,
     listTriggerControls: async () => [],
     listCollaborators: async () => [],
-    getTriggerAssignment: async () => null,
+    getTriggerAssignment: async () => ({ enabled: true, assignment: null }),
     getGadget: (() => ({ listBindings: async () => [], [Symbol.dispose]: () => {} })) as unknown as Overseer['getGadget'],
     ...overseer,
   }
@@ -283,11 +283,24 @@ describe('a pinned trigger\'s run-on-request control', () => {
     expect(dispose).toHaveBeenCalledOnce()
   })
 
+  it('says assignments are off on this instance when the server says so', async () => {
+    await render({
+      listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
+      getTriggerAssignment: async () => ({ enabled: false, assignment: null }),
+    })
+    const section = container.querySelector('[aria-label="Runs act as"]')!
+    expect(section.textContent).toContain('Not enabled on this instance.')
+    expect(section.querySelector('input, select')).toBeNull()
+  })
+
   it("shows a pinned trigger's assignment and whether its key was given", async () => {
     await render({
       listHooks: async () => [hook({ id: 7 })], getTriggerDefinition: async () => PIN,
       getTriggerAssignment: async () => ({
-        hookId: 7, gatekeeperId: 10, credentialRef: '5b2c1d8e-0000-4000-8000-0000000000a1', assignedBy: ADA, assignedAt: new Date(0),
+        enabled: true,
+        assignment: {
+          hookId: 7, gatekeeperId: 10, credentialRef: '5b2c1d8e-0000-4000-8000-0000000000a1', assignedBy: ADA, assignedAt: new Date(0),
+        },
       }),
     })
     expect(container.querySelector('[aria-label="Runs act as"]')?.textContent)

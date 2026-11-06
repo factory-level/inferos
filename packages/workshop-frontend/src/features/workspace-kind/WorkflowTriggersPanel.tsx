@@ -38,6 +38,8 @@ type Loaded =
       collaborators: CollaboratorInfo[]
       // Each pinned hook's service-account assignment, by hook id; absent when it has none.
       assignments: ReadonlyMap<number, TriggerAssignment>
+      // Whether this instance has assignments on, as the server reads it (off by default).
+      assignmentsEnabled: boolean
       // The connections each pinned hook's gadget binds, which an assignment can choose, by hook id.
       connections: ReadonlyMap<number, AssignableConnection[] | null>
     }
@@ -108,9 +110,11 @@ export const WorkflowTriggersPanel = ({
         Promise.all(pinned.map(h => connectionsOf(overseer, h.gadgetId))),
       ])
       const assignments = new Map<number, TriggerAssignment>()
-      assignmentList.forEach((assignment, i) => { if (assignment) assignments.set(pinned[i]!.id, assignment) })
+      assignmentList.forEach((state, i) => { if (state.assignment) assignments.set(pinned[i]!.id, state.assignment) })
+      // One instance-wide switch; every read reports the same.
+      const assignmentsEnabled = assignmentList.some(state => state.enabled)
       const connections = new Map(pinned.map((h, i) => [h.id, connectionList[i]!]))
-      return { hooks, definitions, pins, controls, collaborators, assignments, connections }
+      return { hooks, definitions, pins, controls, collaborators, assignments, assignmentsEnabled, connections }
     }
     load()
       .then(ready => {
@@ -275,6 +279,7 @@ export const WorkflowTriggersPanel = ({
                         key={`${hook.id}:${JSON.stringify(loaded.assignments.get(hook.id) ?? null)}`}
                         overseer={overseer}
                         hookId={hook.id}
+                        enabled={loaded.assignmentsEnabled}
                         assignment={loaded.assignments.get(hook.id) ?? null}
                         connections={loaded.connections.get(hook.id) ?? null}
                         onChanged={() => setReloadTick(t => t + 1)}

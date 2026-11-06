@@ -66,9 +66,10 @@ afterEach(() => {
 const overseerWith = (methods: Partial<Record<'setTriggerAssignment' | 'provisionTriggerCredential', unknown>>) =>
   methods as unknown as RpcStub<Overseer>
 
-const render = async (overseer: RpcStub<Overseer>, current: TriggerAssignment | null, onChanged = vi.fn<() => void>()) => {
+const render = async (overseer: RpcStub<Overseer>, current: TriggerAssignment | null, onChanged = vi.fn<() => void>(),
+  enabled = true) => {
   await act(async () => {
-    root.render(<TriggerAssignmentEditor overseer={overseer} hookId={1} assignment={current}
+    root.render(<TriggerAssignmentEditor overseer={overseer} hookId={1} enabled={enabled} assignment={current}
       connections={CONNECTIONS} onChanged={onChanged} />)
   })
   return onChanged
@@ -133,7 +134,7 @@ describe('TriggerAssignmentEditor', () => {
 
   it('says how to get a connection when the gadget binds none', async () => {
     await act(async () => {
-      root.render(<TriggerAssignmentEditor overseer={overseerWith({})} hookId={1} assignment={null}
+      root.render(<TriggerAssignmentEditor overseer={overseerWith({})} hookId={1} enabled assignment={null}
         connections={[]} onChanged={vi.fn<() => void>()} />)
     })
     expect(container.textContent).toContain("Bind this trigger's gadget to a connection")
@@ -143,7 +144,7 @@ describe('TriggerAssignmentEditor', () => {
   it("says the gadget's connections couldn't be read, and retries", async () => {
     const onChanged = vi.fn<() => void>()
     await act(async () => {
-      root.render(<TriggerAssignmentEditor overseer={overseerWith({})} hookId={1} assignment={null}
+      root.render(<TriggerAssignmentEditor overseer={overseerWith({})} hookId={1} enabled assignment={null}
         connections={null} onChanged={onChanged} />)
     })
     expect(container.querySelector('[role="alert"]')?.textContent).toBe("Couldn't read this trigger's connections.")
@@ -191,6 +192,27 @@ describe('TriggerAssignmentEditor', () => {
     expect(container.innerHTML).not.toContain(KEY)
     expect(reactTreeHolds(KEY)).toBe(false)
     expect(onChanged).not.toHaveBeenCalled()
+  })
+
+  // The manager, 2026-11-06: assignments are off by default; the server decides, the editor says so.
+  it('says assignments are off on this instance and offers no way to assign or give a key', async () => {
+    await render(overseerWith({}), null, undefined, false)
+    expect(container.textContent).toContain('Not enabled on this instance.')
+    expect(container.querySelector('select')).toBeNull()
+    expect(container.querySelector('input')).toBeNull()
+    expect([...container.querySelectorAll('button')].map(b => b.textContent)).toEqual([])
+  })
+
+  it('still lets an Admin remove an assignment made before they were turned off', async () => {
+    const setTriggerAssignment = vi.fn<Overseer['setTriggerAssignment']>(async () => null)
+    const onChanged = await render(overseerWith({ setTriggerAssignment }), assignment(), undefined, false)
+    expect(container.textContent).toContain('Not enabled on this instance.')
+    expect(container.textContent).toContain('Operations board')
+    expect(container.querySelector('input')).toBeNull()
+    expect([...container.querySelectorAll('button')].map(b => b.textContent)).toEqual(['Remove'])
+    await act(async () => { button('Remove').click() })
+    expect(setTriggerAssignment).toHaveBeenCalledWith(1, null)
+    expect(onChanged).toHaveBeenCalled()
   })
 
   it('says no key has been given yet, then who gave it and when', async () => {
