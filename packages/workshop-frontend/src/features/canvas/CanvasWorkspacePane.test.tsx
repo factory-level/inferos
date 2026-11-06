@@ -20,6 +20,9 @@ const overseer = {
   subscribeToActions: async () => ({ [Symbol.dispose]: () => {} }),
   listActions: async () => ({ entries: [] }),
   getGatekeeperByResourceUrl: async () => null,
+  // The page's configuration and the workspace's settings (FAC-95), unset.
+  traceConfiguration: async () => [],
+  getWorkspaceConfiguration: async () => ({ revision: '0', settings: {} }),
   // A gadget widget's declared events (FAC-94) come from its head commit's states.json.
   listTree: async () => [],
   getGadget: () => Object.assign(new Promise(() => {}), { [Symbol.dispose]: () => {} }),
