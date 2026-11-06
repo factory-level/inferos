@@ -1,61 +1,192 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { Overseer } from "@gadgets/workshop-shared/api";
+import type { AuthoredWidgetBuildDurableObject } from "../src/authored-widget-build.js";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import { readBlueprintVersionToInstall } from "../src/blueprint-install.js";
 import { blueprintVersionMetadata } from "../src/blueprint-archive.js";
+import { compileAuthoredWidgetSources } from "../src/authored-widget-publication.js";
 
 declare module "cloudflare:workers" {
-  interface ProvidedEnv { TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>; }
+  interface ProvidedEnv {
+    TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
+    TEST_AUTHORED_WIDGET_BUILD: DurableObjectNamespace<AuthoredWidgetBuildDurableObject>;
+  }
 }
 
 let nextId = 0;
 
-async function withClient<T>(run: (impl: any, client: Overseer) => Promise<T>): Promise<T> {
+async function withClient<T>(run: (impl: any, client: Overseer, instance: OverseerDurableObject) => Promise<T>): Promise<T> {
   const stub = env.TEST_OVERSEER.getByName(`authored-widget-flow-${++nextId}`);
   return runInDurableObject(stub, async instance => {
-    const impl = (instance as unknown as {impl: any}).impl;
-    const ownerId = impl.users.newUniqueId().toString();
-    impl.ownerId = ownerId;
-    impl.defaultGadgetId = 1;
-    impl.storage.defaultGadgetId.put(1);
-    impl.ensureAmbientCapsules = async () => {};
-    impl.markOutputsDirty = () => {};
-    impl.requireSharedConfiguration = async () => {};
-    impl.recordGadgetAnalytics = () => {};
-    const owner = impl.users.idFromString(ownerId);
-    impl.users.get = () => ({
-      id: owner,
-      whoami: async () => ({id: "owner-profile", name: "Owner"}),
-    });
-    const index = new Map<string, string>();
-    const versions = new Map<string, {body: Uint8Array, metadata?: Record<string, string>}>();
-    impl.env = {
-      ...impl.env,
-      BLUEPRINTS: {
-        get: async (key: string) => index.get(key) ?? null,
-        put: async (key: string, value: string) => { index.set(key, value); },
-        delete: async (key: string) => { index.delete(key); },
-      },
-      BLUEPRINT_CONTENT: {
-        put: async (key: string, body: Uint8Array, options?: {customMetadata?: Record<string, string>}) => {
-          versions.set(key, {body: new Uint8Array(body), metadata: options?.customMetadata});
+      const impl = (instance as unknown as {impl: any}).impl;
+      const ownerId = impl.users.newUniqueId().toString();
+      impl.ownerId = ownerId;
+      impl.defaultGadgetId = 1;
+      impl.storage.defaultGadgetId.put(1);
+      impl.ensureAmbientCapsules = async () => {};
+      impl.markOutputsDirty = () => {};
+      impl.requireSharedConfiguration = async () => {};
+      impl.recordGadgetAnalytics = () => {};
+      const owner = impl.users.idFromString(ownerId);
+      impl.users.get = () => ({
+        id: owner,
+        whoami: async () => ({id: "owner-profile", name: "Owner"}),
+        operateSessionWorkspaceId: async () => stub.id.toString(),
+        recordSharedGadgetOpen: async () => {},
+      });
+      const index = new Map<string, string>();
+      const versions = new Map<string, {body: Uint8Array, metadata?: Record<string, string>}>();
+      impl.env = {
+        ...impl.env,
+        BLUEPRINTS: {
+          get: async (key: string) => index.get(key) ?? null,
+          put: async (key: string, value: string) => { index.set(key, value); },
+          delete: async (key: string) => { index.delete(key); },
         },
-        get: async (key: string) => {
-          const item = versions.get(key);
-          return item ? {body: new Response(item.body).body, customMetadata: item.metadata} : null;
+        BLUEPRINT_CONTENT: {
+          put: async (key: string, body: Uint8Array, options?: {customMetadata?: Record<string, string>}) => {
+            versions.set(key, {body: new Uint8Array(body), metadata: options?.customMetadata});
+          },
+          get: async (key: string) => {
+            const item = versions.get(key);
+            return item ? {body: new Response(item.body).body, customMetadata: item.metadata} : null;
+          },
+          delete: async (key: string) => { versions.delete(key); },
         },
-        delete: async (key: string) => { versions.delete(key); },
-      },
-    };
-    const client = await instance.open(
-      ownerId, "owner-profile", new NativeRpcStub<() => void>(() => {}));
-    return run(impl, client);
+      };
+      const transport = new NativeRpcStub<() => void>(() => {});
+      const client = await instance.open(ownerId, "owner-profile", transport);
+      try {
+        return await run(impl, client, instance);
+      } finally {
+        client[Symbol.dispose]();
+        transport[Symbol.dispose]();
+      }
   });
 }
 
 describe("authored widget publication through the Overseer client", () => {
+  it("builds a chat draft without changing its gadget head or published state", async () => {
+    await withClient(async (impl, client) => {
+      impl.env = { ...impl.env, AUTHORED_WIDGET_BUILD_ENABLED: "true" };
+      impl.storage.gadgets.put({
+        type: "gadget", id: 1, title: "Widget", created: new Date(0), bindingName: "widget", bindings: {},
+      });
+      impl.storage.chatMeta.put({ id: 51, title: "Draft", started: new Date(0), lastActive: new Date(0) });
+      impl.checkChatExistsAndMaterializeChanges = vi.fn();
+      impl.readGadgetFiles = vi.fn(async () => new Map([
+        ["client.tsx", "export default function Widget(){ return <div/> }"],
+      ]));
+      impl.authoredWidgetBuildNamespace = {
+        newUniqueId: () => "preview-build",
+        get: () => ({ compile: async () => ({ clientJs: "compiled preview", durationMs: 7, clientBytes: 16 }) }),
+      };
+      const writeCommit = vi.spyOn(impl.gitStore, "writeFilesAsCommit");
+      const r2Write = vi.spyOn(impl.env.BLUEPRINT_CONTENT, "put");
+      const gadgetBefore = structuredClone(impl.storage.gadgets.get(1));
+      const blueprintsBefore = [...impl.storage.blueprints.list()];
+
+      const result = await client.previewAuthoredWidget(1, 51);
+
+      expect(result.jsCode.length).toBeGreaterThan(0);
+      expect(result.measurements.durationMs).toBeGreaterThanOrEqual(0);
+      expect(result.measurements.clientBytes).toBe(new TextEncoder().encode(result.jsCode).byteLength);
+      expect(impl.checkChatExistsAndMaterializeChanges).toHaveBeenCalledWith(51);
+      expect(writeCommit).not.toHaveBeenCalled();
+      expect(r2Write).not.toHaveBeenCalled();
+      expect(impl.storage.gadgets.get(1)).toEqual(gadgetBefore);
+      expect([...impl.storage.blueprints.list()]).toEqual(blueprintsBefore);
+    });
+  });
+
+  it("compiles a minimal draft through the real build Durable Object in workerd", async () => {
+    await withClient(async (impl, client) => {
+      impl.env = { ...impl.env, AUTHORED_WIDGET_BUILD_ENABLED: "true" };
+      impl.authoredWidgetBuildNamespace = env.TEST_AUTHORED_WIDGET_BUILD;
+      impl.storage.gadgets.put({
+        type: "gadget", id: 1, title: "Widget", created: new Date(0), bindingName: "widget", bindings: {},
+      });
+      impl.storage.chatMeta.put({ id: 51, title: "Draft", started: new Date(0), lastActive: new Date(0) });
+      impl.checkChatExistsAndMaterializeChanges = vi.fn();
+      impl.readGadgetFiles = vi.fn(async () => new Map([
+        ["client.tsx", "export default function Widget(){ return <div>workerd preview</div> }"],
+      ]));
+
+      await expect(client.previewAuthoredWidget(1, 51)).resolves.toMatchObject({
+        jsCode: expect.stringContaining("workerd preview"),
+        measurements: { clientBytes: expect.any(Number), durationMs: expect.any(Number) },
+      });
+    });
+  }, 30_000);
+
+  it.each([
+    ["invalid TSX", "export default function {", "Invalid TypeScript syntax."],
+    ["node import", 'import fs from "node:fs"; export default function Widget(){ return null }', "Unapproved package import."],
+    ["non-literal dynamic import", "const name = './x'; void import(name); export default function Widget(){ return null }", "Dynamic import refused."],
+    ["eval", 'eval("1"); export default function Widget(){ return null }', "Dynamic code loading refused."],
+    ["Function constructor", 'new Function("return 1")(); export default function Widget(){ return null }', "Denied global."],
+    ["require", 'require("react"); export default function Widget(){ return null }', "Dynamic code loading refused."],
+    ["import.meta", "const url = import.meta.url; export default function Widget(){ return null }", "import.meta refused."],
+    ...["Bun", "Deno", "EventSource", "Function", "global", "globalThis", "localStorage", "navigator",
+      "self", "sessionStorage", "WebSocket", "window", "XMLHttpRequest", "fetch", "process"]
+      .map(name => [`${name} global`, `${name}; export default function Widget(){ return null }`, "Denied global."]),
+    ["denied member", "globalThis['fetch']('/private'); export default function Widget(){ return null }", "Denied global."],
+    ["document defaultView", "document.defaultView; export default function Widget(){ return null }", "Denied global."],
+    ["computed document defaultView", "document['defaultView']; export default function Widget(){ return null }", "Denied global."],
+    ["document computed member", "const key = 'cookie'; document[key]; export default function Widget(){ return null }", "Denied global."],
+    ["missing default export", "export const Widget = () => null", "Missing default component export."],
+  ])("refuses %s in the real workerd build Durable Object", async (_label, source, message) => {
+    const stub = env.TEST_AUTHORED_WIDGET_BUILD.get(env.TEST_AUTHORED_WIDGET_BUILD.newUniqueId());
+    await runInDurableObject(stub, async build => {
+      await expect(compileAuthoredWidgetSources({
+        sources: { "client.tsx": source },
+        builds: { newUniqueId: () => "local-build", get: () => build },
+        onFailure: () => {},
+      })).rejects.toThrow(message);
+    });
+  }, 30_000);
+
+  it("rejects an unsafe draft path before allocating a build object", async () => {
+    await withClient(async (impl, client) => {
+      impl.env = { ...impl.env, AUTHORED_WIDGET_BUILD_ENABLED: "true" };
+      impl.storage.gadgets.put({
+        type: "gadget", id: 1, title: "Widget", created: new Date(0), bindingName: "widget", bindings: {},
+      });
+      impl.storage.chatMeta.put({ id: 51, title: "Draft", started: new Date(0), lastActive: new Date(0) });
+      impl.checkChatExistsAndMaterializeChanges = vi.fn();
+      impl.readGadgetFiles = vi.fn(async () => new Map([
+        ["client.tsx", "export default function Widget(){ return <div/> }"],
+        ["notes/../private.ts", "private"],
+      ]));
+      const newUniqueId = vi.fn(() => "preview-build");
+      impl.authoredWidgetBuildNamespace = {
+        newUniqueId,
+        get: () => { throw new Error("must not allocate a build object"); },
+      };
+
+      await expect(client.previewAuthoredWidget(1, 51)).rejects.toThrow("Invalid source path.");
+      expect(newUniqueId).not.toHaveBeenCalled();
+    });
+  });
+
+  it("denies preview when disabled, to use-role collaborators, and to operate sessions", async () => {
+    await withClient(async (impl, client, instance) => {
+      await expect(client.previewAuthoredWidget(1, 1)).rejects.toThrow("Authored widget preview is disabled.");
+
+      impl.getSharingManager = async () => ({}) as never;
+      impl.authorizeCollaborator = async () => "use";
+      let useClient = await instance.open(
+        impl.users.newUniqueId().toString(), "collaborator-profile", new NativeRpcStub<() => void>(() => {}));
+      await expect(useClient.previewAuthoredWidget(1, 1)).rejects.toThrow("Unauthorized");
+
+      let operateClient = await instance.open(
+        impl.ownerId, "owner-profile", new NativeRpcStub<() => void>(() => {}), undefined, undefined, true);
+      await expect(operateClient.previewAuthoredWidget(1, 1)).rejects.toThrow("Unauthorized: an operate session");
+    });
+  });
+
   it("refuses create/update on build errors without changing the published version", async () => {
     await withClient(async (impl, client) => {
       const sourceCommit = await impl.gitStore.writeFilesAsCommit(
