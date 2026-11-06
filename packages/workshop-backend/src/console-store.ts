@@ -173,6 +173,13 @@ export function consoleWidgetRefusal(storage: Pick<ConsoleStorage, "gadgets">, e
   if (refusal || !commits) return refusal;
   let commit = currentCommit(storage, commits, entry.gadgetId);
   let { class: fileClass, violations } = commit.classification;
+  let candidateGadget = storage.gadgets.get(entry.gadgetId);
+  let installed = candidateGadget?.type === "gadget" ? candidateGadget.installedFrom : undefined;
+  if (installed?.authoredWidgetBuild === true && fileClass === null &&
+      violations.length === 1 && violations[0].code === "missingServer") {
+    return commit.statesProblem === null ? null
+      : `Gadget ${entry.gadgetId}'s states.json isn't valid: ${commit.statesProblem}`;
+  }
   if (fileClass === "visualWidget" || fileClass === "callableTools" || fileClass === "callableCombined") {
     return commit.statesProblem === null ? null
       : `Gadget ${entry.gadgetId}'s states.json isn't valid: ${commit.statesProblem}`;
@@ -720,7 +727,11 @@ export class WorkspaceConsoleStore {
       }
       let commit = record.commitId === undefined ? undefined : commits.get(record.commitId);
       let fileClass = commit?.classification.class;
-      let runs = fileClass === "visualWidget" || fileClass === "callableTools" || fileClass === "callableCombined";
+      let authoredUiOnly = installed.authoredWidgetBuild === true && fileClass === null &&
+        commit?.classification.violations.length === 1 &&
+        commit.classification.violations[0].code === "missingServer";
+      let runs = authoredUiOnly || fileClass === "visualWidget" || fileClass === "callableTools" ||
+        fileClass === "callableCombined";
       return { gadgetId: record.id, blueprintId: entry.blueprintId, version: entry.version,
         versionId: consoleWidgetVersionId(entry), commitId: record.commitId ?? null,
         surfaces: runs ? { ui: fileClass !== "callableTools", tools: commit!.tools?.map(tool => tool.name) ?? [],
