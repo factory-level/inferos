@@ -5,6 +5,8 @@ import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-sha
 import type { CanvasCatalog, CanvasContent, CanvasOperation, CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
 import { canvasDefinitionFromPage, canvasTargetPath, formatCanvasTarget, type CanvasPageOperation, type CanvasTarget } from '@gadgets/workshop-shared/canvas-model'
 import { CanvasAttachmentsEditor } from './CanvasAttachmentsEditor'
+import { PageConfigurationPanel } from './PageConfigurationPanel'
+import { WorkspaceSettingsEditor } from './WorkspaceSettingsEditor'
 import { CanvasNodeEditor } from './CanvasNodeEditor'
 import DeleteConfirmationDialog from '../../components/DeleteConfirmationDialog'
 import { CanvasBoardFullView } from './CanvasBoardFullView'
@@ -182,7 +184,9 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
           <CanvasTargetTree page={page} selected={formatCanvasTarget(selected.target)} gadgets={gadgets} onSelect={select} />
           <section aria-label="Selected target" className="min-w-0 space-y-4">
             <CanvasTargetBreadcrumb path={path} gadgets={gadgets} onSelect={select} />
-            {selected.kind === 'workspace' && <p className="text-sm text-kumo-subtle">The workspace's own settings aren't edited from a view.</p>}
+            {selected.kind === 'workspace' && (storage.kind === 'durable'
+              ? <WorkspaceSettingsEditor overseer={overseer} />
+              : <p className="text-sm text-kumo-subtle">Unsaved views have no workspace settings.</p>)}
             {selected.kind === 'page' && <>
               <p className="text-xs font-medium uppercase text-kumo-subtle">View</p>
               <form key={`${active.id}:${active.title}`} className="flex flex-wrap items-end gap-2" onSubmit={event => {
@@ -206,6 +210,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
               </form>
               <CanvasAttachmentsEditor key={`${page.id}:${page.revision}`} target={page.id} node={undefined} attachments={page.attachments}
                 pages={pages} busy={canvas.busy} reader={overseer} gadgets={gadgets} onEdit={canvas.editPage} />
+              {storage.kind === 'durable' && <PageConfigurationPanel overseer={overseer} page={page} busy={canvas.busy} onEdit={canvas.editPage} />}
             </>}
             {selected.kind === 'object' && (() => {
               const index = active.sections.findIndex(section => section.id === selected.node.id)

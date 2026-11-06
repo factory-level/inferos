@@ -2027,6 +2027,25 @@ export function openHttpInferOpsClient(
       });
     },
 
+    async readTableDefinition(_host: string, tableId: string): Promise<TableRecordSchema> {
+      // `table.get` reads the X-Workspace-Id workspace, the one this client was opened for from
+      // the host. Its refusals read as one NOT_FOUND, as `object.embed`'s do.
+      if (!UUID.test(tableId)) throw tableNotFound();
+      let body: unknown;
+      try {
+        body = await request("object.type.get", { method: "GET", path: `/object/types/${tableId.toLowerCase()}` });
+      } catch (error) {
+        const code = inferOpsCode(error);
+        if (code === "NOT_FOUND" || code === "FORBIDDEN") throw tableNotFound();
+        throw error;
+      }
+      return parsed("object.type.get", body, raw => {
+        const table = parseTableSchema(record(raw, "response").type);
+        if (table.id !== tableId.toLowerCase()) throw new Malformed("not the table asked for");
+        return table;
+      });
+    },
+
     async readTableRow(host: string, recordId: string): Promise<TableRead> {
       if (!UUID.test(recordId)) throw tableNotFound();
       return embed("object.row.read",

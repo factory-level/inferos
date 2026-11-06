@@ -55,6 +55,11 @@ describe("a governed list request (FAC-9)", () => {
       [{ meta: { url: "https://example.com" } }, "INVALID_REQUEST"],
       [{ url: "https://example.com", method: "DELETE" }, "INVALID_REQUEST"],
       [{ filters: Array.from({ length: 5 }, () => ({ field: "name", op: "eq", value: "x" })) }, "INVALID_REQUEST"],
+      // r1 on #389: a filter whose value can't match its field's type is refused, never read as empty.
+      [{ filters: [{ field: "units", op: "contains", value: "3" }] }, "OPERATOR_NOT_ALLOWED"],
+      [{ filters: [{ field: "units", op: "eq", value: "3" }] }, "INVALID_REQUEST"],
+      [{ filters: [{ field: "name", op: "eq", value: 3 }] }, "INVALID_REQUEST"],
+      [{ filters: [{ field: "name", op: "contains", value: null }] }, "INVALID_REQUEST"],
     ] as const) {
       expect(refusal(() => parseGovernedListRequest(request, DESCRIPTION)), JSON.stringify(request)).toBe(code);
     }
@@ -77,7 +82,7 @@ describe("listing a governed resource on the server (FAC-9)", () => {
     expect(listGoverned(rows(14), request).rows.map(r => r.values.units)).toEqual([6, 13]);
   });
 
-  it("refuses a cursor made for another request, or not made here", () => {
+  it("refuses a cursor made for another request, or one that isn't a cursor", () => {
     let page = listGoverned(rows(30), parseGovernedListRequest({ pageSize: 5 }, DESCRIPTION));
     let other = parseGovernedListRequest({ pageSize: 5, sort: { field: "units", order: "desc" } }, DESCRIPTION);
     expect(refusal(() => listGoverned(rows(30), { ...other, cursor: page.nextCursor! }))).toBe("INVALID_CURSOR");
