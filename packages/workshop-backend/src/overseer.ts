@@ -6,7 +6,7 @@ import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@g
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
-  TriggerAssignment, TriggerAssignmentSettings,
+  TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation,
 } from "@gadgets/workshop-shared/workflow-definition";
@@ -179,6 +179,21 @@ export async function requireWorkflowInvoke(
  * (FAC-102). Fixed words: nothing of the key or of the service's reason is ever repeated.
  */
 export const PROVISION_REFUSED = "The key wasn't accepted.";
+
+/** The refusal for assigning, giving a key or an assigned run while assignments are off (FAC-102). */
+export const WORKFLOW_ASSIGNMENTS_DISABLED = "Workflow assignments aren't enabled on this instance.";
+
+/**
+ * Whether workflow trigger assignments are on (`WORKFLOW_ASSIGNMENTS_ENABLED === "true"`): off by
+ * default, and to stay off on every deployment until the fail-closed follow-up merges (the manager,
+ * 2026-11-06). The server decides; the UI only reflects it.
+ */
+export function workflowAssignmentsEnabled(env: { WORKFLOW_ASSIGNMENTS_ENABLED?: string }): boolean {
+  return env.WORKFLOW_ASSIGNMENTS_ENABLED === "true";
+}
+
+/** The fixed refusal when a request failed before its delivery took it, for any other reason. */
+const RUN_NOT_STARTED = "This trigger couldn't be run just now.";
 
 /** Longest service-account key relayed for provisioning. */
 const MAX_PROVISIONED_KEY_LENGTH = 1024;
@@ -6626,6 +6641,14 @@ class OverseerImpl implements AgentHooks {
   /** The admitted, assigned runs in flight (FAC-102; see system-run.ts). */
   systemRuns = new SystemRunRegistry();
 
+  /**
+   * Invocations a delivery has taken while their `invokeTrigger` call is still waiting (#374):
+   * startHook adds one as `fire` consumes it, and invokeWorkflowTrigger reads and removes it to
+   * tell the run's own failure from a request that never started. In memory: both happen within
+   * the one call, which a reset ends anyway.
+   */
+  takenInvocations = new Set<string>();
+
   // What system-run.ts needs of this workspace, bound to it.
   #systemRunHost(): SystemRunHost {
     return {
@@ -12685,10 +12708,19 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // firing is recorded with it (workflow-definition-store.ts); it never falls back to another.
     // A delivery a person asked for (invokeTrigger) names the invocation admitted for it; the store
     // accepts only that, once, and records who asked as a claim beside the run.
+    let invocationId = typeof request?.invocationId === "string" ? request.invocationId : undefined;
+    // Assignments off (FAC-102): a request for a trigger assigned before never runs, neither as the
+    // service account nor on the gadget's own callback, and is refused before it is taken.
+    if (invocationId !== undefined && !workflowAssignmentsEnabled(this.env) &&
+        this.impl.workflowDefinitionStore().assignmentOf(hookId)) {
+      throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+    }
     let delivery = this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
         gadgetId => this.impl.getGadgetHead(gadgetId),
         profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build",
-        typeof request?.invocationId === "string" ? request.invocationId : undefined);
+        invocationId);
+    // The request is taken: from here a failure is the run's own (invokeWorkflowTrigger).
+    if (delivery?.invocation) this.impl.takenInvocations.add(delivery.invocation.id);
 
     // An admitted request for an assigned trigger runs as its service account (FAC-102), in a
     // run-scoped worker, never through the gadget's own callback and the bindings people connected.
@@ -13441,8 +13473,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("publish", "always");
     return this.impl.setTriggerAssignment(await this.#getClientProfile(), hookId, settings);
   }
-  async getTriggerAssignment(hookId: number): Promise<TriggerAssignment | null> {
-    return this.impl.workflowDefinitionStore().assignmentOf(hookId);
+  async getTriggerAssignment(hookId: number): Promise<TriggerAssignmentState> {
+    return {
+      enabled: workflowAssignmentsEnabled(this.impl.env),
+      assignment: this.impl.workflowDefinitionStore().assignmentOf(hookId),
+    };
   }
   // Giving the key decides what runs act as, like assigning: the same authority.
   async provisionTriggerCredential(hookId: number, key: string): Promise<TriggerAssignment> {
@@ -16052,7 +16087,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // configures nothing (FAC-102, inferops ADR 0011 S6).
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
   async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
-  async getTriggerAssignment(_hookId: number): Promise<TriggerAssignment | null> { this.#deny(); }
+  async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }
   async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> {
     return this.impl.workflowDefinitionStore().controls(this.clientProfileId);
@@ -16687,7 +16722,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
   async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
-  async getTriggerAssignment(_hookId: number): Promise<TriggerAssignment | null> { this.#deny(); }
+  async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }
   async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> { this.#deny(); }
   async invokeTrigger(_hookId: number): Promise<WorkflowInvocation> { this.#deny(); }
@@ -17300,6 +17335,7 @@ export function setWorkflowTriggerAssignment(
   let previous = store.assignmentOf(hookId);
   let gatekeeperId: number | null = null;
   if (settings !== null) {
+    if (!workflowAssignmentsEnabled(impl.env)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
     let requested = typeof settings === "object" ? (settings as {gatekeeperId?: unknown}).gatekeeperId : undefined;
     if (typeof requested !== "number" || !Number.isSafeInteger(requested)) {
       throw new TypeError("An assignment names the connection by its id.");
@@ -17397,6 +17433,7 @@ export async function provisionWorkflowTriggerCredential(
     impl: Pick<OverseerImpl, "env" | "storage" | "ctx" | "systemRuns" | "workflowDefinitionStore">,
     caller: AiChatAuthorInfo, hookId: number, key: string): Promise<TriggerAssignment> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
+  if (!workflowAssignmentsEnabled(impl.env)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
   let assignment = impl.workflowDefinitionStore().assignmentOf(hookId);
   if (!assignment) throw new Error("This trigger isn't assigned to a service account.");
   if (typeof key !== "string" || !key || key.length > MAX_PROVISIONED_KEY_LENGTH) throw new Error(PROVISION_REFUSED);
@@ -17466,7 +17503,7 @@ async function forgetProvisioned(
  */
 export async function invokeWorkflowTrigger(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
-        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord">,
+        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations">,
     userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
@@ -17476,21 +17513,29 @@ export async function invokeWorkflowTrigger(
   // Re-read after the await: the input gate was open, so the hook may have been disabled meanwhile.
   let record = requireLiveHook(impl as OverseerImpl, hookId);
   let store = impl.workflowDefinitionStore();
+  // Assignments off (FAC-102): a trigger assigned before is refused here, before anything is minted.
+  if (!workflowAssignmentsEnabled(impl.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
   let invocation = store.beginInvocation(profileId, hookId);
   try {
     await (record.controller as unknown as HookController<RpcTarget>).invoke!({invocationId: invocation.id});
   } catch (error) {
-    // Decided by what happened to the invocation, not by the error's words (#374, review.r2): a
-    // delivery consumes it, so if it is gone the gatekeeper implemented `invoke` and took the
-    // request, and the failure is the run's own, surfacing with its cause whatever it names. Only
-    // a request no delivery took can mean the gatekeeper has no `invoke` at all.
-    let taken = !store.isWaiting(invocation.id);
+    // Decided by the recorded outcome, never by the error's words or by the request having gone
+    // (#374, review.r2): startHook marks the invocation taken as its delivery consumes it. Taken,
+    // the failure is the run's own and surfaces with its cause, whatever it names. Not taken (the
+    // gatekeeper never delivered it, or a pin, control or assignment change dropped it), the
+    // invoker gets fixed words only: that it can't run on request when the gatekeeper has no
+    // `invoke`, our own refusal when we gave one, and otherwise that it couldn't run just now.
+    let taken = impl.takenInvocations.has(invocation.id);
     store.cancelInvocation(invocation.id);
+    if (taken) throw error;
     let message = error instanceof Error ? error.message : String(error);
-    if (!taken && /does not implement the method "invoke"|\binvoke is not a function|no such method:? "?invoke\b/i.test(message)) {
+    if (/does not implement the method "invoke"|\binvoke is not a function|no such method:? "?invoke\b/i.test(message)) {
       throw new Error("This trigger can't be run on request.", {cause: error});
     }
-    throw error;
+    if (message === WORKFLOW_ASSIGNMENTS_DISABLED) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED, {cause: error});
+    throw new Error(RUN_NOT_STARTED, {cause: error});
+  } finally {
+    impl.takenInvocations.delete(invocation.id);
   }
   return invocation;
 }

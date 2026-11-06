@@ -8,7 +8,8 @@ import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
 import {
   OverseerDurableObject, PROVISION_REFUSED, makeOverseerStorage, provisionWorkflowTriggerCredential,
-  retireAssignmentsUsing, retireTriggerAssignment, retireUnboundAssignments, setWorkflowTriggerAssignment,
+  WORKFLOW_ASSIGNMENTS_DISABLED, retireAssignmentsUsing, retireTriggerAssignment, retireUnboundAssignments,
+  setWorkflowTriggerAssignment,
 } from "../src/overseer.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SYSTEM_RUN_ENDED, SYSTEM_RUN_UNSUPPORTED, SYSTEM_RUN_WRONG_CONNECTION,
@@ -279,13 +280,18 @@ describe("an assignment", () => {
 });
 
 /** An Overseer whose startHook fires HOOK from `store`, with a recording runAssignedDelivery. */
-function overseerFor(store: WorkspaceWorkflowDefinitionStore) {
+function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled = true) {
+  let takenInvocations = new Set<string>();
   let gadgetCallback = { onSchedule: vi.fn(async () => "gadget's own") };
   let runSpy = vi.fn(async (..._args: unknown[]) => "as the service account");
   let overseer = Object.create(OverseerDurableObject.prototype) as OverseerDurableObject;
   Object.assign(overseer, {
-    env: { BLUEPRINTS: { get: async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG) } },
+    env: {
+      BLUEPRINTS: { get: async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG) },
+      ...(assignmentsEnabled ? { WORKFLOW_ASSIGNMENTS_ENABLED: "true" } : {}),
+    },
     impl: {
+      takenInvocations,
       assertGatekeeperUsable: () => {},
       getSharingManager: async () => ({ getEffectiveRole: () => undefined }),
       getOwnerProfileId: async () => ADA.id,
@@ -299,7 +305,7 @@ function overseerFor(store: WorkspaceWorkflowDefinitionStore) {
       },
     },
   });
-  return { overseer, gadgetCallback, runSpy };
+  return { overseer, gadgetCallback, runSpy, takenInvocations };
 }
 
 describe("startHook for a trigger with an assignment", () => {
@@ -343,7 +349,9 @@ describe("startHook for a trigger with an assignment", () => {
 });
 
 /** An Overseer impl for assignments: HOOK wakes GADGET, which binds INFEROPS (inferops) and 60 (mail). */
-function assignmentImpl(env: Record<string, string>) {
+function assignmentImpl(given: Record<string, string>) {
+  // Assignments are on unless a test turns them off (WORKFLOW_ASSIGNMENTS_ENABLED, default off).
+  let env = { WORKFLOW_ASSIGNMENTS_ENABLED: "true", ...given };
   let { store } = pinnedStore();
   let aborted: string[] = [];
   let systemRuns = new SystemRunRegistry();
@@ -404,8 +412,8 @@ describe("assigning a trigger", () => {
 });
 
 /** A session over assignmentImpl whose person holds (or not) the deployment's publish authority. */
-async function assignmentSession(role: "build" | "use", holdsPublish: boolean) {
-  let { impl, store } = assignmentImpl({ SHARED_CONFIGURATION_GATEKEEPER: "inferops" });
+async function assignmentSession(role: "build" | "use", holdsPublish: boolean, enabled = true) {
+  let { impl, store } = assignmentImpl({ SHARED_CONFIGURATION_GATEKEEPER: "inferops", WORKFLOW_ASSIGNMENTS_ENABLED: String(enabled) });
   let asked: string[] = [];
   let full = Object.assign(impl as object, {
     isSharedConfiguration: async () => true,
@@ -773,5 +781,67 @@ describe("a run's session over real Workers RPC", () => {
     let refused: unknown;
     try { await stub.readBoard(); } catch (error) { refused = error; }
     expect(String(refused)).toContain(SYSTEM_RUN_ENDED);
+  });
+});
+
+// The manager, 2026-11-06: assignments are off by default (WORKFLOW_ASSIGNMENTS_ENABLED) until the
+// fail-closed follow-up merges. Off, nothing new is assigned or given a key and no run takes the
+// assigned path, while clearing and retiring still work so an Admin can always clean up.
+describe("WORKFLOW_ASSIGNMENTS_ENABLED off", () => {
+  const OFF = { SHARED_CONFIGURATION_GATEKEEPER: "inferops", WORKFLOW_ASSIGNMENTS_ENABLED: "false" };
+
+  it("refuses assigning and giving a key, in fixed words", async () => {
+    let { impl, store } = assignmentImpl(OFF);
+    expect(() => setWorkflowTriggerAssignment(impl, ADA, HOOK, { gatekeeperId: INFEROPS })).toThrow(WORKFLOW_ASSIGNMENTS_DISABLED);
+    expect(store.assignmentOf(HOOK)).toBeNull();
+    store.setAssignment(ADA, HOOK, INFEROPS);
+    let provision = vi.fn(async () => {});
+    (impl as unknown as { env: Record<string, unknown> }).env = { ...OFF, GATEKEEPER_INFEROPS: { provisionSystemCredential: provision } };
+    await expect(provisionWorkflowTriggerCredential(impl, ADA, HOOK, KEY)).rejects.toThrow(WORKFLOW_ASSIGNMENTS_DISABLED);
+    expect(provision).not.toHaveBeenCalled();
+  });
+
+  it("still clears an assignment made before, retiring it", async () => {
+    let { impl, store, aborted, running } = assignmentImpl(OFF);
+    let before = store.setAssignment(ADA, HOOK, INFEROPS)!;
+    running(before.credentialRef);
+    expect(setWorkflowTriggerAssignment(impl, ADA, HOOK, null)).toBeNull();
+    expect(store.assignmentOf(HOOK)).toBeNull();
+    expect(aborted).toEqual([systemGatekeeperFacetName(before.credentialRef, 7)]);
+  });
+
+  it("never runs a request through an assignment made before, nor through the gadget's own callback", async () => {
+    let { store } = pinnedStore();
+    store.setAssignment(ADA, HOOK, INFEROPS);
+    let { overseer, gadgetCallback, runSpy } = overseerFor(store, false);
+    let invocation = store.beginInvocation("operator", HOOK);
+    let refused: unknown;
+    try { await overseer.startHook(HOOK, { invocationId: invocation.id }); } catch (error) { refused = error; }
+    expect(String(refused)).toContain(WORKFLOW_ASSIGNMENTS_DISABLED);
+    expect(runSpy).not.toHaveBeenCalled();
+    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
+    // The request was not taken: it is still the store's to cancel, and no delivery was recorded.
+    expect(store.isWaiting(invocation.id)).toBe(true);
+  });
+
+  it("reads as disabled, with any assignment made before, so the editor can say so", async () => {
+    let off = await assignmentSession("build", true, false);
+    off.store.setAssignment(ADA, HOOK, INFEROPS);
+    expect(await off.overseer.getTriggerAssignment(HOOK)).toMatchObject({ enabled: false, assignment: { hookId: HOOK } });
+    await expect(off.overseer.setTriggerAssignment(HOOK, null)).resolves.toBeNull();
+    let on = await assignmentSession("build", true);
+    expect(await on.overseer.getTriggerAssignment(HOOK)).toEqual({ enabled: true, assignment: null });
+  });
+});
+
+describe("a request is taken only when its delivery is (#374, review.r2)", () => {
+  it("marks the invocation taken when startHook delivers it, and not for a scheduled firing", async () => {
+    let { store } = pinnedStore();
+    let { overseer, takenInvocations } = overseerFor(store);
+    await overseer.startHook(HOOK);
+    expect(takenInvocations.size).toBe(0);
+    let invocation = store.beginInvocation("operator", HOOK);
+    await overseer.startHook(HOOK, { invocationId: invocation.id });
+    expect(takenInvocations.has(invocation.id)).toBe(true);
   });
 });
