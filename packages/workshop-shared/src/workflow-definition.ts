@@ -123,6 +123,13 @@ export type TriggerAssignment = {
 /** What a builder sets to assign a trigger's runs: the connection whose system credential runs it. */
 export type TriggerAssignmentSettings = { gatekeeperId: number };
 
+/**
+ * What `getTriggerAssignment` reads (FAC-102): whether assignments are enabled on this instance
+ * (`WORKFLOW_ASSIGNMENTS_ENABLED`, off by default), and the trigger's assignment, which may be one
+ * made before they were turned off and can still be removed.
+ */
+export type TriggerAssignmentState = { enabled: boolean; assignment: TriggerAssignment | null };
+
 /** Most people one trigger control lists as allowed to run it. */
 export const MAX_TRIGGER_CONTROL_INVOKERS = 50;
 
