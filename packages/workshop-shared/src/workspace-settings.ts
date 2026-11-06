@@ -54,12 +54,22 @@ export type WorkspaceConfiguration = {
 /** The configuration of a workspace that has never saved one. */
 export const EMPTY_WORKSPACE_CONFIGURATION: WorkspaceConfiguration = Object.freeze({ revision: "0", settings: Object.freeze({}) });
 
+// A plain record: an object whose prototype is Object.prototype or null. A Date, Map, Set, class
+// instance, typed array or the like has no entries of its own, and must never read as "no settings".
+const isPlainRecord = (value: unknown): value is Record<string, unknown> => {
+  if (!value || typeof value !== "object") return false;
+  let prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+};
+
 /**
- * Validate and detach some settings: an object of registry keys, each with one of its values.
- * Throws a `TypeError` naming the first unknown key or invalid value, so nothing is half-applied.
+ * Validate and detach some settings: a plain record (see `isPlainRecord`) of registry keys, each
+ * with one of its values. Throws a `TypeError` for anything else, naming the first unknown key or
+ * invalid value, so nothing is half-applied. An empty record is valid: it sets nothing, which as a
+ * whole replacement is how a builder clears every setting at that level.
  */
 export function parseWorkspaceSettings(value: unknown): WorkspaceSettings {
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError("Settings must be an object.");
+  if (!isPlainRecord(value)) throw new TypeError("Settings must be an object.");
   let result: Record<string, unknown> = {};
   for (let [key, raw] of Object.entries(value)) {
     if (!Object.hasOwn(WORKSPACE_SETTINGS, key)) throw new TypeError(`Unknown setting "${key}".`);

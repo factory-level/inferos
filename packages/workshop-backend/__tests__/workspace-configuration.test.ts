@@ -38,6 +38,9 @@ describe("the workspace's settings", () => {
     ["an unknown key", "1", { "baseUi.modals": true }, 'Unknown setting "baseUi.modals".'],
     ["a value the key doesn't take", "1", { "chatPane.widgets": "all" }, 'Setting "chatPane.widgets" must be one of'],
     ["something that isn't settings", "1", ["baseUi.alerts"], "Settings must be an object."],
+    // r2 round 1 on #395: an object with no entries of its own must never clear every setting.
+    ["a Date", "1", new Date(), "Settings must be an object."],
+    ["a Map", "1", new Map([["baseUi.alerts", false]]), "Settings must be an object."],
   ] as const)("refuse %s, writing nothing", ([, revision, settings, refusal]) => {
     const { storage } = setUp();
     saveWorkspaceConfiguration(storage, "0", { "baseUi.alerts": true });
@@ -59,6 +62,19 @@ describe("a page's overrides", () => {
     const cleared = canvases.editPage(row.id, renamed.revision, [{ type: "setSettings", settings: {} }]);
     expect(cleared.settings).toBeUndefined();
     expect(storage.canvasPages.get(row.id)).toBeUndefined();
+  });
+
+  // r2 round 1 on #395: the page write takes only a plain record too, leaving the page as it was.
+  it("refuse a Date or a Map as the page's settings, changing nothing", () => {
+    const { storage, canvases } = setUp();
+    const row = canvases.create(screen);
+    const page = canvases.editPage(row.id, row.revision, [{ type: "setSettings", settings: { "baseUi.alerts": true } }]);
+    for (const settings of [new Date(), new Map([["baseUi.alerts", false]])]) {
+      expect(() => canvases.editPage(row.id, page.revision, [{ type: "setSettings", settings } as never])).toThrow(/invalid-setting/);
+      expect(() => canvases.savePage({ ...page, settings }, page.revision)).toThrow(/invalid-setting/);
+    }
+    expect(canvases.getPage(row.id)).toEqual(page);
+    expect(storage.canvasPages.get(row.id)?.page.settings).toEqual({ "baseUi.alerts": true });
   });
 
   it("refuse an unknown key, and keep refusing every other override field", () => {
