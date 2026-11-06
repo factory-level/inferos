@@ -109,9 +109,9 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
 /**
  * Where a run a person asked for stands in the workspace that executes it (FAC-112). `queued`: the
  * firing recorded it, and nothing of it ran yet. `running`: the workspace started it (`attempts`
- * times; above 1 when a restart interrupted it and it ran again from its start). `finished` or
- * `failed`: it ended, with the error's words when it failed. Only this; a run's results, events
- * and delegates aren't recorded here.
+ * times; above 1 when a restart interrupted an assigned run and it ran again from its start).
+ * `finished` or `failed`: it ended, with why it failed as a fixed category, never the words it
+ * threw. Only this; a run's results, events and delegates aren't recorded here.
  */
 export type WorkflowRunExecution = {
   state: "queued" | "running" | "finished" | "failed";
@@ -119,8 +119,22 @@ export type WorkflowRunExecution = {
   queuedAt: Date;
   startedAt?: Date;
   endedAt?: Date;
-  error?: string;
+  failure?: WorkflowRunFailure;
 };
+
+/**
+ * Why a run failed (FAC-112), a fixed category whatever the run threw, whose words can carry what
+ * only its executor may see and stay in the server's log:
+ * - `requester-revoked`: the person who asked may no longer run it;
+ * - `code-changed`: the gadget's code moved on from the revision it was asked at;
+ * - `assignment-changed`: the trigger's assignment changed, ended or is off;
+ * - `trigger-gone`: the trigger was disabled or deleted;
+ * - `interrupted`: a restart interrupted a run on the gadget's own bindings, which is not run
+ *   again, since its writes can't be told apart from the gadget's others;
+ * - `runtime-error`: anything else the run threw.
+ */
+export type WorkflowRunFailure =
+  "requester-revoked" | "code-changed" | "assignment-changed" | "trigger-gone" | "interrupted" | "runtime-error";
 
 /**
  * Who asked for a run (FAC-111, inferops ADR 0011's requester): the person whose control press

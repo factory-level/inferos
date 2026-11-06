@@ -8,11 +8,11 @@ import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
-  WorkflowDefinitionSave, WorkflowInvocation,
+  WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
-  SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
+  SYSTEM_RUN_ASSIGNMENT_CHANGED, SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
   systemGatekeeperFacetName, type AssignedDelivery, type AssignedExecution, type SystemRunHost,
   type SystemRunRequester,
 } from "./system-run.js";
@@ -194,6 +194,27 @@ export async function requireWorkflowInvoke(
  */
 export const WORKFLOW_RUN_CODE_CHANGED =
   "The workflow's code changed after this run was asked for, so it didn't run. Ask for it again.";
+
+/**
+ * The refusal of a write an assigned run proposes when it runs again after a restart (FAC-112) and
+ * proposes, at some place, a different write than it did before: nothing is recorded.
+ */
+export const WORKFLOW_RUN_REPLAY_DIVERGED =
+  "This workflow run proposed a different write when it ran again, so it stopped. Ask for it again.";
+
+/**
+ * The fixed category stored for a run that threw `error` (FAC-112): known refusals by their own
+ * words, anything else `runtime-error`. Never stores the words themselves.
+ */
+export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
+  let message = error instanceof Error ? error.message : "";
+  if (message === RUN_REQUESTER_REVOKED) return "requester-revoked";
+  if (message === WORKFLOW_RUN_CODE_CHANGED) return "code-changed";
+  if (message === SYSTEM_RUN_ASSIGNMENT_CHANGED || message === WORKFLOW_ASSIGNMENTS_DISABLED ||
+      message === TRIGGER_AUTO_RETIRED) return "assignment-changed";
+  if (message === "Hook has been deleted or disabled.") return "trigger-gone";
+  return "runtime-error";
+}
 
 /**
  * The refusal at a protected point of an assigned run (FAC-104) when the person who asked for it
@@ -1896,6 +1917,13 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
           // reconnect replays only the records changed during the gap.
           byLastChanged: actionLastChangedKey,
           // Sparse: only new bridge records carry this field, so legacy actions need no backfill.
+          // Sparse (FAC-112): an assigned run's writes, by run and place, so a run that runs again
+          // after a restart finds the write it already proposed at each place.
+          byRunProposal(record: ActionRecord) {
+            return record.type === "action" && record.executedAs?.runId !== undefined &&
+                record.executedAs.proposal !== undefined
+              ? `${record.executedAs.runId}#${record.executedAs.proposal}` : null;
+          },
           byApprovalThread(record: ActionRecord) {
             return record.type === "action" && record.aguiApproval && record.aguiApproval.replacement === undefined
               ? JSON.stringify([record.aguiApproval.person, record.aguiApproval.threadId]) : null;
@@ -2304,6 +2332,10 @@ class OverseerImpl implements AgentHooks {
   // for, and what keeps a run from starting twice here. A reset empties it, so the next alarm runs
   // each queued run again from its start.
   #runningWorkflowRuns = new Map<number, Promise<void>>();
+
+  // How many writes each assigned run has proposed in its current attempt (FAC-112), by delivery
+  // id: the place of its next one (AssignedExecution.proposal). Set to 0 when an attempt starts.
+  #workflowRunProposals = new Map<number, number>();
 
   // Ambient connections whose getAgentCatalog() answered null, which the contract makes permanent
   // for the connection. Held in memory only: a gatekeeper that gains a catalog in a later version
@@ -6982,9 +7014,10 @@ class OverseerImpl implements AgentHooks {
     let delivery = store.startRun(queued.deliveryId);
     if (!delivery) return;
     let { hookId, deliveryId, method, args } = queued;
-    let error: string | undefined;
+    let error: unknown;
     try {
       if (delivery.executedAs) {
+        this.startWorkflowRunProposals(deliveryId);
         await this.runAssignedDelivery(hookId,
             { deliveryId, commitId: delivery.commitId, credentialRef: delivery.executedAs.credentialRef }, method, args);
       } else {
@@ -7000,14 +7033,27 @@ class OverseerImpl implements AgentHooks {
           ? Reflect.apply(callback, undefined, args)
           : Reflect.apply(callback[method], callback, args));
       }
-    } catch (failure) {
-      error = failure instanceof Error ? failure.message : String(failure);
+    } catch (thrown) {
+      error = thrown ?? new Error("The run failed.");
+    } finally {
+      this.#workflowRunProposals.delete(deliveryId);
     }
-    store.endRun(deliveryId, error);
+    // Only a fixed category is stored and shown: what the run threw can carry data only its
+    // executor may see, so its words stay in this log.
+    let failure = error === undefined ? undefined : workflowRunFailureOf(error);
+    store.endRun(deliveryId, failure);
     let run = delivery.run;
     let fields = { hookId, deliveryId, ...(run ? { runId: run.runId } : {}), attempts: delivery.execution?.attempts };
     if (error === undefined) logger.info("workflow run finished", { event: "workflow.run.finished", ...fields });
-    else logger.warn("workflow run failed", { event: "workflow.run.failed", ...fields, error });
+    else logger.warn("workflow run failed", { event: "workflow.run.failed", ...fields, runFailure: failure, error });
+  }
+
+  /**
+   * Starts counting the writes queued run `deliveryId` proposes (FAC-112), from place 0: called as
+   * each attempt of an assigned run starts, so a run that runs again proposes from place 0 again.
+   */
+  startWorkflowRunProposals(deliveryId: number): void {
+    this.#workflowRunProposals.set(deliveryId, 0);
   }
 
   // Open the session behind a binding loopback.
@@ -7526,11 +7572,27 @@ class OverseerImpl implements AgentHooks {
       if (run.gatekeeperId !== gatekeeperId) throw new Error("This workflow run can't propose actions on that connection.");
       // Both actors, for the audit (FAC-104): who asked for the run, and who it acts as.
       let admitted = this.workflowDefinitionStore().deliveryRun(caller.deliveryId)?.run;
+      // Its place among the writes this attempt proposed (FAC-112). A run that runs again after a
+      // restart proposes the same writes in the same order: the write already recorded at this
+      // place is the answer, not a second one, and a different write there refuses (fail closed).
+      let proposal = this.#workflowRunProposals.get(caller.deliveryId);
+      if (admitted && proposal !== undefined) {
+        this.#workflowRunProposals.set(caller.deliveryId, proposal + 1);
+        let already = this.storage.actions.byRunProposal.get(`${admitted.runId}#${proposal}`);
+        if (already) {
+          if (already.type === "action" && already.gatekeeperId === gatekeeperId &&
+              JSON.stringify(already.description) === JSON.stringify(description)) {
+            return already.id;
+          }
+          throw new Error(WORKFLOW_RUN_REPLAY_DIVERGED);
+        }
+      }
       executedAs = {
         hookId: caller.hookId, deliveryId: caller.deliveryId, credentialRef: run.credentialRef,
         ...(admitted ? {
           runId: admitted.runId,
           requestedBy: admitted.requester.kind === "person" ? admitted.requester.profileId : null,
+          ...(proposal !== undefined ? { proposal } : {}),
         } : {}),
       };
     }

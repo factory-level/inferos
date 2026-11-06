@@ -4,7 +4,8 @@ import {
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, TRIGGER_RUNS_PER_INVOKER, TRIGGER_RUNS_PER_TRIGGER,
   WORKFLOW_INVOCATION_TTL_MS, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
   type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery, type WorkflowDefinitionRef,
-  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunRecord,
+  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunFailure,
+  type WorkflowRunRecord,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 
@@ -543,12 +544,20 @@ export class WorkspaceWorkflowDefinitionStore {
   /**
    * Mark queued run `deliveryId` started (FAC-112), counting the attempt, and return its delivery,
    * the run's only starting context. Null, and the run unqueued, when its delivery is gone (dropped
-   * past `MAX_WORKFLOW_DELIVERIES`).
+   * past `MAX_WORKFLOW_DELIVERIES`), and when a restart interrupted it while it ran on the gadget's
+   * own bindings: then it ends `interrupted` rather than run again, since the writes it made went
+   * through the gadget's own sessions, which name no run, so a second run could repeat them. An
+   * assigned run's writes name it, so it runs again, and its repeated writes are matched to the
+   * ones it made (`OverseerImpl.submitActionNow`).
    */
   startRun(deliveryId: number): StoredWorkflowDelivery | null {
     let delivery = this.storage.workflowDeliveries.get(deliveryId);
     if (!delivery?.execution) {
       this.storage.workflowRunQueue.delete(deliveryId);
+      return null;
+    }
+    if (delivery.execution.state === "running" && !delivery.executedAs) {
+      this.endRun(deliveryId, "interrupted");
       return null;
     }
     let started: StoredWorkflowDelivery = {
@@ -559,8 +568,8 @@ export class WorkspaceWorkflowDefinitionStore {
     return started;
   }
 
-  /** Record queued run `deliveryId` ended (FAC-112), failed with `error`'s words when given, and unqueue it. */
-  endRun(deliveryId: number, error?: string): void {
+  /** Record queued run `deliveryId` ended (FAC-112), failed for `failure` when given, and unqueue it. */
+  endRun(deliveryId: number, failure?: WorkflowRunFailure): void {
     this.durableStorage.transactionSync(() => {
       this.storage.workflowRunQueue.delete(deliveryId);
       let delivery = this.storage.workflowDeliveries.get(deliveryId);
@@ -568,8 +577,8 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowDeliveries.put({
         ...delivery,
         execution: {
-          ...delivery.execution, state: error === undefined ? "finished" : "failed", endedAt: new Date(),
-          ...(error === undefined ? {} : { error: error.slice(0, 500) }),
+          ...delivery.execution, state: failure === undefined ? "finished" : "failed", endedAt: new Date(),
+          ...(failure === undefined ? {} : { failure }),
         },
       });
     });

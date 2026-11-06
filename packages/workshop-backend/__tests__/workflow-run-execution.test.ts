@@ -58,20 +58,24 @@ async function withImpl<T>(name: string, fn: (impl: any) => Promise<T> | T): Pro
   return runInDurableObject(stub, async (instance: OverseerDurableObject) => fn((instance as any).impl));
 }
 
+/** The stand-in hook code for `workspace`: records each call, and the run's state when it came. */
+function standIn(workspace: any) {
+  return {
+    onSchedule: async (...args: unknown[]) => {
+      calls.push({ method: "onSchedule", args });
+      statesSeen.push(structuredClone([...workspace.storage.workflowDeliveries.list()].at(-1)?.execution));
+      return answer();
+    },
+  };
+}
+
 /**
  * A workspace with a live trigger pinned at revision 1 (code `commit(1)`), a control listing
  * PERSON, and one admitted run PERSON asked for, fired. Returns the delivery.
  */
 function admitted(impl: any, opts: { assigned?: boolean } = {}) {
   onPrototype(impl, "workflowRunCallback", function (this: any) {
-    let workspace = this;
-    return {
-      onSchedule: async (...args: unknown[]) => {
-        calls.push({ method: "onSchedule", args });
-        statesSeen.push(structuredClone([...workspace.storage.workflowDeliveries.list()].at(-1)?.execution));
-        return answer();
-      },
-    };
+    return standIn(this);
   });
   onPrototype(impl, "getGadgetHead", (id: number) => (id === GADGET ? commit(1) : undefined));
   impl.storage.gatekeepers.put({
@@ -98,6 +102,10 @@ function admitted(impl: any, opts: { assigned?: boolean } = {}) {
 }
 
 const deliveryOf = (impl: any, id: number) => impl.storage.workflowDeliveries.get(id);
+const DESCRIPTION = { title: "Create issue", description: "Creates one issue.", implementsRevert: false };
+/** The run's one write, through `caller`: a pending action on the connection. */
+const submitted = (impl: any, caller: unknown) => impl.submitActionNow(CONNECTION, 1, DESCRIPTION, caller);
+const actionsOf = (impl: any) => [...impl.storage.actions.list()].filter((a: any) => a.type === "action");
 
 async function settled(name: string, id: number) {
   let stub = env.TEST_OVERSEER.getByName(name);
@@ -158,22 +166,72 @@ describe("a requested run across a restart (FAC-112)", () => {
     expect(done.execution).toMatchObject({ state: "finished", attempts: 1 });
   });
 
-  it("interrupted while running, runs again from its start after the restart (at least once)", async () => {
+  // Round 1 (review HIGH): a gadget-bindings run's writes go through the gadget's own sessions,
+  // which name no run, so running it again could repeat an applied (even auto-approved) write.
+  // Interrupted while running, it isn't run again: it ends as interrupted, with its one write.
+  it("on the gadget's bindings, interrupted while running, isn't run again: no second write", async () => {
     let name = `run-exec-midrun-${crypto.randomUUID()}`;
     let id = await withImpl(name, impl => {
       let delivery = admitted(impl);
-      answer = () => new Promise(() => {}); // never ends: the restart interrupts it
+      answer = () => {
+        // The run's write lands, then the restart interrupts the run before it ends.
+        submitted(impl, { from: "gadget", gadgetId: GADGET });
+        return new Promise(() => {});
+      };
       impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
       void impl.runQueuedWorkflowRuns();
       return delivery.deliveryId;
     });
-    await withImpl(name, impl => vi.waitFor(() =>
-      expect(deliveryOf(impl, id).execution).toMatchObject({ state: "running", attempts: 1 })));
+    await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(1)));
     answer = async () => "done";
     await abortAllDurableObjects();
     let done = await settled(name, id);
-    expect(calls.map(c => c.method)).toEqual(["onSchedule", "onSchedule"]);
+    expect(calls.map(c => c.method)).toEqual(["onSchedule"]);
+    expect(done.execution).toMatchObject({ state: "failed", failure: "interrupted", attempts: 1 });
+    expect(await withImpl(name, impl => actionsOf(impl))).toHaveLength(1);
+  });
+
+  // Round 1 (review HIGH): an assigned run's writes name their run, so a replay's writes are the
+  // ones it already proposed: matched by run and by order, never recorded or applied twice.
+  it("assigned, interrupted after a write, runs again without proposing that write twice", async () => {
+    let name = `run-exec-replay-${crypto.randomUUID()}`;
+    let attempt = 0;
+    let id = await withImpl(name, impl => {
+      let delivery = admitted(impl, { assigned: true });
+      onPrototype(impl, "runAssignedDelivery", async function (this: any, hookId: number, d: { deliveryId: number }) {
+        attempt++;
+        this.systemRuns.begin(d.deliveryId, { hookId, gatekeeperId: CONNECTION, credentialRef: REF });
+        submitted(this, { from: "systemRun", hookId, deliveryId: d.deliveryId });
+        if (attempt === 1) return new Promise(() => {}); // interrupted after its write
+        this.systemRuns.end(d.deliveryId);
+        return "ran";
+      });
+      impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+      void impl.runQueuedWorkflowRuns();
+      return delivery.deliveryId;
+    });
+    await withImpl(name, impl => vi.waitFor(() => expect(actionsOf(impl)).toHaveLength(1)));
+    await abortAllDurableObjects();
+    let done = await settled(name, id);
+    expect(attempt).toBe(2);
     expect(done.execution).toMatchObject({ state: "finished", attempts: 2 });
+    let actions = await withImpl(name, impl => actionsOf(impl));
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ state: "pending", executedAs: { runId: done.run.runId } });
+  });
+
+  it("assigned, a replay that proposes a different write than before is refused, not recorded", async () => {
+    await withImpl(`run-exec-diverge-${crypto.randomUUID()}`, impl => {
+      let delivery = admitted(impl, { assigned: true });
+      let caller = { from: "systemRun", hookId: HOOK, deliveryId: delivery.deliveryId };
+      impl.systemRuns.begin(delivery.deliveryId, { hookId: HOOK, gatekeeperId: CONNECTION, credentialRef: REF });
+      impl.startWorkflowRunProposals(delivery.deliveryId);
+      submitted(impl, caller);
+      impl.startWorkflowRunProposals(delivery.deliveryId); // the replay
+      expect(() => impl.submitActionNow(CONNECTION, 2, { ...DESCRIPTION, title: "Close issue" }, caller))
+        .toThrow("proposed a different write");
+      expect(actionsOf(impl)).toHaveLength(1);
+    });
   });
 });
 
@@ -189,7 +247,8 @@ describe("a requested run uses only its stored starting context (FAC-112)", () =
     });
     let done = await settled(name, id);
     expect(calls).toEqual([]);
-    expect(done.execution).toMatchObject({ state: "failed", error: WORKFLOW_RUN_CODE_CHANGED });
+    expect(done.execution).toMatchObject({ state: "failed", failure: "code-changed" });
+    expect(JSON.stringify(done)).not.toContain(WORKFLOW_RUN_CODE_CHANGED);
   });
 
   it("runs an assigned run from its pinned commit as its service account, whatever the page holds now", async () => {
@@ -218,6 +277,27 @@ describe("a requested run uses only its stored starting context (FAC-112)", () =
     });
     let done = await settled(name, id);
     expect(calls).toEqual([]);
-    expect(done.execution).toMatchObject({ state: "failed", error: RUN_REQUESTER_REVOKED });
+    expect(done.execution).toMatchObject({ state: "failed", failure: "requester-revoked" });
+    expect(JSON.stringify(done)).not.toContain(RUN_REQUESTER_REVOKED);
+  });
+});
+
+// Round 1 (review HIGH): what a run threw can carry data only its executor may see, so the stored
+// and listed outcome is a fixed category; the words stay in the server's log.
+describe("a failed run's recorded outcome (FAC-112)", () => {
+  it("is a fixed category, never what the run threw", async () => {
+    let name = `run-exec-failure-${crypto.randomUUID()}`;
+    const SENTINEL = "SENTINEL-only-the-service-account-sees-this";
+    let { id, definitionId } = await withImpl(name, impl => {
+      let delivery = admitted(impl);
+      answer = async () => { throw new Error(SENTINEL); };
+      impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+      return { id: delivery.deliveryId, definitionId: delivery.definitionId };
+    });
+    let done = await settled(name, id);
+    expect(done.execution).toMatchObject({ state: "failed", failure: "runtime-error" });
+    expect(JSON.stringify(done)).not.toContain(SENTINEL);
+    let listed = await withImpl(name, impl => impl.workflowDefinitionStore().deliveries(ADA.id, definitionId));
+    expect(JSON.stringify(listed)).not.toContain(SENTINEL);
   });
 });

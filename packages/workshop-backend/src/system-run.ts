@@ -44,6 +44,12 @@ export type AssignedExecution = {
    * person's profile id, or null when the trigger fired it itself. A record, never authority.
    */
   requestedBy?: string | null;
+  /**
+   * Its place among the writes its run proposed in one attempt, from 0 (FAC-112): a run that runs
+   * again after a restart proposes the same writes in the same order, and each is matched to the
+   * one already recorded at its place rather than recorded again.
+   */
+  proposal?: number;
 };
 
 /**
