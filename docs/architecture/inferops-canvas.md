@@ -23,6 +23,10 @@ covers:
   - packages/workshop-shared/src/api.ts
   - packages/workshop-shared/src/canvas.ts
   - packages/workshop-shared/src/canvas-model.ts
+  - packages/workshop-shared/src/workspace-settings.ts
+  - packages/workshop-shared/src/configuration-trace.ts
+  - packages/workshop-backend/src/workspace-configuration.ts
+  - packages/workshop-backend/__tests__/workspace-configuration.test.ts
   - packages/workshop-shared/src/canvas-model-fixtures
   - packages/workshop-shared/src/workspace-kind.ts
   - scripts/consumer/views.ts
@@ -163,6 +167,38 @@ Board and Wiki widgets resolve their session through one frontend helper, `openI
 Real Workers/RPC tests cover concurrent revision conflicts, rollback, scope isolation, build/use roles, quota and recreation identity. A harness configuration update reloads Workers with durable views disabled, proves access is denied, then reenables them and reads the original definition. This demonstrates Worker-reload retention, not a cloud rollout, OS crash recovery, schema migration or completed consumer view experience.
 
 The release slice of #34 (one private Kanban/Operate view with a live reference) has its own end-to-end test in `packages/integration-tests/__tests__/workshop-canvas.test.ts`. A view whose board card targets `inferops://demo.local/project/board/DEMO` is created and edited; an edit or delete at the replaced revision is rejected with the `Canvas changed` conflict and the stored definition is unchanged; two connections of the same owner editing the same revision produce exactly one winner and one conflict. Another account cannot open the workspace, and its own workspace neither lists nor reads the view and reports `not found` on edit. A collaborator added with the `use` role opens the workspace, lists and reads no view while no console shows it, and gets `Unauthorized` on edit and delete. The owner's Operate session opens the view, then the Workshop Worker is restarted through a harness configuration update (a pre-restart connection is shown to drop). Afterwards the definition, its revision and its board reference read back unchanged, the Operate session's working set and focus still hold the view and resolve to it, the use-role denial and the stale-revision conflict still apply, and an edit at the current revision advances it. Like the reload test above, this is local Worker-restart evidence, not a cloud deployment or OS crash recovery claim, and it reads no board data.
+
+### Workspace and page configuration
+
+FAC-95 makes the design's two configuration levels explicit ([ADR 0017](../adr/0017-page-settings-override.md), proposed, which amends ADR 0014 decision 4).
+
+- **One registry.** `WORKSPACE_SETTINGS` (`workshop-shared/src/workspace-settings.ts`) names each setting with the values it takes, its default and what it permits:
+  - `baseUi.alerts`: whether widgets may ask the host to show an alert. Default off.
+  - `baseUi.notifications`: whether widgets may raise a notification. Default off. Delivery isn't defined (FAC-114), so this records the choice and its owner only.
+  - `chatPane.widgets`: which of the console's widgets the operate chat pane may open, `console` or `none`. Default `console`.
+
+  `parseWorkspaceSettings` refuses an unknown key or value in fixed words. No setting grants authority. Nothing reads them to draw yet: the builder and runtime surfaces that use them are later work.
+- **Two levels, one shape.**
+  - **The workspace's settings** are one revisioned record, `WorkspaceConfiguration`. It lives in the `workspaceConfiguration` storage singleton, and is read and saved by `workspace-configuration.ts`.
+  - **A page's overrides** are `CanvasPage.settings`, the same keys. `parseCanvasPage` accepts them and refuses a bad one as `invalid-setting`. They're replaced by one `setSettings` page operation; an empty object removes them. Every other inheritance field is still `undefined-inheritance`.
+  - **Storage:** a page with settings has no version 1 form (`canvasDefinitionFromPage` returns null), so the store keeps it nested; clearing them lets it return to its row.
+  - **Resolution:** `resolveWorkspaceSetting(key, workspace, page)` gives the value and its owner: `page`, `workspace` or `default`.
+- **The RPCs** are build role only. The use role and the operate session are refused all three, and `workshop-use-role.test.ts` lists them among the denied.
+  - `getWorkspaceConfiguration()` reads the record.
+  - `setWorkspaceConfiguration(expectedRevision, settings)` saves it. It is building, so in a shared workspace the deployment's shared-configuration service must agree, asked fresh as for hooks and workflow saves (FAC-44). The check and the write are one storage step: a stale revision is `WORKSPACE_CONFIGURATION_CHANGED`, and an unknown key or value is refused, writing nothing.
+  - Page overrides go through `editCanvasPage` with the canvas writes' existing authority.
+- **Publication** freezes both. `ConsolePublication.settings` copies the workspace's settings, absent when there are none, and each published page keeps its own `settings`. So FAC-99's Admin publish check governs what operators get, and a later change reaches them through a republish.
+- **The trace.** `traceConfiguration(canvasId | null)` (build only, over the pure `traceConfiguration` in `configuration-trace.ts`) lists:
+  - each setting as the page resolves it, with its owner;
+  - each page hook (an attachment, FAC-94), with the page or node that holds it (`formatCanvasTarget`), its event, its effect and what it permits: navigation, a raised event within the page, or an action requested through the person's own grant and approval;
+  - the workspace's gatekeeper hooks, read-only, owned by their gatekeeper and gadget, with any workflow revision they're pinned to.
+
+  Every entry says it grants nothing.
+- **Tests.**
+  - `workspace-settings.test.ts` and `configuration-trace.test.ts` in `workshop-shared`.
+  - `canvas-model.test.ts`, "a page's settings".
+  - `workspace-configuration.test.ts`: a save at its revision, refusals writing nothing, page overrides persisting nested and through edits, and publication freezing both.
+  - `shared-configuration.test.ts`: an Operator refused through the read-only session, and another company's member refused at the write, asked `build`.
 
 ## Canvas page and builder composition UI
 

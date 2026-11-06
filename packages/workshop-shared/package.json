@@ -71,6 +71,14 @@
       "types": "./src/canvas-model.ts",
       "import": "./src/canvas-model.ts"
     },
+    "./workspace-settings": {
+      "types": "./src/workspace-settings.ts",
+      "import": "./src/workspace-settings.ts"
+    },
+    "./configuration-trace": {
+      "types": "./src/configuration-trace.ts",
+      "import": "./src/configuration-trace.ts"
+    },
     "./action-outcome": {
       "types": "./src/action-outcome.ts",
       "import": "./src/action-outcome.ts"
