@@ -26,6 +26,19 @@ const UNAVAILABLE: Record<EmbeddedConsoleWidgetUnavailable, string> = {
   'no-ui': 'This widget has no UI to show here; its console offers only its tools.',
 }
 
+const viewerIds = new WeakMap<object, number>()
+let nextViewerId = 1
+/**
+ * A stable id for a signed-in account (`AuthContext.accountKey`, an opaque object per account), for
+ * keying an embed so that another account's sign-in remounts it. `anonymous` when nobody is.
+ */
+export const embedViewerKey = (accountKey: object | null | undefined): string => {
+  if (!accountKey) return 'anonymous'
+  let id = viewerIds.get(accountKey)
+  if (id === undefined) { id = nextViewerId++; viewerIds.set(accountKey, id) }
+  return `viewer-${id}`
+}
+
 /**
  * A published console's widget embedded in a Wiki page (FAC-12, inferops ADR 0013 W11). It opens
  * the console's workspace with the person's own access, never the Wiki's connection, resolves the
@@ -39,19 +52,21 @@ const UNAVAILABLE: Record<EmbeddedConsoleWidgetUnavailable, string> = {
 export const WikiGadgetEmbed = ({ reference, label }: { reference: GadgetReference; label: string }) => {
   const auth = useOptionalAuthenticatedApi()
   const api = auth?.authenticatedApi
+  const viewer = auth?.accountKey ?? null
   const [attempt, setAttempt] = useState(0)
   const { workspaceId, consoleId, sourceGadgetId, href } = reference
-  // What was shown belongs to the exact reference and attempt it was resolved for, and is used only
-  // while those still match: a changed target never renders the previous widget, even before the
-  // effect below has run for it.
+  // What was shown belongs to the exact reference, attempt and viewer it was resolved for, and is
+  // used only while all three still match: a changed target or a newly signed-in account never
+  // renders the previous answer, even before the effect below has run for it.
   const key = `${href}\n${attempt}`
-  const [answer, setAnswer] = useState<{ key: string; shown: Shown } | null>(null)
-  const shown: Shown = answer?.key === key ? answer.shown : { status: 'loading' }
+  const [answer, setAnswer] = useState<{ key: string; viewer: object | null; api: unknown; shown: Shown } | null>(null)
+  const shown: Shown = answer?.key === key && answer.viewer === viewer && answer.api === api ? answer.shown : { status: 'loading' }
 
   useEffect(() => {
     const setShown = (next: Shown | ((state: Shown) => Shown)) => setAnswer(previous => {
-      const before = previous?.key === key ? previous.shown : { status: 'loading' } as Shown
-      return { key, shown: typeof next === 'function' ? next(before) : next }
+      const before = previous?.key === key && previous.viewer === viewer && previous.api === api
+        ? previous.shown : { status: 'loading' } as Shown
+      return { key, viewer, api, shown: typeof next === 'function' ? next(before) : next }
     })
     if (!api) { setShown({ status: 'no-access' }); return }
     let current = true
@@ -83,7 +98,7 @@ export const WikiGadgetEmbed = ({ reference, label }: { reference: GadgetReferen
       stub?.[Symbol.dispose]()
       workspace[Symbol.dispose]()
     }
-  }, [api, workspaceId, consoleId, sourceGadgetId, key])
+  }, [api, viewer, workspaceId, consoleId, sourceGadgetId, key])
 
   const title = shown.status === 'ready' ? shown.widget.label : label || 'Embedded widget'
   const stale = shown.status === 'ready' &&

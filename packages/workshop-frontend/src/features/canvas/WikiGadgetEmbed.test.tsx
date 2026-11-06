@@ -4,7 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { EmbeddedConsoleWidget } from '@gadgets/workshop-shared/operate-console'
-import { WikiGadgetEmbed } from './WikiGadgetEmbed'
+import { embedViewerKey, WikiGadgetEmbed } from './WikiGadgetEmbed'
 import { parseWikiReference, type WikiReference } from './wikiPage'
 
 // FAC-12: a published console's widget embedded in a Wiki page, in each of its states. The kernel
@@ -12,7 +12,7 @@ import { parseWikiReference, type WikiReference } from './wikiPage'
 // resolves the link and opens the widget; GadgetUI only records the capability it was given.
 const shownWith = vi.fn<(gadget: unknown) => void>()
 vi.mock('../../GadgetUI', () => ({ default: ({ gadget }: { gadget: unknown }) => { shownWith(gadget); return <p>frame</p> } }))
-let auth: { authenticatedApi: { openGadget: (id: string) => unknown } } | null = null
+let auth: { authenticatedApi: { openGadget: (id: string) => unknown }; accountKey?: object } | null = null
 vi.mock('../../AuthContext', () => ({ useOptionalAuthenticatedApi: () => auth }))
 
 const HREF = 'inferops://acme.kb/knowledge/inferos-widget/ws-7/floor/41?blueprint="bp"&version="1"'
@@ -38,7 +38,7 @@ function kernel(resolved: EmbeddedConsoleWidget | Error, opens: 'ok' | 'refused'
     [Symbol.dispose]: () => disposed.push('workspace'),
   }
   const openGadget = vi.fn<(id: string) => typeof workspace>(() => workspace)
-  auth = { authenticatedApi: { openGadget } }
+  auth = { authenticatedApi: { openGadget }, accountKey: {} }
   return { openGadget, workspace, stub, breakIt: () => broken?.() }
 }
 
@@ -143,4 +143,26 @@ it('offers to check again where it can’t open the workspace', async () => {
   await act(async () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Check again')!.click())
   await settle()
   expect(k.workspace.resolveEmbeddedWidget).toHaveBeenCalledTimes(2)
+})
+
+// r2 round 2 on #392: the shown widget also belongs to the viewer it was resolved for. When the
+// signed-in account changes on the same mounted page, the previous viewer's widget never renders.
+it('never renders the previous viewer’s widget once another account is signed in', async () => {
+  const viewerA = kernel(AVAILABLE)
+  await render()
+  expect(shownWith).toHaveBeenLastCalledWith(viewerA.stub)
+  // Viewer B, who can't open the workspace, on the same page and the same embed.
+  const viewerB = kernel(new Error('Unauthorized'))
+  shownWith.mockClear()
+  await render()
+  expect(shownWith).not.toHaveBeenCalled()
+  expect(viewerB.openGadget).toHaveBeenCalledWith('ws-7')
+  expect(text()).toContain('in a workspace you can’t open')
+})
+
+it('keys each signed-in account apart, and the same account the same way', () => {
+  const a = {}, b = {}
+  expect(embedViewerKey(a)).toBe(embedViewerKey(a))
+  expect(embedViewerKey(a)).not.toBe(embedViewerKey(b))
+  expect(embedViewerKey(null)).toBe('anonymous')
 })
