@@ -7,7 +7,7 @@ vi.mock('../../fileTransfers', () => ({ saveTextToFile: vi.fn<(name: string, tex
 beforeEach(() => vi.clearAllMocks())
 const definition = (): CanvasDefinition => ({ schemaVersion: 1, id: 'view-1', revision: '7', title: 'Dispatch', sections: [{
   id: 'section-1', title: 'Work', columns: 2, widgets: [{ id: 'widget-1', kind: 'inferops.project-board', version: 1,
-    targetRef: 'inferops://demo.local/project/board/DEMO', size: 'wide', params: { workflow: 'software', showCompleted: false } }],
+    targetRef: 'inferops://demo.local/project/board/DEMO', dataBinding: { resource: 'project/board', ref: 'inferops://demo.local/project/board/DEMO', schemaVersion: 1 }, size: 'wide', params: { workflow: 'software', showCompleted: false } }],
 }] })
 
 it('exports a definition that can be imported unchanged, preserving layout and references', () => {
