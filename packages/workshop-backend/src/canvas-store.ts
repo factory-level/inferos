@@ -1,3 +1,4 @@
+import type { WorkspaceSettings } from "@gadgets/workshop-shared/workspace-settings";
 import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type CanvasContent, type CanvasDefinition, type CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import { applyCanvasPageOperations, canvasDefinitionFromPage, canvasDefinitionProjection, canvasPageFromDefinition, parseCanvasPage, parseCanvasWorkspacePages, type CanvasPage, type CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
 import { readCanvasCatalog } from "./canvas-catalog";
@@ -8,10 +9,30 @@ import type { OverseerStorage } from "./overseer";
  * revision when this was saved: if the row has moved, code without pages edited it, and the row wins.
  */
 export interface StoredCanvasPage {
-  /** The nested page. */
+  /** The nested page, without its settings (see `settings`). */
   page: CanvasPage;
   /** The revision of the `canvases` row this page replaces while the two agree. */
   basedOnRevision: string;
+  /**
+   * The page's settings overrides (FAC-95), kept beside the page rather than in it, so a reader
+   * from before page settings, which refuses any page field it doesn't know, still reads the page
+   * and leaves the overrides inert. Absent when the page overrides nothing.
+   */
+  settings?: WorkspaceSettings;
+}
+
+/**
+ * A page split for storage (FAC-95 follow-up): the page as a reader before page settings takes
+ * it, and its settings to keep beside it. `joinPageSettings` puts them back.
+ */
+export function splitPageSettings(page: CanvasPage): { page: CanvasPage; settings?: WorkspaceSettings } {
+  const { settings, ...rest } = page;
+  return settings ? { page: rest, settings } : { page: rest };
+}
+
+/** A stored page with the settings kept beside it, parsed back into one page. */
+export function joinPageSettings(page: unknown, settings: WorkspaceSettings | undefined): CanvasPage {
+  return parseCanvasPage(settings ? { ...(page as object), settings } : page);
 }
 
 /**
@@ -40,7 +61,7 @@ export function currentPage(storage: Pick<OverseerStorage, "canvasPages">, row: 
 /** The nested page that currently replaces `row`, if any: one based on the row's revision. */
 export function nestedPage(storage: Pick<OverseerStorage, "canvasPages">, row: Pick<CanvasDefinition, "id" | "revision">): CanvasPage | null {
   const stored = storage.canvasPages.get(row.id);
-  return stored?.basedOnRevision === row.revision ? parseCanvasPage(stored.page) : null;
+  return stored?.basedOnRevision === row.revision ? joinPageSettings(stored.page, stored.settings) : null;
 }
 
 /**
@@ -187,7 +208,7 @@ export class WorkspaceCanvasStore {
       this.storage.canvases.put(definition);
       this.storage.canvasPages.delete(page.id);
     } else {
-      this.storage.canvasPages.put({ page: updated, basedOnRevision: row.revision });
+      this.storage.canvasPages.put({ ...splitPageSettings(updated), basedOnRevision: row.revision });
     }
     return updated;
   }
