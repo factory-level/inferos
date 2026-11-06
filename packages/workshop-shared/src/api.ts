@@ -32,7 +32,7 @@ import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
-  WorkflowDefinitionSave, WorkflowInvocation,
+  WorkflowDefinitionSave, WorkflowInvocation, RequestedRun,
 } from "./workflow-definition.js";
 import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
 import type {
@@ -500,9 +500,12 @@ export interface OperateSession extends RpcTarget {
   getWidgetState(ref: OperateWidgetRef): Promise<WidgetStateSnapshot>;
   /**
    * Moves the widget's state by `event` if `expectedSeq` is its current `seq` and its declaration
-   * permits `event` from the current state, and returns the new state. **It never changes the
-   * operate page**: the page's sequence and state stay as they were (connecting a widget event to
-   * the page is an explicitly configured attachment, FAC-87). Rejects, changing nothing, with
+   * permits `event` from the current state, and returns the new state. **It changes the operate
+   * page only through an explicit wire** (FAC-94): when the published page the person is shown
+   * wires `event` on this widget to `navigate`, the page moves there through the person's own
+   * checked dispatch, as a separate operate event, and the snapshot's `navigation` says where and
+   * whether it was shown; an unwired event leaves the page's sequence and state as they were.
+   * Rejects, changing nothing, with
    * `WIDGET_UNKNOWN_EVENT`, `WIDGET_TRANSITION_NOT_PERMITTED` (naming the events the current state
    * accepts), `WIDGET_STATE_CONFLICT` or `WIDGET_HAS_NO_STATES`.
    */
@@ -2814,6 +2817,15 @@ export interface Overseer extends RpcTarget {
    * Open to build and use sessions; refused in an operate session, and agents hold no Overseer.
    */
   invokeTrigger(hookId: number): Promise<WorkflowInvocation>;
+  /**
+   * What the caller reads of the run their request `invocationId` made (FAC-114; inferos ADR 0012,
+   * proposed): its run id, revision, outcome (`queued`, `running`, `waiting`, `succeeded`, `failed`
+   * or `uncertain`) with its fixed reason, and each write it proposed by action id with that
+   * action's outcome. Null unless the caller is the person who asked, so it can be read after any
+   * reconnect. `uncertain` stays until reconciled. Open to build and use sessions; refused in an
+   * operate session.
+   */
+  getRequestedRun(invocationId: string): Promise<RequestedRun | null>;
 
   /**
    * List this workspace's consoles: one operator role's menu of views over this workspace's

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
 import {
+  canvasPageEffects,
+  canvasWidgetEventsHeard,
   CANVAS_MODEL_LIMITS, CANVAS_WIDGET_ACTIONS, CanvasModelError, canvasDefinitionFromPage, canvasPageFromDefinition, canvasTargetPath, formatCanvasTarget, parseCanvasPage, parseCanvasTarget, parseCanvasWorkspacePages,
   resolveCanvasTarget, type CanvasModelErrorCode, type CanvasNode, type CanvasPage, type CanvasTarget,
 } from "./canvas-model";
@@ -382,5 +384,52 @@ describe("section-based canvases", () => {
 
   test("this contract refuses a version 1 definition rather than guessing", () => {
     expect(rejection(() => parseCanvasPage(sectionMapping[0].sections))).toEqual({ code: "unknown-version", at: "page" });
+  });
+});
+
+// FAC-94: a widget's own declared event (FAC-86 states) can drive a page effect through an explicit
+// attachment; an event nothing is wired to stays local, and nothing propagates on its own.
+describe("widget events drive page effects (FAC-94)", () => {
+  const gadgetPage = (widgetAttachments: unknown[], objectAttachments: unknown[] = [], pageAttachments: unknown[] = []) => ({
+    schemaVersion: 2, id: "p", revision: "0", title: "P", children: ["a"], attachments: pageAttachments, nodes: [
+      { nodeType: "object", id: "a", title: "A", columns: 1, children: ["g"], attachments: objectAttachments },
+      { nodeType: "widget", id: "g", kind: "inferos.gadget", version: 1, targetRef: "gadget:7", size: "normal", params: {},
+        attachments: widgetAttachments },
+    ],
+  });
+
+  test("a gadget widget's attachment may listen for its own declared event, checked at publish", () => {
+    const page = parseCanvasPage(gadgetPage([{ id: "done", version: 1, on: "finish", effect: { kind: "navigate", page: "q" } }]));
+    expect(canvasWidgetEventsHeard(page)).toEqual([{ nodeId: "g", targetRef: "gadget:7", event: "finish", attachmentId: "done" }]);
+  });
+
+  test("a gadget widget still can't listen for action events it never emits, and a board's unknown event is refused", () => {
+    expect(rejection(() => parseCanvasPage(gadgetPage([{ id: "x", version: 1, on: "action-completed", effect: { kind: "navigate", page: "q" } }]))))
+      .toEqual({ code: "unknown-event", at: "x" });
+    const board = { schemaVersion: 2, id: "p", revision: "0", title: "P", children: ["w"], attachments: [], nodes: [
+      { nodeType: "widget", id: "w", kind: "inferops.project-board", version: 1, targetRef: "inferops://acme.operations/project/board/ENG", size: "normal",
+        params: { workflow: "software", showCompleted: false }, attachments: [{ id: "y", version: 1, on: "finish", effect: { kind: "navigate", page: "q" } }] },
+    ] };
+    expect(rejection(() => parseCanvasPage(board))).toEqual({ code: "unknown-event", at: "y" });
+  });
+
+  test("resolves a wired event to its page effects, following raised events, and an unwired one to none", () => {
+    const page = parseCanvasPage(gadgetPage(
+      [{ id: "up", version: 1, on: "finish", effect: { kind: "raise-event", target: "a", event: "section-done" } },
+        { id: "now", version: 1, on: "fail", effect: { kind: "navigate", page: "help" } }],
+      [{ id: "next", version: 1, on: "section-done", effect: { kind: "raise-event", target: "p", event: "all-done" } }],
+      [{ id: "go", version: 1, on: "all-done", effect: { kind: "navigate", page: "q" } }],
+    ));
+    expect(canvasPageEffects(page, "gadget:7", "finish")).toEqual([{ kind: "navigate", page: "q" }]);
+    expect(canvasPageEffects(page, "gadget:7", "fail")).toEqual([{ kind: "navigate", page: "help" }]);
+    expect(canvasPageEffects(page, "gadget:7", "reset")).toEqual([]);
+    expect(canvasPageEffects(page, "gadget:8", "finish")).toEqual([]);
+  });
+
+  test("still refuses a loop of raised events", () => {
+    expect(rejection(() => parseCanvasPage(gadgetPage(
+      [{ id: "up", version: 1, on: "finish", effect: { kind: "raise-event", target: "a", event: "ping" } }],
+      [{ id: "back", version: 1, on: "ping", effect: { kind: "raise-event", target: "a", event: "ping" } }],
+    )))).toEqual({ code: "reference-cycle", at: "back" });
   });
 });
