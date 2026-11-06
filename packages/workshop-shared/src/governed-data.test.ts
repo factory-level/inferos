@@ -4,8 +4,8 @@
 // bound to the request that made it. Listing runs on the server over a bounded snapshot.
 import { describe, expect, it } from "vitest";
 import {
-  GOVERNED_PAGE_MAX, GOVERNED_SNAPSHOT_MAX, GovernedRequestError, listGoverned, parseGovernedListRequest,
-  type GovernedDescription, type GovernedRow,
+  GOVERNED_PAGE_MAX, GOVERNED_SNAPSHOT_MAX, GovernedRequestError, listGoverned, parseGovernedCommand,
+  parseGovernedListRequest, type GovernedDescription, type GovernedRow,
 } from "./governed-data.js";
 
 const DESCRIPTION: GovernedDescription = {
@@ -94,5 +94,41 @@ describe("listing a governed resource on the server (FAC-9)", () => {
     expect(result.total).toBe(GOVERNED_SNAPSHOT_MAX);
     expect(result.truncated).toBe(true);
     expect(listGoverned(rows(10), parseGovernedListRequest({}, DESCRIPTION)).truncated).toBe(false);
+  });
+});
+
+describe("a governed command request (FAC-9)", () => {
+  const QUEUE: GovernedDescription = {
+    resource: "tickets/queue",
+    fields: [
+      { name: "title", label: "Title", type: "text", filterable: true, sortable: true },
+      { name: "status", label: "Status", type: "text", filterable: true, sortable: true, options: ["open", "pending", "closed"] },
+    ],
+    commands: [{ name: "setStatus", label: "Change status", fields: ["status"] }],
+  };
+
+  it("accepts a declared command on one row, with exactly its fields and the revision it was read at", () => {
+    expect(parseGovernedCommand({ command: "setStatus", id: "T-1", values: { status: "closed" }, expectedRevision: "1" }, QUEUE))
+      .toEqual({ command: "setStatus", id: "T-1", values: { status: "closed" }, expectedRevision: "1" });
+  });
+
+  it("refuses anything but a declared command, its own fields, an allowed value and a revision", () => {
+    const base = { command: "setStatus", id: "T-1", values: { status: "closed" }, expectedRevision: "1" };
+    for (const [request, code] of [
+      [{ ...base, command: "delete" }, "COMMAND_NOT_DECLARED"],
+      [{ ...base, command: "custom" }, "COMMAND_NOT_DECLARED"],
+      [{ ...base, values: { status: "closed", title: "x" } }, "INVALID_REQUEST"],
+      [{ ...base, values: {} }, "INVALID_REQUEST"],
+      [{ ...base, values: { status: "done" } }, "INVALID_REQUEST"],
+      [{ ...base, values: { status: 3 } }, "INVALID_REQUEST"],
+      [{ ...base, expectedRevision: undefined }, "INVALID_REQUEST"],
+      [{ ...base, expectedRevision: "one" }, "INVALID_REQUEST"],
+      [{ ...base, id: "" }, "INVALID_REQUEST"],
+      [{ ...base, ids: ["T-1", "T-2"] }, "INVALID_REQUEST"],
+      [{ ...base, meta: { url: "https://example.com" } }, "INVALID_REQUEST"],
+    ] as const) {
+      expect(refusal(() => parseGovernedCommand(request, QUEUE)), JSON.stringify(request)).toBe(code);
+    }
+    expect(refusal(() => parseGovernedCommand(base, { ...QUEUE, commands: [] }))).toBe("COMMAND_NOT_DECLARED");
   });
 });
