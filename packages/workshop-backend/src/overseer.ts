@@ -17360,7 +17360,7 @@ export async function provisionWorkflowTriggerCredential(
   let vendorId = gatekeeperVendorId(record);
   let resourceUrl = gatekeeperResourceUrl(record);
   let vendor = vendorId === undefined ? undefined : buildGatekeeperVendorMap(impl.env).get(vendorId) as unknown as
-      Pick<GatekeeperVendor, "provisionSystemCredential"> | undefined;
+      Pick<GatekeeperVendor, "provisionSystemCredential" | "forgetSystemCredential"> | undefined;
   if (!vendor?.provisionSystemCredential || resourceUrl === undefined) throw new Error(PROVISION_REFUSED);
   try {
     await vendor.provisionSystemCredential(assignment.credentialRef, {resourceUrl}, key);
@@ -17371,10 +17371,33 @@ export async function provisionWorkflowTriggerCredential(
     });
     throw new Error(PROVISION_REFUSED);
   }
-  let marked = impl.workflowDefinitionStore().markProvisioned(hookId, assignment.credentialRef, caller);
+  // The vendor has stored the key. Anything failing from here leaves it at rest for a reference
+  // this trigger no longer uses, so forget it before refusing (#375 round 2).
+  let marked: TriggerAssignment | null;
+  try {
+    marked = impl.workflowDefinitionStore().markProvisioned(hookId, assignment.credentialRef, caller);
+  } catch (error) {
+    await forgetProvisioned(vendor, hookId, assignment.credentialRef);
+    throw error;
+  }
   // The assignment changed while the key was being checked: what was stored is for a dead reference.
-  if (!marked) throw new Error("This trigger's assignment changed. Assign it again, then give the key.");
+  if (!marked) {
+    await forgetProvisioned(vendor, hookId, assignment.credentialRef);
+    throw new Error("This trigger's assignment changed. Assign it again, then give the key.");
+  }
   return marked;
+}
+
+/** Forgets the key just stored for `credentialRef`, logging by hook only if the vendor can't. */
+async function forgetProvisioned(
+    vendor: Pick<GatekeeperVendor, "forgetSystemCredential">, hookId: number, credentialRef: string): Promise<void> {
+  try {
+    await vendor.forgetSystemCredential?.(credentialRef);
+  } catch {
+    logger.warn("system credential could not be forgotten", {
+      event: "workflow.system_credential.forget.failed", hookId,
+    });
+  }
 }
 
 /**
