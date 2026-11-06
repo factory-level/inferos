@@ -1,3 +1,4 @@
+import type { ActionOutcome } from "./action-outcome.js";
 import type { AiChatAuthorInfo, WorkpieceId } from "./api.js";
 
 // A workflow definition: the reusable description of a workflow, stored in one workspace and
@@ -104,6 +105,70 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
    * beside it never changes.
    */
   execution?: WorkflowRunExecution;
+  /**
+   * The run's result (FAC-114; inferos ADR 0012 §3, proposed): its outcome as its completion and
+   * its own writes stand, the fixed reason when it failed or is uncertain, and what its code
+   * returned. Re-evaluated as the run ends and as each of its writes settles.
+   */
+  result?: WorkflowRunResult;
+  /** Where the result was delivered, by destination (FAC-114). Run history is always one. */
+  delivery?: WorkflowRunDelivery;
+};
+
+/**
+ * A requested run's outcome (FAC-114; inferos ADR 0012 §3, proposed):
+ * - `queued`, `running`: admitted, or started; neither is success;
+ * - `waiting`: its code finished, and a write it proposed waits for a person;
+ * - `succeeded`: its code finished, and none of its writes is waiting or may have happened unseen;
+ * - `failed`: it is known to have stopped, with nothing unknown; `reason` says why;
+ * - `uncertain`: work may or may not have happened, and nothing available can tell (`reason`).
+ *   It stays so, after any reconnect, until reconciled; a person resolving it is FAC-117's.
+ */
+export type WorkflowRunOutcome = "queued" | "running" | "waiting" | "succeeded" | "failed" | "uncertain";
+
+/**
+ * Why a run is uncertain (FAC-114): a write of it whose outcome is unknown (`action-unknown`); it
+ * threw after it had proposed a write (`lost-after-write`); or it was admitted and never started
+ * within `WORKFLOW_RUN_START_WINDOW_MS` (`not-started`).
+ */
+export type WorkflowRunUncertainty = "action-unknown" | "lost-after-write" | "not-started";
+
+/** How long an admitted run may take to be queued before it reads `uncertain` (`not-started`). */
+export const WORKFLOW_RUN_START_WINDOW_MS = 10 * 60 * 1000;
+
+/** The most text a run's returned report keeps (FAC-114); a larger one is kept as `{ truncated: true }`. */
+export const WORKFLOW_RUN_REPORT_MAX_CHARS = 4096;
+
+/**
+ * A run's recorded result (FAC-114). `report` is the plain JSON the run's code returned, bounded,
+ * for builders only: the code may run as a service account, so a requester never reads it.
+ */
+export type WorkflowRunResult = {
+  outcome: WorkflowRunOutcome;
+  reason?: WorkflowRunFailure | WorkflowRunUncertainty;
+  report?: unknown;
+  settledAt: Date;
+};
+
+/** The places a run's result is delivered (FAC-114). Today run history only; others add a key. */
+export type WorkflowRunDestination = "history";
+
+/** Per destination: not yet, done, or given up on. Separate from the outcome (ADR 0012 §2). */
+export type WorkflowRunDelivery = Partial<Record<WorkflowRunDestination, "pending" | "delivered" | "undelivered">>;
+
+/**
+ * What the person who asked for a run reads of it (FAC-114, `getRequestedRun`): the run, the
+ * revision it ran, its outcome and fixed reason, and each write it proposed, by action id, with that
+ * action's own outcome. No report, no write's text, no copy of anything it wrote.
+ */
+export type RequestedRun = {
+  runId: string;
+  invocationId: string;
+  revision: number;
+  requestedAt: Date;
+  outcome: WorkflowRunOutcome;
+  reason?: WorkflowRunFailure | WorkflowRunUncertainty;
+  actions: { actionId: number; outcome: ActionOutcome }[];
 };
 
 /**

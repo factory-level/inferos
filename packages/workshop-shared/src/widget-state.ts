@@ -83,7 +83,21 @@ export type WidgetStateSnapshot = {
   seq: number;
   /** The events the widget accepts in `state`, in declaration order. */
   events: string[];
+  /**
+   * Present only when the transition's event is wired to a `navigate` effect on the published page
+   * the person is shown (FAC-94): where it led, and whether the person's own operate page moved
+   * there. Absent for an unwired event, which changes nothing but the widget.
+   */
+  navigation?: WidgetNavigation;
 };
+
+/**
+ * Where a wired widget event navigated the person's operate page (FAC-94). `shown` when the page now
+ * shows `screenId`; `refused` when the move was checked and refused (the console doesn't show that
+ * screen, or the page changed meanwhile), leaving the page as it was. The widget's own transition
+ * stands either way.
+ */
+export type WidgetNavigation = { screenId: string; outcome: "shown" | "refused" };
 
 /** Refusal codes a widget transition carries, so a client can tell the reasons apart. */
 export const WIDGET_STATE_ERROR_CODES = Object.freeze({
