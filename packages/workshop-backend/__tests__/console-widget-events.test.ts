@@ -143,6 +143,15 @@ describe("a run's result at publication (FAC-116)", () => {
     expect(widget).toMatchObject({ attachments: [{ id: "next", on: canvasRunEvent("run-succeeded", 11) }] });
   });
 
+  it("publishes an attachment hearing the workspace's first trigger, hook 0", () => {
+    let t = setUp("plain");
+    hook(t.storage, 0, 1);
+    wire(t.storage, canvasRunEvent("run-failed", 0));
+    let published = publish(t).run();
+    let widget = t.consoles.page(published.id, "floor", "published")!.nodes.find(node => node.nodeType === "widget")!;
+    expect(widget).toMatchObject({ attachments: [{ id: "next", on: canvasRunEvent("run-failed", 0) }] });
+  });
+
   it.for([
     ["a trigger that isn't bound", null],
     ["another gadget's trigger", 2],

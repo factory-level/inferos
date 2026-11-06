@@ -452,10 +452,19 @@ describe("a requested run's result drives page effects (FAC-116)", () => {
     expect(parseCanvasRunEvent("finish")).toBeNull();
     // The earlier encoding is an ordinary widget event now, nothing reserved.
     expect(parseCanvasRunEvent("run-succeeded-11")).toBeNull();
-    for (const on of ["run-result-succeeded", "run-result-failed-000000000000000000000000", "run-result-failed-11",
+    for (const on of ["run-result-succeeded", "run-result-failed-11",
       "run-result-done-000000000000000000000011", "run-result-uncertain-999999999999999999999999"]) {
       expect(parseCanvasRunEvent(on), on).toBe("malformed");
     }
+  });
+
+  test("hears a workspace's first trigger, hook 0", () => {
+    const first = { ...done, on: canvasRunEvent("run-succeeded", 0) };
+    expect(first.on).toBe("run-result-succeeded-000000000000000000000000");
+    expect(parseCanvasRunEvent(first.on)).toEqual({ event: "run-succeeded", trigger: 0 });
+    const page = parseCanvasPage(runPage([first]));
+    expect(canvasRunEventsHeard(page)).toEqual([{ nodeId: "g", targetRef: "gadget:7", trigger: 0, event: "run-succeeded", attachmentId: "done" }]);
+    expect(canvasRunEffects(page, 0, "run-succeeded")).toEqual([{ kind: "navigate", page: "q" }]);
   });
 
   test("a gadget widget's attachment may hear one trigger's run results, checked at publish", () => {
@@ -511,7 +520,7 @@ describe("a requested run's result drives page effects (FAC-116)", () => {
     expect(canvasPageEffects(own, "gadget:7", "run-succeeded-11")).toEqual([{ kind: "navigate", page: "q" }]);
     expect(canvasRunEffects(own, 11, "run-succeeded")).toEqual([]);
     // And a run event is longer than any event a widget can declare (at most 40 characters).
-    for (const event of CANVAS_RUN_EVENTS) for (const trigger of [1, Number.MAX_SAFE_INTEGER]) {
+    for (const event of CANVAS_RUN_EVENTS) for (const trigger of [0, 1, Number.MAX_SAFE_INTEGER]) {
       expect(canvasRunEvent(event, trigger).length).toBeGreaterThan(40);
       expect(canvasRunEvent(event, trigger).length).toBeLessThanOrEqual(64);
     }

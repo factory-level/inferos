@@ -69,7 +69,7 @@ export function parseCanvasRunEvent(on: string): { event: CanvasRunEvent; trigge
   if (!on.startsWith(RUN_EVENT_PREFIX)) return null;
   const match = RUN_EVENT.exec(on);
   const trigger = match ? Number(match[2]) : Number.NaN;
-  return match && Number.isSafeInteger(trigger) && trigger > 0 ? { event: `run-${match[1]}` as CanvasRunEvent, trigger } : "malformed";
+  return match && Number.isSafeInteger(trigger) && trigger >= 0 ? { event: `run-${match[1]}` as CanvasRunEvent, trigger } : "malformed";
 }
 
 /**
