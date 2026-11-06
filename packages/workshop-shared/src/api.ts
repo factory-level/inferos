@@ -29,7 +29,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import type { WorkspaceConfiguration, WorkspaceSettings } from "./workspace-settings.js";
 import type { ConfigurationTraceEntry } from "./configuration-trace.js";
-import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, ConsoleDraftProblem, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
@@ -2890,6 +2890,17 @@ export interface Overseer extends RpcTarget {
    * (including one already published) throws the canvas conflict error.
    */
   publishConsole(id: string, expectedRevision: string): Promise<OperateConsole>;
+  /**
+   * Every problem that would stop console `id`'s draft being published as it stands (FAC-96): the
+   * same checks `publishConsole` runs and refuses with the first of, each with its target and a
+   * repair (`ConsoleDraftProblem`), in publication's order. An empty list means the draft would
+   * publish, apart from its size once published, which only publication can measure. It reads
+   * InferOS storage and the gadgets' git commits only, never InferOps or any connection, and writes
+   * nothing: the draft, its pages and their revisions are unchanged. Build access only; the use
+   * role and the operate session are refused. A gadget whose commit moves while it runs refuses
+   * with `CONSOLE_CHANGED`, to try again.
+   */
+  validateConsoleDraft(id: string): Promise<ConsoleDraftProblem[]>;
   /**
    * Read one console: its `published` revision as operators see it, or its `draft`, which needs
    * build access. Null if there is no such console or it has never been published.
