@@ -14,6 +14,7 @@ type FeatureFlagEnv = {
   ENABLE_OPENAI_ASSISTANT_PLUGIN?: string;
   OPENAI_ASSISTANT_PLUGIN_URL?: string;
   OPENAI_ASSISTANT_PLUGIN_SECRET?: string;
+  AUTHORED_WIDGET_BUILD_ENABLED?: string;
   DEV?: boolean;
   FLAGS?: Pick<Flagship, "getBooleanValue">;
 };
@@ -24,7 +25,10 @@ export async function resolveUiFeatureFlags(
     env: FeatureFlagEnv,
     userId: string,
 ): Promise<UiFeatureFlags> {
-  const deploymentFlags = { 'openai-chatgpt-plan-usage': isOpenAiPluginEnabled(env) };
+  const deploymentFlags = {
+    'openai-chatgpt-plan-usage': isOpenAiPluginEnabled(env),
+    'authored-widgets': env.AUTHORED_WIDGET_BUILD_ENABLED === "true",
+  };
   if (env.DEV) {
     return { ...DEV_UI_FEATURE_FLAGS, ...deploymentFlags };
   }
@@ -40,7 +44,9 @@ export async function resolveUiFeatureFlags(
 
   const values: UiFeatureFlagEntry[] = await Promise.all(
     UI_FEATURE_FLAGS.map(async (flag): Promise<UiFeatureFlagEntry> => {
-      if (flag.key === 'openai-chatgpt-plan-usage') return [flag.key, deploymentFlags[flag.key]];
+      if (flag.key === 'openai-chatgpt-plan-usage' || flag.key === 'authored-widgets') {
+        return [flag.key, deploymentFlags[flag.key]];
+      }
       try {
         return [flag.key, await flags.getBooleanValue(flag.key, flag.default, { userId })];
       } catch (error) {
