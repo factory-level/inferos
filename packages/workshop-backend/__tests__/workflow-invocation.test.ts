@@ -232,6 +232,20 @@ describe("through the Overseer", () => {
     }
   });
 
+  // Re-QA on #374: a fixed refusal must not carry the error it replaced. RPC serialises `cause`, so
+  // a refusal built with one handed the invoker the gatekeeper's own words after all.
+  it("never sends the replaced error along with a fixed refusal", async () => {
+    const internal = "This scheduled task isn't running, so it can't be run now.";
+    for (const message of ['The RPC receiver does not implement the method "invoke".', internal]) {
+      let made = await session("use", { invoke: async () => { throw new Error(message); } });
+      let refused: unknown;
+      try { await made.overseer.invokeTrigger(HOOK); } catch (error) { refused = error; }
+      expect(refused).toBeInstanceOf(Error);
+      expect(Object.hasOwn(refused as object, "cause")).toBe(false);
+      expect(JSON.stringify(refused, Object.getOwnPropertyNames(refused))).not.toContain(message);
+    }
+  });
+
   it("refuses at once, asking no gatekeeper, a trigger assigned while assignments are off", async () => {
     let off = await session("use");
     off.store.setAssignment(ADA, HOOK, 50);

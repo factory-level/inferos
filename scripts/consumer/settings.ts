@@ -389,6 +389,13 @@ export const SETTINGS: readonly SettingEntry[] = [
     readAt: "Shell, then the backend's `auth/config.ts`",
     present: ({ env }) => env.PUBLICATION_SELF_APPROVAL === "true",
   },
+  {
+    name: "WORKFLOW_ASSIGNMENTS_ENABLED", group: "Host and runtime", kind: "value", owner: "deployer", default: "off", source: "both",
+    description: "`true` lets an Admin assign a trigger's runs on request to a service account and give its key, and runs act as it. Off: assigning and giving a key are refused, a request for a trigger assigned before is refused, and removing still works. Leave unset on every deployment until the fail-closed follow-up merges (FAC-102); QA turns it on explicitly.",
+    requiredWhen: never,
+    readAt: "Shell, then the backend's `overseer.ts` (`workflowAssignmentsEnabled`)",
+    present: ({ env }) => env.WORKFLOW_ASSIGNMENTS_ENABLED === "true",
+  },
 ];
 
 /** One problem with the settings. Messages name settings and problems only, never values. */
