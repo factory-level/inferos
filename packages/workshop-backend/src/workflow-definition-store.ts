@@ -487,6 +487,20 @@ export class WorkspaceWorkflowDefinitionStore {
     return null;
   }
 
+  /**
+   * What delivery `deliveryId` recorded about who asked for it (FAC-104): its admitted run, and
+   * whether a person asked through an invocation. Null when the delivery is unknown or was dropped
+   * past `MAX_WORKFLOW_DELIVERIES`. `run` is absent on a delivery recorded before FAC-111.
+   */
+  deliveryRun(deliveryId: number): { invoked: boolean; run?: WorkflowRunRecord } | null {
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    if (!delivery) return null;
+    return {
+      invoked: delivery.invocation !== undefined,
+      ...(delivery.run ? { run: this.run(delivery.run.runId) ?? undefined } : {}),
+    };
+  }
+
   /** The recorded deliveries of a definition visible to `viewer`, oldest first. */
   deliveries(viewer: string, definitionId: string): WorkflowDefinitionDelivery[] {
     if (!this.get(viewer, definitionId)) throw new Error(NOT_FOUND);
