@@ -191,7 +191,7 @@ const backendPlugins = () => [
  *   the file that made it (`__tests__/workerd/backend-file-boundary.ts`).
  * - `backend-restart`: the same Worker, for the few files that restart every Durable Object
  *   (`abortAllDurableObjects()`), which in `backend`'s shared runtime would restart other files'
- *   objects too. Each gets a Miniflare of its own, after `backend` has finished.
+ *   objects too. Each gets a Miniflare of its own, one file at a time, after `backend` has finished.
  *
  * The three workerd projects load `@gadgets/scripts/assert-workerd`, which fails the run unless the
  * pool actually started, rather than trusting a green run to mean workerd.
@@ -262,7 +262,9 @@ export default defineConfig({
           // own Miniflare (the default `isolate`), after `backend` has finished.
           name: 'backend-restart',
           include: tests(BACKEND_RESTART),
+          // One file at a time: a file's restart must reach no other file's objects.
           maxWorkers: 1,
+          fileParallelism: false,
           sequence: { groupOrder: 2 },
           unstubGlobals: true,
           restoreMocks: true,

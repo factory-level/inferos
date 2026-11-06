@@ -67,6 +67,9 @@ import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
   RpcTarget as NativeRpcTarget, restore,
 } from "cloudflare:workers";
+import type { WorkspaceConfiguration, WorkspaceSettings } from "@gadgets/workshop-shared/workspace-settings";
+import { traceConfiguration, type ConfigurationTraceEntry } from "@gadgets/workshop-shared/configuration-trace";
+import { readWorkspaceConfiguration, saveWorkspaceConfiguration } from "./workspace-configuration";
 import { createTypedStorage, collection, singleton, keyString } from "@gadgets/typed-storage";
 import type { ListOptions } from "@gadgets/typed-storage";
 import {
@@ -1810,6 +1813,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // its `ObservationDescription`. Share links stop working and only the owner can add
       // collaborators (enforced by SharingManager).
       ownerInvitesOnly: singleton(false),
+
+      // The workspace's own settings (FAC-95; see workspace-configuration.ts), which a page may
+      // override and a console publication freezes. Unset until the first save.
+      workspaceConfiguration: singleton<WorkspaceConfiguration | null>(null),
 
       // The authorization generation (see AuthzGenerationStorage in sharing.ts): raised at every
       // change to who may reach this workspace or on what terms. See the end of this function.
@@ -14110,6 +14117,24 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.impl.deleteCanvasAs(this.#canvasWriter, id, expectedRevision);
   }
   async getCanvasPage(id: string): Promise<CanvasPage | null> { return this.#canvasStore().getPage(id); }
+  // FAC-95: the workspace's settings are building, gated in a shared workspace as hooks and
+  // workflow saves are; the check and the write are one storage step (workspace-configuration.ts).
+  async getWorkspaceConfiguration(): Promise<WorkspaceConfiguration> {
+    return readWorkspaceConfiguration(this.impl.storage);
+  }
+  async setWorkspaceConfiguration(expectedRevision: string, settings: WorkspaceSettings): Promise<WorkspaceConfiguration> {
+    await this.#requireSharedConfiguration("build", "shared");
+    return this.impl.ctx.storage.transactionSync(() =>
+      saveWorkspaceConfiguration(this.impl.storage, expectedRevision, settings));
+  }
+  async traceConfiguration(canvasId: string | null): Promise<ConfigurationTraceEntry[]> {
+    let page = canvasId === null ? null : this.#canvasStore().getPage(canvasId);
+    if (canvasId !== null && !page) throw new Error("Canvas not found");
+    let store = this.impl.workflowDefinitionStore();
+    let hooks = (await this.listHooks()).map(hook => ({ hookId: hook.id, title: hook.description.title,
+      enabled: hook.enabled, gatekeeperId: hook.gatekeeperId, gadgetId: hook.gadgetId, pinned: store.pinOf(hook.id) }));
+    return traceConfiguration(readWorkspaceConfiguration(this.impl.storage).settings, page, hooks);
+  }
   async editCanvasPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage> {
     return this.impl.editCanvasPageAs(this.#canvasWriter, id, expectedRevision, operations);
   }
@@ -16799,6 +16824,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   // The nested page is the builder's: a use session reads only published version 1 screens.
   async getCanvasPage(_id: string): Promise<CanvasPage | null> { this.#deny(); }
+  // Settings are the builder's; operators get them as a console publication froze them (FAC-95).
+  async getWorkspaceConfiguration(): Promise<WorkspaceConfiguration> { this.#deny(); }
+  async setWorkspaceConfiguration(_expectedRevision: string, _settings: WorkspaceSettings): Promise<WorkspaceConfiguration> { this.#deny(); }
+  async traceConfiguration(_canvasId: string | null): Promise<ConfigurationTraceEntry[]> { this.#deny(); }
   async editCanvasPage(_id: string, _expectedRevision: string, _operations: CanvasPageOperation[]): Promise<CanvasPage> { this.#deny(); }
   async listFlows(): Promise<OperateFlow[]> { this.#deny(); }
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
@@ -17459,6 +17488,10 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   // The nested page is the builder's live draft: an operate session reads only what a console published.
   async getCanvasPage(_id: string): Promise<CanvasPage | null> { this.#deny(); }
+  // Settings are the builder's; operators get them as a console publication froze them (FAC-95).
+  async getWorkspaceConfiguration(): Promise<WorkspaceConfiguration> { this.#deny(); }
+  async setWorkspaceConfiguration(_expectedRevision: string, _settings: WorkspaceSettings): Promise<WorkspaceConfiguration> { this.#deny(); }
+  async traceConfiguration(_canvasId: string | null): Promise<ConfigurationTraceEntry[]> { this.#deny(); }
   async editCanvasPage(_id: string, _expectedRevision: string, _operations: CanvasPageOperation[])
       : Promise<CanvasPage> { this.#deny(); }
   async createFlow(_content: OperateFlowContent): Promise<OperateFlow> { this.#deny(); }
