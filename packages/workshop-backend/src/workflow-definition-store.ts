@@ -4,7 +4,7 @@ import {
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, TRIGGER_RUNS_PER_INVOKER, TRIGGER_RUNS_PER_TRIGGER,
   WORKFLOW_INVOCATION_TTL_MS, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
   type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery, type WorkflowDefinitionRef,
-  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunFailure,
+  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunFailure, type WorkflowRunResult,
   type WorkflowRunRecord,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
@@ -574,6 +574,33 @@ export class WorkspaceWorkflowDefinitionStore {
           ...(failure === undefined ? {} : { failure }),
         },
       });
+    });
+  }
+
+  /** The delivery a person's request `invocationId` made, or null (FAC-114): at most one, ever. */
+  deliveryOfInvocation(invocationId: string): StoredWorkflowDelivery | null {
+    for (let delivery of this.storage.workflowDeliveries.list()) {
+      if (delivery.invocation?.id === invocationId) return delivery;
+    }
+    return null;
+  }
+
+  /** Record delivery `deliveryId`'s result (FAC-114), with run history delivered; unchanged if it's the same. */
+  recordResult(deliveryId: number, result: Omit<WorkflowRunResult, "settledAt">): void {
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    if (!delivery) return;
+    let same = delivery.result && delivery.result.outcome === result.outcome && delivery.result.reason === result.reason &&
+        JSON.stringify(delivery.result.report) === JSON.stringify(result.report);
+    if (same && delivery.delivery?.history === "delivered") return;
+    this.storage.workflowDeliveries.put({
+      ...delivery,
+      result: {
+        outcome: result.outcome,
+        ...(result.reason ? { reason: result.reason } : {}),
+        ...(result.report !== undefined ? { report: result.report } : {}),
+        settledAt: same ? delivery.result!.settledAt : new Date(),
+      },
+      delivery: { ...delivery.delivery, history: "delivered" },
     });
   }
 
