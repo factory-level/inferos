@@ -47,6 +47,7 @@ export const UNIT_NODE: readonly string[] = [
   "code-preview.test.ts",
   "console-host-boards.test.ts",
   "console-tool-surfaces.test.ts",
+  "workspace-configuration.test.ts",
   "console-widget-events.test.ts",
   "feature-flags.test.ts",
   "gadget-export.test.ts",
@@ -110,20 +111,14 @@ export const WORKERD_LIGHT: readonly string[] = [
  */
 export const BACKEND: readonly string[] = [
   "agent-spawner-config.test.ts",
-  "operate-agui.test.ts",
   "operate-flow-start.test.ts",
   "widget-state.test.ts",
   "widget-event-navigation.test.ts",
   "personal-state-partition.test.ts",
-  "agent-calls.test.ts",
-  "workflow-run-restart.test.ts",
-  "workflow-run-execution.test.ts",
-  "workflow-run-results.test.ts",
   "workflow-requested-runs.test.ts",
   "agent-tracing.test.ts",
   "authored-widget-publish-flow.test.ts",
   "authorize-observation-flags.test.ts",
-  "authz-generation.test.ts",
   "chat-changes.test.ts",
   "chat-taint.test.ts",
   "connect-handoff.test.ts",
@@ -135,20 +130,36 @@ export const BACKEND: readonly string[] = [
   "execution-bound-loopbacks.test.ts",
   "gadget-restore.test.ts",
   "git-binding.test.ts",
-  "git-migration-do.test.ts",
   "git-push-actions.test.ts",
-  "host-boards.test.ts",
   "observer-exclude-scope.test.ts",
   "observer-scope-restart.test.ts",
   "observer-verification-failure.test.ts",
   "pending-login.test.ts",
-  "published-consoles-migration.test.ts",
   "restricted-actions.test.ts",
   "spawned-agent-tools.test.ts",
-  "tool-lane.test.ts",
   "user-commit-email.test.ts",
   "user-models.test.ts",
   "workflow-assigned-writes.test.ts",
   "worktree-session.test.ts",
+];
+
+/**
+ * Backend files that restart every Durable Object (`abortAllDurableObjects()`). In the shared
+ * `backend` runtime that would also restart, mid-test, the objects of other files the same worker
+ * ran, which breaks them (and can crash workerd: see `workerd/backend-file-boundary.ts`). So these
+ * run in their own project, `backend-restart`, after `backend`, one file at a time, each with its own
+ * Miniflare. Every file that calls it belongs here; `test-projects.test.ts` checks that.
+ */
+export const BACKEND_RESTART: readonly string[] = [
+  "agent-calls.test.ts",
+  "authz-generation.test.ts",
+  "git-migration-do.test.ts",
+  "host-boards.test.ts",
+  "operate-agui.test.ts",
+  "published-consoles-migration.test.ts",
+  "tool-lane.test.ts",
+  "workflow-run-execution.test.ts",
+  "workflow-run-restart.test.ts",
+  "workflow-run-results.test.ts",
   "worktrees.test.ts",
 ];

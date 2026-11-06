@@ -27,6 +27,8 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 // Gadget a stub pointing to the Gadget's server-side Durable Object interface.
 
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
+import type { WorkspaceConfiguration, WorkspaceSettings } from "./workspace-settings.js";
+import type { ConfigurationTraceEntry } from "./configuration-trace.js";
 import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
@@ -2721,6 +2723,29 @@ export interface Overseer extends RpcTarget {
    * are refused: they read only what a console published. A missing canvas reads as null.
    */
   getCanvasPage(id: string): Promise<CanvasPage | null>;
+  /**
+   * The workspace's own settings (FAC-95): registry keys (`WORKSPACE_SETTINGS`) with their values, at
+   * their revision ("0" before the first save). A page may override any of them
+   * (`CanvasPage.settings`), and a console publication freezes both. Build access only: the use
+   * role and an operate session read settings as a publication froze them.
+   */
+  getWorkspaceConfiguration(): Promise<WorkspaceConfiguration>;
+  /**
+   * Replace the workspace's settings if `expectedRevision` is current, returning the new
+   * configuration. Building: in a shared workspace the deployment's shared-configuration service
+   * must agree (FAC-44), so an Operator or another company's member is refused before anything is
+   * read. An unknown key or value, or a stale revision, is refused and nothing is written. Nothing
+   * reaches operators until a console is published again. A setting grants no authority.
+   */
+  setWorkspaceConfiguration(expectedRevision: string, settings: WorkspaceSettings): Promise<WorkspaceConfiguration>;
+  /**
+   * Trace configuration (FAC-95, `traceConfiguration`): with `canvasId`, that canvas's draft page's
+   * settings as it resolves them against the workspace's, each with the level that owns it, and its
+   * page hooks with the page or node that holds them; then the workspace's gatekeeper hooks,
+   * read-only, with the gadget they wake and any workflow revision they're pinned to. Every entry
+   * says what it may do, and none grants anything. Build access only; a missing canvas is refused.
+   */
+  traceConfiguration(canvasId: string | null): Promise<ConfigurationTraceEntry[]>;
   /**
    * Compare the page revision and apply typed page operations atomically, with build access and both
    * flags. A stale revision throws the canvas conflict error and writes nothing. Removing a node

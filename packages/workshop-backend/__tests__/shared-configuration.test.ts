@@ -172,11 +172,11 @@ async function shared(answers: { build: Answer; publish: Answer }, storage: obje
 
 describe("a build session in a shared workspace", () => {
 
-  // FAC-99: publication is the company Admin's. An Operator (a build collaborator the service says
-  // no to for publish) and another company's Admin (to whom the deployment's service answers no:
+  // FAC-99: publication is the company Admin's. A builder without publish (a build collaborator the
+  // service says no to for publish; in InferOps an Operator has neither, see the FAC-95 case below) and another company's Admin (to whom the deployment's service answers no:
   // gatekeeper-inferops account.test.ts, "answers for nothing in a deployment that names another
   // company") are refused before the console store is touched.
-  it("refuses a console publication by an Operator, or by another company's Admin (FAC-99)", async () => {
+  it("refuses a console publication by a builder without publish, or by another company's Admin (FAC-99)", async () => {
     let operator = await open({
       env: GATED, shared: true, collaborator: true, answer: action => action === "build",
     });
@@ -188,6 +188,21 @@ describe("a build session in a shared workspace", () => {
     otherCompany.asked.length = 0;
     await expect(otherCompany.overseer.publishConsole("console", "1")).rejects.toThrow(REFUSED);
     expect(otherCompany.asked).toEqual(["publish"]);
+  });
+
+  // FAC-95: the workspace's settings are building. An Operator (a collaborator the service says no to
+  // for build) gets the read-only session, which refuses them; another company's member, to whom the
+  // deployment's service answers no for build, is refused at the write, before storage is touched.
+  it("refuses the workspace's settings to an Operator, and to another company's member (FAC-95)", async () => {
+    let operator = await open({ env: GATED, shared: true, collaborator: true, answer: false });
+    expect(kind(operator.overseer)).toBe("UseOverseerInterface");
+    await expect(operator.overseer.setWorkspaceConfiguration("0", { "baseUi.alerts": true })).rejects.toThrow(/Unauthorized/);
+    await expect(operator.overseer.getWorkspaceConfiguration()).rejects.toThrow(/Unauthorized/);
+    await expect(operator.overseer.traceConfiguration(null)).rejects.toThrow(/Unauthorized/);
+    let otherCompany = await shared({ build: false, publish: false });
+    otherCompany.asked.length = 0;
+    await expect(otherCompany.overseer.setWorkspaceConfiguration("0", { "baseUi.alerts": true })).rejects.toThrow(REFUSED);
+    expect(otherCompany.asked).toEqual(["build"]);
   });
 
   it("refuses publishing, installs and blueprint changes without publish, before anything runs", async () => {

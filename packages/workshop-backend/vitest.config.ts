@@ -6,7 +6,7 @@ import { defineConfig } from 'vitest/config'
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
 import { COMPATIBILITY_DATE } from '@gadgets/scripts/worker-config'
 import capnwebValidate from 'capnweb-validate/vite'
-import { BACKEND, UNIT_NODE, WORKERD_LIGHT } from './__tests__/test-projects.ts'
+import { BACKEND, BACKEND_RESTART, UNIT_NODE, WORKERD_LIGHT } from './__tests__/test-projects.ts'
 
 // Wrangler ships `*.txt` imports as Text modules (its default module rules; see
 // src/text-modules.d.ts), but this config drives the pool from inline miniflare settings, and
@@ -135,9 +135,48 @@ function backendWorkers(): number {
   return Number(value)
 }
 
+/** The `backend` projects' plugins: the production Worker, plus test-only entrypoints, in workerd. */
+const backendPlugins = () => [
+  ...plugins(),
+  cloudflareTest({
+    // The production Worker plus test-only entrypoints (see __tests__/test-worker.ts).
+    main: './__tests__/test-worker.ts',
+    miniflare: {
+      compatibilityDate: COMPATIBILITY_DATE,
+      compatibilityFlags,
+      streamingTails: ['span-recorder'],
+      serviceBindings: { SPAN_RECORDER: { name: 'span-recorder', entrypoint: 'SpanRecorder' } },
+      workers: [{
+        name: 'span-recorder',
+        modules: true,
+        script: spanRecorder,
+        compatibilityDate: COMPATIBILITY_DATE,
+        compatibilityFlags: ['experimental', 'streaming_tail_worker'],
+      }],
+      bindings: { PUBLIC_BASE_URL: 'https://workshop.example/' },
+      // The overseer loads gadget code through this, so a test can run a real gadget facet.
+      workerLoaders: { LOADER: {} },
+      durableObjects: {
+        TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
+        TEST_AUTHORED_WIDGET_BUILD: { className: 'AuthoredWidgetBuildDurableObject', useSQLite: true },
+        TEST_USER: { className: 'UserDurableObject', useSQLite: true },
+        TEST_PENDING_LOGIN: { className: 'PendingLogin', useSQLite: true },
+        // Never addressed by name: a binding is what puts the class in `ctx.exports`, from
+        // which the overseer instantiates it (with props) as one of its own facets.
+        TEST_AGENT_SPAWNER: { className: 'AgentSpawnerGatekeeper', useSQLite: true },
+        TEST_USER_DIRECTORY: { className: 'UserDirectoryDurableObject', useSQLite: true },
+        // Puts the class in `ctx.exports`, from which a user DO leaves a former subject's
+        // presence on a company change (FAC-88).
+        TEST_SUBJECT_PRESENCE: { className: 'SubjectPresenceDurableObject', useSQLite: true },
+      },
+      modulesRules: [{ type: 'CompiledWasm', include: ['**/esbuild.wasm'] }],
+    },
+  }),
+]
+
 /**
- * Three projects, cheapest first; `__tests__/test-projects.ts` says which file runs where, and
- * `vitest run` runs all three (`--project <name>` picks one).
+ * Four projects, cheapest first; `__tests__/test-projects.ts` says which file runs where, and
+ * `vitest run` runs all four (`--project <name>` picks one).
  *
  * - `unit-node`: pure logic under Node. No workerd start, so a file costs milliseconds.
  * - `workerd-light`: needs workerd's runtime APIs but not the backend, so the pool's `main` is a
@@ -150,8 +189,11 @@ function backendWorkers(): number {
  *   global or a patched prototype is put back when the test or file ends, module-level state in
  *   `test-worker.ts` is keyed by names the file mints itself, and an overseer's alarm runs only for
  *   the file that made it (`__tests__/workerd/backend-file-boundary.ts`).
+ * - `backend-restart`: the same Worker, for the few files that restart every Durable Object
+ *   (`abortAllDurableObjects()`), which in `backend`'s shared runtime would restart other files'
+ *   objects too. Each gets a Miniflare of its own, one file at a time, after `backend` has finished.
  *
- * The two workerd projects load `@gadgets/scripts/assert-workerd`, which fails the run unless the
+ * The three workerd projects load `@gadgets/scripts/assert-workerd`, which fails the run unless the
  * pool actually started, rather than trusting a green run to mean workerd.
  */
 export default defineConfig({
@@ -194,43 +236,7 @@ export default defineConfig({
       },
       {
         ...shared,
-        plugins: [
-          ...plugins(),
-          cloudflareTest({
-            // The production Worker plus test-only entrypoints (see __tests__/test-worker.ts).
-            main: './__tests__/test-worker.ts',
-            miniflare: {
-              compatibilityDate: COMPATIBILITY_DATE,
-              compatibilityFlags,
-              streamingTails: ['span-recorder'],
-              serviceBindings: { SPAN_RECORDER: { name: 'span-recorder', entrypoint: 'SpanRecorder' } },
-              workers: [{
-                name: 'span-recorder',
-                modules: true,
-                script: spanRecorder,
-                compatibilityDate: COMPATIBILITY_DATE,
-                compatibilityFlags: ['experimental', 'streaming_tail_worker'],
-              }],
-              bindings: { PUBLIC_BASE_URL: 'https://workshop.example/' },
-              // The overseer loads gadget code through this, so a test can run a real gadget facet.
-              workerLoaders: { LOADER: {} },
-              durableObjects: {
-                TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
-                TEST_AUTHORED_WIDGET_BUILD: { className: 'AuthoredWidgetBuildDurableObject', useSQLite: true },
-                TEST_USER: { className: 'UserDurableObject', useSQLite: true },
-                TEST_PENDING_LOGIN: { className: 'PendingLogin', useSQLite: true },
-                // Never addressed by name: a binding is what puts the class in `ctx.exports`, from
-                // which the overseer instantiates it (with props) as one of its own facets.
-                TEST_AGENT_SPAWNER: { className: 'AgentSpawnerGatekeeper', useSQLite: true },
-                TEST_USER_DIRECTORY: { className: 'UserDirectoryDurableObject', useSQLite: true },
-                // Puts the class in `ctx.exports`, from which a user DO leaves a former subject's
-                // presence on a company change (FAC-88).
-                TEST_SUBJECT_PRESENCE: { className: 'SubjectPresenceDurableObject', useSQLite: true },
-              },
-              modulesRules: [{ type: 'CompiledWasm', include: ['**/esbuild.wasm'] }],
-            },
-          }),
-        ],
+        plugins: backendPlugins(),
         test: {
           name: 'backend',
           include: tests(BACKEND),
@@ -242,6 +248,24 @@ export default defineConfig({
           maxWorkers: backendWorkers(),
           sequence: { groupOrder: 1 },
           // Module state outlives a file here, so undo what a test stubs as soon as it ends.
+          unstubGlobals: true,
+          restoreMocks: true,
+          setupFiles: ['@gadgets/scripts/assert-workerd', './__tests__/workerd/backend-file-boundary.ts'],
+        },
+      },
+      {
+        ...shared,
+        plugins: backendPlugins(),
+        test: {
+          // Files that restart every Durable Object (`abortAllDurableObjects()`), which in the
+          // shared `backend` runtime would restart other files' objects too. Each file here gets its
+          // own Miniflare (the default `isolate`), after `backend` has finished.
+          name: 'backend-restart',
+          include: tests(BACKEND_RESTART),
+          // One file at a time: a file's restart must reach no other file's objects.
+          maxWorkers: 1,
+          fileParallelism: false,
+          sequence: { groupOrder: 2 },
           unstubGlobals: true,
           restoreMocks: true,
           setupFiles: ['@gadgets/scripts/assert-workerd', './__tests__/workerd/backend-file-boundary.ts'],

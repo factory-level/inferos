@@ -8,6 +8,7 @@
  * the acting person's or run's own authority.
  */
 import { CANVAS_ID, CANVAS_REVISION, parseCanvasDefinition, parseCanvasWidget, type CanvasDataBinding, type CanvasDefinition, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
+import { parseWorkspaceSettings, type WorkspaceSettings } from "./workspace-settings";
 
 /** The schema version this module reads. `CanvasDefinition`, with sections, is version 1. */
 export const CANVAS_MODEL_SCHEMA_VERSION = 2;
@@ -132,6 +133,13 @@ export interface CanvasPage {
   attachments: CanvasAttachment[];
   /** Every object and widget on the page. Array order means nothing; `children` carries the layout. */
   nodes: CanvasNode[];
+  /**
+   * This page's overrides of the workspace's settings (FAC-95): registry keys only
+   * (`WORKSPACE_SETTINGS`), each with one of its values. Absent when the page overrides nothing.
+   * It is the one override the model allows (ADR 0014 as amended by ADR 0017); every other
+   * inheritance or override field is still refused.
+   */
+  settings?: WorkspaceSettings;
 }
 
 /** Why a value was rejected. Each is stable, so a caller can act on it without reading a message. */
@@ -141,7 +149,8 @@ export type CanvasModelErrorCode =
   | "duplicate-id" | "limit-exceeded" | "missing-reference"
   | "containment-cycle" | "multiple-parents" | "orphan-node" | "invalid-nesting" | "nesting-too-deep"
   | "invalid-attachment" | "unknown-effect" | "invalid-target" | "unavailable-action"
-  | "unknown-event" | "reserved-event" | "reference-cycle" | "invalid-data-binding" | "incompatible-data-binding";
+  | "unknown-event" | "reserved-event" | "reference-cycle" | "invalid-data-binding" | "incompatible-data-binding"
+  | "invalid-setting";
 
 /** A rejected page. Its message and `at` hold only validated IDs and known field names, never submitted values. */
 export class CanvasModelError extends Error {
@@ -429,6 +438,15 @@ export function canvasPageEffects(page: CanvasPage, targetRef: string, event: st
   return effects;
 }
 
+// A page's settings, as the registry parses them; its words stay out of the error, as for every field.
+const parsePageSettings = (value: unknown, at: string): WorkspaceSettings => {
+  try {
+    return parseWorkspaceSettings(value);
+  } catch {
+    return reject("invalid-setting", at);
+  }
+};
+
 /**
  * Validate and detach one page. Throws `CanvasModelError`. This takes no viewer and performs no I/O:
  * accepting a page says its shape is sound, and says nothing about who may see a target it names.
@@ -438,7 +456,10 @@ export function parseCanvasPage(value: unknown): CanvasPage {
   const raw = value as Record<string, unknown>;
   if (raw.schemaVersion !== CANVAS_MODEL_SCHEMA_VERSION) return reject("unknown-version", "page");
   const id = parseId(raw.id, "page");
-  const p = fields(value, ["schemaVersion", "id", "revision", "title", "children", "attachments", "nodes"], id);
+  // `settings` is the page's one optional field; an empty object means none.
+  const { settings: rawSettings, ...required } = raw;
+  const p = fields(required, ["schemaVersion", "id", "revision", "title", "children", "attachments", "nodes"], id);
+  const settings = rawSettings === undefined ? {} : parsePageSettings(rawSettings, `${id}.settings`);
   if (typeof p.revision !== "string" || !CANVAS_REVISION.test(p.revision)) return reject("invalid-shape", id);
   if (!Array.isArray(p.nodes)) return reject("invalid-shape", id);
   if (p.nodes.length > CANVAS_MODEL_LIMITS.nodes) return reject("limit-exceeded", id);
@@ -452,6 +473,7 @@ export function parseCanvasPage(value: unknown): CanvasPage {
   const page: CanvasPage = {
     schemaVersion: CANVAS_MODEL_SCHEMA_VERSION, id, revision: p.revision, title: parseTitle(p.title, id),
     children: idList(p.children, id), attachments: parseAttachments(p.attachments, id), nodes,
+    ...(Object.keys(settings).length === 0 ? {} : { settings }),
   };
   checkContainment(page, byId);
   checkAttachments(page, byId);
@@ -503,7 +525,8 @@ export function canvasPageFromDefinition(definition: unknown): CanvasPage {
  * attachments, nesting, a widget directly under the page, or more sections than version 1 allows.
  */
 export function canvasDefinitionFromPage(page: CanvasPage): CanvasDefinition | null {
-  if (page.attachments.length > 0 || page.children.length > 12) return null;
+  // Version 1 has nowhere to keep a page's settings, so a page with any stays nested.
+  if (page.attachments.length > 0 || page.children.length > 12 || page.settings) return null;
   const byId = new Map(page.nodes.map(node => [node.id, node]));
   const sections: CanvasDefinition["sections"] = [];
   for (const sectionId of page.children) {
@@ -636,7 +659,9 @@ export type CanvasPageOperation =
   /** Remove a node and everything it contains from the page. */
   | { type: "removeNode"; nodeId: string }
   /** Replace the attachments of the page or of one node. */
-  | { type: "setAttachments"; target: string; attachments: CanvasAttachment[] };
+  | { type: "setAttachments"; target: string; attachments: CanvasAttachment[] }
+  /** Replace the page's settings overrides (FAC-95); an empty object removes them all. */
+  | { type: "setSettings"; settings: WorkspaceSettings };
 
 const COLUMNS = (value: unknown, at: string): 1 | 2 | 3 =>
   value === 1 || value === 2 || value === 3 ? value : reject("invalid-shape", at);
@@ -653,6 +678,7 @@ export function applyCanvasPageOperations(current: CanvasPage, operations: unkno
   let title = page.title;
   let pageChildren = [...page.children];
   let pageAttachments = page.attachments;
+  let pageSettings = page.settings ?? {};
   const nodes = new Map<string, CanvasNode>(page.nodes.map(node => [node.id, node]));
 
   const childrenOf = (parent: string, at: string): string[] => {
@@ -762,6 +788,9 @@ export function applyCanvasPageOperations(current: CanvasPage, operations: unkno
         }
         return;
       }
+      case "setSettings":
+        pageSettings = parsePageSettings(fields(op, ["type", "settings"], at).settings, at);
+        return;
       default:
         return reject("invalid-shape", at);
     }
@@ -769,7 +798,9 @@ export function applyCanvasPageOperations(current: CanvasPage, operations: unkno
 
   if (pageChildren.length > CANVAS_PAGE_TOP_OBJECTS) return reject("limit-exceeded", page.id);
   if (pageChildren.some(child => nodes.get(child)?.nodeType !== "object")) return reject("invalid-nesting", page.id);
-  return parseCanvasPage({ ...page, title, children: pageChildren, attachments: pageAttachments, nodes: [...nodes.values()] });
+  const { settings: _settings, ...rest } = page;
+  return parseCanvasPage({ ...rest, title, children: pageChildren, attachments: pageAttachments, nodes: [...nodes.values()],
+    ...(Object.keys(pageSettings).length === 0 ? {} : { settings: pageSettings }) });
 }
 
 /**
