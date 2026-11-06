@@ -8,14 +8,14 @@
         {
           "id": "work", "title": "Work", "columns": 2,
           "widgets": [
-            { "id": "eng-board", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "wide", "params": { "workflow": "software", "showCompleted": false } },
+            { "id": "eng-board", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "dataBinding": { "resource": "project/board", "ref": "inferops://acme.operations/project/board/ENG", "schemaVersion": 1 }, "size": "wide", "params": { "workflow": "software", "showCompleted": false } },
             { "id": "tool", "kind": "inferos.gadget", "version": 1, "targetRef": "gadget:42", "size": "normal", "params": {} }
           ]
         },
         {
           "id": "reference", "title": "Reference", "columns": 1,
           "widgets": [
-            { "id": "runbook", "kind": "inferops.wiki", "version": 1, "targetRef": "inferops://acme.knowledge/knowledge/wiki", "size": "full", "params": { "page": "runbook" } }
+            { "id": "runbook", "kind": "inferops.wiki", "version": 1, "targetRef": "inferops://acme.knowledge/knowledge/wiki", "dataBinding": { "resource": "knowledge/wiki", "ref": "inferops://acme.knowledge/knowledge/wiki", "schemaVersion": 1 }, "size": "full", "params": { "page": "runbook" } }
           ]
         }
       ]
@@ -26,10 +26,10 @@
       "attachments": [],
       "nodes": [
         { "nodeType": "object", "id": "work", "title": "Work", "columns": 2, "children": ["eng-board", "tool"], "attachments": [] },
-        { "nodeType": "widget", "id": "eng-board", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "wide", "params": { "workflow": "software", "showCompleted": false }, "attachments": [] },
+        { "nodeType": "widget", "id": "eng-board", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "dataBinding": { "resource": "project/board", "ref": "inferops://acme.operations/project/board/ENG", "schemaVersion": 1 }, "size": "wide", "params": { "workflow": "software", "showCompleted": false }, "attachments": [] },
         { "nodeType": "widget", "id": "tool", "kind": "inferos.gadget", "version": 1, "targetRef": "gadget:42", "size": "normal", "params": {}, "attachments": [] },
         { "nodeType": "object", "id": "reference", "title": "Reference", "columns": 1, "children": ["runbook"], "attachments": [] },
-        { "nodeType": "widget", "id": "runbook", "kind": "inferops.wiki", "version": 1, "targetRef": "inferops://acme.knowledge/knowledge/wiki", "size": "full", "params": { "page": "runbook" }, "attachments": [] }
+        { "nodeType": "widget", "id": "runbook", "kind": "inferops.wiki", "version": 1, "targetRef": "inferops://acme.knowledge/knowledge/wiki", "dataBinding": { "resource": "knowledge/wiki", "ref": "inferops://acme.knowledge/knowledge/wiki", "schemaVersion": 1 }, "size": "full", "params": { "page": "runbook" }, "attachments": [] }
       ]
     }
   },
@@ -43,8 +43,8 @@
         {
           "id": "pair", "title": "Both", "columns": 3,
           "widgets": [
-            { "id": "second", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/OPS", "size": "normal", "params": { "workflow": "content", "showCompleted": true } },
-            { "id": "first", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false } }
+            { "id": "second", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/OPS", "dataBinding": { "resource": "project/board", "ref": "inferops://acme.operations/project/board/OPS", "schemaVersion": 1 }, "size": "normal", "params": { "workflow": "content", "showCompleted": true } },
+            { "id": "first", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "dataBinding": { "resource": "project/board", "ref": "inferops://acme.operations/project/board/ENG", "schemaVersion": 1 }, "size": "normal", "params": { "workflow": "software", "showCompleted": false } }
           ]
         }
       ]
@@ -56,8 +56,8 @@
       "nodes": [
         { "nodeType": "object", "id": "empty", "title": "Later", "columns": 3, "children": [], "attachments": [] },
         { "nodeType": "object", "id": "pair", "title": "Both", "columns": 3, "children": ["second", "first"], "attachments": [] },
-        { "nodeType": "widget", "id": "second", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/OPS", "size": "normal", "params": { "workflow": "content", "showCompleted": true }, "attachments": [] },
-        { "nodeType": "widget", "id": "first", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "size": "normal", "params": { "workflow": "software", "showCompleted": false }, "attachments": [] }
+        { "nodeType": "widget", "id": "second", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/OPS", "dataBinding": { "resource": "project/board", "ref": "inferops://acme.operations/project/board/OPS", "schemaVersion": 1 }, "size": "normal", "params": { "workflow": "content", "showCompleted": true }, "attachments": [] },
+        { "nodeType": "widget", "id": "first", "kind": "inferops.project-board", "version": 1, "targetRef": "inferops://acme.operations/project/board/ENG", "dataBinding": { "resource": "project/board", "ref": "inferops://acme.operations/project/board/ENG", "schemaVersion": 1 }, "size": "normal", "params": { "workflow": "software", "showCompleted": false }, "attachments": [] }
       ]
     }
   },
