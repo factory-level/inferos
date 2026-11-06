@@ -114,6 +114,15 @@ describe("authored widget publication through the Overseer client", () => {
         ["client.tsx", "export default function Widget(){ return <div>workerd preview</div> }"],
       ]));
 
+      // Load the build runtime's modules before the timed build. In this pool, the build Durable
+      // Object's dynamic `import()` of the runtime goes through Vite's on-demand transform of the
+      // esbuild-wasm wrapper and the generated 1.6 MB dependency module: about 9 s on an idle
+      // 14-core machine, and more than the 15 s preview deadline on a CI runner running every
+      // package's tests at once. The deployed Worker is bundled, so it never pays that transform
+      // (the first preview on a local wrangler stack takes 1-2 s in total). After this, the call
+      // below still runs the real build Durable Object, the esbuild-wasm initialization and the
+      // build itself, all inside the product's deadline (FAC-8).
+      await import("../src/authored-widget-build-runtime.js");
       await expect(client.previewAuthoredWidget(1, 51)).resolves.toMatchObject({
         jsCode: expect.stringContaining("workerd preview"),
         measurements: { clientBytes: expect.any(Number), durationMs: expect.any(Number) },
@@ -189,6 +198,9 @@ describe("authored widget publication through the Overseer client", () => {
 
   it("refuses create/update on build errors without changing the published version", async () => {
     await withClient(async (impl, client) => {
+      impl.env = { ...impl.env, AUTHORED_WIDGET_BUILD_ENABLED: "true",
+        COMPOSABLE_VIEWS: "true", DURABLE_VIEWS: "true" };
+      impl.storage.kind.put("widget");
       const sourceCommit = await impl.gitStore.writeFilesAsCommit(
         new Map([["client.tsx", "export default function Widget(){ return <div/> }"]]), {
           parents: [], author: {name: "Owner", email: "owner@example.com"},
@@ -217,7 +229,8 @@ describe("authored widget publication through the Overseer client", () => {
           metadata: record.metadata, ownerId: impl.ownerId, gadgetId: "1",
         }));
         await impl.env.BLUEPRINT_CONTENT.put(`${record.id}/${record.metadata.version}`, snapshot, {
-          customMetadata: blueprintVersionMetadata(record.metadata.kind, record.metadata.dataContract),
+          customMetadata: blueprintVersionMetadata(record.metadata.kind, record.metadata.dataContract,
+            record.authoredWidgetBuild === true),
         });
       };
 
@@ -233,20 +246,82 @@ describe("authored widget publication through the Overseer client", () => {
       expect(recordBefore.metadata.version).toBe(1);
       expect(recordBefore.commitId).toBe(compiledCommit);
       expect(impl.storage.gadgets.get(1).commitId).toBe(sourceCommit);
-      const snapshotBefore = structuredClone(recordBefore);
       const installBefore = await readBlueprintVersionToInstall(
         impl.env, recordBefore.id, {});
       expect(installBefore.install.version).toBe(1);
+      expect(installBefore.install.kind).toBe("widget");
+      expect(installBefore.install.authoredWidgetBuild).toBe(true);
+
+      const installedId = await client.installBlueprint(recordBefore.id, {});
+      expect(impl.storage.gadgets.get(installedId)).toMatchObject({
+        installedFrom: {kind: "widget", blueprintId: recordBefore.id, version: 1, authoredWidgetBuild: true},
+      });
+      await expect(client.listConsoleWidgetCandidates()).resolves.toContainEqual(
+        expect.objectContaining({gadgetId: installedId, refusal: null,
+          surfaces: {ui: true, tools: [], states: null}}));
+
+      buildFails = false;
+      await client.updateBlueprint(recordBefore.id, {updateCode: true});
+      expect(impl.storage.blueprints.get(recordBefore.id)).toMatchObject({
+        commitId: compiledCommit, metadata: {kind: "widget", version: 2},
+      });
+      const snapshotAfterUpdate = structuredClone(impl.storage.blueprints.get(recordBefore.id));
 
       buildFails = true;
       await expect(client.updateBlueprint(recordBefore.id, {
         updateCode: true, title: "must not be applied",
       })).rejects.toThrow("Build failed");
-      expect(impl.storage.blueprints.get(recordBefore.id)).toEqual(snapshotBefore);
-      expect(propagated).toBe(1);
+      expect(impl.storage.blueprints.get(recordBefore.id)).toEqual(snapshotAfterUpdate);
+      expect(propagated).toBe(2);
       expect(impl.storage.gadgets.get(1).commitId).toBe(sourceCommit);
       await expect(readBlueprintVersionToInstall(impl.env, recordBefore.id, {})).resolves
-        .toMatchObject({install: {version: 1}, code: installBefore.code});
+        .toMatchObject({install: {version: 2}});
+    });
+  });
+
+  it("keeps missing client and server refusals when authored builds are disabled", async () => {
+    await withClient(async (impl, client) => {
+      impl.storage.kind.put("widget");
+      impl.env = { ...impl.env, AUTHORED_WIDGET_BUILD_ENABLED: "false" };
+      impl.storage.gadgets.put({
+        type: "gadget", id: 1, title: "Widget", created: new Date(0), bindingName: "widget", bindings: {},
+      });
+      const commit = async (files: Record<string, string>) => impl.gitStore.writeFilesAsCommit(
+        new Map(Object.entries(files)), {
+          parents: [], author: {name: "Owner", email: "owner@example.com"},
+          message: "widget source", timestamp: new Date(1_700_000_000_000),
+        });
+
+      const noClient = await commit({"server.js": "export class Gadget {}"});
+      impl.storage.gadgets.put({...impl.storage.gadgets.get(1)!, commitId: noClient});
+      await expect((await client.getGadget(1)).createBlueprint())
+        .rejects.toThrow("no client.js");
+
+      const noServer = await commit({"client.js": "export default 1"});
+      impl.storage.gadgets.put({...impl.storage.gadgets.get(1)!, commitId: noServer});
+      await expect((await client.getGadget(1)).createBlueprint())
+        .rejects.toThrow("no server.js");
+      expect([...impl.storage.blueprints.list()]).toHaveLength(0);
+    });
+  });
+
+  it("does not waive the server requirement for a non-authored widget", async () => {
+    await withClient(async (impl, client) => {
+      impl.storage.kind.put("widget");
+      impl.env = { ...impl.env, AUTHORED_WIDGET_BUILD_ENABLED: "true" };
+      const sourceCommit = await impl.gitStore.writeFilesAsCommit(
+        new Map([["server.js", "export class Gadget {}"]]), {
+          parents: [], author: {name: "Owner", email: "owner@example.com"},
+          message: "ordinary widget", timestamp: new Date(1_700_000_000_000),
+        });
+      impl.storage.gadgets.put({
+        type: "gadget", id: 1, title: "Widget", created: new Date(0), bindingName: "widget",
+        commitId: sourceCommit, bindings: {},
+      });
+
+      await expect((await client.getGadget(1)).createBlueprint())
+        .rejects.toThrow("no client.js");
+      expect([...impl.storage.blueprints.list()]).toHaveLength(0);
     });
   });
 
