@@ -28,7 +28,7 @@ covers:
   - scripts/release/manifest-lib.ts
   - packages/workshop-backend/scripts/company-data-dashboard-proof.ts
   - scripts/run-dev-server.ts
-updated: 2026-11-06
+updated: 2026-11-07
 ---
 
 # InferOps gatekeeper
@@ -1228,14 +1228,23 @@ Edited target arguments validate against the current issue/revision/workflow, st
 The `inferops.service-jobs`, `inferops.service-job-status-counts`, and `inferops.service-job-recent-activities` blueprints share `libraries/service-dashboard` and compose as three separate `inferos.gadget` instances on an ordinary saved canvas. The combined `inferops.service-dashboard` blueprint also offers all three panels over one
 project connection: `service-jobs`, `service-job-status-counts`, and
 `service-job-recent-activities`. `InferOpsProjectSession.readServiceQuery` accepts only those names,
-a bounded limit and an opaque cursor. The HTTP adapter supplies `queryVersion=1` and resolves the
-bound project's ID itself; caller-supplied scope is refused. Response fields are projected and a
-job outside the project is refused. A project connection latches owner-only before attempting a joined read, so even a later or concurrently admitted collaborator cannot inherit joined data; account connections use their existing withheld-observation tracker. Each read reuses the existing current-credential request
+a bounded limit and an opaque cursor. The HTTP adapter supplies `queryVersion=2` and the bound
+`projectIdentifier` in one request; it no longer lists projects before querying. InferOps resolves
+the identifier inside the authorized company transaction. The adapter requires the returned
+`scope.projectKey` to match its binding and validates the resolved UUID; caller-supplied scope is
+refused. Response fields are projected and jobs whose project IDs disagree with that scope are
+refused. The widget page shape accepts versions 1 and 2 for compatibility, but this HTTP path
+requires a version-2 provider response and fails explicitly against an older provider. A project connection latches owner-only before attempting a joined read, so even a later or concurrently admitted collaborator cannot inherit joined data; account connections use their existing withheld-observation tracker. Each read reuses the existing current-credential request
 path and is an observation withheld from board-only collaborators, because their board grant
 cannot authorize joined company data. The mock refuses these reads; it supplies no fake proof.
 
 The dashboard stores no records. Failed/denied/missing connections remain distinct from empty
 results, pages expose the next cursor, and stale client responses cannot replace newer reads.
+Each widget exposes its current `data-load-generation` and `data-load-state` on the article.
+A new load clears `data-render-generation`; only a successful DOM update sets it to the current
+generation. Refusals and errors leave it absent. Browser measurements must observe a new matching
+render generation for each independent widget and wait for paint; existing content or an enabled
+Refresh button alone does not prove a fresh successful render.
 Its comment form narrows to the selected issue and calls `InferOpsIssueSession.comment` with the
 exact `headSeq` read by the query. The existing action store fingerprints the body and expected
 head, queues the action, and sends `X-Idempotency-Key` plus `expectedIssueHeadSeq` only on apply.

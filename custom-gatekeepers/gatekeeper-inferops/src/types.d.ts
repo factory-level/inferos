@@ -1068,6 +1068,6 @@ export interface ServiceStatusCount { group: string; count: number; }
 export interface ServiceActivity { id: string; jobId: string; kind: string; body: string | null; createdAt: string; }
 /** A versioned query result. A non-null cursor means there are further rows. */
 export type ServiceQueryPage =
-  | { name: "service-jobs"; version: 1; rows: ServiceJob[]; nextCursor: string | null }
-  | { name: "service-job-status-counts"; version: 1; rows: ServiceStatusCount[]; nextCursor: string | null }
-  | { name: "service-job-recent-activities"; version: 1; rows: ServiceActivity[]; nextCursor: string | null };
+  | { name: "service-jobs"; version: 1 | 2; rows: ServiceJob[]; nextCursor: string | null }
+  | { name: "service-job-status-counts"; version: 1 | 2; rows: ServiceStatusCount[]; nextCursor: string | null }
+  | { name: "service-job-recent-activities"; version: 1 | 2; rows: ServiceActivity[]; nextCursor: string | null };

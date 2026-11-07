@@ -2511,7 +2511,7 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
     // Board observer grants do not cover joined company tables. Withhold this observation from all observers.
     await this.#binding.observeWithheld(this.#queue, {
       title: "Read service dashboard",
-      description: `Read ${page.rows.length} rows from published query ${page.name}, version 1.`,
+      description: `Read ${page.rows.length} rows from published query ${page.name}, version ${page.version}.`,
     });
     return page;
   }

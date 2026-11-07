@@ -1500,10 +1500,9 @@ export function openHttpInferOpsClient(
 
     async readServiceQuery(projectKey, name, options) {
       const query = serviceQuerySearch(name, options);
-      const bound = await project(projectKey);
-      query.set("projectId", bound.id);
+      query.set("projectIdentifier", projectKey);
       const body = await request("query.execute", { method: "GET", path: `/object/queries/${name}?${query}` });
-      return parseServiceQuery(body, name, bound.id);
+      return parseServiceQuery(body, name, projectKey);
     },
 
     async listProjects(): Promise<ProjectSummary[]> {

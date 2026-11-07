@@ -32,15 +32,18 @@ export function serviceQuerySearch(name: ServiceQueryName, options: ServiceQuery
       (options.cursor !== undefined && (typeof options.cursor !== "string" || options.cursor.length > 4096))) {
     throw new InferOpsError("INVALID_REQUEST", "Invalid service query page options.");
   }
-  const query = new URLSearchParams({ queryVersion: "1", limit: String(limit) });
+  const query = new URLSearchParams({ queryVersion: "2", limit: String(limit) });
   if (options.cursor !== undefined) query.set("cursor", options.cursor);
   return query;
 }
 
 /** Project each result field and reject a job from outside the connection's fixed project. */
-export function parseServiceQuery(value: unknown, name: ServiceQueryName, projectId: string): ServiceQueryPage {
+export function parseServiceQuery(value: unknown, name: ServiceQueryName, projectKey: string): ServiceQueryPage {
   const page = object(value);
-  if (page.name !== name || page.version !== 1 || !Array.isArray(page.rows) || page.rows.length > 100) throw invalid();
+  if (page.name !== name || page.version !== 2 || !Array.isArray(page.rows) || page.rows.length > 100) throw invalid();
+  const scope = object(page.scope);
+  if (scope.projectKey !== projectKey) throw invalid();
+  const projectId = id(scope.projectId);
   const nextCursor = page.nextCursor === null ? null : text(page.nextCursor, 4096);
   if (name === "service-jobs") {
     const rows = page.rows.map(value => {
@@ -52,7 +55,7 @@ export function parseServiceQuery(value: unknown, name: ServiceQueryName, projec
         createdAt: text(row.createdAt, 64), updatedAt: text(row.updatedAt, 64),
         customers: relations(row.customers), sites: relations(row.sites), contacts: relations(row.contacts) };
     });
-    return { name, version: 1, rows, nextCursor };
+    return { name, version: 2, rows, nextCursor };
   }
   if (name === "service-job-status-counts") {
     const rows = page.rows.map(value => {
@@ -60,12 +63,12 @@ export function parseServiceQuery(value: unknown, name: ServiceQueryName, projec
       if (typeof row.count !== "number" || !Number.isSafeInteger(row.count) || row.count < 0) throw invalid();
       return { group: text(row.group, 50), count: row.count };
     });
-    return { name, version: 1, rows, nextCursor };
+    return { name, version: 2, rows, nextCursor };
   }
   const rows = page.rows.map(value => {
     const row = object(value);
     return { id: id(row.id), jobId: id(row.jobId), kind: text(row.kind, 50),
       body: row.body === null ? null : text(row.body), createdAt: text(row.createdAt, 64) };
   });
-  return { name, version: 1, rows, nextCursor };
+  return { name, version: 2, rows, nextCursor };
 }
