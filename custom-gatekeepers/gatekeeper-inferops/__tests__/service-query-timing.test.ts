@@ -15,8 +15,8 @@ it("separate RPCs retain their own attempt IDs across concurrent sends and retri
   expect(new Set(ids.flatMap(result => result.attempts)).size).toBe(4);
   for (const result of ids) {
     const line = logs.mock.calls.map(call => call[0]).find(entry => entry.queryCallId === result.queryCallId);
-    expect(line.measurements.httpAttempts.map((attempt: {requestId: string}) => attempt.requestId)).toEqual(result.attempts);
-    expect(line.measurements.phases.rpc.success).toBe(true);
+    expect([line.http1Id, line.http2Id]).toEqual(result.attempts);
+    expect(line.success).toBe(true);
   }
 });
 it("failure survives diagnostic logger failure; unsampled clients get no diagnostic header", async () => {
@@ -39,7 +39,10 @@ it("one completion bounds attempt metadata and ignores later detached measuremen
   runLate(); await detached;
   const line=logs.mock.calls[0]![0];
   expect(logs).toHaveBeenCalledTimes(1);
-  expect(line.measurements.httpAttempts).toHaveLength(2);
-  expect(line.measurements.omittedAttempts).toBe(1);
-  expect(line.measurements.phases.http.count).toBe(3);
+  expect(line.http1Id).toBeTypeOf("string");
+  expect(line.http2Id).toBeTypeOf("string");
+  expect(line).not.toHaveProperty("http3Id");
+  expect(Object.values(line).every(value => value === undefined || ["string", "number", "boolean"].includes(typeof value))).toBe(true);
+  expect(line.omittedAttempts).toBe(1);
+  expect(logs.mock.calls).toHaveLength(1);
 });

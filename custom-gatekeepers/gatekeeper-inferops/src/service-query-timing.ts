@@ -1,3 +1,4 @@
+import { createLogger } from "@gadgets/observability/logger";
 import { createObservabilityContext } from "@gadgets/observability/observability-context";
 
 type Phase = "rpc" | "provider" | "observation" | "authorize" | "http";
@@ -9,7 +10,13 @@ type Measurements = {
   omittedAttempts: number; operationMs: number; fenceMs: number; attempts: number;
 };
 const context = createObservabilityContext<{ queryCallId: string; measurements: Measurements }>();
-const log = context.createLogger({ component: "gatekeeper.inferops.service-query" });
+type CompletionFields = {
+  queryCallId: string; rpcMs: number; providerMs: number; observationMs: number; authorizeMs: number;
+  operationMs: number; fenceMs: number; attempts: number; success: boolean;
+  http1Id: string; http1Ms: number; http1Success: boolean;
+  http2Id: string; http2Ms: number; http2Success: boolean; omittedAttempts: number;
+};
+const log = createLogger<CompletionFields>({ component: "gatekeeper.inferops.service-query" });
 /** Record fixed numeric fields. One RPC completion log includes at most two HTTP attempt IDs. */
 export function recordServiceQueryTiming(phase: Phase, durationMs: number, details: Details): void {
   const measurements = context.get().measurements;
@@ -29,7 +36,22 @@ export function recordServiceQueryTiming(phase: Phase, durationMs: number, detai
   }
   if (phase === "rpc") {
     measurements.closed = true;
-    try { log.debug("Service query completed", { event: "service_query.completed" }); }
+    try {
+      const [first, second] = measurements.httpAttempts;
+      // Flat primitives survive local console inspection as well as deployed structured logs.
+      log.debug("Service query completed", { event: "service_query.completed",
+        queryCallId: context.get().queryCallId,
+        rpcMs: measurements.phases.rpc?.durationMs,
+        providerMs: measurements.phases.provider?.durationMs,
+        observationMs: measurements.phases.observation?.durationMs,
+        authorizeMs: measurements.phases.authorize?.durationMs,
+        operationMs: measurements.operationMs, fenceMs: measurements.fenceMs,
+        attempts: measurements.attempts, success: measurements.phases.rpc?.success,
+        http1Id: first?.requestId, http1Ms: first?.durationMs, http1Success: first?.success,
+        http2Id: second?.requestId, http2Ms: second?.durationMs, http2Success: second?.success,
+        omittedAttempts: measurements.omittedAttempts,
+      });
+    }
     catch { /* Diagnostic delivery must never replace the query outcome. */ }
   }
 }
