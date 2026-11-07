@@ -13,10 +13,10 @@
     "name": "InferOS",
     "id": "agent@inferos.local"
   },
-  "revision": 1,
+  "revision": 2,
   "created": "2026-11-06T00:00:00.000Z",
-  "version": 1,
-  "lastUpdated": "2026-11-06T00:00:00.000Z",
+  "version": 2,
+  "lastUpdated": "2026-11-07T00:00:00.000Z",
   "bindings": {
     "project": {
       "type": "gatekeeper",

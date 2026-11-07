@@ -15,11 +15,12 @@ export interface ServiceJob {
 export interface ServiceStatusCount { group: string; count: number; }
 /** One recent activity on a permitted service job. */
 export interface ServiceActivity { id: string; jobId: string; kind: string; body: string | null; createdAt: string; }
-/** A versioned query result. A non-null cursor means there are further rows. */
+/** A versioned query result. A non-null cursor means there are further rows.
+ * Optional queryCallId is a server-minted diagnostic UUID, never an authority or cache key. */
 export type ServiceQueryPage =
-  | { name: "service-jobs"; version: 1 | 2; rows: ServiceJob[]; nextCursor: string | null }
-  | { name: "service-job-status-counts"; version: 1 | 2; rows: ServiceStatusCount[]; nextCursor: string | null }
-  | { name: "service-job-recent-activities"; version: 1 | 2; rows: ServiceActivity[]; nextCursor: string | null };
+  | { name: "service-jobs"; version: 1 | 2; rows: ServiceJob[]; nextCursor: string | null; queryCallId?: string }
+  | { name: "service-job-status-counts"; version: 1 | 2; rows: ServiceStatusCount[]; nextCursor: string | null; queryCallId?: string }
+  | { name: "service-job-recent-activities"; version: 1 | 2; rows: ServiceActivity[]; nextCursor: string | null; queryCallId?: string };
 
 /** The narrow project capability this dashboard uses. */
 export interface ServiceProject {

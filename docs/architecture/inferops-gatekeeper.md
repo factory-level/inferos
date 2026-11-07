@@ -1258,6 +1258,22 @@ still run afterward. HTTP operation time includes response decoding, and total t
 completion span’s own export overhead. Their lifetimes end when those operations settle,
 so they can separate query work from observation work without using RPC capability lifetimes
 as request latency.
+Each service-query RPC now mints an optional diagnostic `queryCallId`, returned only after
+provider scope validation, credential completion fencing and withheld observation succeed.
+The HTTP adapter adds a separate `x-request-id` for each attempted send, including retries.
+Neither identifier supplies authority, selects records or keys a cache. The existing
+observability context carries IDs across local asynchronous calls; RPC entry establishes a
+fresh context. One bounded structured completion log contains numeric phase durations,
+outcomes and at most two HTTP attempt IDs. It contains no payloads or credentials, and logger
+failure cannot change the query outcome. These phases overlap; do not sum them.
+
+The optional field is additive to `ServiceQueryPage`; existing consumers may omit it.
+Widgets clear the diagnostic ID on loading and expose only a valid UUID on the current fresh
+render. A failed RPC that returns no page cannot be joined to a browser refresh by this field;
+missing correlation remains unknown. Browser-minus-RPC duration includes transport, scheduling,
+serialization and rendering, rather than separately measuring time on the RPC transport.
+The four service blueprints publish this client as version 2; existing installs remain pinned.
+
 The mock refuses these reads; it supplies no fake proof.
 
 The dashboard stores no records. Failed/denied/missing connections remain distinct from empty

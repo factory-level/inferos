@@ -1,3 +1,4 @@
+import { withServiceQueryTiming, measureServiceQueryPhase, recordServiceQueryTiming } from "./service-query-timing";
 import type { ServiceQueryName, ServiceQueryOptions, ServiceQueryPage } from "./types";
 import type { ApprovalEdit, ApprovalProposal } from "@gadgets/workshop-shared/operate-approval";
 import { GovernedRequestError, listGoverned, parseGovernedListRequest } from "@gadgets/workshop-shared/governed-data";
@@ -424,6 +425,7 @@ function accountClient(
         // A synchronous completion span retains bounded timings even when local Workers tracing
         // loses an async parent span across RPC continuations. Never emit authority or result data.
         if (requestOptions?.fenceSuccess) {
+          recordServiceQueryTiming("authorize", performance.now() - started, { operationMs, fenceMs, attempts, success });
           try {
             traceServiceQuery("inferops.service_query.authorize.completed", span => {
               span.setAttribute("total_ms", performance.now() - started);
@@ -2539,19 +2541,21 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
   }
 
   async readServiceQuery(name: ServiceQueryName, options?: ServiceQueryOptions): Promise<ServiceQueryPage> {
-    return traceServiceQuery("inferops.service_query", async () => {
-      // Latch before awaiting: a concurrently admitted or later observer must not inherit joined data.
-      // Account bindings use their existing prepareWithheld tracker instead.
-      if (typeof this.#binding.scope === "string") this.#binding.kv.put(PRIVATE_SERVICE_QUERY, true);
-      const page = await traceServiceQuery("inferops.service_query.provider", () =>
-        this.#binding.client.readServiceQuery(this.#binding.projectKey, name, options));
-      // Board observer grants do not cover joined company tables. Withhold this observation from all observers.
-      await traceServiceQuery("inferops.service_query.observation", () => this.#binding.observeWithheld(this.#queue, {
-        title: "Read service dashboard",
-        description: `Read ${page.rows.length} rows from published query ${page.name}, version ${page.version}.`,
+    return withServiceQueryTiming(queryCallId =>
+      traceServiceQuery("inferops.service_query", async () => {
+        // Latch before awaiting: observer authority never expands to joined company records.
+        if (typeof this.#binding.scope === "string") this.#binding.kv.put(PRIVATE_SERVICE_QUERY, true);
+        const page = await measureServiceQueryPhase("provider", () =>
+          traceServiceQuery("inferops.service_query.provider", () =>
+            this.#binding.client.readServiceQuery(this.#binding.projectKey, name, options)));
+        await measureServiceQueryPhase("observation", () =>
+          traceServiceQuery("inferops.service_query.observation", () => this.#binding.observeWithheld(this.#queue, {
+            title: "Read service dashboard",
+            description: `Read ${page.rows.length} rows from published query ${page.name}, version ${page.version}.`,
+          })));
+        // Add only after the provider scope, credential fence and private observation succeeded.
+        return { ...page, queryCallId };
       }));
-      return page;
-    });
   }
 
   async readBoard(): Promise<Board> {

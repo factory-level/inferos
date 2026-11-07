@@ -156,6 +156,7 @@ class FakeInferLab {
   refreshes: string[] = [];
   exchanges = 0;
   apiCalls: ApiCall[] = [];
+  queryRequestIds: string[] = [];
   /** Refreshes and logouts presented with another fake's refresh token: refused, never applied. */
   #foreignAuth: ApiCall[] = [];
   /** What `GET /project/board-snapshot` answers instead of the bound board, when set. */
@@ -287,6 +288,7 @@ class FakeInferLab {
       return new Response(null, { status: 204 });
     }
     const workspaceId = headers.get("x-workspace-id");
+    if (url.pathname.startsWith("/object/queries/")) this.queryRequestIds.push(headers.get("x-request-id") ?? "");
     if (url.pathname === "/auth/me") {
       // Who the credential is: a service account's key, or a person's token.
       if (!token || !this.access.has(token) || !workspaceId) {
@@ -2194,7 +2196,12 @@ describe("service query completion fences", () => {
         : await hooks().startBoundAccountSession(label).openBoard(BOARD_URL);
       await sibling.readBoard();
       expect(inferlab.refreshes).toEqual(["refresh-1"]);
-      expect(await read.settle()).toMatchObject({ rows: [{ count: 4 }] });
+      const page = await read.settle();
+      expect(page).toMatchObject({ rows: [{ count: 4 }] });
+      expect(page.queryCallId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+      expect(inferlab.queryRequestIds).toHaveLength(2);
+      expect(new Set(inferlab.queryRequestIds).size).toBe(2);
+      for (const requestId of inferlab.queryRequestIds) expect(requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
       const queries = inferlab.apiCalls.filter(call => call.path.startsWith("/object/queries/"));
       expect(queries).toHaveLength(2);
       expect(queries.at(-1)!.token).toBe(inferlab.accessOf("refresh-2"));

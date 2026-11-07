@@ -68,6 +68,7 @@ const loaders = definitions.filter(([name]) => selected === undefined || name ==
     article.dataset.loadGeneration = String(current);
     article.dataset.loadState = "loading";
     delete article.dataset.renderGeneration;
+    delete article.dataset.queryCallId;
     status.textContent = "Loading…"; status.className = "status"; more.disabled = true;
     if (!next) { content.replaceChildren(); cursor = null; more.hidden = true; }
     try {
@@ -81,6 +82,7 @@ const loaders = definitions.filter(([name]) => selected === undefined || name ==
       }
       content.replaceChildren(rows(result.page)); cursor = result.page.nextCursor; more.hidden = cursor === null;
       status.textContent = cursor ? "More records available. Showing one page." : "End of results.";
+      if (typeof result.page.queryCallId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(result.page.queryCallId)) article.dataset.queryCallId = result.page.queryCallId;
       article.dataset.renderGeneration = String(current);
       article.dataset.loadState = "ready";
     } catch { if (current === generation) { article.dataset.loadState = "error"; content.replaceChildren(); status.textContent = "Records could not be loaded. Refresh to retry."; status.className = "status error"; } }

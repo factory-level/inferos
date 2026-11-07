@@ -1,3 +1,4 @@
+import { serviceQueryHttpAttempt } from "./service-query-timing";
 import { parseServiceQuery, serviceQuerySearch } from "./service-queries";
 // LIVE InferOps data source: `InferOpsClient` over the InferOps HTTP API (the contract in
 // InferOps docs/human/architecture/inferos/inferops-gatekeeper.md). The only module that talks HTTP.
@@ -1226,17 +1227,20 @@ export function openHttpInferOpsClient(
 
   /** Send one request and return its parsed JSON body, or throw the mapped `InferOpsError`. */
   function request(operation: string, send: Send): Promise<unknown> {
-    return authorize(authority => sendAs(authority, operation, send),
+    return authorize(authority => operation === "query.execute"
+      ? serviceQueryHttpAttempt(requestId => sendAs(authority, operation, send, requestId))
+      : sendAs(authority, operation, send),
       operation === "query.execute" ? { fenceSuccess: true } : undefined);
   }
 
-  async function sendAs(authority: InferOpsAuthority, operation: string, send: Send):
+  async function sendAs(authority: InferOpsAuthority, operation: string, send: Send, requestId?: string):
       Promise<unknown> {
     const headers: Record<string, string> = {
       accept: "application/json",
       authorization: `Bearer ${authority.token}`,
       "x-workspace-id": authority.workspaceId,
     };
+    if (requestId) headers["x-request-id"] = requestId;
     if (send.body !== undefined) headers["content-type"] = "application/json";
     if (send.idempotencyKey) headers["x-idempotency-key"] = send.idempotencyKey;
 
