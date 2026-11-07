@@ -423,13 +423,17 @@ function accountClient(
       } finally {
         // A synchronous completion span retains bounded timings even when local Workers tracing
         // loses an async parent span across RPC continuations. Never emit authority or result data.
-        if (requestOptions?.fenceSuccess) traceServiceQuery("inferops.service_query.authorize.completed", span => {
-          span.setAttribute("total_ms", performance.now() - started);
-          span.setAttribute("operation_ms", operationMs);
-          span.setAttribute("fence_ms", fenceMs);
-          span.setAttribute("attempts", attempts);
-          span.setAttribute("success", success);
-        });
+        if (requestOptions?.fenceSuccess) {
+          try {
+            traceServiceQuery("inferops.service_query.authorize.completed", span => {
+              span.setAttribute("total_ms", performance.now() - started);
+              span.setAttribute("operation_ms", operationMs);
+              span.setAttribute("fence_ms", fenceMs);
+              span.setAttribute("attempts", attempts);
+              span.setAttribute("success", success);
+            });
+          } catch { /* Diagnostic export must never replace the request's result or exception. */ }
+        }
       }
     },
   }, inferLabFetch(env));

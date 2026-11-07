@@ -1252,7 +1252,10 @@ spans carry only the fixed component name and the tracer’s error boolean; no c
 caller identities, options or row payloads. A synchronous
 `inferops.service_query.authorize.completed` span also records numeric total, HTTP operation and
 completion-fence milliseconds, attempt count and a success boolean. It preserves completed
-phase measurements when the local Workers trace exporter leaves asynchronous spans unfinished. Their lifetimes end when those operations settle,
+phase measurements when the local Workers trace exporter leaves asynchronous spans unfinished. Export is best-effort and cannot replace the request result or exception. Here `success`
+means authorization/request completion; response scope validation and observation authorization
+still run afterward. HTTP operation time includes response decoding, and total time excludes the
+completion span’s own export overhead. Their lifetimes end when those operations settle,
 so they can separate query work from observation work without using RPC capability lifetimes
 as request latency.
 The mock refuses these reads; it supplies no fake proof.
