@@ -1204,6 +1204,91 @@ describe("CredentialSource", () => {
     return { instance, getCredentials, reportCredentialsRejected };
   }
 
+  describe("opt-in read refresh signals", () => {
+    class Refreshed extends Error {}
+    const signal = (error: unknown) => error instanceof Refreshed;
+
+    it("repeats a completed read under a same-generation successor without a rejection report", async () => {
+      let current = { creds: live, identity: "id-a", generation: "gen-a" };
+      const { instance, reportCredentialsRejected } = source({ isReadRefreshSignal: signal,
+        getCredentials: async () => current });
+      const operation = vi.fn(async (creds: Creds) => {
+        if (creds.token === live.token) {
+          current = { creds: fresh, identity: "id-b", generation: "gen-a" };
+          // A successor need not already be adopted when the local signal arrives.
+          throw new Refreshed();
+        }
+        return creds.token;
+      });
+      expect(await instance.run(operation, { replayable: true })).toBe("fresh");
+      expect(operation).toHaveBeenCalledTimes(2);
+      expect(reportCredentialsRejected).not.toHaveBeenCalled();
+    });
+
+    it("a second refresh exhausts the same two-attempt budget", async () => {
+      let rotation = 0;
+      let current = { creds: live, identity: "id-a", generation: "gen-a" };
+      const { instance, reportCredentialsRejected } = source({ isReadRefreshSignal: signal,
+        getCredentials: async () => current });
+      const operation = vi.fn(async () => {
+        current = { creds: fresh, identity: `id-${++rotation}`, generation: "gen-a" };
+        await instance.read();
+        throw new Refreshed();
+      });
+      await expect(instance.run(operation, { replayable: true })).rejects.toThrow(CredentialsChangedError);
+      expect(operation).toHaveBeenCalledTimes(2);
+      expect(reportCredentialsRejected).not.toHaveBeenCalled();
+    });
+
+    for (const change of ["reconnect", "revoke"] as const) {
+      it(`refuses ${change} between a refresh signal and its retry`, async () => {
+        let changed = false;
+        const { instance, reportCredentialsRejected } = source({ isReadRefreshSignal: signal,
+          getCredentials: async () => {
+            if (changed && change === "revoke") throw new CredentialsExpiredError(expiredMessage);
+            return { creds: changed ? fresh : live, identity: changed ? "id-b" : "id-a", generation: changed ? "gen-b" : "gen-a" };
+          } });
+        const operation = vi.fn(async () => { changed = true; throw new Refreshed(); });
+        await expect(instance.run(operation, { replayable: true }))
+          .rejects.toThrow(change === "revoke" ? CredentialsExpiredError : CredentialsChangedError);
+        expect(operation).toHaveBeenCalledOnce();
+        expect(reportCredentialsRejected).not.toHaveBeenCalled();
+      });
+    }
+
+    it("does not replay a caller that did not authorize replay", async () => {
+      const { instance, reportCredentialsRejected } = source({ isReadRefreshSignal: signal });
+      const operation = vi.fn(async () => { throw new Refreshed(); });
+      await expect(instance.run(operation)).rejects.toThrow(CredentialsChangedError);
+      expect(operation).toHaveBeenCalledOnce();
+      expect(reportCredentialsRejected).not.toHaveBeenCalled();
+    });
+
+    it("preserves genuine rejection adjudication and shares its retry budget", async () => {
+      let current = { creds: live, identity: "id-a", generation: "gen-a" };
+      const { instance, reportCredentialsRejected } = source({ isReadRefreshSignal: signal,
+        getCredentials: async () => current,
+        reportCredentialsRejected: async () => {
+          current = { creds: fresh, identity: "id-b", generation: "gen-a" };
+          return "superseded";
+        } });
+      const operation = vi.fn(async (creds: Creds) => {
+        if (creds.token === live.token) throw new Error("401");
+        throw new Refreshed();
+      });
+      await expect(instance.run(operation, { replayable: true })).rejects.toThrow(CredentialsChangedError);
+      expect(operation).toHaveBeenCalledTimes(2);
+      expect(reportCredentialsRejected).toHaveBeenCalledOnce();
+    });
+
+    it("leaves unclassified local errors untouched", async () => {
+      const { instance, reportCredentialsRejected } = source();
+      const error = new Refreshed();
+      await expect(instance.run(async () => { throw error; }, { replayable: true })).rejects.toBe(error);
+      expect(reportCredentialsRejected).not.toHaveBeenCalled();
+    });
+  });
+
   /** A source whose account parks every read for the test to release in order. */
   function queuedSource(overrides: SourceOverrides = {}) {
     const reads: PromiseWithResolvers<CredentialsWithIdentity<Creds>>[] = [];

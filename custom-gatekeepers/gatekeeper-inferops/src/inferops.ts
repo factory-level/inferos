@@ -392,7 +392,8 @@ function accountClient(
         return await source.run(async (authority, read) => {
           sent = true;
           const result = await operation(authority);
-          if (options.fenceSuccess || requestOptions?.fenceSuccess) await assertConnectionUnchanged(source, read);
+          if (options.fenceSuccess || requestOptions?.fenceSuccess)
+            await assertConnectionUnchanged(source, read, requestOptions?.fenceSuccess === true);
           return result;
         }, { replayable: true });
       } catch (error) {
@@ -429,11 +430,15 @@ function accountSource(
       };
     },
     isAuthError: error => inferOpsErrorCode(error) === "UNAUTHORIZED",
+    isReadRefreshSignal: error => error instanceof ReadRefreshed,
     expiredMessage: EXPIRED_MESSAGE,
     vendorId: VENDOR_ID,
     ...options,
   });
 }
+
+/** A successful query must be re-read under the same connection's refreshed credential. */
+class ReadRefreshed extends Error {}
 
 /** What a fenced read says when the connection moved while it was in flight. */
 const CONNECTION_CHANGED = "This InferOps connection changed. Try again.";
@@ -446,7 +451,7 @@ const CONNECTION_CHANGED = "This InferOps connection changed. Try again.";
  * next read reports the account's real state.
  */
 async function assertConnectionUnchanged(
-  source: CredentialSource<InferOpsAuthority>, sent: CredentialRead,
+  source: CredentialSource<InferOpsAuthority>, sent: CredentialRead, retryRefresh = false,
 ): Promise<void> {
   let now: CredentialRead;
   try {
@@ -457,6 +462,7 @@ async function assertConnectionUnchanged(
       isCredentialsExpired(error) ? EXPIRED_MESSAGE : CONNECTION_CHANGED);
   }
   if (now.identity !== sent.identity || now.generation !== sent.generation) {
+    if (retryRefresh && now.generation === sent.generation) throw new ReadRefreshed();
     throw new InferOpsError("UNAVAILABLE", CONNECTION_CHANGED);
   }
 }

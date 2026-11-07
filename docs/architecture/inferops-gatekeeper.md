@@ -1238,9 +1238,12 @@ requires a version-2 provider response and fails explicitly against an older pro
 path and is an observation withheld from board-only collaborators, because their board grant
 cannot authorize joined company data. Named-query requests also require the existing completion
 fence: a successful provider response is discarded if the connected account identity or generation
-changed while it was in flight. This applies to direct project bindings and boards opened through
-an account binding, before any observation or rows are returned. A staged reconnect leaves the
-active connection unchanged. The per-request fence does not alter governed writes.
+changed while it was in flight. A credential refresh within the same connection can trigger
+one fresh read through the kit's guarded retry path, with the completion fence checked again;
+this local signal never reports a provider rejection. Reconnects and revocation still refuse.
+This applies to direct project bindings and boards opened through an account binding, before
+any observation or rows are returned. A staged reconnect leaves the active connection unchanged.
+The per-request fence and read-only refresh signal do not alter governed writes.
 The mock refuses these reads; it supplies no fake proof.
 
 The dashboard stores no records. Failed/denied/missing connections remain distinct from empty

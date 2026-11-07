@@ -2182,6 +2182,25 @@ describe("service query completion fences", () => {
       return { account, session: await accountSession.openBoard(BOARD_URL) };
     }
 
+    it(`${binding}: re-reads a held success after a same-connection credential refresh`, async () => {
+      const label = `query-${binding}-refresh`;
+      const boundRead = await bound(label);
+      using session = boundRead.session;
+      const before = await observed();
+      const read = await heldRead("query", async () => await session.readServiceQuery("service-job-status-counts"));
+      inferlab.access.delete(inferlab.accessOf("refresh-1"));
+      using sibling = binding === "project"
+        ? await hooks().startBoundSession(label)
+        : await hooks().startBoundAccountSession(label).openBoard(BOARD_URL);
+      await sibling.readBoard();
+      expect(inferlab.refreshes).toEqual(["refresh-1"]);
+      expect(await read.settle()).toMatchObject({ rows: [{ count: 4 }] });
+      const queries = inferlab.apiCalls.filter(call => call.path.startsWith("/object/queries/"));
+      expect(queries).toHaveLength(2);
+      expect(queries.at(-1)!.token).toBe(inferlab.accessOf("refresh-2"));
+      expect(await observed()).toBe(before + 1);
+    });
+
     it(`${binding}: discards successful named-query data after a committed reconnect`, async () => {
       const label = `query-${binding}-reconnect`;
       const boundRead = await bound(label);
