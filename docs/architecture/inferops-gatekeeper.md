@@ -1249,7 +1249,10 @@ The existing Workers tracer records `inferops.service_query` around the complete
 with child spans `inferops.service_query.provider` for the provider call (including credential
 fencing/retry) and `inferops.service_query.observation` for observation authorization. These
 spans carry only the fixed component name and the tracer’s error boolean; no credentials,
-caller identities, options or row payloads. Their lifetimes end when those operations settle,
+caller identities, options or row payloads. A synchronous
+`inferops.service_query.authorize.completed` span also records numeric total, HTTP operation and
+completion-fence milliseconds, attempt count and a success boolean. It preserves completed
+phase measurements when the local Workers trace exporter leaves asynchronous spans unfinished. Their lifetimes end when those operations settle,
 so they can separate query work from observation work without using RPC capability lifetimes
 as request latency.
 The mock refuses these reads; it supplies no fake proof.

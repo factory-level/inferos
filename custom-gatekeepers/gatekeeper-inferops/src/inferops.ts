@@ -387,16 +387,27 @@ function accountClient(
     ...endpoint,
     async authorize(operation, requestOptions) {
       let sent = false;
+      const started = performance.now();
+      let operationMs = 0, fenceMs = 0, attempts = 0, success = false;
       try {
         // Every InferOps call here is safe to repeat: reads, or a write under its own
         // idempotency key.
-        return await source.run(async (authority, read) => {
+        const result = await source.run(async (authority, read) => {
           sent = true;
-          const result = await operation(authority);
-          if (options.fenceSuccess || requestOptions?.fenceSuccess)
-            await assertConnectionUnchanged(source, read, requestOptions?.fenceSuccess === true);
-          return result;
+          attempts++;
+          const operationStart = performance.now();
+          let answer;
+          try { answer = await operation(authority); }
+          finally { operationMs += performance.now() - operationStart; }
+          if (options.fenceSuccess || requestOptions?.fenceSuccess) {
+            const fenceStart = performance.now();
+            try { await assertConnectionUnchanged(source, read, requestOptions?.fenceSuccess === true); }
+            finally { fenceMs += performance.now() - fenceStart; }
+          }
+          return answer;
         }, { replayable: true });
+        success = true;
+        return result;
       } catch (error) {
         if (isCredentialsExpired(error)) {
           // Confirmed dead before InferOps processed anything: either no credential was ever
@@ -409,6 +420,16 @@ function accountClient(
           throw new InferOpsError("UNAVAILABLE", "This InferOps connection changed. Try again.");
         }
         throw error;
+      } finally {
+        // A synchronous completion span retains bounded timings even when local Workers tracing
+        // loses an async parent span across RPC continuations. Never emit authority or result data.
+        if (requestOptions?.fenceSuccess) traceServiceQuery("inferops.service_query.authorize.completed", span => {
+          span.setAttribute("total_ms", performance.now() - started);
+          span.setAttribute("operation_ms", operationMs);
+          span.setAttribute("fence_ms", fenceMs);
+          span.setAttribute("attempts", attempts);
+          span.setAttribute("success", success);
+        });
       }
     },
   }, inferLabFetch(env));
