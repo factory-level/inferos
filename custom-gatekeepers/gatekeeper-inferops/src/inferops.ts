@@ -105,6 +105,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeeper-kit/action-description";
 import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gatekeeper-kit/observers";
 import { createLogger } from "@gadgets/observability/logger";
+import { createTracer } from "@gadgets/observability/tracing";
 import type {
   AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
@@ -2494,6 +2495,9 @@ function searchedText(count: number, workspaces: DiscoveryWorkspace[], candidate
     `${candidates.length} candidate${candidates.length === 1 ? "" : "s"}.`;
 }
 
+// Fixed metadata only: query payloads, credentials and caller identities never enter these spans.
+const traceServiceQuery = createTracer(() => ({ component: "inferops.service-query" }));
+
 @validateRpc()
 class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
   #binding: ProjectBinding;
@@ -2510,16 +2514,19 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
   }
 
   async readServiceQuery(name: ServiceQueryName, options?: ServiceQueryOptions): Promise<ServiceQueryPage> {
-    // Latch before awaiting: a concurrently admitted or later observer must not inherit joined data.
-    // Account bindings use their existing prepareWithheld tracker instead.
-    if (typeof this.#binding.scope === "string") this.#binding.kv.put(PRIVATE_SERVICE_QUERY, true);
-    const page = await this.#binding.client.readServiceQuery(this.#binding.projectKey, name, options);
-    // Board observer grants do not cover joined company tables. Withhold this observation from all observers.
-    await this.#binding.observeWithheld(this.#queue, {
-      title: "Read service dashboard",
-      description: `Read ${page.rows.length} rows from published query ${page.name}, version ${page.version}.`,
+    return traceServiceQuery("inferops.service_query", async () => {
+      // Latch before awaiting: a concurrently admitted or later observer must not inherit joined data.
+      // Account bindings use their existing prepareWithheld tracker instead.
+      if (typeof this.#binding.scope === "string") this.#binding.kv.put(PRIVATE_SERVICE_QUERY, true);
+      const page = await traceServiceQuery("inferops.service_query.provider", () =>
+        this.#binding.client.readServiceQuery(this.#binding.projectKey, name, options));
+      // Board observer grants do not cover joined company tables. Withhold this observation from all observers.
+      await traceServiceQuery("inferops.service_query.observation", () => this.#binding.observeWithheld(this.#queue, {
+        title: "Read service dashboard",
+        description: `Read ${page.rows.length} rows from published query ${page.name}, version ${page.version}.`,
+      }));
+      return page;
     });
-    return page;
   }
 
   async readBoard(): Promise<Board> {

@@ -1244,6 +1244,14 @@ this local signal never reports a provider rejection. Reconnects and revocation 
 This applies to direct project bindings and boards opened through an account binding, before
 any observation or rows are returned. A staged reconnect leaves the active connection unchanged.
 The per-request fence and read-only refresh signal do not alter governed writes.
+
+The existing Workers tracer records `inferops.service_query` around the completed read,
+with child spans `inferops.service_query.provider` for the provider call (including credential
+fencing/retry) and `inferops.service_query.observation` for observation authorization. These
+spans carry only the fixed component name and the tracer’s error boolean; no credentials,
+caller identities, options or row payloads. Their lifetimes end when those operations settle,
+so they can separate query work from observation work without using RPC capability lifetimes
+as request latency.
 The mock refuses these reads; it supplies no fake proof.
 
 The dashboard stores no records. Failed/denied/missing connections remain distinct from empty
