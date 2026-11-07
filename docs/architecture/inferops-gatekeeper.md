@@ -1236,7 +1236,12 @@ refused. Response fields are projected and jobs whose project IDs disagree with 
 refused. The widget page shape accepts versions 1 and 2 for compatibility, but this HTTP path
 requires a version-2 provider response and fails explicitly against an older provider. A project connection latches owner-only before attempting a joined read, so even a later or concurrently admitted collaborator cannot inherit joined data; account connections use their existing withheld-observation tracker. Each read reuses the existing current-credential request
 path and is an observation withheld from board-only collaborators, because their board grant
-cannot authorize joined company data. The mock refuses these reads; it supplies no fake proof.
+cannot authorize joined company data. Named-query requests also require the existing completion
+fence: a successful provider response is discarded if the connected account identity or generation
+changed while it was in flight. This applies to direct project bindings and boards opened through
+an account binding, before any observation or rows are returned. A staged reconnect leaves the
+active connection unchanged. The per-request fence does not alter governed writes.
+The mock refuses these reads; it supplies no fake proof.
 
 The dashboard stores no records. Failed/denied/missing connections remain distinct from empty
 results, pages expose the next cursor, and stale client responses cannot replace newer reads.

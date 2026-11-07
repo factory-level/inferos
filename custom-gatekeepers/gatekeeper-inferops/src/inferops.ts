@@ -384,7 +384,7 @@ function accountClient(
   const source = accountSource(exports, accountId, workspaceId);
   return openHttpInferOpsClient({
     ...endpoint,
-    async authorize(operation) {
+    async authorize(operation, requestOptions) {
       let sent = false;
       try {
         // Every InferOps call here is safe to repeat: reads, or a write under its own
@@ -392,7 +392,7 @@ function accountClient(
         return await source.run(async (authority, read) => {
           sent = true;
           const result = await operation(authority);
-          if (options.fenceSuccess) await assertConnectionUnchanged(source, read);
+          if (options.fenceSuccess || requestOptions?.fenceSuccess) await assertConnectionUnchanged(source, read);
           return result;
         }, { replayable: true });
       } catch (error) {

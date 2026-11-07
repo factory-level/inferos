@@ -87,7 +87,10 @@ export type InferOpsAuthority = { token: string; workspaceId: string };
  * it fetches (and refreshes) the token, and when InferOps rejects it, asks the account whether the
  * grant is dead before failing the request.
  */
-export type Authorize = <T>(operation: (authority: InferOpsAuthority) => Promise<T>) => Promise<T>;
+export type Authorize = <T>(
+  operation: (authority: InferOpsAuthority) => Promise<T>,
+  options?: { fenceSuccess?: boolean },
+) => Promise<T>;
 
 /** An endpoint whose authority is fetched per request: a connected person's own token. */
 export type InferOpsAuthorizedEndpoint = InferOpsEndpoint & { authorize: Authorize };
@@ -1223,7 +1226,8 @@ export function openHttpInferOpsClient(
 
   /** Send one request and return its parsed JSON body, or throw the mapped `InferOpsError`. */
   function request(operation: string, send: Send): Promise<unknown> {
-    return authorize(authority => sendAs(authority, operation, send));
+    return authorize(authority => sendAs(authority, operation, send),
+      operation === "query.execute" ? { fenceSuccess: true } : undefined);
   }
 
   async function sendAs(authority: InferOpsAuthority, operation: string, send: Send):
