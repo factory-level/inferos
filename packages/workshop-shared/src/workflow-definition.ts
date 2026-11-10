@@ -64,6 +64,10 @@ export const MIN_WORKFLOW_RUN_HISTORY_RETENTION_DAYS = 1;
 export const MAX_WORKFLOW_RUN_HISTORY_RETENTION_DAYS = 3_650;
 /** Maximum number of due run-history expiry pointers swept per pass. */
 export const WORKFLOW_RUN_HISTORY_SWEEP_BATCH = 100;
+/** Maximum bounded history sweep batches allowed in one synchronous admission transaction. */
+export const WORKFLOW_RUN_HISTORY_ADMISSION_SWEEP_BATCHES = 2;
+/** Delay before retrying a partially drained history backlog from the Durable Object alarm. */
+export const WORKFLOW_RUN_HISTORY_SWEEP_RETRY_MS = 60_000;
 /** Proposed default terminal run-history retention, in milliseconds. */
 export const WORKFLOW_RUN_HISTORY_RETENTION_MS = DEFAULT_WORKFLOW_RUN_HISTORY_RETENTION_DAYS * 24 * 60 * 60_000;
 /** Owner-visible refusal when retained run history is at the configured workspace cap. */

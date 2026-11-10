@@ -10,6 +10,7 @@ import {
   type WorkflowDefinitionRights, type WorkflowDefinitionShare,
   type WorkflowRunRecord, WORKFLOW_RUN_HISTORY_CAP_REFUSAL, WORKFLOW_RUN_HISTORY_RETENTION_MS,
   WORKFLOW_RUN_HISTORY_SWEEP_BATCH, WORKFLOW_RUN_START_WINDOW_MS,
+  WORKFLOW_RUN_HISTORY_ADMISSION_SWEEP_BATCHES, WORKFLOW_RUN_HISTORY_SWEEP_RETRY_MS,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 import type { HookOccurrence } from "@gadgets/workshop-shared/gatekeeper";
@@ -211,12 +212,22 @@ export class WorkspaceWorkflowDefinitionStore {
       if (at === undefined || pinned.has(stored.id) || (at <= now && live.has(stored.id))) continue;
       if (next === undefined || at < next) next = at;
     }
-    let history = Array.from(this.storage.workflowDeliveryExpiries.list({ limit: 1 }))[0];
-    if (history) {
-      let expiry = Number(history.key.slice(0, 16));
-      if (Number.isFinite(expiry) && (next === undefined || expiry < next)) next = expiry;
-    }
     return next;
+  }
+
+  /** Next bounded history sweep: future expiry time, or a delayed retry if a due backlog remains. */
+  nextRunHistorySweep(now = this.retention.now()): number | undefined {
+    let history = Array.from(this.storage.workflowDeliveryExpiries.list({ limit: 1 }))[0];
+    if (!history) return undefined;
+    let expiry = Number(history.key.slice(0, 16));
+    if (!Number.isFinite(expiry)) return undefined;
+    return expiry <= now ? now + WORKFLOW_RUN_HISTORY_SWEEP_RETRY_MS : expiry;
+  }
+
+  /** Whether a due expiry pointer remains after this pass. */
+  hasDueRunHistory(now = this.retention.now()): boolean {
+    let end = `${String(now + 1).padStart(16, "0")}:`;
+    return Array.from(this.storage.workflowDeliveryExpiries.list({ end, limit: 1 })).length > 0;
   }
 
   #changed(): void {
@@ -653,6 +664,22 @@ export class WorkspaceWorkflowDefinitionStore {
         roleOf(stored.owner.id) !== "build") {
       throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
     }
+    // Keep expiry progress even when the subsequent admission is refused at the cap. That
+    // transaction throws by design, which would otherwise roll back its own cleanup. One
+    // admission may inspect at most two bounded batches; alarms and later admissions drain more.
+    this.durableStorage.transactionSync(() => {
+      this.#ensureHistoryIndex();
+      let now = this.retention.now();
+      let maxDeliveries = this.retention.maxWorkflowDeliveries?.() ?? MAX_WORKFLOW_DELIVERIES;
+      let historyEnd = `${String(now + 1).padStart(16, "0")}:`;
+      let historySweeps = 0;
+      do {
+        this.#sweepRunHistoryAt(now);
+        historySweeps++;
+      } while (historySweeps < WORKFLOW_RUN_HISTORY_ADMISSION_SWEEP_BATCHES &&
+          (this.storage.workflowDeliveryCount.get()?.count ?? 0) >= maxDeliveries &&
+          Array.from(this.storage.workflowDeliveryExpiries.list({ end: historyEnd, limit: 1 })).length > 0);
+    });
     return this.durableStorage.transactionSync(() => {
       let now = this.retention.now();
       this.#sweepExpiredOccurrences(now);
@@ -678,16 +705,7 @@ export class WorkspaceWorkflowDefinitionStore {
         error.name = WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME;
         throw error;
       }
-      this.#ensureHistoryIndex();
       let maxDeliveries = this.retention.maxWorkflowDeliveries?.() ?? MAX_WORKFLOW_DELIVERIES;
-      let historyEnd = `${String(now + 1).padStart(16, "0")}:`;
-      this.#sweepRunHistoryAt(now);
-      while ((this.storage.workflowDeliveryCount.get()?.count ?? 0) >= maxDeliveries) {
-        this.#sweepRunHistoryAt(now);
-        // Each pass is limited to one sweep batch. Continue while another due pointer exists, so
-        // expired records beyond the first batch cannot keep an otherwise-open workspace capped.
-        if (Array.from(this.storage.workflowDeliveryExpiries.list({ end: historyEnd, limit: 1 })).length === 0) break;
-      }
       if ((this.storage.workflowDeliveryCount.get()?.count ?? 0) >= maxDeliveries) {
         throw new Error(WORKFLOW_RUN_HISTORY_CAP_REFUSAL);
       }

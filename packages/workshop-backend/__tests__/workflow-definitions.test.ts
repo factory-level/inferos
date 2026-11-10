@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   isLiveWorkflowDelivery, MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKFLOW_DELIVERIES,
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, WORKFLOW_RUN_START_WINDOW_MS,
+  WORKFLOW_RUN_HISTORY_CAP_REFUSAL, WORKFLOW_RUN_HISTORY_SWEEP_BATCH, WORKFLOW_RUN_HISTORY_SWEEP_RETRY_MS,
   maxWorkflowDeliveries, workflowRunHistoryRetentionMs,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { WorkflowDefinitionDelivery } from "@gadgets/workshop-shared/workflow-definition";
@@ -439,6 +440,44 @@ describe("triggers and runs", () => {
     let admitted = store.fire(11, GADGET, headOf, everyoneBuilds)!;
     expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(906);
     expect(admitted.run).toBeDefined();
+  });
+
+  it("limits each admission to two history batches and leaves a due backlog for later alarm passes", () => {
+    let now = Date.now();
+    let { store, storage, headOf } = workspace({ max: 1_000, ttlMs: 1, now: () => now });
+    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    let template = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    let count = 2_505;
+    fillRetainedDeliveries(storage, template, count);
+    for (let pointer of storage.workflowDeliveryExpiries.list()) {
+      storage.workflowDeliveryExpiries.delete(pointer.key);
+    }
+    let oldAt = new Date(now - WORKFLOW_RUN_START_WINDOW_MS - 10_000);
+    let expiry = oldAt.getTime() + WORKFLOW_RUN_START_WINDOW_MS + 1;
+    for (let delivery of storage.workflowDeliveries.list()) {
+      storage.workflowDeliveries.put({ ...delivery, at: oldAt });
+      storage.workflowDeliveryExpiries.put({
+        key: `${String(expiry).padStart(16, "0")}:${String(delivery.id).padStart(16, "0")}`,
+        deliveryId: delivery.id,
+      });
+    }
+    now += WORKFLOW_RUN_START_WINDOW_MS + 20_000;
+
+    expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow(WORKFLOW_RUN_HISTORY_CAP_REFUSAL);
+    expect(storage.workflowDeliveryCount.get()?.count).toBe(count - 2 * WORKFLOW_RUN_HISTORY_SWEEP_BATCH);
+    expect(store.hasDueRunHistory(now)).toBe(true);
+    expect(store.nextRunHistorySweep(now)).toBe(now + WORKFLOW_RUN_HISTORY_SWEEP_RETRY_MS);
+
+    let passes = 0;
+    while (store.hasDueRunHistory(now)) {
+      expect(store.sweepExpiredRunHistory(now)).toBeLessThanOrEqual(WORKFLOW_RUN_HISTORY_SWEEP_BATCH);
+      passes++;
+    }
+    expect(passes).toBeGreaterThan(1);
+    expect(storage.workflowDeliveryCount.get()?.count).toBe(0);
+    expect(store.nextRunHistorySweep(now)).toBeUndefined();
   });
 
   it("expires reconciled terminal history before admitting at the cap", () => {

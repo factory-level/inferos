@@ -15,17 +15,20 @@ updated: 2026-11-10
 ## Overview
 
 Workflow deliveries are the durable run-history records. A workspace keeps at most the configured
-number of records (default 10,000). New admission first removes up to 100 expired, reconciled
-terminal records. If the workspace remains at its limit, admission is refused with a message that
+number of records (default 10,000). New admission removes at most two batches of 100 expired,
+reconciled records. If the workspace remains at its limit, admission is refused with a message that
 directs its administrator to wait for expiry or raise the configured limit. In-window records are
 never silently evicted.
 
-Only succeeded and failed records with a settlement time expire, after the configured retention
-(default 90 days). Queued, running, waiting, uncertain, pending-approval, and not-started records
-are exempt. Retention and cap are deployment settings (`WORKFLOW_RUN_HISTORY_RETENTION_DAYS` and
+Settled succeeded and failed records expire after the configured retention (default 90 days).
+Not-started records expire after their start window plus retention. Queued, running, waiting,
+pending-approval, and uncertain outcomes other than not-started are exempt. Retention and cap are
+deployment settings (`WORKFLOW_RUN_HISTORY_RETENTION_DAYS` and
 `WORKFLOW_MAX_RUN_HISTORY`), validated at use. Both defaults are proposed, not product defaults.
 
-The ordered expiry index lets admission and the alarm sweep a bounded due prefix. FAC-113's
+The ordered expiry index lets admission sweep at most two batches synchronously. When a due backlog
+remains, the Durable Object alarm retries one bounded batch after a delay, and schedules successive
+passes until the due prefix is drained. FAC-113's
 occurrence tombstones remain independent and live for seven days; a tombstone can therefore outlive
 its run record, in which case a repeated occurrence remains deduplicated without a run to return.
 There is no per-run delete, archive, or ownership transfer. Removing a collaborator does not remove

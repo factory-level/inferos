@@ -2748,6 +2748,8 @@ class OverseerImpl implements AgentHooks {
     // The next dynamic workflow definition to expire (FAC-124), so it is swept on time.
     let nextExpiry = this.workflowDefinitionStore().nextExpiry();
     if (nextExpiry !== undefined) times.push(nextExpiry);
+    let nextRunHistorySweep = this.workflowDefinitionStore().nextRunHistorySweep();
+    if (nextRunHistorySweep !== undefined) times.push(nextRunHistorySweep);
 
     // A replay's staged copies still to withdraw (FAC-112), each at its next try.
     for (let entry of this.storage.replayWithdrawals.list()) times.push(entry.nextAttemptAt);
