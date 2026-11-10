@@ -14,6 +14,10 @@ import {
   WIDGET_PLACEMENT_ERROR_CODES, WIDGET_PLACEMENT_LIMITS, WidgetPlacementError, orderWidgetPlacements, parseWidgetPlacementInput,
   sameWidgetPlacementRef, type WidgetPlacement, type WidgetPlacementInput, type WidgetPlacements,
 } from '@gadgets/workshop-shared/widget-placements';
+import {
+  AGENT_VIEW_LIMITS, parseAgentPlacementProposal, parseAgentWidgetView,
+  type AgentPlacementProposal, type AgentViewOverlay, type AgentWidgetView,
+} from '@gadgets/workshop-shared/agent-widgets';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchUnavailableReason, mergeWidgetSearches } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
@@ -1537,6 +1541,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let placementIds = Array.from(this.storage.widgetPlacements.list(), placement => placement.placementId);
     for (let placementId of placementIds) this.storage.widgetPlacements.delete(placementId);
     this.storage.widgetPlacementsRevision.put(this.storage.widgetPlacementsRevision.get() + 1);
+    // And what the agent changed or suggested there (FAC-14), which was never saved.
+    this.#agentViews.clear();
+    this.#agentProposals.clear();
     let record: OperateEventRecord = {
       seq: this.storage.operatePage.get().seq + 1, event: { type: "companyChanged" }, actor: "person", at: new Date(),
     };
@@ -1734,11 +1741,110 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.notFound, "That placement is no longer on your canvas.");
     }
     this.storage.widgetPlacements.delete(placementId);
+    this.#agentViews.delete(placementId);
     let stateKeys = Array.from(this.storage.widgetStates.list(), state => state.key)
       .filter(key => widgetStateKeyPlacement(key) === placementId);
     for (let key of stateKeys) this.storage.widgetStates.delete(key);
     this.storage.widgetPlacementsRevision.put(expectedRevision + 1);
     return this.#widgetPlacements();
+  }
+
+  // --- The agent overlay (FAC-14, agent-widgets.ts) ---
+  //
+  // What the operate agent changed in the person's presentation, held in memory only: never in
+  // storage, never in the operate log. It is the current company's (#resetPresentationState clears
+  // it) and is gone when this Durable Object restarts. Only the person's own calls keep any of it,
+  // as their own placement save.
+
+  #agentViews = new Map<string, AgentWidgetView>();
+  #agentProposals = new Map<string, AgentPlacementProposal>();
+
+  #agentView(): AgentViewOverlay {
+    return { views: [...this.#agentViews.values()], proposals: [...this.#agentProposals.values()] };
+  }
+
+  /** The agent overlay as it is now, for the company the person works in. */
+  async getAgentView(): Promise<AgentViewOverlay> {
+    await this.#enterPresentationCompany();
+    return this.#agentView();
+  }
+
+  /**
+   * Shows the person's placement `placementId` with `filters` in the overlay (the operate agent's
+   * `setWidgetView`). The placement must be on their canvas now; its saved filters are unchanged.
+   */
+  async setAgentWidgetView(placementId: string, filters: Record<string, string>): Promise<AgentViewOverlay> {
+    let checked = parseAgentWidgetView(placementId, filters);
+    await this.#enterPresentationCompany();
+    if (!this.storage.widgetPlacements.get(checked.placementId)) {
+      throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.notFound, "That placement is not on the person's canvas.");
+    }
+    if (!this.#agentViews.has(checked.placementId) && this.#agentViews.size >= AGENT_VIEW_LIMITS.views) {
+      throw new Error(`At most ${AGENT_VIEW_LIMITS.views} placements can show a changed view at once; the person keeps or resets one first.`);
+    }
+    this.#agentViews.set(checked.placementId, { ...checked, setAt: Date.now() });
+    return this.#agentView();
+  }
+
+  /**
+   * Holds a suggested placement in the overlay (the operate agent's `proposePlacement`, whose
+   * caller checked that the person may open it). Placed only by `acceptAgentPlacement`.
+   */
+  async proposeAgentPlacement(input: unknown): Promise<AgentViewOverlay> {
+    let proposal = parseAgentPlacementProposal(input);
+    await this.#enterPresentationCompany();
+    if (this.#agentProposals.size >= AGENT_VIEW_LIMITS.proposals) {
+      throw new Error(`At most ${AGENT_VIEW_LIMITS.proposals} placements can be suggested at once; the person places or dismisses one first.`);
+    }
+    let proposalId = crypto.randomUUID();
+    this.#agentProposals.set(proposalId, { proposalId, ...proposal, proposedAt: Date.now() });
+    return this.#agentView();
+  }
+
+  /** Drops the agent's view of placement `placementId`: it shows its saved filters again. */
+  async dismissAgentView(placementId: string): Promise<AgentViewOverlay> {
+    await this.#enterPresentationCompany();
+    this.#agentViews.delete(placementId);
+    return this.#agentView();
+  }
+
+  /** Drops suggestion `proposalId` without placing it. */
+  async dismissAgentPlacement(proposalId: string): Promise<AgentViewOverlay> {
+    await this.#enterPresentationCompany();
+    this.#agentProposals.delete(proposalId);
+    return this.#agentView();
+  }
+
+  /**
+   * The person keeps the agent's view of placement `placementId`: its filters are saved as the
+   * placement's own (saveWidgetPlacement, with `expectedRevision`), and the view leaves the overlay.
+   */
+  async keepAgentView(placementId: string, expectedRevision: number): Promise<WidgetPlacements> {
+    await this.#enterPresentationCompany();
+    let view = this.#agentViews.get(placementId);
+    let current = this.storage.widgetPlacements.get(placementId);
+    if (!view || !current) {
+      throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.notFound, "There is no changed view of that placement to keep.");
+    }
+    let saved = await this.saveWidgetPlacement({ placementId, ref: current.ref, layout: current.layout, filters: view.filters },
+      expectedRevision);
+    // Only the view that was kept: one the agent changed again while saving stays to be decided.
+    if (this.#agentViews.get(placementId) === view) this.#agentViews.delete(placementId);
+    return saved;
+  }
+
+  /**
+   * The person places suggestion `proposalId` as it was suggested (saveWidgetPlacement, with
+   * `expectedRevision`), and it leaves the overlay.
+   */
+  async acceptAgentPlacement(proposalId: string, expectedRevision: number): Promise<WidgetPlacements> {
+    await this.#enterPresentationCompany();
+    let proposal = this.#agentProposals.get(proposalId);
+    if (!proposal) throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.notFound, "That suggestion is no longer there.");
+    let saved = await this.saveWidgetPlacement({ ref: proposal.ref, layout: proposal.layout, filters: proposal.filters },
+      expectedRevision);
+    this.#agentProposals.delete(proposalId);
+    return saved;
   }
 
   #requirePlacementsRevision(expectedRevision: number): void {

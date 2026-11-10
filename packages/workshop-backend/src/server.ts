@@ -5,6 +5,7 @@ import {
 import {
   WIDGET_PLACEMENT_ERROR_CODES, WidgetPlacementError, parseWidgetPlacementInput, type WidgetPlacementInput, type WidgetPlacements,
 } from "@gadgets/workshop-shared/widget-placements";
+import type { AgentViewOverlay } from "@gadgets/workshop-shared/agent-widgets";
 import { canvasPageEffects } from "@gadgets/workshop-shared/canvas-model";
 import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import type { OperateReadRun } from "@gadgets/workshop-shared/api";
@@ -1091,6 +1092,27 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
 
   removeWidgetPlacement(placementId: string, expectedRevision: number): Promise<WidgetPlacements> {
     return this.user().removeWidgetPlacement(placementId, expectedRevision);
+  }
+
+  /** FAC-14: the agent overlay is the person's to keep, place or dismiss, here, on their own session. */
+  getAgentView(): Promise<AgentViewOverlay> {
+    return this.user().getAgentView();
+  }
+
+  keepAgentView(placementId: string, expectedRevision: number): Promise<WidgetPlacements> {
+    return this.user().keepAgentView(placementId, expectedRevision);
+  }
+
+  dismissAgentView(placementId: string): Promise<AgentViewOverlay> {
+    return this.user().dismissAgentView(placementId);
+  }
+
+  acceptAgentPlacement(proposalId: string, expectedRevision: number): Promise<WidgetPlacements> {
+    return this.user().acceptAgentPlacement(proposalId, expectedRevision);
+  }
+
+  dismissAgentPlacement(proposalId: string): Promise<AgentViewOverlay> {
+    return this.user().dismissAgentPlacement(proposalId);
   }
 
   // FAC-94: where `event` on widget `ref` leads, if the published page the person is shown wires it
