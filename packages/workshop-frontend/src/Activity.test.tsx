@@ -107,7 +107,8 @@ describe('Activity review request after an unsuccessful attempt', () => {
 
   it('shows an unknown outcome that cannot be repeated, and offers only Deny', async () => {
     await renderAttempted({ outcome: 'unknown', message: 'Lost after sending.', retryable: false, at: new Date(1700000200000) })
-    expect(document.body.textContent).toContain('It cannot be sent again: check it at the provider, then deny it.')
+    expect(document.body.textContent).toContain('It cannot be sent again: check it at the service, then deny it.')
+    expect(document.body.textContent).not.toContain('Lost after sending.')
     expect(approveButton()?.disabled).toBe(true)
     expect([...document.querySelectorAll('button')].find(b => b.textContent === 'Deny')?.disabled).toBe(false)
   })
@@ -130,7 +131,9 @@ describe('Activity review request after an unsuccessful attempt', () => {
 
   it('keeps Approve for an attempt that may be repeated, with its reason shown', async () => {
     await renderAttempted({ outcome: 'unknown', message: 'Briefly unreachable.', retryable: true, at: new Date(1700000200000) })
-    expect(document.body.textContent).toContain('Briefly unreachable.')
+    // Its reason in the decision's words (FAC-119), never the provider's own.
+    expect(document.body.textContent).toContain('It may or may not have been applied. Check before making it again.')
+    expect(document.body.textContent).not.toContain('Briefly unreachable.')
     expect(approveButton()?.disabled).toBe(false)
   })
 })

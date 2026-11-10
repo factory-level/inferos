@@ -197,7 +197,9 @@ describe('SessionApprovals', () => {
     await act(async () => button('Approve').click())
     await server.resolvePage({ entries: [attempted('unknown', 'Lost after sending.')] })
     await show({ reviewing: REF, lastApprovalOutcome: { ...REF, outcome: 'failed' } })
-    expect(status()).toContain('Lost after sending.')
+    // The provider's words never reach the status (FAC-119): the decision's words do.
+    expect(status()).toContain('Its last attempt may have reached the service.')
+    expect(status()).not.toContain('Lost after sending.')
 
     // Another tab rejects it: the newer outcome wins over this tab's notice, read afresh.
     await show({ reviewing: REF, lastApprovalOutcome: { ...REF, outcome: 'rejected' } })
