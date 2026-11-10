@@ -1646,8 +1646,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * subscribeOperateSession()), still at `pageSeq`, showing that published console and revision
    * with no flow running, and only once per invocation and attachment; recorded with the actor
    * `workflow-run`. A page that isn't open keeps the request only in memory, for
-   * `RUN_NAVIGATION_PENDING_MS`, and a reconnect of the same session in that time applies it under
-   * the same checks; once this object restarts, or the page moved, it never applies.
+   * `RUN_NAVIGATION_PENDING_MS`, and a reconnect of the same session in that time applies it once
+   * its workspace re-checks the requester, under the same checks; once this object restarts, or the
+   * page moved, it never applies.
    */
   async applyRunNavigation(request: RunNavigationRequest): Promise<RunNavigationOutcome> {
     await this.#enterPresentationCompany();
@@ -1661,7 +1662,20 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let now = Date.now();
     for (let [key, { request, at }] of this.#pendingRunNavigations) {
       this.#pendingRunNavigations.delete(key);
-      if (now - at < RUN_NAVIGATION_PENDING_MS) this.#applyRunNavigation(request, false);
+      if (now - at < RUN_NAVIGATION_PENDING_MS) void this.#recheckRunNavigation(request);
+    }
+  }
+
+  // A waiting move applies only once the run's workspace re-checks it, now: the requester still
+  // may run the trigger and still holds a role there (OverseerImpl.recheckRunNavigation). Then the
+  // same checks as a live one, against the page as it is after that answer.
+  async #recheckRunNavigation(request: RunNavigationRequest): Promise<void> {
+    try {
+      let overseers = this.ctx.exports.OverseerDurableObject;
+      let workspace = overseers.get(overseers.idFromString(request.workspaceId));
+      if (await workspace.recheckRunNavigation(request.profileId, request.invocationId)) this.#applyRunNavigation(request, false);
+    } catch (error) {
+      logger.warn("a run's waiting navigation could not be re-checked", { event: "operate.run_navigation.recheck_failed", error });
     }
   }
 

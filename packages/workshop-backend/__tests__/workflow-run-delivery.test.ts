@@ -73,10 +73,11 @@ function setUp(impl: any, options: Setup = {}) {
   let calls: RunNavigationRequest[] = [];
   let fetched: string[] = [];
   let workspaceId = impl.ctx.id.toString();
+  let shown = { console: options.console ?? {} };
   let user = {
     getOperatePage: async () => ({
       seq: 5, state: { flow: null, console: { workspaceId, consoleId: "intake", source: "published", revision: "3",
-        viewId: "v-form", screenId: "form", ...options.console } },
+        viewId: "v-form", screenId: "form", ...shown.console } },
     }),
     applyRunNavigation: async (request: RunNavigationRequest) => { calls.push(request); return options.answer ?? "shown"; },
   };
@@ -112,7 +113,7 @@ function setUp(impl: any, options: Setup = {}) {
     impl.deliverRunToCanvas(deliveryId);
     await vi.waitFor(() => expect(canvas()).not.toBe("pending"));
   };
-  return { calls, fetched, store, invocationId: invocation.id as string, deliveryId, canvas, settle };
+  return { calls, fetched, store, shown, invocationId: invocation.id as string, deliveryId, canvas, settle };
 }
 
 describe("a requested run's result reaching its requester's page (FAC-116)", () => {
@@ -121,7 +122,7 @@ describe("a requested run's result reaching its requester's page (FAC-116)", () 
       let t = setUp(impl);
       await t.settle("succeeded");
       expect(t.calls).toEqual([{
-        workspaceId: impl.ctx.id.toString(), consoleId: "intake", revision: "3", pageSeq: 5,
+        workspaceId: impl.ctx.id.toString(), profileId: PERSON, consoleId: "intake", revision: "3", pageSeq: 5,
         invocationId: t.invocationId, attachmentId: "on-done", move: { type: "openView", viewId: "v-done" },
       }]);
       expect(t.canvas()).toBe("delivered");
@@ -174,13 +175,28 @@ describe("a requested run's result reaching its requester's page (FAC-116)", () 
     });
   });
 
-  it("leaves the result in history only when the page shows another console or revision", async () => {
+  it("never delivers late: a result first settled while the page showed elsewhere moves nothing once reconciled", async () => {
+    await withImpl(`run-delivery-late-${crypto.randomUUID()}`, async impl => {
+      let t = setUp(impl, { console: { consoleId: "other" } });
+      await t.settle("uncertain");
+      expect(t.canvas()).toBe("undelivered");
+      // The person opens the wired console, then the run's write is reconciled to succeeded.
+      t.shown.console = {};
+      t.store.recordResult(t.deliveryId, { outcome: "succeeded" });
+      impl.deliverRunToCanvas(t.deliveryId);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(t.calls).toEqual([]);
+      expect(t.canvas()).toBe("undelivered");
+    });
+  });
+
+  it("records undelivered, for good, when the page shows another console or revision", async () => {
     for (let shown of [{ consoleId: "other" }, { revision: "2" }, { workspaceId: "another-workspace" }]) {
       await withImpl(`run-delivery-elsewhere-${crypto.randomUUID()}`, async impl => {
         let t = setUp(impl, { console: shown });
         await t.settle("succeeded");
         expect(t.calls, JSON.stringify(shown)).toEqual([]);
-        expect(t.canvas(), JSON.stringify(shown)).toBeUndefined();
+        expect(t.canvas(), JSON.stringify(shown)).toBe("undelivered");
         expect(impl.storage.workflowDeliveries.get(t.deliveryId)?.delivery?.history).toBe("delivered");
       });
     }

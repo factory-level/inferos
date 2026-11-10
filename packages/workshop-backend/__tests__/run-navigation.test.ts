@@ -5,13 +5,16 @@
 // moves it. Over the person's real user DO.
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import { RpcStub } from "capnweb";
 import type { OperateEvent, RunNavigationRequest } from "@gadgets/workshop-shared/operate-session";
+import type { OverseerDurableObject } from "../src/overseer.js";
 import type { UserDurableObject } from "../src/user.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
     TEST_USER: DurableObjectNamespace<UserDurableObject>;
+    TEST_OVERSEER: DurableObjectNamespace<OverseerDurableObject>;
   }
 }
 
@@ -36,9 +39,27 @@ async function open(user: Awaited<ReturnType<typeof person>>) {
 
 async function request(user: Awaited<ReturnType<typeof person>>, overrides: Partial<RunNavigationRequest> = {}): Promise<RunNavigationRequest> {
   return {
-    workspaceId: "console-ws", consoleId: "intake", revision: "3", pageSeq: (await user.getOperatePage()).seq,
+    workspaceId: "console-ws", profileId: "operator-profile", consoleId: "intake", revision: "3", pageSeq: (await user.getOperatePage()).seq,
     invocationId: "inv-1", attachmentId: "done", move: { type: "openView", viewId: "v-done" }, ...overrides,
   };
+}
+
+/**
+ * A real workspace whose re-check of the run answers `allowed` (OverseerImpl.recheckRunNavigation
+ * stood in), and the person's page showing its console.
+ */
+async function rechecked(allowed: boolean) {
+  let id = env.TEST_OVERSEER.newUniqueId();
+  let asked: string[] = [];
+  await runInDurableObject(env.TEST_OVERSEER.get(id), (instance: OverseerDurableObject) => {
+    (instance as any).impl.recheckRunNavigation = async (profileId: string, invocationId: string) => {
+      asked.push(`${profileId} ${invocationId}`);
+      return allowed;
+    };
+  });
+  let workspaceId = id.toString();
+  let user = await person([{ ...OPEN, workspaceId } as OperateEvent, { type: "showScreen", screenId: "form" }]);
+  return { user, workspaceId, asked };
 }
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 50));
@@ -72,14 +93,25 @@ describe("a run's result moving an open page (FAC-116)", () => {
     tab.close();
   });
 
-  it("doesn't move a closed page, but applies the move when the same session reconnects unchanged", async () => {
-    let user = await person();
-    expect(await user.applyRunNavigation(await request(user))).toBe("not-open");
+  it("doesn't move a closed page, but applies the move when the same session reconnects and the workspace re-checks it", async () => {
+    let { user, workspaceId, asked } = await rechecked(true);
+    expect(await user.applyRunNavigation(await request(user, { workspaceId }))).toBe("not-open");
     expect((await user.getOperatePage()).state.console).toMatchObject({ viewId: "v-form" });
     let tab = await open(user);
     await settle();
+    expect(asked).toEqual(["operator-profile inv-1"]);
     expect((await user.getOperatePage()).state.console).toMatchObject({ viewId: "v-done" });
     expect((await user.listOperateEvents(0, 50)).at(-1)).toMatchObject({ actor: "workflow-run" });
+    tab.close();
+  });
+
+  it("doesn't apply a waiting move the workspace's re-check refuses", async () => {
+    let { user, workspaceId, asked } = await rechecked(false);
+    expect(await user.applyRunNavigation(await request(user, { workspaceId }))).toBe("not-open");
+    let tab = await open(user);
+    await settle();
+    expect(asked).toHaveLength(1);
+    expect((await user.getOperatePage()).state.console).toMatchObject({ viewId: "v-form" });
     tab.close();
   });
 

@@ -394,6 +394,8 @@ export type OperateEventActor = "person" | "agent" | "workflow-run";
  */
 export type RunNavigationRequest = {
   workspaceId: string;
+  /** The person who asked for the run, whom the workspace re-checks before a waiting move applies. */
+  profileId: string;
   consoleId: string;
   revision: string;
   pageSeq: number;

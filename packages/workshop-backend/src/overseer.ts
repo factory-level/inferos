@@ -7166,6 +7166,35 @@ class OverseerImpl implements AgentHooks {
     this.deliverRunToCanvas(deliveryId);
   }
 
+  // Whether the person who asked for run `deliveryId` still may now (FAC-116): `requireRunRequester`
+  // (the trigger's control, the trigger enabled, the same company and executor), then their role here
+  // (owner, or at least `use`), then the trigger re-checked once more after the last await.
+  async #requesterStillMay(hookId: number, deliveryId: number, profileId: string,
+      user: DurableObjectStub<UserDurableObject>): Promise<boolean> {
+    try {
+      let check = await requireRunRequester(this, hookId, deliveryId);
+      if (this.users.idFromName(profileId).toString() !== this.ownerId &&
+          !(await this.authorizeCollaborator(profileId, user, { requireRole: "use" }))) {
+        return false;
+      }
+      check.revalidate();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Re-checks, for the person's user Durable Object, a run's navigation that waited for their page
+   * to reconnect (FAC-116, UserDurableObject.applyRunNavigation): true only when `profileId` asked for
+   * run `invocationId` here and still may, as `deliverRunToCanvas` checked before it waited.
+   */
+  async recheckRunNavigation(profileId: string, invocationId: string): Promise<boolean> {
+    let delivery = this.workflowDefinitionStore().deliveryOfInvocation(invocationId);
+    if (!delivery?.run || delivery.invocation?.requestedBy !== profileId) return false;
+    return this.#requesterStillMay(delivery.hookId, delivery.id, profileId, this.users.get(this.users.idFromName(profileId)));
+  }
+
   /** Published console `consoleId` and its screens' pages, as `deliverRunToCanvas` reads them (FAC-116). */
   publishedConsoleForRun(consoleId: string): { saved: OperateConsole | null; page(screenId: string): CanvasPage | null } {
     let consoles = this.#consoleStore();
@@ -7200,7 +7229,8 @@ class OverseerImpl implements AgentHooks {
     let { hookId, invocation } = delivery;
     let event = `run-${outcome}` as CanvasRunEvent;
     let workspaceId = this.ctx.id.toString();
-    let settle = (state: "delivered" | "undelivered" | undefined, reason: string) => {
+    // Every outcome is final: a run found nowhere to go now never goes later (decision C).
+    let settle = (state: "delivered" | "undelivered", reason: string) => {
       store.setCanvasDelivery(deliveryId, state);
       if (state === "undelivered") {
         this.logger.info("a run's result didn't reach its requester's page", {
@@ -7213,7 +7243,7 @@ class OverseerImpl implements AgentHooks {
       let page = await user.getOperatePage();
       let open = page.state.console;
       if (!open || page.state.flow || open.source !== "published" || open.workspaceId !== workspaceId) {
-        return settle(undefined, "not-shown");
+        return settle("undelivered", "not-shown");
       }
       let consoles = this.publishedConsoleForRun(open.consoleId);
       let saved = consoles.saved;
@@ -7222,26 +7252,17 @@ class OverseerImpl implements AgentHooks {
       let shown = saved && saved.revision === open.revision && screenId !== null ? consoles.page(screenId) : null;
       let heard = shown ? canvasRunEventsHeard(shown).find(entry => entry.trigger === hookId && entry.event === event) : undefined;
       let target = heard && shown ? canvasRunEffects(shown, hookId, event).find(effect => effect.kind === "navigate") : undefined;
-      if (!saved || !heard || !target) return settle(undefined, "not-wired");
+      if (!saved || !heard || !target) return settle("undelivered", "not-wired");
       let move = consoleScreenMove(saved, open.viewId, target.page);
       if (!move) return settle("undelivered", "not-shown");
-      let check: RunRequesterCheck;
-      try {
-        check = await requireRunRequester(this, hookId, deliveryId);
-        let userId = this.users.idFromName(invocation.requestedBy).toString();
-        if (userId !== this.ownerId &&
-            !(await this.authorizeCollaborator(invocation.requestedBy, user, { requireRole: "use" }))) {
-          return settle("undelivered", "revoked");
-        }
-        check.revalidate();
-      } catch {
+      if (!(await this.#requesterStillMay(hookId, deliveryId, invocation.requestedBy, user))) {
         return settle("undelivered", "revoked");
       }
       if (this.publishedConsoleForRun(open.consoleId).saved?.revision !== open.revision) {
         return settle("undelivered", "changed");
       }
       let answer = await user.applyRunNavigation({
-        workspaceId, consoleId: open.consoleId, revision: open.revision, pageSeq: page.seq,
+        workspaceId, profileId: invocation.requestedBy, consoleId: open.consoleId, revision: open.revision, pageSeq: page.seq,
         invocationId: invocation.id, attachmentId: heard.attachmentId, move,
       });
       settle(answer === "shown" ? "delivered" : "undelivered", answer);
@@ -12943,6 +12964,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * opened (so nothing was ever handed out, and open() refuses it from now on). False for anyone
    * but the owner, or for a workspace that isn't an operate session.
    */
+  /** See OverseerImpl.recheckRunNavigation (FAC-116); called by a person's user Durable Object. */
+  async recheckRunNavigation(profileId: string, invocationId: string): Promise<boolean> {
+    return this.impl.recheckRunNavigation(profileId, invocationId);
+  }
+
   async retireOperateSession(ownerId: string): Promise<boolean> {
     if (!this.impl.ownerId) return true;
     if (this.impl.ownerId !== ownerId || !this.impl.storage.operateSession.get()) return false;
