@@ -89,7 +89,7 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     "getConsoleWidgetStates" |
     // A widget a Wiki page embeds, by its source gadget, without an open operate session (FAC-12,
     // wiki-embedded-widget.test.ts).
-    "resolveEmbeddedWidget" | "getEmbeddedWidget" |
+    "resolveEmbeddedWidget" | "getEmbeddedWidget" | "listWidgetInstances" |
     // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
     "listWorkflowDefinitions" |
     // A use collaborator listed on a trigger's control may run it, and sees only those controls

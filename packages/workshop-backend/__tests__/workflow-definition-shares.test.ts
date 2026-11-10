@@ -31,7 +31,7 @@ type Role = "build" | "use" | null;
 function workspace(audience: WorkflowDefinitionAudience = SHARED_ONLY_AUDIENCE) {
   let durable = makeMockStorage();
   let storage = makeOverseerStorage(durable);
-  let store = new WorkspaceWorkflowDefinitionStore(durable, storage, audience);
+  let store = new WorkspaceWorkflowDefinitionStore(durable, storage, undefined, audience);
   let head = commit(1);
   let headOf = (id: number) => (id === GADGET ? head : undefined);
   let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
@@ -209,6 +209,64 @@ describe("trigger configuration and run history (#427 round 1)", () => {
     expect(store.deliveries(CARA.id, id, "build")).toHaveLength(1);
     // A missing role grants nothing, an editor's included.
     expect(() => store.deliveries(CARA.id, id, null)).toThrow("Workflow definition not found.");
+  });
+});
+
+// #427 after #416 (FAC-124): history follows who may see it (owner or edit), not availability, and a
+// dynamic, unsaved definition is never shared, so an expired one has no editor and no named reader.
+describe("run history and dynamic definitions (#427 with #416)", () => {
+  const HOUR = 3_600_000;
+  function clocked() {
+    let durable = makeMockStorage();
+    let storage = makeOverseerStorage(durable);
+    let clock = { now: Date.UTC(2026, 10, 10) };
+    let store = new WorkspaceWorkflowDefinitionStore(durable, storage, { now: () => clock.now, dynamicTtlMs: () => HOUR },
+      WORKSPACE_AUDIENCE);
+    let headOf = (gadgetId: number) => (gadgetId === GADGET ? commit(1) : undefined);
+    // One run of the definition trigger HOOK is pinned to, asked by Ben through its control.
+    let ranOnce = (id: string) => {
+      store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: id, revision: 1, mode: "pinned" });
+      store.setControl(ADA, HOOK, { label: "Refund", invokers: [BEN.id] });
+      store.fire(HOOK, GADGET, headOf, () => "use", store.beginInvocation(BEN.id, HOOK, null).id);
+      store.pinTrigger(ADA.id, HOOK, GADGET, null);
+    };
+    return { store, clock, headOf, ranOnce };
+  }
+  const historyOf = (store: WorkspaceWorkflowDefinitionStore, who: string, id: string, role: Role) => {
+    try { return store.deliveries(who, id, role).length; } catch (error) { return String(error); }
+  };
+
+  it("lets the owner and an editor read a live definition's history; a reader and a runner get none", () => {
+    let { store, headOf, ranOnce } = clocked();
+    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
+    store.publish(ADA, saved.id, 1);
+    ranOnce(saved.id);
+    store.share(ADA, saved.id, CARA.id, EDIT, "build");
+    store.share(ADA, saved.id, BEN.id, RUN, "use");
+    store.share(ADA, saved.id, "dan-profile", READ, "use");
+    expect(historyOf(store, ADA.id, saved.id, "build")).toBe(1);
+    expect(historyOf(store, CARA.id, saved.id, "build")).toBe(1);
+    expect(historyOf(store, BEN.id, saved.id, "use")).toContain("Workflow definition not found.");
+    expect(historyOf(store, "dan-profile", saved.id, "use")).toContain("Workflow definition not found.");
+  });
+
+  it("keeps an expired definition's history its owner's: no reader or runner reads it, and none can be an editor", () => {
+    let { store, clock, headOf, ranOnce } = clocked();
+    let made = store.save(ADA, { title: "One-off", gadgetId: GADGET, retain: false }, headOf, "build");
+    store.publish(ADA, made.id, 1);
+    // A dynamic definition is never shared, to edit or otherwise; stopping a share always works.
+    for (let rights of [EDIT, RUN, READ]) {
+      expect(() => store.share(ADA, made.id, CARA.id, rights, "build")).toThrow("Save this workflow before sharing it");
+    }
+    expect(store.share(ADA, made.id, CARA.id, null, "build")).toEqual([]);
+    ranOnce(made.id);
+    clock.now += 2 * HOUR;
+    // Expired, not yet swept: its record is there, and so is its history, for its owner only.
+    expect(store.get(ADA.id, made.id, "build")).toBeNull();
+    expect(historyOf(store, ADA.id, made.id, "build")).toBe(1);
+    // Ben ran it, and the workspace audience let every collaborator read and run it: neither reaches history.
+    expect(historyOf(store, BEN.id, made.id, "use")).toContain("Workflow definition not found.");
+    expect(historyOf(store, CARA.id, made.id, "build")).toContain("Workflow definition not found.");
   });
 });
 

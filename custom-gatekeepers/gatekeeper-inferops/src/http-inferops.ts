@@ -43,6 +43,7 @@ import { parseServiceQuery, serviceQuerySearch } from "./service-queries";
 //   deployment. Local development only; it never backs a connected person.
 
 import { createLogger } from "@gadgets/observability/logger";
+import type { WidgetSearchResult } from "@gadgets/workshop-shared/gatekeeper";
 import { ResponseTooLargeError, readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
 import {
   HOST_BOARD_LIMITS, type HostBoardColumn, type HostBoardIssue, type HostBoardScope,
@@ -427,6 +428,50 @@ function parseSearchHit(value: unknown): WikiSearchRecord {
   };
 }
 
+/**
+ * A workspace where InferOps gives the person no `knowledge:read` (FAC-13): searched, and it adds
+ * nothing. Only that refusal reads so; any other 403 is a workspace that could not be searched.
+ */
+export const WIDGET_SEARCH_DENIED = "InferOps gives you no permission to search widgets in this workspace.";
+
+/** Why a widget search failed when it could not run (FAC-13): never shown as "nothing found". */
+export const WIDGET_SEARCH_UNAVAILABLE =
+  "Widget search is unavailable right now, so this is not an empty result. Try again shortly.";
+
+/** A relevance score: a finite number. */
+function score(value: unknown, what: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Malformed(`${what} is not valid`);
+  return value;
+}
+
+/** `widget.search`'s answer (FAC-13): its built-in kinds and definitions, each within `k`. */
+function parseWidgetSearch(raw: unknown, k: number): WidgetSearchResult {
+  const response = record(raw, "response");
+  const hits = list(response.hits, "hits");
+  const definitions = list(response.definitions, "definitions");
+  if (hits.length > k || definitions.length > k) throw new Malformed("more results than asked for");
+  const ranking = response.ranking;
+  if (ranking !== "semantic" && ranking !== "keyword") throw new Malformed("ranking is not valid");
+  return {
+    hits: hits.map(value => {
+      const hit = record(value, "hit");
+      return { kind: text(hit.kind, "hit.kind"), description: text(hit.description, "hit.description"), score: score(hit.score, "hit.score") };
+    }),
+    definitions: definitions.map(value => {
+      const definition = record(value, "definition");
+      if (definition.source !== "inferos.blueprint") throw new Malformed("definition.source is not valid");
+      return {
+        sourceId: text(definition.sourceId, "definition.sourceId"),
+        sourceVersion: int(definition.sourceVersion, "definition.sourceVersion"),
+        title: text(definition.title, "definition.title"),
+        purpose: text(definition.purpose, "definition.purpose"),
+        score: score(definition.score, "definition.score"),
+      };
+    }),
+    ranking,
+  };
+}
+
 /** Why a Wiki search failed when it could not run: never shown as "no results". */
 export const SEARCH_UNAVAILABLE =
   "InferMind Wiki search is unavailable right now, so this is not an empty result. Try again shortly.";
@@ -753,6 +798,16 @@ function parseTableRead(body: unknown, widget: "table-view" | "record-card"): Ta
     throw new Malformed("a record of another table or version was returned");
   }
   return { table, rows };
+}
+
+/** The message of InferOps' error envelope, if it has one (`{error: {message}}`). */
+function wireMessage(body: unknown): string | null {
+  try {
+    let message = record(record(body, "response").error, "error").message;
+    return typeof message === "string" ? message : null;
+  } catch {
+    return null;
+  }
 }
 
 function wireCode(body: unknown): string | null {
@@ -1192,7 +1247,7 @@ type Send = {
   /** A successful response may have no body (InferOps' answer for a missing Wiki item). */
   maybeEmpty?: boolean;
   /** Read a failed response before the shared mapping; undefined falls back to it. */
-  failure?: (status: number, wire: string | null) => SendFailure | undefined;
+  failure?: (status: number, wire: string | null, body: unknown) => SendFailure | undefined;
   /**
    * Read the body through the streaming byte cap before any parsing: a successful one over it
    * throws `BodyTooLarge` (cancelled, nothing parsed), a failed one is capped at
@@ -1286,7 +1341,7 @@ export function openHttpInferOpsClient(
     }
     if (!response.ok) {
       const wire = wireCode(body);
-      const own = response.status === 401 ? undefined : send.failure?.(response.status, wire);
+      const own = response.status === 401 ? undefined : send.failure?.(response.status, wire, body);
       const code = own?.code ?? failureCode(response.status, wire);
       logger.warn("InferOps request failed", {
         event: "http.request.failed", operation, status: response.status, code: wire ?? code,
@@ -1964,6 +2019,24 @@ export function openHttpInferOpsClient(
           throw new Malformed("another widget definition was returned");
         }
       });
+    },
+
+    async searchWidgets(query: string, k: number): Promise<WidgetSearchResult> {
+      const params = new URLSearchParams({ query, k: String(k) });
+      let body: unknown;
+      try {
+        body = await request("widget.search", { method: "GET", path: `/knowledge/widget-search?${params}`,
+          // InferOps' guard words a missing permission so; only that refusal means "may not search here".
+          failure: (status, _wire, failed) => status === 403 && wireMessage(failed) === "Missing permission: knowledge:read"
+            ? { code: "FORBIDDEN", detail: WIDGET_SEARCH_DENIED } : undefined });
+      } catch (error) {
+        // An InferOps without `widget.search` (404) and an outage both mean "can't search now".
+        if (error instanceof InferOpsError && (error.code === "NOT_FOUND" || error.code === "UNAVAILABLE")) {
+          throw restated(error, "UNAVAILABLE", WIDGET_SEARCH_UNAVAILABLE);
+        }
+        throw error;
+      }
+      return parsed("widget.search", body, raw => parseWidgetSearch(raw, k));
     },
 
     async withdrawWidgetDefinition(sourceId: string, sourceVersion: number): Promise<boolean> {

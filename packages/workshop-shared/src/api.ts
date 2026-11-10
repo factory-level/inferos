@@ -29,7 +29,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import type { WorkspaceConfiguration, WorkspaceSettings } from "./workspace-settings.js";
 import type { ConfigurationTraceEntry } from "./configuration-trace.js";
-import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, ConsoleDraftProblem, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, ConsoleDraftProblem, ConsoleWidgetInstance, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
@@ -45,7 +45,7 @@ import type {
   ArtifactRevision,
 } from "./agent-artifact.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace, WidgetSearchAnswer } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
@@ -821,6 +821,9 @@ export type UserDirectoryRecord = {
 };
 
 /** Top-level API exposed to the user after they have authenticated. */
+/** At most this many built-in widgets, and this many definitions, a widget search returns (FAC-13). */
+export const WIDGET_SEARCH_LIMIT = 8;
+
 export interface AuthenticatedApi extends RpcTarget {
   /** Get profile info for the user who is logged in. */
   whoami(): Promise<AiChatAuthorInfo>;
@@ -1028,6 +1031,19 @@ export interface AuthenticatedApi extends RpcTarget {
    * TODO: Pagination, sort options.
    */
   listGadgets(): Promise<GadgetMetadataWithTimestamps[]>;
+
+  /**
+   * The widgets this person may use that match `query`, their intent in their own words (FAC-13;
+   * at most 500 characters, refused when blank): the deployment's `SHARED_CONFIGURATION_GATEKEEPER`
+   * vendor asked through each of their own connected accounts, with their own credentials, and
+   * merged, each once, best first, at most `WIDGET_SEARCH_LIMIT` of each kind. Definitions only:
+   * no instance or live data (see `Overseer.listWidgetInstances` for a definition's instances).
+   * `unavailable`, with the reason, when nothing could be asked: no vendor, no account of it, a
+   * sign-in to renew, or no workspace there (`WidgetSearchAnswer`), so it never reads as "no
+   * widgets". A partial answer counts what couldn't be searched (`unsearched`) and where the person
+   * may not search (`denied`). Throws when everything asked failed.
+   */
+  searchWidgets(query: string): Promise<WidgetSearchAnswer>;
 
   /**
    * List the outputs of all the user's workspaces. Used to display the Outputs page, which lets
@@ -2838,7 +2854,10 @@ export interface Overseer extends RpcTarget {
    * Save the workflow gadget's current code as a new revision of the caller's own definition, or of
    * a new one. Publishes nothing. Build only; in a shared workspace it also takes the deployment's
    * `build` authority. At most `MAX_WORKSPACE_WORKFLOW_DEFINITIONS` per workspace and
-   * `MAX_WORKFLOW_DEFINITION_REVISIONS` revisions each.
+   * `MAX_WORKFLOW_DEFINITION_REVISIONS` revisions each. With `retain: false` a new definition is
+   * dynamic (FAC-124): it carries `expiresAt` and stops being available for new use then, unless
+   * saved again first (which retains it) or a trigger is pinned to it; at or after its expiry a save
+   * is refused (`WORKFLOW_DEFINITION_EXPIRED`).
    */
   saveWorkflowDefinition(input: WorkflowDefinitionSave): Promise<WorkflowDefinition>;
   /**
@@ -3022,6 +3041,15 @@ export interface Overseer extends RpcTarget {
    * otherwise, and for a widget published without a UI. Denied to the operate session.
    */
   getEmbeddedWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
+   * The instances of the published widget definition `blueprintId` version `version` (as InferOps'
+   * widget search names it) that this workspace's published consoles offer now, with a UI
+   * (FAC-13): each named as a Wiki embed names it, opened through `getEmbeddedWidget`, which checks
+   * the offer again. Never a draft, an unpublished console's widget or a tools-only one. Answered to
+   * whoever may read this workspace's published consoles (build or use access). Denied to the
+   * operate session.
+   */
+  listWidgetInstances(blueprintId: string, version: number): Promise<ConsoleWidgetInstance[]>;
   /**
    * Open an app a console places, as its published revision `revision` fenced it (FAC-89 part 2):
    * `gadgetId` is the live app, with its own storage and bindings, never a copy (see

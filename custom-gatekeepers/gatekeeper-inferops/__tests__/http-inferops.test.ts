@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  WIDGET_INDEX_FORBIDDEN, WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
+  WIDGET_INDEX_FORBIDDEN, WIDGET_SEARCH_DENIED, WIDGET_SEARCH_UNAVAILABLE, WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
   type InferOpsConnection,
 } from "../src/http-inferops";
 import { PROPOSAL_APPROVE_REFUSED, inferOpsErrorCode, isPolicyRefusal, writeStage } from "../src/inferops-client";
@@ -1552,6 +1552,68 @@ describe("company service queries and comments", () => {
 
 // The widget index (FAC-11 slice 2): `widget.publish` and `widget.withdraw` as the connection's
 // own person, in its own workspace, for the company, with nothing but the pointer and its words.
+describe("widget search by intent (FAC-13)", () => {
+  const searching = (answer: () => Response) => {
+    const sent: string[] = [];
+    const client = openHttpInferOpsClient(CONNECTION, (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const url = new URL(String(input));
+      sent.push(`${init.method ?? "GET"} ${url.pathname.replace("/api", "")}${url.search} ${new Headers(init.headers).get("x-workspace-id")}`);
+      return answer();
+    }) as typeof fetch);
+    return { client, sent };
+  };
+  const ANSWER = {
+    hits: [{ kind: "project/board", description: "A project board", score: 0.5 }],
+    definitions: [{ source: "inferos.blueprint", sourceId: "bp-1", sourceVersion: 2, title: "Overdue invoices",
+                    purpose: "Invoices past due", score: 1 }],
+    ranking: "keyword",
+  };
+
+  it("asks InferOps' widget.search in the client's workspace, and reads its definitions and kinds", async () => {
+    const { client, sent } = searching(() => Response.json(ANSWER));
+    expect(await client.searchWidgets("overdue invoices", 8)).toEqual({
+      hits: ANSWER.hits,
+      definitions: [{ sourceId: "bp-1", sourceVersion: 2, title: "Overdue invoices", purpose: "Invoices past due", score: 1 }],
+      ranking: "keyword",
+    });
+    expect(sent).toEqual([`GET /knowledge/widget-search?query=overdue+invoices&k=8 ${CONNECTION.workspaceId}`]);
+  });
+
+  it("calls an answer beyond k, or with another source or ranking, malformed", async () => {
+    for (const bad of [
+      { ...ANSWER, definitions: [ANSWER.definitions[0], ANSWER.definitions[0]] },
+      { ...ANSWER, definitions: [{ ...ANSWER.definitions[0], source: "elsewhere" }] },
+      { ...ANSWER, ranking: "magic" },
+      { ...ANSWER, hits: [{ ...ANSWER.hits[0], score: "high" }] },
+    ]) {
+      const { client } = searching(() => Response.json(bad));
+      expect(inferOpsErrorCode(await client.searchWidgets("x", 1).catch(e => e))).toBe("UNAVAILABLE");
+    }
+  });
+
+  it("says it can't search, never that nothing was found, when InferOps lacks it or is down", async () => {
+    for (const status of [404, 503]) {
+      const { client } = searching(() => Response.json({ error: { code: status === 404 ? "NOT_FOUND" : "UNAVAILABLE", message: "x" } }, { status }));
+      const failed = await client.searchWidgets("invoices", 8).catch(e => e);
+      expect(inferOpsErrorCode(failed)).toBe("UNAVAILABLE");
+      expect(failed.detail).toBe(WIDGET_SEARCH_UNAVAILABLE);
+    }
+  });
+
+  const refusing = (message: string) => searching(() => Response.json({ error: { code: "FORBIDDEN", message } }, { status: 403 }));
+
+  it("reads only a missing knowledge:read as 'may not search here'; any other 403 stays a refusal", async () => {
+    const denied = await refusing("Missing permission: knowledge:read").client.searchWidgets("invoices", 8).catch(e => e);
+    expect(inferOpsErrorCode(denied)).toBe("FORBIDDEN");
+    expect(denied.detail).toBe(WIDGET_SEARCH_DENIED);
+    for (const message of ["Wrong product for this route", "Missing permission: knowledge:write", "Permission denied"]) {
+      const other = await refusing(message).client.searchWidgets("invoices", 8).catch(e => e);
+      expect(inferOpsErrorCode(other), message).toBe("FORBIDDEN");
+      expect(other.detail, message).not.toBe(WIDGET_SEARCH_DENIED);
+    }
+  });
+});
+
 describe("widget index writes", () => {
   type Sent = { method: string; path: string; workspaceId: string | null; body: unknown };
   const widgetIndex = (answer: (sent: Sent) => Response) => {

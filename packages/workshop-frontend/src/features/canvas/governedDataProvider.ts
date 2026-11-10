@@ -1,11 +1,12 @@
 import type { BaseKey, BaseRecord, CrudFilter, CrudSort, DataProvider, MetaQuery, Pagination } from '@refinedev/core'
+import type { ActionReceiptStatus } from '@gadgets/workshop-shared/gatekeeper'
 import type { GovernedFilter, GovernedListResult, GovernedRow, GovernedWriteSession } from '@gadgets/workshop-shared/governed-data'
 
 /** What `getApiUrl` answers: there is no API URL, since every read goes through the governed session. */
 export const GOVERNED_API_URL = 'inferos:governed'
 
 /** A governed row as Refine holds it: its id, its values by field, and its revision when it has one. */
-export type GovernedRecord = BaseRecord & { id: string; values: GovernedRow['values']; revision?: string }
+export type GovernedRecord = BaseRecord & { id: string; values: GovernedRow['values']; revision?: string; receipt?: { actionId: string; status: () => Promise<ActionReceiptStatus> } }
 
 /** What `update` takes: one of the resource's declared commands, with exactly its fields. */
 export type GovernedCommandVariables = { command: string; values: Record<string, string | number | boolean>; expectedRevision: string }
@@ -115,7 +116,7 @@ export const governedDataProvider = (session: () => Promise<GovernedWriteSession
       }
       const { command, values, expectedRevision } = given as GovernedCommandVariables
       const receipt = await (await session()).command({ command, id: String(id), values, expectedRevision })
-      return { data: { id: String(id), outcome: receipt.outcome } as unknown as TData }
+      return { data: { id: String(id), outcome: receipt.outcome, receipt: { actionId: receipt.actionId, status: () => receipt.status() } } as unknown as TData }
     },
 
     create: async () => refuse(WRITES_REFUSED),
