@@ -278,3 +278,42 @@ async function created(space: RpcStub<Overseer>, content: OperateConsoleContent)
   const draft = await space.createConsole(content);
   return [draft.id, draft.revision];
 }
+
+describe("finding a published widget by intent (FAC-13)", () => {
+  it("finds a company widget for another person of the company, through their own InferOps sign-in", async () => {
+    const builder = await newUser("searchbuilder", ["operations", "mind"]);
+    fake.grantPublishConfiguration(builder.person, "operations");
+    const word = `overduebills${Date.now().toString(36)}`;
+    const blueprintId = await publishWidget(builder.api, word);
+    const { space, entry, screen } = await consoleSpace(builder, blueprintId);
+    const draft = await space.createConsole(consoleOf(screen.id, [entry]));
+    await space.publishConsole(draft.id, draft.revision);
+
+    const operator = await newUser("searchoperator", ["operations"]);
+    const found = await operator.api.searchWidgets(`show ${word}`);
+    expect(found.ranking).toBe("keyword");
+    // "show" also matches other widgets' purposes ("Shows who is free"), at a lower score: the one
+    // matching every word ranks first, once.
+    expect(found.definitions[0]).toEqual(
+      expect.objectContaining({ sourceId: blueprintId, sourceVersion: 1, title: "Free technicians", score: 1 }));
+    expect(found.definitions.filter(d => d.sourceId === blueprintId)).toHaveLength(1);
+    expect(found.definitions.slice(1).every(d => d.score < 1)).toBe(true);
+    // Asked with the operator's own credentials, never the builder's or a shared one.
+    const asked = fake.requests.filter(r => r.path.startsWith("/knowledge/widget-search"));
+    expect(asked.length).toBeGreaterThan(0);
+    for (const request of asked.filter(r => r.person === operator.username)) {
+      expect(fake.accessTokensOf(operator.person)).toContain(request.token);
+    }
+    // A query that matches nothing finds nothing; a blank one is refused before anything is asked.
+    expect((await operator.api.searchWidgets(`zzqx${word}`)).definitions).toEqual([]);
+    const before = fake.requests.length;
+    await expect(operator.api.searchWidgets("   ")).rejects.toThrow("Say what you want to find");
+    expect(fake.requests.length).toBe(before);
+  });
+
+  it("finds nothing for a person InferOps gives no knowledge:read, rather than failing", async () => {
+    const denied = await newUser("searchdenied", ["operations"]);
+    fake.setKnowledgeAccess(denied.person, "none");
+    expect(await denied.api.searchWidgets("technicians")).toEqual({ hits: [], definitions: [], ranking: "keyword" });
+  });
+});

@@ -109,7 +109,7 @@ import type {
   AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
-  WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace,
+  WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchResult,
 } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
@@ -1310,6 +1310,46 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
       }
     }
     return found;
+  }
+
+  /**
+   * The widgets the connected person may use that match `query` (FAC-13): InferOps' `widget.search`
+   * asked in each of their workspaces, with their own credentials, and merged: each built-in kind
+   * and each definition (Blueprint version) once, at its best score, best first, at most `k` of each.
+   * Nothing for an account without a connected person of the deployment's company. A workspace that
+   * refuses (no `knowledge:read`) adds nothing; if none could answer, it is UNAVAILABLE.
+   */
+  async searchWidgets(query: string, k: number): Promise<WidgetSearchResult> {
+    const empty: WidgetSearchResult = { hits: [], definitions: [], ranking: "keyword" };
+    const identity = await this.#widgetIndexIdentity();
+    if (!identity || identity.workspaces.length === 0) return empty;
+    const hits = new Map<string, WidgetSearchResult["hits"][number]>();
+    const definitions = new Map<string, WidgetSearchResult["definitions"][number]>();
+    let ranking: WidgetSearchResult["ranking"] = "keyword";
+    let answered = 0;
+    let lastFailure: unknown;
+    for (const { workspaceId } of identity.workspaces) {
+      let found: WidgetSearchResult;
+      try {
+        found = await this.#widgetIndexClient(identity.endpoint, workspaceId).searchWidgets(query, k);
+      } catch (error) {
+        if (inferOpsErrorCode(error) === "FORBIDDEN") { answered++; continue; }
+        lastFailure = error;
+        continue;
+      }
+      answered++;
+      if (found.ranking === "semantic") ranking = "semantic";
+      for (const hit of found.hits) {
+        if ((hits.get(hit.kind)?.score ?? -Infinity) < hit.score) hits.set(hit.kind, hit);
+      }
+      for (const definition of found.definitions) {
+        const key = `${definition.sourceId}@${definition.sourceVersion}`;
+        if ((definitions.get(key)?.score ?? -Infinity) < definition.score) definitions.set(key, definition);
+      }
+    }
+    if (answered === 0 && lastFailure !== undefined) throw lastFailure;
+    const best = <T extends { score: number }>(items: Iterable<T>) => [...items].toSorted((a, b) => b.score - a.score).slice(0, k);
+    return { hits: best(hits.values()), definitions: best(definitions.values()), ranking };
   }
 
   /** Lists one widget version in the person's own workspace `workspaceId`: `widget.publish`. */

@@ -125,6 +125,20 @@ export type WidgetIndexEntry = {
 };
 
 /**
+ * A widget the person may use, found by intent (FAC-13; InferOps' `widget.search`): one of the
+ * service's built-in widget kinds, or a published widget definition (a pointer to a Blueprint
+ * version, with its words). Definitions only: no instance, record or live data.
+ */
+export type WidgetSearchResult = {
+  /** Built-in widget kinds, best first: the kind and what it shows. */
+  hits: Array<{ kind: string; description: string; score: number }>;
+  /** Published widget definitions, best first (see `WidgetIndexEntry`). */
+  definitions: Array<WidgetIndexEntry & { score: number }>;
+  /** How they were matched: by meaning, or by the query's words. */
+  ranking: "semantic" | "keyword";
+};
+
+/**
  * The service's answer to one widget index write, as it gave it. `applied` is a write it made live;
  * `proposed` is one it took for someone else to confirm, never shown as done; `refused` carries the
  * service's own words (for InferOps, a person without `configuration:publish`); `unavailable` is
@@ -908,6 +922,15 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * it; `applied` with `removed: false` when there was none. Called as `widgetIndexWorkspaces` is.
    */
   withdrawWidget?(workspaceId: string, sourceId: string, sourceVersion: number): Promise<WidgetIndexOutcome>;
+
+  /**
+   * The widgets the person behind this account may use that match `query`, their intent in their
+   * own words (FAC-13): searched freshly with their own credentials in each of their workspaces of
+   * the service, for their company, and merged, each once, best first, at most `k` of each kind.
+   * Definitions only. Empty for an account without a connected person. Called only on accounts of
+   * the vendor `SHARED_CONFIGURATION_GATEKEEPER` names, by the Workshop for the person themself.
+   */
+  searchWidgets?(query: string, k: number): Promise<WidgetSearchResult>;
 
   // TODO:
   // - Query whether account has scope to access a particular URL.

@@ -43,7 +43,7 @@ import type {
   ArtifactRevision,
 } from "./agent-artifact.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace, WidgetSearchResult } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
@@ -819,6 +819,9 @@ export type UserDirectoryRecord = {
 };
 
 /** Top-level API exposed to the user after they have authenticated. */
+/** At most this many built-in widgets, and this many definitions, a widget search returns (FAC-13). */
+export const WIDGET_SEARCH_LIMIT = 8;
+
 export interface AuthenticatedApi extends RpcTarget {
   /** Get profile info for the user who is logged in. */
   whoami(): Promise<AiChatAuthorInfo>;
@@ -1026,6 +1029,16 @@ export interface AuthenticatedApi extends RpcTarget {
    * TODO: Pagination, sort options.
    */
   listGadgets(): Promise<GadgetMetadataWithTimestamps[]>;
+
+  /**
+   * The widgets this person may use that match `query`, their intent in their own words (FAC-13;
+   * at most 500 characters, refused when blank): the deployment's `SHARED_CONFIGURATION_GATEKEEPER`
+   * vendor asked through each of their own connected accounts, with their own credentials, and
+   * merged, each once, best first, at most `WIDGET_SEARCH_LIMIT` of each kind. Definitions only:
+   * no instance or live data (see `Overseer.listWidgetInstances` for a definition's instances).
+   * Empty, by keyword, when the deployment names no vendor or the person has no account of it.
+   */
+  searchWidgets(query: string): Promise<WidgetSearchResult>;
 
   /**
    * List the outputs of all the user's workspaces. Used to display the Outputs page, which lets

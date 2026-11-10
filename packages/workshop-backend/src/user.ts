@@ -11,7 +11,7 @@ import {
   type WidgetStateMachine, type WidgetStateSnapshot,
 } from '@gadgets/workshop-shared/widget-state';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchResult } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -254,6 +254,9 @@ export async function presentationCompanyOf(
 // Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names, by a console
 // publication (see UserDurableObject.widgetIndexWorkspaces).
 type WidgetIndexAccountStub = Required<Pick<GatekeeperUser, "widgetIndexWorkspaces" | "registerWidget" | "withdrawWidget">>;
+// Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names, for the person's own
+// widget search (see UserDurableObject.searchWidgets).
+type WidgetSearchAccountStub = Required<Pick<GatekeeperUser, "searchWidgets">>;
 
 /** A workspace in which the person may list widgets, with the account of theirs that may. */
 export type PersonWidgetIndexWorkspace = WidgetIndexWorkspace & { accountId: number };
@@ -2576,6 +2579,44 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     return [...found.values()];
+  }
+
+  /**
+   * The widgets this person may use that match `query` (FAC-13), as the deployment's
+   * SHARED_CONFIGURATION_GATEKEEPER vendor answers through each of their own connected accounts
+   * with live credentials, merged: each built-in kind and each definition (Blueprint version) once,
+   * at its best score, best first, at most `k` of each. Empty, by keyword, when the deployment names
+   * no vendor. Throws when no account could answer, so a search reports that, never "nothing found".
+   */
+  async searchWidgets(query: string, k: number): Promise<WidgetSearchResult> {
+    let empty: WidgetSearchResult = { hits: [], definitions: [], ranking: "keyword" };
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    if (!vendorId) return empty;
+    let found: WidgetSearchResult[] = [];
+    let failed: unknown;
+    for (let record of this.#connectedAccountRecords()) {
+      if (record.vendorId !== vendorId || !areCredentialsValid(record)) continue;
+      try {
+        found.push(await (record.account as unknown as WidgetSearchAccountStub).searchWidgets(query, k));
+      } catch (error) {
+        failed = error;
+      }
+    }
+    if (found.length === 0 && failed !== undefined) throw failed;
+    let hits = new Map<string, WidgetSearchResult["hits"][number]>();
+    let definitions = new Map<string, WidgetSearchResult["definitions"][number]>();
+    for (let result of found) {
+      for (let hit of result.hits) if ((hits.get(hit.kind)?.score ?? -Infinity) < hit.score) hits.set(hit.kind, hit);
+      for (let definition of result.definitions) {
+        let key = `${definition.sourceId}@${definition.sourceVersion}`;
+        if ((definitions.get(key)?.score ?? -Infinity) < definition.score) definitions.set(key, definition);
+      }
+    }
+    let best = <T extends { score: number }>(items: Iterable<T>) => [...items].toSorted((a, b) => b.score - a.score).slice(0, k);
+    return {
+      hits: best(hits.values()), definitions: best(definitions.values()),
+      ranking: found.some(result => result.ranking === "semantic") ? "semantic" : "keyword",
+    };
   }
 
   /**

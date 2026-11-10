@@ -43,6 +43,7 @@ import { parseServiceQuery, serviceQuerySearch } from "./service-queries";
 //   deployment. Local development only; it never backs a connected person.
 
 import { createLogger } from "@gadgets/observability/logger";
+import type { WidgetSearchResult } from "@gadgets/workshop-shared/gatekeeper";
 import { ResponseTooLargeError, readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
 import {
   HOST_BOARD_LIMITS, type HostBoardColumn, type HostBoardIssue, type HostBoardScope,
@@ -424,6 +425,44 @@ function parseSearchHit(value: unknown): WikiSearchRecord {
     documentSlug: text(hit.documentSlug, "hit.documentSlug"),
     documentTitle: text(hit.documentTitle, "hit.documentTitle"),
     snippet,
+  };
+}
+
+/** Why a widget search failed when it could not run (FAC-13): never shown as "nothing found". */
+export const WIDGET_SEARCH_UNAVAILABLE =
+  "Widget search is unavailable right now, so this is not an empty result. Try again shortly.";
+
+/** A relevance score: a finite number. */
+function score(value: unknown, what: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Malformed(`${what} is not valid`);
+  return value;
+}
+
+/** `widget.search`'s answer (FAC-13): its built-in kinds and definitions, each within `k`. */
+function parseWidgetSearch(raw: unknown, k: number): WidgetSearchResult {
+  const response = record(raw, "response");
+  const hits = list(response.hits, "hits");
+  const definitions = list(response.definitions, "definitions");
+  if (hits.length > k || definitions.length > k) throw new Malformed("more results than asked for");
+  const ranking = response.ranking;
+  if (ranking !== "semantic" && ranking !== "keyword") throw new Malformed("ranking is not valid");
+  return {
+    hits: hits.map(value => {
+      const hit = record(value, "hit");
+      return { kind: text(hit.kind, "hit.kind"), description: text(hit.description, "hit.description"), score: score(hit.score, "hit.score") };
+    }),
+    definitions: definitions.map(value => {
+      const definition = record(value, "definition");
+      if (definition.source !== "inferos.blueprint") throw new Malformed("definition.source is not valid");
+      return {
+        sourceId: text(definition.sourceId, "definition.sourceId"),
+        sourceVersion: int(definition.sourceVersion, "definition.sourceVersion"),
+        title: text(definition.title, "definition.title"),
+        purpose: text(definition.purpose, "definition.purpose"),
+        score: score(definition.score, "definition.score"),
+      };
+    }),
+    ranking,
   };
 }
 
@@ -1964,6 +2003,21 @@ export function openHttpInferOpsClient(
           throw new Malformed("another widget definition was returned");
         }
       });
+    },
+
+    async searchWidgets(query: string, k: number): Promise<WidgetSearchResult> {
+      const params = new URLSearchParams({ query, k: String(k) });
+      let body: unknown;
+      try {
+        body = await knowledge("widget.search", { method: "GET", path: `/knowledge/widget-search?${params}` });
+      } catch (error) {
+        // An InferOps without `widget.search` (404) and an outage both mean "can't search now".
+        if (error instanceof InferOpsError && (error.code === "NOT_FOUND" || error.code === "UNAVAILABLE")) {
+          throw restated(error, "UNAVAILABLE", WIDGET_SEARCH_UNAVAILABLE);
+        }
+        throw error;
+      }
+      return parsed("widget.search", body, raw => parseWidgetSearch(raw, k));
     },
 
     async withdrawWidgetDefinition(sourceId: string, sourceVersion: number): Promise<boolean> {

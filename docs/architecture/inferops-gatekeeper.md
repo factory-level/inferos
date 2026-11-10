@@ -253,6 +253,19 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `unavailable`. Only the Workshop's build-role `publishConsole` and `deleteConsole` call them (see
   [Operate mode](operate-mode.md#widget-index)), directly rather than as approved actions: the
   divergence below.
+- **Widget search by intent (FAC-13).** `InferOpsAccount.searchWidgets(query, k)` asks InferOps'
+  `widget.search` (`GET /knowledge/widget-search?query&k`, `knowledge:read`) through
+  `InferOpsClient.searchWidgets`, with the connected person's own token, in each of their
+  workspaces, and merges the answers: each built-in kind and each definition
+  (`<sourceId>@<sourceVersion>`) once, at its best score, best first, at most `k` of each. It
+  returns definitions only (`WidgetSearchResult`): no instance, record or live data. A workspace
+  that answers 403 adds nothing; if none answered and one failed, the failure is thrown, never an
+  empty result. An account without a connected person of `INFEROPS_COMPANY` answers empty. A 404
+  (an InferOps without `widget.search`) or an outage is `UNAVAILABLE` in
+  `WIDGET_SEARCH_UNAVAILABLE`'s words; an answer that doesn't parse, or holds more than `k` of
+  either, is refused as malformed. The demo's mock has no index and throws.
+  `__tests__/http-inferops.test.ts` ("widget search by intent (FAC-13)") covers the request and
+  its parsing.
 - **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses
   `inferops://<tenant>.<workspace>/project/board/<KEY>` (exactly two lowercase slug labels, no
   port; anything else is not a board URL), resolves the workspace, checks the project exists there
