@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   WIDGET_INDEX_FORBIDDEN, WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
-  type InferOpsConnection,
+  type InferOpsConnection, type Authorize,
 } from "../src/http-inferops";
 import { PROPOSAL_APPROVE_REFUSED, inferOpsErrorCode, isPolicyRefusal, writeStage } from "../src/inferops-client";
 
@@ -46,7 +46,7 @@ type Call = { method: string; path: string; headers: Headers; body: unknown };
  * A fake InferOps. `override` answers a request first; returning undefined falls through. Like
  * InferOps, a write replays a known idempotency key per operation without comparing bodies.
  */
-function fakeInferOps(override?: (call: Call) => Response | undefined) {
+function fakeInferOps(override?: (call: Call) => Response | undefined, authorize?: Authorize) {
   const calls: Call[] = [];
   const issues = new Map<string, { card: Card; projectId: string }>([
     [DEMO_1, { card: card(DEMO_1, "DEMO-1", READY, "1041"), projectId: DEMO.id }],
@@ -140,7 +140,7 @@ function fakeInferOps(override?: (call: Call) => Response | undefined) {
   }) as typeof fetch;
 
   return {
-    client: openHttpInferOpsClient(CONNECTION, fetcher), calls, applied: () => applied, network,
+    client: openHttpInferOpsClient(authorize ? { ...CONNECTION, authorize } : CONNECTION, fetcher), calls, applied: () => applied, network,
     issues,
   };
 }
@@ -1529,15 +1529,35 @@ describe("Wiki proposals over HTTP", () => {
 });
 
 describe("company service queries and comments", () => {
-  it("injects the bound project ID and keeps query version distinct from CLI version", async () => {
+  it("fences named-query success without fencing governed writes", async () => {
+    const requested: Array<boolean> = [];
     const fake = fakeInferOps(call => call.path.startsWith("/object/queries/")
-      ? Response.json({ name: "service-job-status-counts", version: 1, rows: [{ group: "started", count: 4 }], nextCursor: null })
+      ? Response.json({ name: "service-job-status-counts", version: 2, scope: { projectId: DEMO.id, projectKey: "DEMO" }, rows: [{ group: "started", count: 4 }], nextCursor: null })
+      : undefined,
+    async (operation, options) => {
+      requested.push(options?.fenceSuccess === true);
+      return operation(CONNECTION);
+    });
+    await fake.client.readServiceQuery("DEMO", "service-job-status-counts");
+    expect(requested).toEqual([true]);
+    requested.length = 0;
+    await fake.client.updateIssue("DEMO", DEMO_1, { title: "Updated" }, "1041", "fence-write-regression");
+    expect(fake.applied()).toBe(1);
+    expect(requested.length).toBeGreaterThan(0);
+    expect(requested.every(value => !value)).toBe(true);
+  });
+
+  it("uses one v2 query with the bound identifier and no discovery request", async () => {
+    const fake = fakeInferOps(call => call.path.startsWith("/object/queries/")
+      ? Response.json({ name: "service-job-status-counts", version: 2, scope: { projectId: DEMO.id, projectKey: "DEMO" }, rows: [{ group: "started", count: 4 }], nextCursor: null })
       : undefined);
     expect(await fake.client.readServiceQuery("DEMO", "service-job-status-counts")).toMatchObject({ rows: [{ count: 4 }] });
     const call = fake.calls.find(item => item.path.startsWith("/object/queries/"))!;
     const query = new URL(`https://example.test${call.path}`).searchParams;
-    expect(query.get("projectId")).toBe(DEMO.id);
-    expect(query.get("queryVersion")).toBe("1");
+    expect(query.get("projectId")).toBeNull();
+    expect(query.get("projectIdentifier")).toBe("DEMO");
+    expect(query.get("queryVersion")).toBe("2");
+    expect(fake.calls).toHaveLength(1);
   });
   it("never comments on another project's issue and sends the exact head with its replay key", async () => {
     const fake = fakeInferOps(call => call.path.endsWith("/comments") ? Response.json({ comment: { id: UNKNOWN } }) : undefined);

@@ -1,3 +1,4 @@
+import { withServiceQueryTiming, measureServiceQueryPhase, recordServiceQueryTiming } from "./service-query-timing";
 import type { ServiceQueryName, ServiceQueryOptions, ServiceQueryPage } from "./types";
 import type { ApprovalEdit, ApprovalProposal } from "@gadgets/workshop-shared/operate-approval";
 import { GovernedRequestError, listGoverned, parseGovernedListRequest } from "@gadgets/workshop-shared/governed-data";
@@ -105,6 +106,7 @@ import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeeper-kit/action-description";
 import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gatekeeper-kit/observers";
 import { createLogger } from "@gadgets/observability/logger";
+import { createTracer } from "@gadgets/observability/tracing";
 import type {
   AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
@@ -390,17 +392,29 @@ function accountClient(
   const source = accountSource(exports, accountId, workspaceId);
   return openHttpInferOpsClient({
     ...endpoint,
-    async authorize(operation) {
+    async authorize(operation, requestOptions) {
       let sent = false;
+      const started = performance.now();
+      let operationMs = 0, fenceMs = 0, attempts = 0, success = false;
       try {
         // Every InferOps call here is safe to repeat: reads, or a write under its own
         // idempotency key.
-        return await source.run(async (authority, read) => {
+        const result = await source.run(async (authority, read) => {
           sent = true;
-          const result = await operation(authority);
-          if (options.fenceSuccess) await assertConnectionUnchanged(source, read);
-          return result;
+          attempts++;
+          const operationStart = performance.now();
+          let answer;
+          try { answer = await operation(authority); }
+          finally { operationMs += performance.now() - operationStart; }
+          if (options.fenceSuccess || requestOptions?.fenceSuccess) {
+            const fenceStart = performance.now();
+            try { await assertConnectionUnchanged(source, read, requestOptions?.fenceSuccess === true); }
+            finally { fenceMs += performance.now() - fenceStart; }
+          }
+          return answer;
         }, { replayable: true });
+        success = true;
+        return result;
       } catch (error) {
         if (isCredentialsExpired(error)) {
           // Confirmed dead before InferOps processed anything: either no credential was ever
@@ -413,6 +427,21 @@ function accountClient(
           throw new InferOpsError("UNAVAILABLE", "This InferOps connection changed. Try again.");
         }
         throw error;
+      } finally {
+        // A synchronous completion span retains bounded timings even when local Workers tracing
+        // loses an async parent span across RPC continuations. Never emit authority or result data.
+        if (requestOptions?.fenceSuccess) {
+          recordServiceQueryTiming("authorize", performance.now() - started, { operationMs, fenceMs, attempts, success });
+          try {
+            traceServiceQuery("inferops.service_query.authorize.completed", span => {
+              span.setAttribute("total_ms", performance.now() - started);
+              span.setAttribute("operation_ms", operationMs);
+              span.setAttribute("fence_ms", fenceMs);
+              span.setAttribute("attempts", attempts);
+              span.setAttribute("success", success);
+            });
+          } catch { /* Diagnostic export must never replace the request's result or exception. */ }
+        }
       }
     },
   }, inferLabFetch(env));
@@ -435,11 +464,15 @@ function accountSource(
       };
     },
     isAuthError: error => inferOpsErrorCode(error) === "UNAUTHORIZED",
+    isReadRefreshSignal: error => error instanceof ReadRefreshed,
     expiredMessage: EXPIRED_MESSAGE,
     vendorId: VENDOR_ID,
     ...options,
   });
 }
+
+/** A successful query must be re-read under the same connection's refreshed credential. */
+class ReadRefreshed extends Error {}
 
 /** What a fenced read says when the connection moved while it was in flight. */
 const CONNECTION_CHANGED = "This InferOps connection changed. Try again.";
@@ -452,7 +485,7 @@ const CONNECTION_CHANGED = "This InferOps connection changed. Try again.";
  * next read reports the account's real state.
  */
 async function assertConnectionUnchanged(
-  source: CredentialSource<InferOpsAuthority>, sent: CredentialRead,
+  source: CredentialSource<InferOpsAuthority>, sent: CredentialRead, retryRefresh = false,
 ): Promise<void> {
   let now: CredentialRead;
   try {
@@ -463,6 +496,7 @@ async function assertConnectionUnchanged(
       isCredentialsExpired(error) ? EXPIRED_MESSAGE : CONNECTION_CHANGED);
   }
   if (now.identity !== sent.identity || now.generation !== sent.generation) {
+    if (retryRefresh && now.generation === sent.generation) throw new ReadRefreshed();
     throw new InferOpsError("UNAVAILABLE", CONNECTION_CHANGED);
   }
 }
@@ -2509,6 +2543,9 @@ function searchedText(count: number, workspaces: DiscoveryWorkspace[], candidate
     `${candidates.length} candidate${candidates.length === 1 ? "" : "s"}.`;
 }
 
+// Fixed metadata only: query payloads, credentials and caller identities never enter these spans.
+const traceServiceQuery = createTracer(() => ({ component: "inferops.service-query" }));
+
 @validateRpc()
 class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
   #binding: ProjectBinding;
@@ -2525,16 +2562,21 @@ class ProjectSessionImpl extends RpcTarget implements InferOpsProjectSession {
   }
 
   async readServiceQuery(name: ServiceQueryName, options?: ServiceQueryOptions): Promise<ServiceQueryPage> {
-    // Latch before awaiting: a concurrently admitted or later observer must not inherit joined data.
-    // Account bindings use their existing prepareWithheld tracker instead.
-    if (typeof this.#binding.scope === "string") this.#binding.kv.put(PRIVATE_SERVICE_QUERY, true);
-    const page = await this.#binding.client.readServiceQuery(this.#binding.projectKey, name, options);
-    // Board observer grants do not cover joined company tables. Withhold this observation from all observers.
-    await this.#binding.observeWithheld(this.#queue, {
-      title: "Read service dashboard",
-      description: `Read ${page.rows.length} rows from published query ${page.name}, version 1.`,
-    });
-    return page;
+    return withServiceQueryTiming(queryCallId =>
+      traceServiceQuery("inferops.service_query", async () => {
+        // Latch before awaiting: observer authority never expands to joined company records.
+        if (typeof this.#binding.scope === "string") this.#binding.kv.put(PRIVATE_SERVICE_QUERY, true);
+        const page = await measureServiceQueryPhase("provider", () =>
+          traceServiceQuery("inferops.service_query.provider", () =>
+            this.#binding.client.readServiceQuery(this.#binding.projectKey, name, options)));
+        await measureServiceQueryPhase("observation", () =>
+          traceServiceQuery("inferops.service_query.observation", () => this.#binding.observeWithheld(this.#queue, {
+            title: "Read service dashboard",
+            description: `Read ${page.rows.length} rows from published query ${page.name}, version ${page.version}.`,
+          })));
+        // Add only after the provider scope, credential fence and private observation succeeded.
+        return { ...page, queryCallId };
+      }));
   }
 
   async readBoard(): Promise<Board> {

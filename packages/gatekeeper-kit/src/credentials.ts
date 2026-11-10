@@ -712,6 +712,15 @@ export type CredentialSourceOptions<Creds> = {
    * @returns Whether credentials caused the failure.
    */
   isAuthError(error: unknown): boolean;
+  /**
+   * Optional local signal that a completed read must be repeated after credential refresh.
+   * This is not a provider rejection and is never reported to the account. A replayable run
+   * shares its existing one-retry budget and may retry only under an adopted same-generation
+   * successor. Other callers receive CredentialsChangedError.
+   * @param error A caller-owned read-completion signal.
+   * @returns Whether the successful read lost its credential fence.
+   */
+  isReadRefreshSignal?(error: unknown): boolean;
   /** What the gadget is told when they no longer work. */
   expiredMessage: string;
   /** Vendor id for log attribution. */
@@ -839,6 +848,10 @@ export class CredentialSource<Creds> {
       // A fresh object, never the internal triple: the operation may hold or mutate its read.
       return await operation(read.creds, { identity: read.identity, generation: read.generation });
     } catch (error) {
+      if (this.#options.isReadRefreshSignal?.(error)) {
+        if (retry) return this.#retry(operation, read, error);
+        throw new CredentialsChangedError({ cause: error });
+      }
       if (!this.#options.isAuthError(error)) throw error;
       return this.#resolve(operation, read, error, retry);
     }
@@ -924,12 +937,13 @@ export class CredentialSource<Creds> {
   }
 
   /**
-   * Retries a rejected operation once with freshly fetched credentials — after a `"superseded"`
+   * Retries an operation once with freshly fetched credentials — after a local read-refresh
+   * signal, or a `"superseded"`
    * verdict, whose fence bump forgot the pre-ask flight so the single-threaded account answers
    * the refetch after its heal's commit, or under a live successor the source already adopted.
    * @param operation Provider call being retried.
-   * @param first The read whose rejection resolved as superseded.
-   * @param cause Provider rejection being resolved.
+   * @param first The read whose rejection or local refresh signal requires a successor.
+   * @param cause Provider rejection or local refresh signal being resolved.
    * @returns The retried operation result.
    */
   async #retry<T>(

@@ -1,3 +1,4 @@
+import { serviceQueryHttpAttempt } from "./service-query-timing";
 import { parseServiceQuery, serviceQuerySearch } from "./service-queries";
 // LIVE InferOps data source: `InferOpsClient` over the InferOps HTTP API (the contract in
 // InferOps docs/human/architecture/inferos/inferops-gatekeeper.md). The only module that talks HTTP.
@@ -87,7 +88,10 @@ export type InferOpsAuthority = { token: string; workspaceId: string };
  * it fetches (and refreshes) the token, and when InferOps rejects it, asks the account whether the
  * grant is dead before failing the request.
  */
-export type Authorize = <T>(operation: (authority: InferOpsAuthority) => Promise<T>) => Promise<T>;
+export type Authorize = <T>(
+  operation: (authority: InferOpsAuthority) => Promise<T>,
+  options?: { fenceSuccess?: boolean },
+) => Promise<T>;
 
 /** An endpoint whose authority is fetched per request: a connected person's own token. */
 export type InferOpsAuthorizedEndpoint = InferOpsEndpoint & { authorize: Authorize };
@@ -1223,16 +1227,20 @@ export function openHttpInferOpsClient(
 
   /** Send one request and return its parsed JSON body, or throw the mapped `InferOpsError`. */
   function request(operation: string, send: Send): Promise<unknown> {
-    return authorize(authority => sendAs(authority, operation, send));
+    return authorize(authority => operation === "query.execute"
+      ? serviceQueryHttpAttempt(requestId => sendAs(authority, operation, send, requestId))
+      : sendAs(authority, operation, send),
+      operation === "query.execute" ? { fenceSuccess: true } : undefined);
   }
 
-  async function sendAs(authority: InferOpsAuthority, operation: string, send: Send):
+  async function sendAs(authority: InferOpsAuthority, operation: string, send: Send, requestId?: string):
       Promise<unknown> {
     const headers: Record<string, string> = {
       accept: "application/json",
       authorization: `Bearer ${authority.token}`,
       "x-workspace-id": authority.workspaceId,
     };
+    if (requestId) headers["x-request-id"] = requestId;
     if (send.body !== undefined) headers["content-type"] = "application/json";
     if (send.idempotencyKey) headers["x-idempotency-key"] = send.idempotencyKey;
 
@@ -1500,10 +1508,9 @@ export function openHttpInferOpsClient(
 
     async readServiceQuery(projectKey, name, options) {
       const query = serviceQuerySearch(name, options);
-      const bound = await project(projectKey);
-      query.set("projectId", bound.id);
+      query.set("projectIdentifier", projectKey);
       const body = await request("query.execute", { method: "GET", path: `/object/queries/${name}?${query}` });
-      return parseServiceQuery(body, name, bound.id);
+      return parseServiceQuery(body, name, projectKey);
     },
 
     async listProjects(): Promise<ProjectSummary[]> {

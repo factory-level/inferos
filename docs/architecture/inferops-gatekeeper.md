@@ -31,7 +31,7 @@ covers:
   - scripts/release/manifest-lib.ts
   - packages/workshop-backend/scripts/company-data-dashboard-proof.ts
   - scripts/run-dev-server.ts
-updated: 2026-11-06
+updated: 2026-11-07
 ---
 
 # InferOps gatekeeper
@@ -1280,14 +1280,61 @@ Edited target arguments validate against the current issue/revision/workflow, st
 The `inferops.service-jobs`, `inferops.service-job-status-counts`, and `inferops.service-job-recent-activities` blueprints share `libraries/service-dashboard` and compose as three separate `inferos.gadget` instances on an ordinary saved canvas. The combined `inferops.service-dashboard` blueprint also offers all three panels over one
 project connection: `service-jobs`, `service-job-status-counts`, and
 `service-job-recent-activities`. `InferOpsProjectSession.readServiceQuery` accepts only those names,
-a bounded limit and an opaque cursor. The HTTP adapter supplies `queryVersion=1` and resolves the
-bound project's ID itself; caller-supplied scope is refused. Response fields are projected and a
-job outside the project is refused. A project connection latches owner-only before attempting a joined read, so even a later or concurrently admitted collaborator cannot inherit joined data; account connections use their existing withheld-observation tracker. Each read reuses the existing current-credential request
+a bounded limit and an opaque cursor. The HTTP adapter supplies `queryVersion=2` and the bound
+`projectIdentifier` in one request; it no longer lists projects before querying. InferOps resolves
+the identifier inside the authorized company transaction. The adapter requires the returned
+`scope.projectKey` to match its binding and validates the resolved UUID; caller-supplied scope is
+refused. Response fields are projected and jobs whose project IDs disagree with that scope are
+refused. The widget page shape accepts versions 1 and 2 for compatibility, but this HTTP path
+requires a version-2 provider response and fails explicitly against an older provider. A project connection latches owner-only before attempting a joined read, so even a later or concurrently admitted collaborator cannot inherit joined data; account connections use their existing withheld-observation tracker. Each read reuses the existing current-credential request
 path and is an observation withheld from board-only collaborators, because their board grant
-cannot authorize joined company data. The mock refuses these reads; it supplies no fake proof.
+cannot authorize joined company data. Named-query requests also require the existing completion
+fence: a successful provider response is discarded if the connected account identity or generation
+changed while it was in flight. A credential refresh within the same connection can trigger
+one fresh read through the kit's guarded retry path, with the completion fence checked again;
+this local signal never reports a provider rejection. Reconnects and revocation still refuse.
+This applies to direct project bindings and boards opened through an account binding, before
+any observation or rows are returned. A staged reconnect leaves the active connection unchanged.
+The per-request fence and read-only refresh signal do not alter governed writes.
+
+The existing Workers tracer records `inferops.service_query` around the completed read,
+with child spans `inferops.service_query.provider` for the provider call (including credential
+fencing/retry) and `inferops.service_query.observation` for observation authorization. These
+spans carry only the fixed component name and the tracer’s error boolean; no credentials,
+caller identities, options or row payloads. A synchronous
+`inferops.service_query.authorize.completed` span also records numeric total, HTTP operation and
+completion-fence milliseconds, attempt count and a success boolean. It preserves completed
+phase measurements when the local Workers trace exporter leaves asynchronous spans unfinished. Export is best-effort and cannot replace the request result or exception. Here `success`
+means authorization/request completion; response scope validation and observation authorization
+still run afterward. HTTP operation time includes response decoding, and total time excludes the
+completion span’s own export overhead. Their lifetimes end when those operations settle,
+so they can separate query work from observation work without using RPC capability lifetimes
+as request latency.
+Each service-query RPC now mints an optional diagnostic `queryCallId`, returned only after
+provider scope validation, credential completion fencing and withheld observation succeed.
+The HTTP adapter adds a separate `x-request-id` for each attempted send, including retries.
+Neither identifier supplies authority, selects records or keys a cache. The existing
+observability context carries IDs across local asynchronous calls; RPC entry establishes a
+fresh context. One bounded structured completion log contains numeric phase durations,
+outcomes and at most two HTTP attempt IDs. It contains no payloads or credentials, and logger
+failure cannot change the query outcome. These phases overlap; do not sum them.
+
+The optional field is additive to `ServiceQueryPage`; existing consumers may omit it.
+Widgets clear the diagnostic ID on loading and expose only a valid UUID on the current fresh
+render. A failed RPC that returns no page cannot be joined to a browser refresh by this field;
+missing correlation remains unknown. Browser-minus-RPC duration includes transport, scheduling,
+serialization and rendering, rather than separately measuring time on the RPC transport.
+The four service blueprints publish this client as version 2; existing installs remain pinned.
+
+The mock refuses these reads; it supplies no fake proof.
 
 The dashboard stores no records. Failed/denied/missing connections remain distinct from empty
 results, pages expose the next cursor, and stale client responses cannot replace newer reads.
+Each widget exposes its current `data-load-generation` and `data-load-state` on the article.
+A new load clears `data-render-generation`; only a successful DOM update sets it to the current
+generation. Refusals and errors leave it absent. Browser measurements must observe a new matching
+render generation for each independent widget and wait for paint; existing content or an enabled
+Refresh button alone does not prove a fresh successful render.
 Its comment form narrows to the selected issue and calls `InferOpsIssueSession.comment` with the
 exact `headSeq` read by the query. The existing action store fingerprints the body and expected
 head, queues the action, and sends `X-Idempotency-Key` plus `expectedIssueHeadSeq` only on apply.

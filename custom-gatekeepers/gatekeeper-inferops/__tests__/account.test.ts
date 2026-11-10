@@ -71,7 +71,7 @@ function jwt(expiresAt: number): string {
 }
 
 /** The routes whose answers a test can hold in flight. */
-type HeldRoute = "embed" | "snapshot" | "members" | "workflow";
+type HeldRoute = "embed" | "snapshot" | "members" | "workflow" | "query";
 
 /**
  * One InferOps request. `issuer` is the test whose fake minted the request's access token (null for
@@ -156,12 +156,13 @@ class FakeInferLab {
   refreshes: string[] = [];
   exchanges = 0;
   apiCalls: ApiCall[] = [];
+  queryRequestIds: string[] = [];
   /** Refreshes and logouts presented with another fake's refresh token: refused, never applied. */
   #foreignAuth: ApiCall[] = [];
   /** What `GET /project/board-snapshot` answers instead of the bound board, when set. */
   snapshotAnswer: (() => Response) | null = null;
   /** Requests that have reached a gate, by route. */
-  held: Record<HeldRoute, number> = { embed: 0, snapshot: 0, members: 0, workflow: 0 };
+  held: Record<HeldRoute, number> = { embed: 0, snapshot: 0, members: 0, workflow: 0, query: 0 };
   /** The open gate per route: a request reaching it waits there, after reading its answer. */
   #gates: Partial<Record<HeldRoute, { arrive: (path: string) => void; released: Promise<void> }>> = {};
   /** Releases every gate this fake has opened, whether or not anything reached it. */
@@ -287,6 +288,7 @@ class FakeInferLab {
       return new Response(null, { status: 204 });
     }
     const workspaceId = headers.get("x-workspace-id");
+    if (url.pathname.startsWith("/object/queries/")) this.queryRequestIds.push(headers.get("x-request-id") ?? "");
     if (url.pathname === "/auth/me") {
       // Who the credential is: a service account's key, or a person's token.
       if (!token || !this.access.has(token) || !workspaceId) {
@@ -328,6 +330,15 @@ class FakeInferLab {
     }
     if (!workspaceId || !this.memberships.has(workspaceId)) {
       return Response.json({ error: { code: "FORBIDDEN", message: "not a member" } }, { status: 403 });
+    }
+    if (url.pathname === "/object/queries/service-job-status-counts") {
+      // Capture a successful answer before holding it: the completion fence must reject it,
+      // not a provider refusal caused by revoking the fixture while it waits.
+      const answer = Response.json({ name: "service-job-status-counts", version: 2,
+        scope: { projectId: DEMO.id, projectKey: "DEMO" },
+        rows: [{ group: "started", count: 4 }], nextCursor: null });
+      await this.#pass("query", url.pathname + url.search);
+      return answer;
     }
     if (url.pathname.startsWith("/knowledge/")) {
       // InferOps' product gate, then the permission check: both answer 403 FORBIDDEN.
@@ -2222,4 +2233,80 @@ describe("system credentials (FAC-102)", () => {
     expect(await hooks().provisionSystem(RETIRED, BOARD_URL, KEY)).toBe("The key wasn't accepted.");
     expect(await systemRead("system-retired", BOARD_URL, RETIRED)).toContain("No service account is provisioned");
   });
+});
+
+
+describe("service query completion fences", () => {
+  const observed = async () => (await hooks().log()).observations
+    .filter(title => title === "Read service dashboard").length;
+
+  for (const binding of ["project", "account"] as const) {
+    async function bound(label: string) {
+      const account = await connect(label);
+      if (binding === "project") return { account, session: await bindBoard(account, label) };
+      expect(await hooks().bindAccount(label, account, "inferops://acme/account")).toBeNull();
+      using accountSession = await hooks().startBoundAccountSession(label);
+      return { account, session: await accountSession.openBoard(BOARD_URL) };
+    }
+
+    it(`${binding}: re-reads a held success after a same-connection credential refresh`, async () => {
+      const label = `query-${binding}-refresh`;
+      const boundRead = await bound(label);
+      using session = boundRead.session;
+      const before = await observed();
+      const read = await heldRead("query", async () => await session.readServiceQuery("service-job-status-counts"));
+      inferlab.access.delete(inferlab.accessOf("refresh-1"));
+      using sibling = binding === "project"
+        ? await hooks().startBoundSession(label)
+        : await hooks().startBoundAccountSession(label).openBoard(BOARD_URL);
+      await sibling.readBoard();
+      expect(inferlab.refreshes).toEqual(["refresh-1"]);
+      const page = await read.settle();
+      expect(page).toMatchObject({ rows: [{ count: 4 }] });
+      expect(page.queryCallId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+      expect(inferlab.queryRequestIds).toHaveLength(2);
+      expect(new Set(inferlab.queryRequestIds).size).toBe(2);
+      for (const requestId of inferlab.queryRequestIds) expect(requestId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+      const queries = inferlab.apiCalls.filter(call => call.path.startsWith("/object/queries/"));
+      expect(queries).toHaveLength(2);
+      expect(queries.at(-1)!.token).toBe(inferlab.accessOf("refresh-2"));
+      expect(await observed()).toBe(before + 1);
+    });
+
+    it(`${binding}: discards successful named-query data after a committed reconnect`, async () => {
+      const label = `query-${binding}-reconnect`;
+      const boundRead = await bound(label);
+      using session = boundRead.session;
+      const before = await observed();
+      const read = await heldRead("query", () => failure(session.readServiceQuery("service-job-status-counts")));
+      expect((await finish(await hooks().reconnectAccount(boundRead.account))).status).toBe(200);
+      const stageId = reconnects.find(item => item.label === label)!.stageId;
+      expect(await hooks().commitReconnect(boundRead.account, stageId)).toBeNull();
+      expect(await read.settle()).toBe("InferOpsError: UNAVAILABLE: This InferOps connection changed. Try again.");
+      expect(await observed()).toBe(before);
+      using refreshed = binding === "project"
+        ? await hooks().startBoundSession(label)
+        : await hooks().startBoundAccountSession(label).openBoard(BOARD_URL);
+      expect(await refreshed.readServiceQuery("service-job-status-counts")).toMatchObject({ rows: [{ count: 4 }] });
+      expect(lastApiCall().token).toBe(inferlab.accessOf("refresh-2"));
+    });
+
+    it(`${binding}: discards successful named-query data after revoke`, async () => {
+      const boundRead = await bound(`query-${binding}-revoke`);
+      using session = boundRead.session;
+      const before = await observed();
+      const read = await heldRead("query", () => failure(session.readServiceQuery("service-job-status-counts")));
+      await hooks().revokeAccount(boundRead.account);
+      expect(await read.settle()).toMatch(/^InferOpsError: (UNAVAILABLE|UNAUTHORIZED): /);
+      expect(await observed()).toBe(before);
+    });
+
+    it(`${binding}: a staged reconnect leaves the active connection's answer valid`, async () => {
+      const boundRead = await bound(`query-${binding}-staged`);
+      using session = boundRead.session;
+      const read = await heldRead("query", async () => await session.readServiceQuery("service-job-status-counts"));
+      expect((await finish(await hooks().reconnectAccount(boundRead.account))).status).toBe(200);
+      expect(await read.settle()).toMatchObject({ rows: [{ count: 4 }] });
+    });
+  }
 });

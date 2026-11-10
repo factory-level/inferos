@@ -330,6 +330,14 @@ listProjects() {
 `isAuthError` classifies credential rejection only. Do not classify a per-resource 403 or 404 as an
 authentication error; doing so can retire a healthy account.
 
+A completed read may also detect a credential refresh at its local completion fence.
+An opt-in `isReadRefreshSignal` classifier can recognize that caller-owned signal separately
+from `isAuthError`. It never reports a credential rejection to the account. A replayable run
+may repeat once under a fresh, adopted successor in the same connection generation, sharing
+the existing two-attempt total with provider-error recovery. Reconnects, revocation, uncertain
+identity and a second refresh refuse the read. Emit this signal only for completed reads,
+never for writes or provider authentication failures.
+
 Set `replayable: true` only when the operation may execute twice. Re-entry can repeat provider calls
 that succeeded before a later call rejected the credential. Without that flag, stale rejection
 surfaces as `CredentialsChangedError` instead.
