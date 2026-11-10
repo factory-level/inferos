@@ -163,7 +163,7 @@ it("restores the board, the open issue and the one pending edit after the connec
 
   // Approved once: one write. Approving it again writes nothing.
   await tab.own.approveAction(action!.id);
-  expect(await failure(tab.own.approveAction(action!.id))).toContain("not pending");
+  await tab.own.approveAction(action!.id);
   expect(fake.commits.filter(c => c.person === user.username)).toHaveLength(1);
   expect(fake.issue("ENG-1").title).toBe("Proposed before the drop");
 });

@@ -11,9 +11,15 @@ import {
   type WidgetStateMachine, type WidgetStateSnapshot,
 } from '@gadgets/workshop-shared/widget-state';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchUnavailableReason, mergeWidgetSearches } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
+import { subjectAccountName, type SubjectBinding } from "./account-subject";
+
+/** Why a bound account refuses an email-keyed sign-in (ADR 0019 decision 4). Safe to show. */
+export const SIGNS_IN_THROUGH_SUBJECT = "This account signs in with InferOps. Use InferOps sign-in.";
+/** A subject's sign-in reached an account bound to another (never expected; the directory decides). */
+const SUBJECT_MISMATCH = "This account belongs to another sign-in.";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { createTypedStorage, collection } from "@gadgets/typed-storage";
 import { recordAnalytics } from "./analytics";
@@ -254,6 +260,9 @@ export async function presentationCompanyOf(
 // Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names, by a console
 // publication (see UserDurableObject.widgetIndexWorkspaces).
 type WidgetIndexAccountStub = Required<Pick<GatekeeperUser, "widgetIndexWorkspaces" | "registerWidget" | "withdrawWidget">>;
+// Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names, for the person's own
+// widget search (see UserDurableObject.searchWidgets).
+type WidgetSearchAccountStub = Required<Pick<GatekeeperUser, "searchWidgets">>;
 
 /** A workspace in which the person may list widgets, with the account of theirs that may. */
 export type PersonWidgetIndexWorkspace = WidgetIndexWorkspace & { accountId: number };
@@ -516,6 +525,12 @@ function makeUserStorage(storage: DurableObjectStorage) {
       //
       // null = password disabled (e.g. because some other auth mechanism is used)
       passwordHashHash: <Uint8Array | null>null,
+      // ADR 0019 (FAC-165): the stable subject this account is bound to (`subjectAccountName`), or
+      // null. Once set it never changes, and the account then signs in only through that subject.
+      boundSubject: <string | null>null,
+      // The address the subject's provider last vouched for, for display and finding them by
+      // address; null when it vouched none. Never the account's key.
+      vouchedEmail: <string | null>null,
       // Current profile revision, bumped every time the user updates their
       // public-facing profile. Currently this is only bumped when the user
       // changes their display name.
@@ -698,6 +713,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * existing users can still sign in.
    */
   async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {
+    // A bound account signs in only through its subject (ADR 0019 decision 4).
+    if (this.storage.boundSubject.get() !== null) throw new Error(SIGNS_IN_THROUGH_SUBJECT);
     const isNew = !this.storage.created.get();
     if (isNew) {
       if (!allowCreate) {
@@ -784,6 +801,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * returns null instead of creating one — existing users can still sign in.
    */
   async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
+    // A bound account signs in only through its subject (ADR 0019 decision 4): an address that now
+    // belongs to someone else reaches nothing here.
+    if (this.storage.boundSubject.get() !== null) throw new Error(SIGNS_IN_THROUGH_SUBJECT);
     if (!this.storage.created.get()) {
       if (!allowCreate) return null;
       this.storage.created.put(true);
@@ -804,6 +824,86 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       source: "gatekeeper",
     });
     return this.#newSessionToken();
+  }
+
+  /**
+   * Binds this email-keyed account to `subject` (ADR 0019 decision 3), set-if-unset with no await
+   * between the check and the write: `bound` when it is (now, or already) bound to `subject`;
+   * `bound-elsewhere` when another subject holds it; `password` for a password account, which never
+   * binds; `absent` when there is no account here, which this writes nothing for. The caller has
+   * already checked the provider vouches for the address this account is named by.
+   */
+  async bindSubject(subject: string): Promise<SubjectBinding> {
+    if (!this.storage.created.get()) return "absent";
+    if (this.storage.passwordHashHash.get() !== null) return "password";
+    const bound = this.storage.boundSubject.get();
+    if (bound === null) {
+      this.storage.boundSubject.put(subject);
+      return "bound";
+    }
+    return bound === subject ? "bound" : "bound-elsewhere";
+  }
+
+  /** Whether this account is bound to a subject (ADR 0019), and so found only through it. */
+  async isSubjectBound(): Promise<boolean> {
+    return this.storage.boundSubject.get() !== null;
+  }
+
+  /**
+   * Signs in through `subject` (ADR 0019), creating the account on first use when `allowCreate`:
+   * its profile id is `name`, the account name the directory resolved (the subject's own name, or
+   * the address of the email-keyed account it bound), so a profile id still names its account. A
+   * new account is bound to `subject` as it is made; an existing one must already be bound to it.
+   * `email` is the address the provider vouches for now, or null; it is kept for display only.
+   * Returns the session secret, or null when signups are closed and there is no account yet.
+   */
+  async loginOrCreateViaSubject(name: string, subject: string, email: string | null, allowCreate: boolean)
+      : Promise<string | null> {
+    if (!this.storage.created.get()) {
+      if (!allowCreate) return null;
+      this.storage.created.put(true);
+      this.storage.boundSubject.put(subject);
+      this.storage.profile.put({ type: "user", name: email ? email.split("@")[0]! : "InferOps user", id: name });
+      recordAnalytics(this.ctx, this.env, {
+        event_name: "account_created", user_id: this.ctx.id.toString(), source: "gatekeeper",
+      });
+    } else if (this.storage.boundSubject.get() !== subject) {
+      throw new Error(SUBJECT_MISMATCH);
+    }
+    this.storage.vouchedEmail.put(email);
+    recordAnalytics(this.ctx, this.env, {
+      event_name: "user_authenticated", user_id: this.ctx.id.toString(), source: "gatekeeper",
+    });
+    return this.#newSessionToken();
+  }
+
+  /**
+   * For the one-off subject pass (ADR 0019 decision 7): the subject this email-keyed account would
+   * bind to, read from a connection of `vendorId` it holds, when that connection's vouched email is
+   * the account's own address; its bound subject if it already has one; else null. Reads only: the
+   * pass checks the directory, then binds with `bindSubject`.
+   */
+  async subjectFromConnections(vendorId: string): Promise<string | null> {
+    if (!this.storage.created.get() || this.storage.passwordHashHash.get() !== null) return null;
+    const already = this.storage.boundSubject.get();
+    if (already !== null) return already;
+    const address = this.storage.profile.get().id;
+    if (!address.includes("@")) return null;
+    for (let record of Array.from(this.storage.connectedAccounts.list())) {
+      if (record.vendorId !== vendorId) continue;
+      const account = record.account as unknown as Required<Pick<GatekeeperUser, "getAuthenticatedSubject" | "getAuthenticatedEmail">>;
+      let email: string | null, subject: GatekeeperSubject | null;
+      try {
+        [email, subject] = await Promise.all([account.getAuthenticatedEmail(), account.getAuthenticatedSubject()]);
+      } catch (error) {
+        logger.warn("connected account could not name its subject", {
+          event: "account.subject.read.failed", vendorId, accountId: record.id, error,
+        });
+        continue;
+      }
+      if (subject && email?.toLowerCase() === address.toLowerCase()) return subjectAccountName(subject);
+    }
+    return null;
   }
 
   /** Whether this account has a password set (false for gatekeeper sign-in accounts). */
@@ -2576,6 +2676,43 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     return [...found.values()];
+  }
+
+  /**
+   * The widgets this person may use that match `query` (FAC-13), as the deployment's
+   * SHARED_CONFIGURATION_GATEKEEPER vendor answers through each of their own connected accounts
+   * with live credentials, merged (mergeWidgetSearches). `unavailable` when nothing could be asked:
+   * no vendor (`not-configured`), no account of it (`not-connected`), only accounts whose sign-in
+   * must be renewed (`reconnect`), or every account answering so itself. An account to reconnect
+   * or one that failed beside one that answered counts as `unsearched`. Throws when every account
+   * asked failed, so a failure never reads as "nothing found".
+   */
+  async searchWidgets(query: string, k: number): Promise<WidgetSearchAnswer> {
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    if (!vendorId) return { status: "unavailable", reason: "not-configured" };
+    let accounts = [...this.#connectedAccountRecords()].filter(record => record.vendorId === vendorId);
+    if (accounts.length === 0) return { status: "unavailable", reason: "not-connected" };
+    let found: Extract<WidgetSearchAnswer, { status: "searched" }>[] = [];
+    let unavailable: WidgetSearchUnavailableReason[] = [];
+    let failed: unknown;
+    let failures = 0;
+    for (let record of accounts) {
+      if (!areCredentialsValid(record)) { unavailable.push("reconnect"); continue; }
+      try {
+        let answer = await (record.account as unknown as WidgetSearchAccountStub).searchWidgets(query, k);
+        if (answer.status === "searched") found.push(answer);
+        else unavailable.push(answer.reason);
+      } catch (error) {
+        failed = error;
+        failures++;
+      }
+    }
+    if (found.length === 0) {
+      if (failed !== undefined) throw failed;
+      // The most actionable reason first: renewing a sign-in, then the service's own.
+      return { status: "unavailable", reason: unavailable.includes("reconnect") ? "reconnect" : unavailable[0]! };
+    }
+    return mergeWidgetSearches(found, k, { denied: 0, unsearched: failures + unavailable.length });
   }
 
   /**

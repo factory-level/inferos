@@ -107,10 +107,11 @@ import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gate
 import { createLogger } from "@gadgets/observability/logger";
 import type {
   AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
-  GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
+  GatekeeperConnectOptions, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
-  WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace,
+  WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchResult,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { mergeWidgetSearches } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
   CredentialSource, isCredentialsChanged, isCredentialsExpired, type CredentialRead,
@@ -124,7 +125,7 @@ import {
   BOARD_WRITES, CheckRefused, PROPOSAL_APPROVE, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
 } from "./apply-attempts";
 import {
-  WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, listWorkspaceSlugs, openHttpInferOpsClient,
+  WIDGET_SEARCH_DENIED, WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, listWorkspaceSlugs, openHttpInferOpsClient,
   readCallerPrincipal, tableNotFound,
   type BoardSnapshotAnswer, type InferOpsAuthority, type InferOpsEndpoint,
 } from "./http-inferops";
@@ -265,6 +266,12 @@ export default {
  */
 type AccountProps = {
   accountId: string; email?: string; connected?: boolean;
+  /**
+   * The InferLab principal behind a sign-in or connect (ADR 0019, FAC-165): the configured auth
+   * origin as issuer, and InferLab's `user.id`. Absent on auto-provisioned accounts, and on accounts
+   * connected before it was recorded, whose stored identity answers instead.
+   */
+  subject?: GatekeeperSubject;
   /**
    * Set only on a configured system workflow's binding (FAC-102, `getSystemGatekeeperClass`): the
    * Workshop's assignment reference whose stored service-account key the binding acts as. Such a
@@ -749,6 +756,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
       // demo account is provided automatically.
       autoProvisionsAccount: !identity,
       providesAuth: identity,
+      // Sign-in keys the Workshop account on the InferLab principal, not the email (ADR 0019).
+      providesSubject: identity,
     };
   }
 
@@ -1210,6 +1219,19 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   }
 
   /**
+   * The InferLab principal behind this account (ADR 0019): the one its sign-in or connect recorded,
+   * else, for an account connected before that, the `userId` its stored identity holds, issued by
+   * the configured auth origin. Null for an account with no person behind it (auto-provisioned).
+   */
+  async getAuthenticatedSubject(): Promise<GatekeeperSubject | null> {
+    if (this.ctx.props.subject) return this.ctx.props.subject;
+    if (!this.ctx.props.connected) return null;
+    const issuer = inferLabAuthOrigin(this.env);
+    const identity = await this.#credentials().identity();
+    return issuer && identity?.userId ? { issuer, subject: identity.userId } : null;
+  }
+
+  /**
    * Whether the connected person may `build` or `publish` configuration other people use in this
    * InferOS: InferOps' `configuration:<action>` (only an Admin's grant holds it, and a grant deny
    * removes it), asked with their own token in each of their workspaces until one says yes. The
@@ -1310,6 +1332,39 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
       }
     }
     return found;
+  }
+
+  /**
+   * The widgets the connected person may use that match `query` (FAC-13): InferOps' `widget.search`
+   * asked in each of their workspaces, with their own credentials, and merged (mergeWidgetSearches).
+   * `unavailable` with `reconnect` for an account without a connected person of the deployment's
+   * company (the stopgap bearer, demo data, a sign-in to renew), and with `no-workspace` when InferOps
+   * gives them none. A workspace where InferOps refuses for a missing `knowledge:read` is `denied`:
+   * asked, it adds nothing. Any other failure in a workspace is `unsearched`, and if every workspace
+   * failed so, the last failure is thrown.
+   */
+  async searchWidgets(query: string, k: number): Promise<WidgetSearchAnswer> {
+    const identity = await this.#widgetIndexIdentity();
+    if (!identity) return { status: "unavailable", reason: "reconnect" };
+    if (identity.workspaces.length === 0) return { status: "unavailable", reason: "no-workspace" };
+    const found: WidgetSearchResult[] = [];
+    let denied = 0;
+    let unsearched = 0;
+    let lastFailure: unknown;
+    for (const { workspaceId } of identity.workspaces) {
+      try {
+        found.push(await this.#widgetIndexClient(identity.endpoint, workspaceId).searchWidgets(query, k));
+      } catch (error) {
+        if (error instanceof InferOpsError && error.code === "FORBIDDEN" && error.detail === WIDGET_SEARCH_DENIED) {
+          denied++;
+          continue;
+        }
+        lastFailure = error;
+        unsearched++;
+      }
+    }
+    if (found.length === 0 && denied === 0) throw lastFailure;
+    return mergeWidgetSearches(found, k, { denied, unsearched });
   }
 
   /** Lists one widget version in the person's own workspace `workspaceId`: `widget.publish`. */

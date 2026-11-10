@@ -20,6 +20,72 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
       search_text TEXT NOT NULL,
       rev INTEGER NOT NULL
     ) STRICT`);
+    // ADR 0019: which account each stable subject signs in to, written once per subject by the
+    // sign-in that binds it; and the account each vouched address currently belongs to, for finding a
+    // person by address. Reached only from the Workshop's own sign-in and lookups, never a caller.
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS subjects (
+      subject TEXT PRIMARY KEY,
+      account TEXT NOT NULL
+    ) STRICT`);
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS emails (
+      email TEXT PRIMARY KEY,
+      account TEXT NOT NULL
+    ) STRICT`);
+  }
+
+  /** The account name `subject` signs in to (ADR 0019), or null before it was recorded. */
+  accountForSubject(subject: string): string | null {
+    const rows = this.ctx.storage.sql.exec<{ account: string }>(
+      `SELECT account FROM subjects WHERE subject = ?`, subject).toArray();
+    return rows[0]?.account ?? null;
+  }
+
+  /**
+   * The account `subject` signs in to, claiming `candidate` for it in one step when it has none yet
+   * (set-if-unset): the claim is the subject's mapping from then on, and is never removed. Every
+   * sign-in for the subject gets the same answer however they overlap, so only the account it names
+   * is ever bound to the subject (`resolveSubjectAccount`).
+   */
+  claimSubject(subject: string, candidate: string): string {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO subjects (subject, account) VALUES (?, ?) ON CONFLICT (subject) DO NOTHING`, subject, candidate);
+    return this.accountForSubject(subject)!;
+  }
+
+  /**
+   * Moves `subject`'s mapping from `from` to `to` only while it still names `from`
+   * (compare-and-set), and returns the mapping after: for a claimed account that can't bind to the
+   * subject, every sign-in that finds so moves it to the same account.
+   */
+  moveSubject(subject: string, from: string, to: string): string {
+    this.ctx.storage.sql.exec(`UPDATE subjects SET account = ? WHERE subject = ? AND account = ?`, to, subject, from);
+    return this.accountForSubject(subject)!;
+  }
+
+  /** The account whose current vouched address `email` is (ADR 0019), or null. */
+  accountForEmail(email: string): string | null {
+    const rows = this.ctx.storage.sql.exec<{ account: string }>(
+      `SELECT account FROM emails WHERE email = ?`, email.toLowerCase()).toArray();
+    return rows[0]?.account ?? null;
+  }
+
+  /**
+   * Records that `account`'s current vouched address is `email`: it replaces whatever address the
+   * account had, and whatever account had the address, so a moved address finds its new owner only.
+   */
+  recordEmail(email: string, account: string): void {
+    const address = email.toLowerCase();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(`DELETE FROM emails WHERE account = ? AND email != ?`, account, address);
+      this.ctx.storage.sql.exec(
+        `INSERT INTO emails (email, account) VALUES (?, ?) ON CONFLICT (email) DO UPDATE SET account = excluded.account`,
+        address, account);
+    });
+  }
+
+  /** Every account name the directory lists, for the one-off subject pass (ADR 0019 decision 7). */
+  listUserIds(): string[] {
+    return this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM users ORDER BY id`).toArray().map(row => row.id);
   }
 
   /**

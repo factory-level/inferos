@@ -102,6 +102,7 @@ export const WORKERD_LIGHT: readonly string[] = [
   "overseer-hooks.test.ts",
   "sharing.test.ts",
   "shared-configuration.test.ts",
+  "action-decisions.test.ts",
   "workflow-definitions.test.ts",
   "workflow-dynamic-definitions.test.ts",
   "workflow-invocation.test.ts",
@@ -170,4 +171,13 @@ export const BACKEND_RESTART: readonly string[] = [
   "workflow-run-restart.test.ts",
   "workflow-run-results.test.ts",
   "worktrees.test.ts",
+];
+
+/**
+ * Backend files that drive a real gatekeeper sign-in through the login callback, which reads the
+ * admin config from `BLUEPRINTS`. They run in their own project, `backend-sign-in`, whose Miniflare
+ * alone has that namespace (empty, so signups are open), so no other file's runtime changes.
+ */
+export const BACKEND_SIGN_IN: readonly string[] = [
+  "account-subject.test.ts",
 ];

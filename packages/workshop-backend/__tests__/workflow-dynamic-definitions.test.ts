@@ -119,6 +119,27 @@ describe("expiry blocks new use (acceptance 1)", () => {
     expect(storage.workflowDefinitions.get(made.id)).toBeUndefined();
   });
 
+  it("keeps an expired definition's history readable to its owner, gated on ownership, not availability (QA)", () => {
+    let { store, clock, temporary } = workspace();
+    let made = temporary();
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1, mode: "pinned" });
+    store.setControl(ADA, HOOK, { label: "Run it", invokers: [ADA.id] });
+    let invocation = store.beginInvocation(ADA.id, HOOK, null);
+    let delivery = store.fire(HOOK, GADGET, headOf, everyoneBuilds, invocation.id)!;
+    store.queueRun(HOOK, delivery.deliveryId, null, []);
+    store.pinTrigger(ADA.id, HOOK, GADGET, null);
+    clock.now = START + 25 * HOUR;
+    store.startRun(delivery.deliveryId);
+    // Past expiry, its live run is still listed for its owner; someone else still finds nothing.
+    expect(store.get(ADA.id, made.id)).toBeNull();
+    expect(store.deliveries(ADA.id, made.id)).toMatchObject([{ definitionId: made.id, execution: { state: "running" } }]);
+    expect(() => store.deliveries(BEN.id, made.id)).toThrow();
+    // Once it ends and is swept, the run itself is still read from its record.
+    store.endRun(delivery.deliveryId);
+    expect(store.sweepExpired()).toBe(1);
+    expect(store.run(delivery.run!.runId)).toMatchObject({ definitionId: made.id });
+  });
+
   it("deletes only expired dynamic definitions nothing keeps: never a saved one, an unexpired one or another workspace's", () => {
     let { store, clock, temporary } = workspace();
     let other = workspace();

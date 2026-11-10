@@ -29,7 +29,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import type { WorkspaceConfiguration, WorkspaceSettings } from "./workspace-settings.js";
 import type { ConfigurationTraceEntry } from "./configuration-trace.js";
-import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, ConsoleDraftProblem, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, ConsoleDraftProblem, ConsoleWidgetInstance, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
@@ -44,7 +44,7 @@ import type {
   ArtifactRevision,
 } from "./agent-artifact.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace, WidgetSearchAnswer } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
@@ -820,6 +820,9 @@ export type UserDirectoryRecord = {
 };
 
 /** Top-level API exposed to the user after they have authenticated. */
+/** At most this many built-in widgets, and this many definitions, a widget search returns (FAC-13). */
+export const WIDGET_SEARCH_LIMIT = 8;
+
 export interface AuthenticatedApi extends RpcTarget {
   /** Get profile info for the user who is logged in. */
   whoami(): Promise<AiChatAuthorInfo>;
@@ -1027,6 +1030,19 @@ export interface AuthenticatedApi extends RpcTarget {
    * TODO: Pagination, sort options.
    */
   listGadgets(): Promise<GadgetMetadataWithTimestamps[]>;
+
+  /**
+   * The widgets this person may use that match `query`, their intent in their own words (FAC-13;
+   * at most 500 characters, refused when blank): the deployment's `SHARED_CONFIGURATION_GATEKEEPER`
+   * vendor asked through each of their own connected accounts, with their own credentials, and
+   * merged, each once, best first, at most `WIDGET_SEARCH_LIMIT` of each kind. Definitions only:
+   * no instance or live data (see `Overseer.listWidgetInstances` for a definition's instances).
+   * `unavailable`, with the reason, when nothing could be asked: no vendor, no account of it, a
+   * sign-in to renew, or no workspace there (`WidgetSearchAnswer`), so it never reads as "no
+   * widgets". A partial answer counts what couldn't be searched (`unsearched`) and where the person
+   * may not search (`denied`). Throws when everything asked failed.
+   */
+  searchWidgets(query: string): Promise<WidgetSearchAnswer>;
 
   /**
    * List the outputs of all the user's workspaces. Used to display the Outputs page, which lets
@@ -1544,6 +1560,18 @@ export interface DeploymentProfile {
   displayDensity?: DisplayDensity;
 }
 
+/** What one subject pass (`AdminApi.bindAccountSubjects`, ADR 0019) did. */
+export type AccountSubjectPass = {
+  /** Email-keyed accounts looked at. */
+  checked: number;
+  /** Accounts this pass bound to their subject. */
+  bound: number;
+  /** Accounts already bound to the subject their connection names, left as they were. */
+  alreadyBound: number;
+  /** Accounts whose subject the directory sends to another account, or that another subject holds; left unbound. */
+  conflicts: number;
+};
+
 /**
  * Capability for managing deployment-wide admin settings, obtained via
  * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
@@ -1571,6 +1599,13 @@ export interface AdminApi {
 
   /** Enable or disable new account signups. Existing users can still log in while signups are closed. */
   setSignupsEnabled(enabled: boolean): Promise<void>;
+
+  /**
+   * The one-off subject pass (ADR 0019, FAC-165): binds each email-keyed account that holds an
+   * InferOps connection vouching its own address to the InferOps principal behind it, so an email
+   * change later keeps the account. Creates no account; running it again binds nothing new.
+   */
+  bindAccountSubjects(): Promise<AccountSubjectPass>;
 
   /**
    * Enable or disable user directory search. The directory itself is maintained
@@ -2501,6 +2536,22 @@ export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
 export type ActionState = "pending" | "approved" | "rejected" | "failed";
 
 /**
+ * Why a pending action's approved apply was refused before anything was sent (FAC-118): a re-check
+ * at resume found that the authority it was proposed under no longer holds (the person who asked a
+ * run, their role or grant, the run's assignment or company). It stays pending, and can be decided
+ * again once that is fixed; the next apply that passes clears it.
+ */
+/** Why the workspace rejected an action itself (FAC-118; see `ActionLogEntry.rejectedBecause`). */
+export type ActionRejectedBecause = "expired" | "definition-changed";
+
+export type ActionBlocked = {
+  /** The refusal, in the words the re-check gave it. */
+  reason: string;
+  /** When it was refused. */
+  at: Date;
+};
+
+/**
  * An action's most recent unsuccessful apply, as the overseer recorded it from the gatekeeper's
  * answer (see `ActionApplyFailure`). `notApplied` is known absent at the provider; `unknown` may
  * have happened there, so it is never presented as safely undone.
@@ -2587,6 +2638,20 @@ export type ActionLogEntry = {
    * not as waiting for a decision (see `actionOutcome`). Absent otherwise.
    */
   applying?: true;
+
+  /**
+   * Set while the action is pending and its last approved apply was refused at resume, before
+   * anything was sent (FAC-118; see `ActionBlocked`). Absent otherwise.
+   */
+  blocked?: ActionBlocked;
+
+  /**
+   * Set on an action the workspace rejected itself, with no person deciding (FAC-118); `resolvedBy`
+   * is then absent and nothing was sent. `expired`: nobody decided it within its workflow run's wait
+   * (7 days from when the run proposed it). `definition-changed`: approved after the run's workflow
+   * definition changed, which can't be fixed, so a fresh proposal is needed (run it again).
+   */
+  rejectedBecause?: ActionRejectedBecause;
 
   /**
    * What the provider reported the apply produced (`ActionResult`), such as a created issue's key
@@ -2963,6 +3028,15 @@ export interface Overseer extends RpcTarget {
    * otherwise, and for a widget published without a UI. Denied to the operate session.
    */
   getEmbeddedWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
+   * The instances of the published widget definition `blueprintId` version `version` (as InferOps'
+   * widget search names it) that this workspace's published consoles offer now, with a UI
+   * (FAC-13): each named as a Wiki embed names it, opened through `getEmbeddedWidget`, which checks
+   * the offer again. Never a draft, an unpublished console's widget or a tools-only one. Answered to
+   * whoever may read this workspace's published consoles (build or use access). Denied to the
+   * operate session.
+   */
+  listWidgetInstances(blueprintId: string, version: number): Promise<ConsoleWidgetInstance[]>;
   /**
    * Open an app a console places, as its published revision `revision` fenced it (FAC-89 part 2):
    * `gadgetId` is the live app, with its own storage and bindings, never a copy (see

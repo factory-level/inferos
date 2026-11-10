@@ -89,5 +89,17 @@ export const CanvasSectionEditor = ({ section, busy, first, gadgets, overseer, a
       <Input label="First page (optional)" name="page" maxLength={200} disabled={busy} placeholder="handbook" />
       <Button type="submit" disabled={busy || section.widgets.length >= 48}>Add Wiki</Button>
     </form>}
+    {catalog.widgetKinds.includes('inferos.governed-table') && <form className="flex flex-wrap items-end gap-2" onSubmit={async event => {
+      event.preventDefault()
+      const form = event.currentTarget
+      const targetRef = String(new FormData(form).get('table') ?? '').trim()
+      const success = await onEdit([{ type: 'addWidget', sectionId: section.id, index: section.widgets.length,
+        widget: { id: crypto.randomUUID(), kind: 'inferos.governed-table', version: 1, targetRef, size: 'full', params: {} } }])
+      if (success) form.reset()
+    }}>
+      <Input label="Table or queue reference" name="table" required maxLength={512} disabled={busy}
+        placeholder="inferops://tenant.workspace/object/table/<id> or tickets://workspace/queue/<id>" className="min-w-0 flex-1" />
+      <Button type="submit" disabled={busy || section.widgets.length >= 48}>Add table</Button>
+    </form>}
   </section>
 )

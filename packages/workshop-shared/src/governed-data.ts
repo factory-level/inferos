@@ -10,39 +10,11 @@
  * session was opened; a request can only narrow what that session already returns.
  */
 
-/** The resources a governed session serves (FAC-9): custom tables, and ticket queues. */
-export type GovernedResource = "object/table" | "tickets/queue";
-
-// A tenant or workspace slug InferOps could have issued (gatekeeper-inferops `isSlug`).
-const SLUG = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
-// A custom table's reference, exactly as gatekeeper-inferops `parseTableUrl` accepts it.
-const TABLE_REF = new RegExp(
-  `^inferops://${SLUG}\\.${SLUG}/object/table/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`);
-
-/** The longest tickets queue id a reference may name (FAC-9). */
-export const TICKETS_QUEUE_ID_MAX = 64;
-const QUEUE_REF = new RegExp(`^tickets://([a-z0-9-]+)/queue/([A-Za-z0-9_-]{1,${TICKETS_QUEUE_ID_MAX}})$`);
-
-/**
- * The workspace and queue a tickets queue reference, `tickets://<workspace>/queue/<id>`, names, or
- * null for anything else. The one grammar for it: the tickets connector binds by it, and the host's
- * governed reference (`governedResourceOf`) names a queue by it, so the two never disagree.
- */
-export function parseTicketsQueueRef(ref: string): { workspace: string; queueId: string } | null {
-  const match = QUEUE_REF.exec(ref);
-  return match ? { workspace: match[1]!, queueId: match[2]! } : null;
-}
-
-/**
- * The governed resource reference `ref` names (FAC-9): a custom table,
- * `inferops://<tenant>.<workspace>/object/table/<tableId>`, or a tickets queue,
- * `tickets://<workspace>/queue/<id>`, each exactly as its connector accepts it. Null for anything
- * else. It names a resource; it grants nothing.
- */
-export function governedResourceOf(ref: string): GovernedResource | null {
-  if (TABLE_REF.test(ref)) return "object/table";
-  return parseTicketsQueueRef(ref) ? "tickets/queue" : null;
-}
+// The reference grammar lives in `canvas.ts`, which a Node-run script imports directly (and so
+// imports nothing itself); it is re-exported here unchanged.
+export { governedResourceOf, parseTicketsQueueRef, TICKETS_QUEUE_ID_MAX, type GovernedResource } from "./canvas";
+import type { GovernedResource } from "./canvas";
+import type { ActionReceipt } from "./gatekeeper";
 
 /**
  * The filter operators a request may use: `eq`, equality with a value of the field's own type (or
@@ -161,19 +133,22 @@ export interface GovernedCommandRequest {
 }
 
 /**
- * What running a command returns: it was proposed, never done. A person or a rule decides it, and
- * the connector applies it; the row is read again to see the outcome.
+ * What running a command returns: it was proposed, never done. `status` is the FAC-97 receipt
+ * capability issued for that same ApprovalQueue action; it reads the action journal's current
+ * projection through the originating workspace connection. It is deliberately not an action-log
+ * id lookup, and creates no second receipt store or authority path.
  */
-export interface GovernedCommandReceipt {
+export type GovernedCommandReceipt = ActionReceipt & {
+  /** Immediate acknowledgment only; consult `status()` for the authoritative lifecycle. */
   outcome: "proposed";
-}
+};
 
 /**
  * A governed resource session that also takes its declared commands (FAC-9; ADR 0013 W4–W6). A
  * command is validated against `describe()` before anything is read or proposed.
  */
 export interface GovernedWriteSession extends GovernedReadSession {
-  /** Propose one declared command on one row. */
+  /** Propose one declared command on one row and return its caller-bound FAC-97 receipt. */
   command(request: unknown): Promise<GovernedCommandReceipt>;
 }
 
