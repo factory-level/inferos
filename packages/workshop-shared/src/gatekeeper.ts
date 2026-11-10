@@ -1033,6 +1033,29 @@ export interface GatekeeperUserVerifier extends WorkerEntrypoint {}
 export type ActionApplied = { applied: { result: ActionResult } };
 
 /**
+ * What the kernel does for a gatekeeper as the person approving one of its actions (FAC-120), passed
+ * to `applyAction()` only for that person's approval and revoked when it returns. Each effect runs
+ * as that person, with every check of the same request made by them directly, and its answer is
+ * kernel text; nothing a gatekeeper sends can make it run outside such an approval.
+ */
+export interface ApprovedEffects extends RpcTarget {
+  /**
+   * Starts the workflow run InferOS trigger reference `reference` names
+   * (`inferops://<company>.<workspace>/inferos/workflow-trigger/...`, workflow-trigger-ref.ts), as
+   * the approving person: in the trigger's own workspace, verified and with at least `use` there,
+   * only while its definition and published revision are the ones named, and then through the
+   * workspace's on-request admission (its run control's invokers, `workflow:invoke` asked with the
+   * person's own account, the run right and the rate caps). At most once per apply.
+   */
+  invokeWorkflow(reference: string): Promise<ApprovedWorkflowRun>;
+}
+
+/** An `ApprovedEffects.invokeWorkflow` answer: the run admitted, or why not, in a FAC-119 kind. */
+export type ApprovedWorkflowRun =
+  | { status: "started"; runId: string }
+  | { status: "refused"; kind: ActionFailureKind; reason: string };
+
+/**
  * An apply that did not succeed, as `applyAction` reports it when it knows more than a thrown error
  * says. Returned rather than thrown, because RPC carries only an error's message.
  */
@@ -1264,8 +1287,14 @@ export interface Gatekeeper<Session> extends DurableObject {
    * in the action's `ActionDescription.pushedCommits`. Actions that don't interact with git can
    * ignore this parameter (and can even omit the parameter from their `applyAction()`
    * declaration).
+   *
+   * `effects` (FAC-120) is present only while a person's own approval of this action is being
+   * applied, never for an automatic one, and is revoked once `applyAction()` returns: what the
+   * kernel itself may do as that approving person, with every check of their own request
+   * (`ApprovedEffects`). A gatekeeper that has no use for it ignores it.
    */
-  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void | { failed: ActionApplyFailure } | ActionApplied>;
+  applyAction(action: number, cache: RpcStub<GitCache>, effects?: RpcStub<ApprovedEffects>)
+      : Promise<void | { failed: ActionApplyFailure } | ActionApplied>;
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
