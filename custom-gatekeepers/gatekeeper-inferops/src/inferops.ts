@@ -4231,10 +4231,10 @@ async function applyDotAction(binding: DotBinding, actionId: number):
 }
 
 /** Why a decline couldn't be confirmed: InferOps may still be waiting for a decision. */
-export const DOT_DECLINE_UNCONFIRMED =
+const DOT_DECLINE_UNCONFIRMED =
   "Your decline couldn't be confirmed in InferOps: the change may still be waiting there. Decline it again.";
 /** Why a change InferOps already made can't be declined. */
-export const DOT_DECLINE_ALREADY_MADE =
+const DOT_DECLINE_ALREADY_MADE =
   "This change was already made in InferOps, so it can't be declined. Approve it to record that.";
 
 /**
