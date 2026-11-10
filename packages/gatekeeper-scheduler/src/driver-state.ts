@@ -21,6 +21,8 @@ export type ScheduleRegistration = {
 type ScheduleProgress = ScheduleRegistration & {
   /** Logical occurrences started so far. Set only when `occurrences` bounds the recurrence. */
   occurrenceCount?: number;
+  /** Most recent occurrence refused during workflow admission; visible to the schedule owner. */
+  lastAdmissionRefusal?: { code: "workflow_occurrence_limit"; scheduledTime: number; refusedAt: number };
 };
 
 /** An enabled schedule waiting for its next occurrence. */
@@ -174,13 +176,15 @@ export function admitRun(
   leaseExpiresAt: number,
 ): EnabledSchedule {
   if (!isPending(schedule, runId, "admission")) return schedule;
-  return {
+  let admitted: PendingSchedule = {
     ...schedule,
     stage: "delivery",
     attempts: schedule.attempts + 1,
     leaseExpiresAt,
     nextFire: recurringNextFire(schedule, now),
   };
+  delete admitted.lastAdmissionRefusal;
+  return admitted;
 }
 
 /** Abandons a run after admission rejects without consuming a callback attempt. */
@@ -188,9 +192,13 @@ export function rejectRun(
   schedule: EnabledSchedule,
   runId: string,
   rejectedAt: number,
+  refusal?: { code: "workflow_occurrence_limit"; scheduledTime: number },
 ): EnabledSchedule {
   if (!isPending(schedule, runId, "admission")) return schedule;
-  const common = copyProgress(schedule);
+  const common = {
+    ...copyProgress(schedule),
+    ...(refusal ? { lastAdmissionRefusal: { ...refusal, refusedAt: rejectedAt } } : {}),
+  };
   if (schedule.spec.kind === "once") {
     return { ...common, status: "expired", expiredAt: rejectedAt };
   }
@@ -286,9 +294,17 @@ function latestFireAtOrBefore(spec: ScheduleSpec, first: number, now: number): n
 }
 
 function copyProgress(
-  { workspaceId, scheduleId, spec, occurrences, occurrenceCount, missedRuns }: ScheduleProgress,
+  { workspaceId, scheduleId, spec, occurrences, occurrenceCount, missedRuns, lastAdmissionRefusal }: ScheduleProgress,
 ): ScheduleProgress {
-  return { workspaceId, scheduleId, spec, occurrences, occurrenceCount, missedRuns };
+  return {
+    workspaceId,
+    scheduleId,
+    spec,
+    occurrences,
+    occurrenceCount,
+    missedRuns,
+    ...(lastAdmissionRefusal ? { lastAdmissionRefusal } : {}),
+  };
 }
 
 function withinLimit(schedule: ScheduleProgress, nextFire: number): boolean {

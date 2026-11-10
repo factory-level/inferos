@@ -51,6 +51,9 @@ export function dynamicDefinitionTtlMs(setting: string | undefined): number {
 /** Most delivery records one workspace keeps; the oldest is dropped past it. */
 export const MAX_WORKFLOW_DELIVERIES = 1000;
 
+/** Stable error name for a trigger refused because its occurrence tombstones are at capacity. */
+export const WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME = "WorkflowOccurrenceLimitError";
+
 /** What a revision runs: a workflow gadget of the workspace at one commit of its code. */
 export type WorkflowDefinitionSource = {
   kind: "gadget";

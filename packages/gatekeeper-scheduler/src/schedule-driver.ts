@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { RpcStub, RpcTarget } from "cloudflare:workers";
 import { reportIssue } from "@gadgets/observability/error-reporting";
 import type { ApprovalQueue, HookInitiator } from "@gadgets/workshop-shared/gatekeeper";
+import { WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME } from "@gadgets/workshop-shared/workflow-definition";
 import {
   admitRun,
   beginDueRun,
@@ -451,8 +452,11 @@ export class ScheduleDriver extends DurableObject {
         // callback attempt is counted or either returned capability is used.
         // @ts-expect-error Worker RPC's mapped return type wraps the already-stubbed hook result.
         hookResult = await hookCall;
-      } catch {
-        this.#rejectPending(prepared, Date.now());
+      } catch (error) {
+        const refusal = error instanceof Error && error.name === WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME
+          ? { code: "workflow_occurrence_limit" as const, scheduledTime: prepared.scheduledTime }
+          : undefined;
+        this.#rejectPending(prepared, Date.now(), refusal);
         return true;
       }
 
@@ -564,8 +568,12 @@ export class ScheduleDriver extends DurableObject {
     });
   }
 
-  #rejectPending(prepared: PreparedRun, rejectedAt: number): void {
-    this.#settle(prepared, undefined, (state) => rejectRun(state, prepared.runId, rejectedAt));
+  #rejectPending(
+    prepared: PreparedRun,
+    rejectedAt: number,
+    refusal?: { code: "workflow_occurrence_limit"; scheduledTime: number },
+  ): void {
+    this.#settle(prepared, undefined, (state) => rejectRun(state, prepared.runId, rejectedAt, refusal));
   }
 
   #failPending(
@@ -718,6 +726,7 @@ function toScheduleSummary(schedule: StoredSchedule): ScheduleSummary {
     occurrences: schedule.state.occurrences,
     ...(schedule.state.spec.kind !== "once" ? { missedRuns: schedule.state.missedRuns ?? "skip" } : {}),
     occurrenceCount: schedule.state.occurrences ? schedule.state.occurrenceCount ?? 0 : undefined,
+    ...(schedule.state.lastAdmissionRefusal ? { lastAdmissionRefusal: schedule.state.lastAdmissionRefusal } : {}),
   };
   const state = schedule.state;
   switch (state.status) {

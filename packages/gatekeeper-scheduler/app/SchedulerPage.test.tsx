@@ -62,6 +62,16 @@ const dead: ManagementSchedule = {
   gadgetId: 2,
 };
 
+const occurrenceLimited: ManagementSchedule = {
+  ...active,
+  scheduleId: "occurrence-limited",
+  lastAdmissionRefusal: {
+    code: "workflow_occurrence_limit",
+    scheduledTime: Date.UTC(2026, 6, 31, 13),
+    refusedAt: Date.UTC(2026, 6, 31, 13, 1),
+  },
+};
+
 const completed: ManagementSchedule = {
   scheduleId: "completed",
   title: "Quarterly export",
@@ -126,6 +136,17 @@ describe("SchedulerPage", () => {
     await click('[data-action="toggle-diagnostic"]');
     expect(container!.textContent).toContain("Task callback failed after retries.");
     expect(container!.textContent).not.toContain(dead.description);
+  });
+
+  it("shows a named occurrence-cap refusal on the schedule row", async () => {
+    const list = vi.fn<ScheduleManagementClient["list"]>(async () => ({
+      schedules: [occurrenceLimited],
+    }));
+    await render(<SchedulerPage api={{ list }} {...hostProps()} />);
+
+    expect(container!.querySelectorAll('[data-action="toggle-diagnostic"]')).toHaveLength(1);
+    await click('[data-action="toggle-diagnostic"]');
+    expect(container!.textContent).toContain("reached its occurrence history limit");
   });
 
   it("maps status tabs to server filters and appends cursor pages", async () => {

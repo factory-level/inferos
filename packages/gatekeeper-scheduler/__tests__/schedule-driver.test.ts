@@ -18,7 +18,7 @@ type ScheduleHookTarget = RpcTarget & ScheduledTaskHook;
 
 type TestHooks = HookInitiator<ScheduleHookTarget> & {
   configure(
-    mode: "success" | "start-reject" | "authorization-reject" | "callback-reject",
+    mode: "success" | "start-reject" | "occurrence-cap" | "authorization-reject" | "callback-reject",
   ): Promise<void>;
   blockAt(point: "start" | "authorization" | "callback"): Promise<void>;
   holdCallbacksUntilConcurrent(count: number): Promise<void>;
@@ -824,6 +824,34 @@ describe("ScheduleDriver", () => {
         startHookRejectedCount: 1,
       }),
     );
+  });
+
+  it("shows a named occurrence-cap refusal in the schedule owner's history", async () => {
+    const driver = testEnv.SCHEDULE_DRIVER.getByName("occurrence-cap-refusal");
+    const activationTime = Date.now();
+    await testEnv.TEST_HOOKS.configure("occurrence-cap");
+    await enableSchedule(driver, {
+      workspaceId: "workspace-a",
+      scheduleId: "capacity-limited",
+      spec: { kind: "interval", everyMs: 60_000, anchorMs: activationTime },
+      title: "Capacity limited task",
+      description: "A capped occurrence remains visible.",
+      gadgetId,
+    }, activationTime);
+    await makeActiveScheduleDue(driver, "workspace-a", "capacity-limited");
+
+    await runDurableObjectAlarm(driver);
+
+    await expect(driver.listWorkspace("workspace-a")).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        scheduleId: "capacity-limited",
+        status: "active",
+        lastAdmissionRefusal: expect.objectContaining({
+          code: "workflow_occurrence_limit",
+          scheduledTime: activationTime,
+        }),
+      }),
+    ]));
   });
 
   it("uses a pending run's scheduled time in workspace summaries", async () => {

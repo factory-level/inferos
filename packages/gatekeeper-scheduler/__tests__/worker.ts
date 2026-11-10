@@ -12,7 +12,7 @@ type TestExports = {
   SchedulerScopeTestFacet: DurableObjectClass<SchedulerScopeTestFacet>;
 };
 
-type TestMode = "success" | "start-reject" | "authorization-reject" | "callback-reject";
+type TestMode = "success" | "start-reject" | "occurrence-cap" | "authorization-reject" | "callback-reject";
 type BlockPoint = "start" | "authorization" | "callback";
 
 let mode: TestMode = "success";
@@ -159,6 +159,11 @@ export class TestHooks extends WorkerEntrypoint {
     mark("start");
     await pauseIfBlocked("start");
     if (mode === "start-reject") throw new Error("opaque admission rejection");
+    if (mode === "occurrence-cap") {
+      const error = new Error("This trigger reached its occurrence deduplication limit.");
+      error.name = "WorkflowOccurrenceLimitError";
+      throw error;
+    }
     const callback = new TestCallback();
     const approvalQueue = new TestApprovalQueue();
     this.ctx.waitUntil(holdSessionUntilDisposed([callback.disposed, approvalQueue.disposed]));

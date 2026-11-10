@@ -5,7 +5,7 @@ import {
   WORKFLOW_DEFINITION_EXPIRED, WORKFLOW_INVOCATION_TTL_MS, dynamicDefinitionTtlMs, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
   type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery,
   type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunFailure, type WorkflowRunResult,
-  type WorkflowTriggerDefinitionRef, isLiveWorkflowDelivery,
+  type WorkflowTriggerDefinitionRef, isLiveWorkflowDelivery, WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME,
   type WorkflowRunRecord,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
@@ -371,8 +371,6 @@ export class WorkspaceWorkflowDefinitionStore {
       // The original occurrence identity remains in the suffix for readable durable evidence.
       let storedKey = `${hookId}:${occurrenceKey}`;
       let seenOccurrence = this.storage.workflowOccurrences.get(storedKey);
-      // Read tombstones written by the earlier FAC-113 candidate during rolling upgrades.
-      seenOccurrence ??= this.storage.workflowOccurrences.get(occurrenceKey);
       if (seenOccurrence && seenOccurrence.expiresAt > now) {
         // A crash can happen after admission but before the caller queues the run. Return the
         // original delivery while it is retained so the same verified occurrence can finish that
@@ -387,7 +385,9 @@ export class WorkspaceWorkflowDefinitionStore {
       if (seenOccurrence) this.#deleteOccurrence(seenOccurrence);
       let occurrenceCount = this.storage.workflowOccurrenceCounts.get(hookId)?.count ?? 0;
       if (occurrenceCount >= MAX_WORKFLOW_OCCURRENCES_PER_TRIGGER) {
-        throw new Error("This trigger reached its occurrence deduplication limit. Retry after older occurrences expire.");
+        let error = new Error("This trigger reached its occurrence deduplication limit. Retry after older occurrences expire.");
+        error.name = WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME;
+        throw error;
       }
       let deliveries = Array.from(this.storage.workflowDeliveries.list()).toSorted((a, b) => a.id - b.id);
       if (deliveries.length >= MAX_WORKFLOW_DELIVERIES) {
@@ -446,11 +446,6 @@ export class WorkspaceWorkflowDefinitionStore {
 
   #deleteOccurrence(occurrence: StoredWorkflowOccurrence): void {
     let expiryKey = `${String(occurrence.expiresAt).padStart(16, "0")}:${occurrence.key}`;
-    if (!Number.isSafeInteger(occurrence.hookId)) {
-      // Rows from the first candidate predate the expiry index and counters.
-      this.storage.workflowOccurrences.delete(occurrence.key);
-      return;
-    }
     this.#deleteOccurrenceKey(occurrence.key, occurrence.hookId, expiryKey);
   }
 
