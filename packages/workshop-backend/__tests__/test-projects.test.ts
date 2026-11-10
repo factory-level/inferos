@@ -4,12 +4,15 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { BACKEND, BACKEND_RESTART, UNIT_NODE, WORKERD_LIGHT } from "./test-projects.js";
+import { BACKEND, BACKEND_RESTART, BACKEND_SIGN_IN, UNIT_NODE, WORKERD_LIGHT } from "./test-projects.js";
 
 const here = import.meta.dirname;
-const PROJECTS = { "unit-node": UNIT_NODE, "workerd-light": WORKERD_LIGHT, backend: BACKEND, "backend-restart": BACKEND_RESTART };
+const PROJECTS = {
+  "unit-node": UNIT_NODE, "workerd-light": WORKERD_LIGHT, backend: BACKEND, "backend-restart": BACKEND_RESTART,
+  "backend-sign-in": BACKEND_SIGN_IN,
+};
 /** The files that run against the backend Worker, in either backend project. */
-const BACKEND_FILES = [...BACKEND, ...BACKEND_RESTART];
+const BACKEND_FILES = [...BACKEND, ...BACKEND_RESTART, ...BACKEND_SIGN_IN];
 const onDisk = readdirSync(here).filter(file => file.endsWith(".test.ts"));
 
 /**

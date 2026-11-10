@@ -49,10 +49,14 @@ async function open(opts: {
         get: () => ({
           whoami: async () => ({ id: "profile-id", name: "Test User" }),
           whoamiIfExists: async () => null,
+          // Finding a person by address asks whether the account it names is bound (ADR 0019).
+          isSubjectBound: async () => false,
           recordSharedGadgetOpen: async () => {},
           holdsSharedConfiguration: answerFor,
         }),
       },
+      // No one holds an address as their current, vouched one here.
+      userDirectory: { getByName: () => ({ accountForEmail: async () => null }) },
     },
   });
   return { overseer, asked, sharing };
