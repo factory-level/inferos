@@ -1123,6 +1123,7 @@ export function openInferOpsClient(
     // The demo data has no widget index: nothing is listed, and nothing claims it was.
     publishWidgetDefinition: async () => { throw new InferOpsError("UNAVAILABLE", DEMO_NO_WIDGET_INDEX); },
     withdrawWidgetDefinition: async () => { throw new InferOpsError("UNAVAILABLE", DEMO_NO_WIDGET_INDEX); },
+    searchWidgets: async () => { throw new InferOpsError("UNAVAILABLE", DEMO_NO_WIDGET_INDEX); },
     readWorkflowPolicy: async projectKey => {
       const { projectId, body } = await stub.readWorkflowPolicy(projectKey);
       return readWorkflowPolicyAnswer(body, projectId);

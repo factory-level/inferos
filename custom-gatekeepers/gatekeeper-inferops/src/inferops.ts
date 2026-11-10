@@ -109,8 +109,9 @@ import type {
   AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
-  WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace,
+  WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchResult,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { mergeWidgetSearches } from "@gadgets/workshop-shared/gatekeeper";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
   CredentialSource, isCredentialsChanged, isCredentialsExpired, type CredentialRead,
@@ -125,7 +126,7 @@ import {
   BOARD_WRITES, CheckRefused, PROPOSAL_APPROVE, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
 } from "./apply-attempts";
 import {
-  WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, listWorkspaceSlugs, openHttpInferOpsClient,
+  WIDGET_SEARCH_DENIED, WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, listWorkspaceSlugs, openHttpInferOpsClient,
   readCallerPrincipal, tableNotFound,
   type BoardSnapshotAnswer, type InferOpsAuthority, type InferOpsEndpoint,
 } from "./http-inferops";
@@ -1391,6 +1392,39 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
       }
     }
     return found;
+  }
+
+  /**
+   * The widgets the connected person may use that match `query` (FAC-13): InferOps' `widget.search`
+   * asked in each of their workspaces, with their own credentials, and merged (mergeWidgetSearches).
+   * `unavailable` with `reconnect` for an account without a connected person of the deployment's
+   * company (the stopgap bearer, demo data, a sign-in to renew), and with `no-workspace` when InferOps
+   * gives them none. A workspace where InferOps refuses for a missing `knowledge:read` is `denied`:
+   * asked, it adds nothing. Any other failure in a workspace is `unsearched`, and if every workspace
+   * failed so, the last failure is thrown.
+   */
+  async searchWidgets(query: string, k: number): Promise<WidgetSearchAnswer> {
+    const identity = await this.#widgetIndexIdentity();
+    if (!identity) return { status: "unavailable", reason: "reconnect" };
+    if (identity.workspaces.length === 0) return { status: "unavailable", reason: "no-workspace" };
+    const found: WidgetSearchResult[] = [];
+    let denied = 0;
+    let unsearched = 0;
+    let lastFailure: unknown;
+    for (const { workspaceId } of identity.workspaces) {
+      try {
+        found.push(await this.#widgetIndexClient(identity.endpoint, workspaceId).searchWidgets(query, k));
+      } catch (error) {
+        if (error instanceof InferOpsError && error.code === "FORBIDDEN" && error.detail === WIDGET_SEARCH_DENIED) {
+          denied++;
+          continue;
+        }
+        lastFailure = error;
+        unsearched++;
+      }
+    }
+    if (found.length === 0 && denied === 0) throw lastFailure;
+    return mergeWidgetSearches(found, k, { denied, unsearched });
   }
 
   /** Lists one widget version in the person's own workspace `workspaceId`: `widget.publish`. */

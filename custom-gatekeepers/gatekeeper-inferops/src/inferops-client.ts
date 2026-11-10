@@ -10,6 +10,7 @@ import type {
   WikiSearchHit, WikiStructure,
 } from "./types";
 import type { WorkflowHeadRecord } from "./workflow-policy";
+import type { WidgetSearchResult } from "@gadgets/workshop-shared/gatekeeper";
 import type { Event as DotEvent } from "@ag-ui/core";
 
 /** One validated AG-UI event of a Dot run (`@ag-ui/core` 1.0.2, the version InferOps emits). */
@@ -594,6 +595,14 @@ export interface InferOpsClient {
    * Refused as `publishWidgetDefinition` is.
    */
   withdrawWidgetDefinition(sourceId: string, sourceVersion: number): Promise<boolean>;
+
+  /**
+   * The widgets the person may use in the client's own workspace that match `query`, their intent
+   * in their own words, as InferOps' `widget.search` (FAC-13): built-in kinds and published widget
+   * definitions, best first, at most `k` of each. Definitions only, never an instance or a record.
+   * An InferOps without it (404) or an outage is UNAVAILABLE, never "nothing found".
+   */
+  searchWidgets(query: string, k: number): Promise<WidgetSearchResult>;
 
   /**
    * The published content-workflow policy head of the project with key `projectKey`, as InferOps'

@@ -11,7 +11,7 @@ import {
   type WidgetStateMachine, type WidgetStateSnapshot,
 } from '@gadgets/workshop-shared/widget-state';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
-import { Gatekeeper, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchUnavailableReason, mergeWidgetSearches } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { subjectAccountName, type SubjectBinding } from "./account-subject";
@@ -260,6 +260,9 @@ export async function presentationCompanyOf(
 // Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names, by a console
 // publication (see UserDurableObject.widgetIndexWorkspaces).
 type WidgetIndexAccountStub = Required<Pick<GatekeeperUser, "widgetIndexWorkspaces" | "registerWidget" | "withdrawWidget">>;
+// Called only on accounts of the vendor SHARED_CONFIGURATION_GATEKEEPER names, for the person's own
+// widget search (see UserDurableObject.searchWidgets).
+type WidgetSearchAccountStub = Required<Pick<GatekeeperUser, "searchWidgets">>;
 
 /** A workspace in which the person may list widgets, with the account of theirs that may. */
 export type PersonWidgetIndexWorkspace = WidgetIndexWorkspace & { accountId: number };
@@ -2673,6 +2676,43 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
       }
     }
     return [...found.values()];
+  }
+
+  /**
+   * The widgets this person may use that match `query` (FAC-13), as the deployment's
+   * SHARED_CONFIGURATION_GATEKEEPER vendor answers through each of their own connected accounts
+   * with live credentials, merged (mergeWidgetSearches). `unavailable` when nothing could be asked:
+   * no vendor (`not-configured`), no account of it (`not-connected`), only accounts whose sign-in
+   * must be renewed (`reconnect`), or every account answering so itself. An account to reconnect
+   * or one that failed beside one that answered counts as `unsearched`. Throws when every account
+   * asked failed, so a failure never reads as "nothing found".
+   */
+  async searchWidgets(query: string, k: number): Promise<WidgetSearchAnswer> {
+    let vendorId = getSharedConfigurationGatekeeper(this.env);
+    if (!vendorId) return { status: "unavailable", reason: "not-configured" };
+    let accounts = [...this.#connectedAccountRecords()].filter(record => record.vendorId === vendorId);
+    if (accounts.length === 0) return { status: "unavailable", reason: "not-connected" };
+    let found: Extract<WidgetSearchAnswer, { status: "searched" }>[] = [];
+    let unavailable: WidgetSearchUnavailableReason[] = [];
+    let failed: unknown;
+    let failures = 0;
+    for (let record of accounts) {
+      if (!areCredentialsValid(record)) { unavailable.push("reconnect"); continue; }
+      try {
+        let answer = await (record.account as unknown as WidgetSearchAccountStub).searchWidgets(query, k);
+        if (answer.status === "searched") found.push(answer);
+        else unavailable.push(answer.reason);
+      } catch (error) {
+        failed = error;
+        failures++;
+      }
+    }
+    if (found.length === 0) {
+      if (failed !== undefined) throw failed;
+      // The most actionable reason first: renewing a sign-in, then the service's own.
+      return { status: "unavailable", reason: unavailable.includes("reconnect") ? "reconnect" : unavailable[0]! };
+    }
+    return mergeWidgetSearches(found, k, { denied: 0, unsearched: failures + unavailable.length });
   }
 
   /**

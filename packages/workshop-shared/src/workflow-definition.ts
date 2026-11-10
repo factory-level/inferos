@@ -16,6 +16,38 @@ export const MAX_WORKFLOW_DEFINITION_REVISIONS = 50;
 /** Longest workflow definition title, in characters. */
 export const MAX_WORKFLOW_DEFINITION_TITLE_LENGTH = 120;
 
+/**
+ * How long a dynamic, unsaved workflow definition lasts by default (FAC-124), in hours: 24, a
+ * PROPOSED default (inferops docs/human/architecture/workflows.md, Retention rules, says no duration
+ * is selected yet). A deployment sets `WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS` from
+ * `MIN_DYNAMIC_DEFINITION_TTL_HOURS` to `MAX_DYNAMIC_DEFINITION_TTL_HOURS`.
+ */
+export const DEFAULT_DYNAMIC_DEFINITION_TTL_HOURS = 24;
+
+/** Shortest TTL a deployment may set for a dynamic definition, in hours. */
+export const MIN_DYNAMIC_DEFINITION_TTL_HOURS = 1;
+
+/** Longest TTL a deployment may set for a dynamic definition, in hours (30 days). */
+export const MAX_DYNAMIC_DEFINITION_TTL_HOURS = 720;
+
+/** The refusal of any new use of a dynamic definition past its expiry (FAC-124). */
+export const WORKFLOW_DEFINITION_EXPIRED = "This workflow expired. Create it again.";
+
+/**
+ * A dynamic definition's TTL in milliseconds from the deployment's
+ * `WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS`: the default when unset, else a whole number of hours in
+ * range. Anything else throws, naming the setting, so a misconfigured deployment refuses to create
+ * dynamic definitions rather than pick a duration nobody chose.
+ */
+export function dynamicDefinitionTtlMs(setting: string | undefined): number {
+  if (setting === undefined) return DEFAULT_DYNAMIC_DEFINITION_TTL_HOURS * 60 * 60 * 1000;
+  let hours = /^\d+$/.test(setting) ? Number(setting) : Number.NaN;
+  if (!(hours >= MIN_DYNAMIC_DEFINITION_TTL_HOURS && hours <= MAX_DYNAMIC_DEFINITION_TTL_HOURS)) {
+    throw new Error(`WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS must be a whole number of hours from ${MIN_DYNAMIC_DEFINITION_TTL_HOURS} to ${MAX_DYNAMIC_DEFINITION_TTL_HOURS}.`);
+  }
+  return hours * 60 * 60 * 1000;
+}
+
 /** Most delivery records one workspace keeps; the oldest is dropped past it. */
 export const MAX_WORKFLOW_DELIVERIES = 1000;
 
@@ -57,6 +89,11 @@ export type WorkflowDefinition = {
   /** Saved revisions visible to this viewer, oldest first. */
   revisions: WorkflowDefinitionRevision[];
   published: WorkflowDefinitionPublication | null;
+  /**
+   * Present only on a dynamic, unsaved definition (FAC-124): when it stops being available for new
+   * use, unless saved first or kept by a trigger pinned to it. Saving removes it.
+   */
+  expiresAt?: Date;
 };
 
 /** What a person saves: a title and the workflow gadget whose current code becomes a revision. */
@@ -66,6 +103,12 @@ export type WorkflowDefinitionSave = {
   /** 1 to `MAX_WORKFLOW_DEFINITION_TITLE_LENGTH` characters. */
   title: string;
   gadgetId: WorkpieceId;
+  /**
+   * `false` creates a dynamic, unsaved definition, which expires at the deployment's TTL
+   * (`dynamicDefinitionTtlMs`) unless saved (FAC-124); only for a new definition. Absent or `true`
+   * keeps the definition: a new one is saved, and saving an existing dynamic one retains it.
+   */
+  retain?: boolean;
 };
 
 /**

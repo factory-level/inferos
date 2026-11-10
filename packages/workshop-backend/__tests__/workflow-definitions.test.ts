@@ -364,6 +364,18 @@ describe("through the Overseer", () => {
     return { overseer, store };
   }
 
+  // FAC-124: a dynamic definition over the RPC, and a tampered `retain` refused there too.
+  it("creates a dynamic definition over the RPC, with its expiry, and refuses a retain that isn't a boolean", async () => {
+    let { overseer } = await session({ role: "build", answers: { build: true, publish: true } });
+    let made = await overseer.saveWorkflowDefinition({ title: "One-off", gadgetId: GADGET, retain: false });
+    expect(made.expiresAt).toBeInstanceOf(Date);
+    let kept = await overseer.saveWorkflowDefinition({ id: made.id, title: "Kept", gadgetId: GADGET });
+    expect(kept).not.toHaveProperty("expiresAt");
+    // Refused at the RPC boundary, before the store.
+    await expect(async () => overseer.saveWorkflowDefinition({ title: "X", gadgetId: GADGET, retain: "no" } as never))
+      .rejects.toThrow("retain");
+  });
+
   it("saves and publishes as two acts for someone the deployment lets build and publish", async () => {
     let { overseer } = await session({ role: "build", answers: { build: true, publish: true } });
     let saved = await overseer.saveWorkflowDefinition({ title: "Intake", gadgetId: GADGET });

@@ -13,6 +13,7 @@ import { resolve } from "node:path";
 import type { RpcStub } from "capnweb";
 import type { AuthenticatedApi, Overseer, WorkpieceId } from "@gadgets/workshop-shared/api";
 import type { ConsoleWidgetEntry, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import type { WidgetSearchAnswer } from "@gadgets/workshop-shared/gatekeeper";
 import { diffFiles, type CodeContent } from "@gadgets/workshop-shared/code-change";
 import { startHarness, type Harness } from "../src/harness.js";
 import { INFERLAB_ORIGIN, INFEROPS_ORIGIN, InferOpsFake, WORKSPACES, type FakePerson, type WorkspaceSlug } from "../src/inferops-fake.js";
@@ -278,3 +279,84 @@ async function created(space: RpcStub<Overseer>, content: OperateConsoleContent)
   const draft = await space.createConsole(content);
   return [draft.id, draft.revision];
 }
+
+/** The matches of a search that ran (FAC-13), failing the test if it asked nothing. */
+function searched(answer: WidgetSearchAnswer) {
+  if (answer.status !== "searched") throw new Error(`Expected a search, got ${JSON.stringify(answer)}`);
+  return answer;
+}
+
+describe("finding a published widget by intent (FAC-13)", () => {
+  it("finds a company widget for another person of the company, through their own InferOps sign-in", async () => {
+    const builder = await newUser("searchbuilder", ["operations", "mind"]);
+    fake.grantPublishConfiguration(builder.person, "operations");
+    const word = `overduebills${Date.now().toString(36)}`;
+    const blueprintId = await publishWidget(builder.api, word);
+    const { space, entry, screen } = await consoleSpace(builder, blueprintId);
+    const draft = await space.createConsole(consoleOf(screen.id, [entry]));
+    await space.publishConsole(draft.id, draft.revision);
+
+    const operator = await newUser("searchoperator", ["operations"]);
+    const found = searched(await operator.api.searchWidgets(`show ${word}`));
+    expect(found).toMatchObject({ ranking: "keyword", denied: 0, unsearched: 0 });
+    // "show" also matches other widgets' purposes ("Shows who is free"), at a lower score: the one
+    // matching every word ranks first, once.
+    expect(found.definitions[0]).toEqual(
+      expect.objectContaining({ sourceId: blueprintId, sourceVersion: 1, title: "Free technicians", score: 1 }));
+    expect(found.definitions.filter(d => d.sourceId === blueprintId)).toHaveLength(1);
+    expect(found.definitions.slice(1).every(d => d.score < 1)).toBe(true);
+    // Asked with the operator's own credentials, never the builder's or a shared one.
+    const asked = fake.requests.filter(r => r.path.startsWith("/knowledge/widget-search"));
+    expect(asked.length).toBeGreaterThan(0);
+    for (const request of asked.filter(r => r.person === operator.username)) {
+      expect(fake.accessTokensOf(operator.person)).toContain(request.token);
+    }
+    // A query that matches nothing finds nothing; a blank one is refused before anything is asked.
+    expect(searched(await operator.api.searchWidgets(`zzqx${word}`)).definitions).toEqual([]);
+    const before = fake.requests.length;
+    await expect(operator.api.searchWidgets("   ")).rejects.toThrow("Say what you want to find");
+    expect(fake.requests.length).toBe(before);
+  });
+
+  it("counts a workspace where InferOps gives no knowledge:read as asked and adding nothing", async () => {
+    const denied = await newUser("searchdenied", ["operations"]);
+    fake.setKnowledgeAccess(denied.person, "none");
+    expect(await denied.api.searchWidgets("technicians"))
+      .toEqual({ status: "searched", hits: [], definitions: [], ranking: "keyword", denied: 1, unsearched: 0 });
+  });
+
+  it("says nothing was asked, and why, rather than finding no widgets", async () => {
+    // No InferOps account at all.
+    const [loneName] = nextUsernames("searchlone");
+    const lone = await signUp(connect(harness.url), loneName!);
+    expect(await lone.searchWidgets("technicians")).toEqual({ status: "unavailable", reason: "not-connected" });
+
+    // InferOps gives the person no workspace to search (the sign-in records which they hold).
+    const homeless = await newUser("searchhomeless", []);
+    expect(await homeless.api.searchWidgets("technicians")).toEqual({ status: "unavailable", reason: "no-workspace" });
+
+    // The person's sign-in ended at InferLab: once the account is marked expired, they're told to reconnect.
+    const lapsed = await newUser("searchlapsed", ["operations"]);
+    fake.revokeSessions(lapsed.person);
+    await lapsed.api.searchWidgets("technicians").catch(() => undefined);
+    await waitFor("the account to be marked expired", async () =>
+      (await listConnectedAccounts(lapsed.api)).some(a => a.vendorId === VENDOR && !a.credentialsValid) || null);
+    expect(await lapsed.api.searchWidgets("technicians")).toEqual({ status: "unavailable", reason: "reconnect" });
+  });
+
+  it("reports workspaces it couldn't search, and fails only when none could be", async () => {
+    const partial = await newUser("searchpartial", ["operations", "mind"]);
+    try {
+      expect(searched(await partial.api.searchWidgets("technicians"))).toMatchObject({ denied: 0, unsearched: 0 });
+      fake.widgetSearchFaults.set("mind", "down");
+      expect(searched(await partial.api.searchWidgets("technicians"))).toMatchObject({ denied: 0, unsearched: 1 });
+      // A 403 that isn't a missing knowledge:read is a workspace not searched, never "denied".
+      fake.widgetSearchFaults.set("mind", "forbidden");
+      expect(searched(await partial.api.searchWidgets("technicians"))).toMatchObject({ denied: 0, unsearched: 1 });
+      fake.widgetSearchFaults.set("operations", "down");
+      await expect(partial.api.searchWidgets("technicians")).rejects.toThrow();
+    } finally {
+      fake.widgetSearchFaults.clear();
+    }
+  });
+});

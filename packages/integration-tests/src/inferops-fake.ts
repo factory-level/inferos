@@ -281,6 +281,11 @@ export class InferOpsFake {
   readonly widgetDefinitions = new Map<string, FakeWidgetDefinition>();
   /** Answer the next N widget index writes with a 503, before changing anything. */
   failNextWidgetWrites = 0;
+  /**
+   * Widget searches in these workspaces fail (FAC-13): `down` is a 503, `forbidden` a 403 that isn't
+   * a missing permission (InferOps' product refusal).
+   */
+  readonly widgetSearchFaults = new Map<WorkspaceSlug, "down" | "forbidden">();
 
   /** Answer the next N InferOps API calls with a 503, before doing anything. */
   failNextRequests = 0;
@@ -671,6 +676,7 @@ export class InferOpsFake {
           person.publishesConfiguration.has(slug) })) });
     }
     if (url.pathname.startsWith("/knowledge/widget-definitions")) return this.#widgetIndex(url, method, request, record, slug, person);
+    if (url.pathname === "/knowledge/widget-search" && method === "GET") return this.#widgetSearch(url, slug, person);
     if (url.pathname.startsWith("/knowledge/")) return this.#knowledge(url, method, request, record, slug, person);
     if (url.pathname === "/object/types" && method === "GET") {
       return json({ types: Object.values(TABLES).filter(t => t.workspace === slug).map(tableType) });
@@ -934,6 +940,32 @@ export class InferOpsFake {
       return json({ withdrawn: this.widgetDefinitions.delete(key) });
     }
     return failure(404, "NOT_FOUND", "no route");
+  }
+
+  /**
+   * `widget.search` in workspace `slug` (FAC-13), as InferOps answers it with no embedding provider:
+   * any product's workspace, `knowledge:read` (a person with none is refused), the definitions this
+   * workspace may find (company-visible, or its own) matched by the query's words, best first. The
+   * fake has no built-in widget catalog, so `hits` is empty.
+   */
+  #widgetSearch(url: URL, slug: WorkspaceSlug, person: FakePerson): Response {
+    const fault = this.widgetSearchFaults.get(slug);
+    if (fault === "down") return failure(503, "UNAVAILABLE", "down");
+    if (fault === "forbidden") return failure(403, "FORBIDDEN", "Wrong product for this route");
+    if (person.knowledge === "none") return failure(403, "FORBIDDEN", "Missing permission: knowledge:read");
+    const query = (url.searchParams.get("query") ?? "").trim();
+    if (!query) return failure(400, "VALIDATION", "Say what you want to find");
+    const k = Number(url.searchParams.get("k") ?? "8");
+    const terms = [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(t => t.length >= 2))].slice(0, 8);
+    const definitions = [...this.widgetDefinitions.values()]
+      .filter(d => d.visibility === "company" || d.workspace === slug)
+      .map(d => ({ source: "inferos.blueprint", sourceId: d.sourceId, sourceVersion: d.sourceVersion, title: d.title,
+        purpose: d.purpose,
+        score: terms.length === 0 ? 0 : terms.filter(t => `${d.title} ${d.purpose}`.toLowerCase().includes(t)).length / terms.length }))
+      .filter(d => d.score > 0)
+      .toSorted((a, b) => b.score - a.score || a.title.localeCompare(b.title))
+      .slice(0, k);
+    return json({ hits: [], definitions, ranking: "keyword" });
   }
 
   /** InferOps' knowledge routes, for one request already authorized into workspace `slug`. */
