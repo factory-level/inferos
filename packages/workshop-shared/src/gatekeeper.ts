@@ -1845,7 +1845,11 @@ export interface HookController<Hook extends RpcTarget> extends WorkerEntrypoint
 }
 
 /** An admitted request to run a hook now (HookController.invoke); its id is the overseer's. */
-export type HookInvocation = { invocationId: string };
+export type HookOccurrence =
+  | { kind: "schedule"; scheduledTime: number }
+  | { kind: "event"; provider: string; deliveryId: string };
+
+export type HookInvocation = { invocationId: string; occurrence?: never };
 
 /**
  * Object passed to HookController.enable(), used to inform the overseer when a hook event occurs.
@@ -1861,11 +1865,14 @@ export interface HookInitiator<Hook extends RpcTarget> extends WorkerEntrypoint 
    * observation. Some hooks may even pass callbacks or interpret the return value in a way that
    * causes side effects, which should be registered as actions.
    *
-   * `request` is the invocation from `HookController.invoke()` when this delivery is one a person
-   * asked for, and must be omitted otherwise. The overseer accepts only an invocation it admitted
-   * for this hook and not yet delivered.
+   * `request` is either the invocation from `HookController.invoke()` when this delivery is one a
+   * person asked for, or a server-verified occurrence supplied by a scheduler/event ingress. A
+   * caller must never forward occurrence metadata from a gadget or request payload.
    */
-  startHook(request?: HookInvocation): Promise<{callback: RpcStub<Hook>, approvalQueue: RpcStub<ApprovalQueue>}>;
+  startHook(request?: HookInvocation | { occurrence: HookOccurrence }): Promise<
+    | { alreadyDelivered: true }
+    | { alreadyDelivered?: false; callback: RpcStub<Hook>; approvalQueue: RpcStub<ApprovalQueue> }
+  >;
 }
 
 /**

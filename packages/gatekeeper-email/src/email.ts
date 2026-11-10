@@ -27,6 +27,7 @@ import {
   EmailAttachment,
 } from "./types";
 import PostalMime from "postal-mime";
+import { emailOccurrenceId } from "./occurrence";
 import type { Email } from "postal-mime";
 import TYPES_CODE from "./types.txt";
 import EMAIL_CONFIGURATOR_HTML from "./generated/email-configurator-ui.txt";
@@ -192,8 +193,14 @@ export default {
     let stub: DurableObjectStub<EmailAddress> =
         ctx.exports.EmailAddress.getByName(name);
 
-    // Parse the email using postal-mime.
-    let parsed: Email = await PostalMime.parse(message.raw);
+    // Hash provider-received bytes plus the SMTP envelope recipient before parsing. Do not use
+    // RFC Message-ID: it is supplied by the sender and is not a delivery identity.
+    const [parseStream, hashStream] = message.raw.tee();
+    const rawBytes = await new Response(hashStream).arrayBuffer();
+    const deliveryId = await emailOccurrenceId(new Uint8Array(rawBytes), message.to);
+
+    // Parse the same provider-received bytes after the identity is minted.
+    let parsed: Email = await PostalMime.parse(parseStream);
 
     // Build the structured IncomingEmail.
     let from: EmailAddressType = parsed.from
@@ -229,7 +236,7 @@ export default {
     };
 
     try {
-      await stub.receiveEmail(incomingEmail);
+      await stub.receiveEmail(incomingEmail, deliveryId);
     } catch (err) {
       logger.error("email delivery failed", {
         event: "email.delivery.failed", error: err,
@@ -658,7 +665,7 @@ export class EmailAddress extends DurableObject<Env> {
     }
   }
 
-  async receiveEmail(email: IncomingEmail): Promise<void> {
+  async receiveEmail(email: IncomingEmail, deliveryId: string): Promise<void> {
     let hookInitiator =
         this.ctx.storage.kv.get<Fetcher<HookInitiator<EmailHookTarget>>>("hook");
     if (!hookInitiator) {
@@ -669,7 +676,11 @@ export class EmailAddress extends DurableObject<Env> {
     // and an ApprovalQueue for logging observations. Use `using` to dispose the result (and its
     // contained stubs, including approvalQueue) at end of scope.
     // @ts-ignore TODO: TS doesn't understand that the returned promise is disposable?
-    using startHookResult = hookInitiator.startHook();
+    using startHookCall = hookInitiator.startHook({
+      occurrence: { kind: "event", provider: "cloudflare-email", deliveryId },
+    });
+    const startHookResult = await startHookCall;
+    if ("alreadyDelivered" in startHookResult && startHookResult.alreadyDelivered) return;
 
     // Pipeline: access approvalQueue on the not-yet-resolved promise and call through it.
     let sender = email.from.name

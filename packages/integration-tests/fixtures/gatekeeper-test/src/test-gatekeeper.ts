@@ -358,7 +358,9 @@ export class TestControl extends DurableObject<Cloudflare.Env> {
     const { initiator } = this.#hook(key);
     if (!initiator) return { error: "hook was never enabled" };
     try {
-      const { callback, approvalQueue } = await initiator.startHook();
+      const result = await initiator.startHook();
+      if ("alreadyDelivered" in result && result.alreadyDelivered) return { fired: true };
+      const { callback, approvalQueue } = result;
       try {
         await approvalQueue.authorizeObservation({
           title: `Hook ${key} requested ${value}`,

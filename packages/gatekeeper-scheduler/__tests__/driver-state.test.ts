@@ -24,6 +24,23 @@ const oneShot: ScheduleRegistration = {
 };
 
 describe("schedule state", () => {
+  it("skips multiple missed slots by default and coalesces at the latest missed slot explicitly", () => {
+    const active = createSchedule(recurring, 0);
+    expect(beginDueRun(active, 240_000, "skip", 600_000)).toEqual({
+      ...recurring,
+      status: "active",
+      nextFire: 300_000,
+    });
+    expect(beginDueRun(createSchedule({ ...recurring, missedRuns: "coalesce" }, 0),
+      240_000, "coalesce", 600_000)).toMatchObject({
+      status: "pending",
+      stage: "admission",
+      runId: "coalesce",
+      scheduledTime: 240_000,
+      occurrenceCount: undefined,
+    });
+  });
+
   it("creates enabled state from the original phase and expires a past one-shot", () => {
     expect(createSchedule(recurring, 90_000)).toEqual({
       ...recurring,

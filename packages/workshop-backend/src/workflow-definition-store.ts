@@ -9,6 +9,7 @@ import {
   type WorkflowRunRecord,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
+import type { HookOccurrence } from "@gadgets/workshop-shared/gatekeeper";
 
 /** A workflow definition as stored: every saved revision, whoever is looking. */
 export type StoredWorkflowDefinition = Omit<WorkflowDefinition, "revisions"> & {
@@ -20,6 +21,10 @@ export type StoredTriggerPin = { hookId: number; definitionId: string; revision:
 
 /** A stored delivery, numbered so the oldest can be dropped. */
 export type StoredWorkflowDelivery = WorkflowDefinitionDelivery & { id: number };
+
+/** Dedupe tombstones survive delivery-history eviction for the configured occurrence window. */
+export type StoredWorkflowOccurrence = { key: string; deliveryId: number; expiresAt: number };
+const WORKFLOW_OCCURRENCE_TTL_MS = 7 * 24 * 60 * 60_000;
 
 /**
  * A run a person asked for, queued in the workspace that executes it (FAC-112): the firing's one
@@ -83,7 +88,7 @@ const NOT_FOUND = "Workflow definition not found.";
 export class WorkspaceWorkflowDefinitionStore {
   constructor(private durableStorage: DurableObjectStorage,
       private storage: Pick<OverseerStorage,
-          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId" |
+          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "workflowOccurrences" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
           "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired" |
           "workflowRunQueue">,
@@ -301,7 +306,8 @@ export class WorkspaceWorkflowDefinitionStore {
   fire(hookId: number, hookGadgetId: WorkpieceId | null,
        headOf: (gadgetId: WorkpieceId) => string | undefined,
        ownerCanBuild: (profileId: string) => boolean,
-       invocationId?: string): (WorkflowDefinitionDelivery & { deliveryId: number }) | null {
+       invocationId?: string, occurrence?: HookOccurrence):
+       ({ alreadyDelivered: true } | (WorkflowDefinitionDelivery & { deliveryId: number })) | null {
     // A delivery a person asked for names an invocation minted here for this trigger, not yet run;
     // anything else starts nothing.
     let invocation = invocationId === undefined ? undefined : this.storage.workflowInvocations.get(invocationId);
@@ -312,6 +318,13 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowInvocations.delete(invocation.id);
       throw new Error("That run request expired. Ask again.");
     }
+    const occurrenceKey = invocation
+      ? `manual:${hookId}:${invocation.id}`
+      : occurrence?.kind === "schedule"
+        ? `schedule:${hookId}:${occurrence.scheduledTime}`
+        : occurrence?.kind === "event"
+          ? `event:${hookId}:${encodeURIComponent(occurrence.provider)}:${encodeURIComponent(occurrence.deliveryId)}`
+          : `press:${hookId}:${crypto.randomUUID()}`;
     let pin = this.storage.workflowTriggerPins.get(hookId);
     if (!pin) {
       if (invocation) throw new Error(CANNOT_RUN);
@@ -344,9 +357,25 @@ export class WorkspaceWorkflowDefinitionStore {
       throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
     }
     return this.durableStorage.transactionSync(() => {
+      let now = Date.now();
+      for (let old of this.storage.workflowOccurrences.list()) {
+        if (old.expiresAt <= now) this.storage.workflowOccurrences.delete(old.key);
+      }
+      let seenOccurrence = this.storage.workflowOccurrences.get(occurrenceKey);
+      if (seenOccurrence && seenOccurrence.expiresAt > now) {
+        // A crash can happen after admission but before the caller queues the run. Return the
+        // original delivery while it is retained so the same verified occurrence can finish that
+        // admission. queueRun is idempotent once execution is recorded.
+        let existing = this.storage.workflowDeliveries.get(seenOccurrence.deliveryId);
+        if (existing) {
+          let { id: _, ...shown } = existing;
+          return { ...shown, deliveryId: existing.id };
+        }
+        return { alreadyDelivered: true as const };
+      }
+      if (seenOccurrence) this.storage.workflowOccurrences.delete(occurrenceKey);
       let deliveries = Array.from(this.storage.workflowDeliveries.list()).toSorted((a, b) => a.id - b.id);
       if (deliveries.length >= MAX_WORKFLOW_DELIVERIES) {
-        let now = Date.now();
         let isLive = (candidate: StoredWorkflowDelivery) => isLiveWorkflowDelivery(candidate, now);
         let terminal = deliveries.find(candidate => !isLive(candidate));
         if (!terminal) {
@@ -379,6 +408,9 @@ export class WorkspaceWorkflowDefinitionStore {
       };
       if (invocation) this.storage.workflowInvocations.delete(invocation.id);
       this.storage.workflowDeliveries.put(delivery);
+      this.storage.workflowOccurrences.put({
+        key: occurrenceKey, deliveryId: id, expiresAt: now + WORKFLOW_OCCURRENCE_TTL_MS,
+      });
       let { id: _, ...shown } = delivery;
       return { ...shown, deliveryId: id };
     });
@@ -675,15 +707,16 @@ export class WorkspaceWorkflowDefinitionStore {
   }
 
   /**
-   * Queue the run delivery `deliveryId` admitted for a person (FAC-112), with the firing's one call:
-   * recorded together with its `execution` (`queued`) in one step, so the run is queued exactly when
-   * its record says so. Refuses a delivery no person asked for, a run already queued or ended
-   * (`WORKFLOW_RUN_ALREADY_STARTED`), and arguments storage can't hold (a function or a stub).
+   * Queue an admitted workflow delivery with the firing's one call: recorded together with its
+   * `execution` (`queued`) in one step. For a verified external occurrence, retrying the same
+   * delivery after a crash is a no-op once queued; a person-requested delivery retains the
+   * single-use refusal. Arguments storage cannot hold a function or stub.
    */
   queueRun(hookId: number, deliveryId: number, method: string | null, args: unknown[]): void {
     let delivery = this.storage.workflowDeliveries.get(deliveryId);
-    if (!delivery?.invocation || !delivery.run || delivery.hookId !== hookId) throw new Error(CANNOT_RUN);
+    if (!delivery?.run || delivery.hookId !== hookId) throw new Error(CANNOT_RUN);
     if (delivery.execution || this.storage.workflowRunQueue.get(deliveryId)) {
+      if (!delivery.invocation) return;
       throw new Error(WORKFLOW_RUN_ALREADY_STARTED);
     }
     try {

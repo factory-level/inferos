@@ -68,6 +68,7 @@ export type ScheduleControllerProps = {
   title: string;
   description: string;
   occurrences?: NormalizedScheduleOccurrences;
+  missedRuns?: "skip" | "coalesce";
 };
 
 type SessionDriver = Pick<ScheduleDriver, "listWorkspace">;

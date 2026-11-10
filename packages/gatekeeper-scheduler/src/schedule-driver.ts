@@ -52,7 +52,7 @@ type StoredCapabilities = {
 type HookResult = {
   callback: RpcStub<ScheduleHookTarget>;
   approvalQueue: RpcStub<ApprovalQueue>;
-};
+} | { alreadyDelivered: true };
 
 export type ScheduleActivation = ScheduleRegistration & {
   title: string;
@@ -443,7 +443,9 @@ export class ScheduleDriver extends DurableObject {
     let hookResult: HookResult | undefined;
     try {
       // @ts-expect-error Worker RPC promises are disposable even though the mapped type omits it.
-      using hookCall = capabilities.initiator.startHook();
+      using hookCall = capabilities.initiator.startHook({
+        occurrence: { kind: "schedule", scheduledTime: prepared.scheduledTime },
+      });
       try {
         // Await admission rather than pipeline: its rejection must skip this occurrence before the
         // callback attempt is counted or either returned capability is used.
@@ -456,6 +458,10 @@ export class ScheduleDriver extends DurableObject {
 
       const admitted = this.#markAdmitted(prepared, Date.now());
       if (!admitted || !hookResult) return false;
+      if ("alreadyDelivered" in hookResult && hookResult.alreadyDelivered) {
+        this.#completePending(prepared, Date.now());
+        return false;
+      }
 
       const firing: ScheduledFiring = {
         scheduleId: prepared.scheduleId,
@@ -710,6 +716,7 @@ function toScheduleSummary(schedule: StoredSchedule): ScheduleSummary {
     description: schedule.description,
     cadence: toScheduleCadence(schedule.state.spec),
     occurrences: schedule.state.occurrences,
+    ...(schedule.state.spec.kind !== "once" ? { missedRuns: schedule.state.missedRuns ?? "skip" } : {}),
     occurrenceCount: schedule.state.occurrences ? schedule.state.occurrenceCount ?? 0 : undefined,
   };
   const state = schedule.state;

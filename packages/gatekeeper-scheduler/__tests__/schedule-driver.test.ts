@@ -87,7 +87,11 @@ async function makeActiveScheduleDue(
 ): Promise<void> {
   await updateSchedule(driver, workspaceId, scheduleId, (stored) => {
     if (stored.state.status !== "active") throw new Error("Expected active schedule");
-    return { ...stored, state: { ...stored.state, nextFire: 1 } };
+    // Use an occurrence on the schedule's actual phase. `1` used to force due state, but the
+    // missed-run logic correctly treats that noncanonical timestamp as several elapsed slots.
+    const { spec } = stored.state;
+    const nextFire = spec.kind === "once" ? 1 : spec.kind === "interval" ? spec.anchorMs : spec.rule.anchorMs;
+    return { ...stored, state: { ...stored.state, nextFire } };
   });
 }
 
@@ -233,6 +237,7 @@ describe("ScheduleDriver", () => {
     await abortAllDurableObjects();
     driver = testEnv.SCHEDULE_DRIVER.getByName("reconstruction");
     await makeActiveScheduleDue(driver, "workspace-a", "schedule-a");
+    const dueAt = (await driver.getSchedule("workspace-a", "schedule-a"))?.state.nextFire;
     expect(await runDurableObjectAlarm(driver)).toBe(true);
 
     const stored = await driver.getSchedule("workspace-a", "schedule-a");
@@ -242,6 +247,7 @@ describe("ScheduleDriver", () => {
       "authorize",
       "callback",
     ]);
+    expect((await testEnv.TEST_HOOKS.read()).occurrences).toEqual([{ kind: "schedule", scheduledTime: dueAt }]);
   });
 
   it("completes consecutive Sunday and Wednesday deliveries for a weekly schedule", async () => {
@@ -341,6 +347,7 @@ describe("ScheduleDriver", () => {
         description: "Test capability replacement.",
         cadence: { kind: "interval", everyMs: 60_000, anchorMs: activationTime },
         occurrences: { count: 2 },
+        missedRuns: "skip",
         occurrenceCount: 0,
         status: "active",
         nextFire: activationTime + 60_000,
@@ -759,7 +766,9 @@ describe("ScheduleDriver", () => {
           if (stored.state.status !== "active") throw new Error("Expected active schedule");
           state.storage.kv.put<StoredSchedule>(key, {
             ...stored,
-            state: { ...stored.state, nextFire: 1 },
+            // Keep the due timestamp on the recurrence phase. Timestamp 1 is noncanonical
+            // and now correctly looks like a large missed backlog.
+            state: { ...stored.state, nextFire: activationTime },
           });
         }
       });
