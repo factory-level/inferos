@@ -14,6 +14,7 @@ let container: HTMLDivElement
 const onOpen = vi.fn<(entry: ConsoleEntry, source: ConsoleSource) => void>()
 const onEdit = vi.fn<(entry: ConsoleEntry) => void>()
 const onPublish = vi.fn<(entry: ConsoleEntry) => void>()
+const onSimulate = vi.fn<(entry: ConsoleEntry) => void>()
 const screens = (count: number): WorkspaceScreensState => ({ status: 'ready', workspaces: [{
   workspace: { id: 'workspace', title: 'Operations' } as ConsoleEntry['workspace'], screens: [], flows: [], publishedScreens: {},
   consoles: Array.from({ length: count }, (_, index) => {
@@ -24,11 +25,11 @@ const screens = (count: number): WorkspaceScreensState => ({ status: 'ready', wo
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-  onOpen.mockClear(); onEdit.mockClear(); onPublish.mockClear()
+  onOpen.mockClear(); onEdit.mockClear(); onPublish.mockClear(); onSimulate.mockClear()
 })
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
 const render = (count: number, highlighted?: string) => act(() => root.render(
-  <ConsoleMosaic screens={screens(count)} onOpen={onOpen} onEdit={onEdit} onPublish={onPublish} highlighted={highlighted} />))
+  <ConsoleMosaic screens={screens(count)} onOpen={onOpen} onEdit={onEdit} onPublish={onPublish} onSimulate={onSimulate} highlighted={highlighted} />))
 const button = (label: string) => [...container.querySelectorAll('button')].find(item => (item.getAttribute('aria-label') ?? item.textContent) === label)!
 
 it('shows only real cards, with eight consoles per page and no placeholders', () => {
@@ -63,7 +64,7 @@ it('opens a console shared for use but offers no edit', () => {
   const shared = screens(1)
   if (shared.status !== 'ready') throw new Error('unreachable')
   const workspaces = [{ ...shared.workspaces[0]!, screens: null, workspace: { id: 'workspace', title: 'Operations', role: 'use' } as ConsoleEntry['workspace'] }]
-  act(() => root.render(<ConsoleMosaic screens={{ status: 'ready', workspaces }} onOpen={onOpen} onEdit={onEdit} onPublish={onPublish} />))
+  act(() => root.render(<ConsoleMosaic screens={{ status: 'ready', workspaces }} onOpen={onOpen} onEdit={onEdit} onPublish={onPublish} onSimulate={onSimulate} />))
   expect(button('Edit Console 1')).toBeUndefined()
   expect(button('Publish Console 1')).toBeUndefined()
   expect(container.textContent).not.toContain('Draft')
@@ -75,7 +76,7 @@ it('shows a builder each console\'s publication status, with preview and publish
   const board: CanvasDefinition = { schemaVersion: 1, id: 'screen', title: 'Board', revision: '3', sections: [] }
   const main: OperateConsoleContent = { title: 'Main', fullChat: 'default', views: [{ id: 'main', title: 'Main', type: 'screen', screen: 'screen' }] }
   const published = (revision: string) => ({ revision, publishedAt: '2026-10-06T00:00:00.000Z', content: main })
-  const render3 = (screenRevision: string) => act(() => root.render(<ConsoleMosaic onOpen={onOpen} onEdit={onEdit} onPublish={onPublish} screens={{ status: 'ready', workspaces: [{
+  const render3 = (screenRevision: string) => act(() => root.render(<ConsoleMosaic onOpen={onOpen} onEdit={onEdit} onPublish={onPublish} onSimulate={onSimulate} screens={{ status: 'ready', workspaces: [{
     workspace: { id: 'workspace', title: 'Operations', role: 'build' } as ConsoleEntry['workspace'], flows: [],
     screens: [{ ...board, revision: screenRevision }], publishedScreens: { c1: [board], c2: [board] },
     consoles: [
@@ -91,13 +92,18 @@ it('shows a builder each console\'s publication status, with preview and publish
   expect(tile('Live')).toContain('Published')
   expect(button('Publish Live')).toBeUndefined()
 
-  // A console never published opens only as a preview of its draft.
-  act(() => button('Preview New').click())
+  // A console never published opens only as its draft, live in Operate (FAC-96 relabels it).
+  act(() => button('Open the draft of New in Operate (live data)').click())
   expect(onOpen).toHaveBeenLastCalledWith(expect.objectContaining({ console: expect.objectContaining({ id: 'c0' }) }), 'draft')
   act(() => button('Open Edited').click())
   expect(onOpen).toHaveBeenLastCalledWith(expect.anything(), 'published')
-  act(() => button('Preview the draft of Edited').click())
+  act(() => button('Open the draft of Edited in Operate (live data)').click())
   expect(onOpen).toHaveBeenLastCalledWith(expect.anything(), 'draft')
+  // The simulated preview (FAC-96) is offered for every draft, apart from the live one.
+  act(() => button('Simulate the draft of Edited').click())
+  expect(onSimulate).toHaveBeenLastCalledWith(expect.objectContaining({ console: expect.objectContaining({ id: 'c1' }) }))
+  expect(button('Simulate the draft of New')).toBeDefined()
+  expect(button('Simulate the draft of Live')).toBeUndefined()
   act(() => button('Publish Edited').click())
   expect(onPublish).toHaveBeenCalledWith(expect.objectContaining({ console: expect.objectContaining({ id: 'c1' }) }))
 
