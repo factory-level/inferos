@@ -20,6 +20,8 @@ const GADGET = 3;
 const HOOK = 11;
 const OTHER_HOOK = 12;
 const CONNECTION = 7;
+const COMPANY_A = "0b7e2c3a-1f00-4a00-8000-00000000000a";
+const COMPANY_B = "0b7e2c3a-1f00-4a00-8000-00000000000b";
 const commit = (n: number) => n.toString(16).padStart(40, "0");
 const head = (id: number) => (id === GADGET ? commit(1) : undefined);
 
@@ -49,8 +51,8 @@ function triggers(impl: any) {
 }
 
 /** One run `profileId` asked trigger `hook` for, fired at `at`; returns its invocation and delivery ids. */
-function asked(impl: any, store: any, profileId: string, hook: number, at: Date) {
-  let invocation = store.beginInvocation(profileId, hook, null);
+function asked(impl: any, store: any, profileId: string, hook: number, at: Date, company: string | null = null) {
+  let invocation = store.beginInvocation(profileId, hook, company);
   let delivery = store.fire(hook, GADGET, head, () => true, invocation.id)!;
   let stored = impl.storage.workflowDeliveries.get(delivery.deliveryId);
   impl.storage.workflowDeliveries.put({ ...stored, at });
@@ -60,7 +62,7 @@ function asked(impl: any, store: any, profileId: string, hook: number, at: Date)
 describe("the runs a person asked a trigger for, read back (FAC-116)", () => {
   it("lists the caller's own runs of that trigger, newest first, each with its outcome and no report", async () => {
     let name = `requested-runs-${crypto.randomUUID()}`;
-    await withImpl(name, impl => {
+    await withImpl(name, async impl => {
       let store = triggers(impl);
       let now = Date.now();
       let older = asked(impl, store, PERSON, HOOK, new Date(now - 2000));
@@ -69,16 +71,16 @@ describe("the runs a person asked a trigger for, read back (FAC-116)", () => {
       let elsewhere = asked(impl, store, PERSON, OTHER_HOOK, new Date(now - 100));
       store.recordResult(older.deliveryId, { outcome: "succeeded", report: { summary: "refunded 3" } });
 
-      let mine = impl.listRequestedRuns(PERSON, HOOK);
+      let mine = await impl.listRequestedRuns(PERSON, HOOK);
       expect(mine.map((run: any) => run.invocationId)).toEqual([newer.invocationId, older.invocationId]);
       expect(mine.map((run: any) => run.outcome)).toEqual(["queued", "succeeded"]);
       // Exactly what getRequestedRun reads of each: no report, nothing of anyone else's.
-      expect(mine[1]).toEqual(impl.getRequestedRun(PERSON, older.invocationId));
+      expect(mine[1]).toEqual(await impl.getRequestedRun(PERSON, older.invocationId));
       expect(JSON.stringify(mine)).not.toContain("refunded");
-      expect(impl.listRequestedRuns(OTHER, HOOK).map((run: any) => run.invocationId)).toEqual([others.invocationId]);
-      expect(impl.listRequestedRuns(PERSON, OTHER_HOOK).map((run: any) => run.invocationId)).toEqual([elsewhere.invocationId]);
-      expect(impl.listRequestedRuns("someone-else", HOOK)).toEqual([]);
-      expect(impl.listRequestedRuns(PERSON, 999)).toEqual([]);
+      expect((await impl.listRequestedRuns(OTHER, HOOK)).map((run: any) => run.invocationId)).toEqual([others.invocationId]);
+      expect((await impl.listRequestedRuns(PERSON, OTHER_HOOK)).map((run: any) => run.invocationId)).toEqual([elsewhere.invocationId]);
+      expect(await impl.listRequestedRuns("someone-else", HOOK)).toEqual([]);
+      expect(await impl.listRequestedRuns(PERSON, 999)).toEqual([]);
     });
   });
 
@@ -95,9 +97,35 @@ describe("the runs a person asked a trigger for, read back (FAC-116)", () => {
       .toMatchObject([{ invocationId, outcome: "failed", reason: "runtime-error" }]);
   });
 
+  it("hides a run from the same person when their current company differs", async () => {
+    let name = `requested-runs-company-${crypto.randomUUID()}`;
+    await withImpl(name, async impl => {
+      let store = triggers(impl);
+      let currentCompany = COMPANY_A;
+      impl.env = { ...impl.env, SHARED_CONFIGURATION_GATEKEEPER: "inferops" };
+      impl.storage.boundHooks = { get: (hook: number) => hook === HOOK ? { id: HOOK, gadgetId: GADGET, enabled: true } : undefined };
+      impl.storage.gatekeepers = { get: (id: number) => id === CONNECTION ? {
+        creationSpec: { type: "gatekeeper", vendorId: "inferops", resourceUrl: "inferops://acme.operations/project/board/OPS" },
+      } : undefined };
+      impl.getGadgetRecord = () => ({});
+      impl.visibleBindings = () => [["BOARD", { target: CONNECTION }]];
+      impl.users = {
+        idFromName: (profileId: string) => ({ toString: () => profileId }),
+        idFromString: (id: string) => id,
+        get: () => ({ workflowInvokeAnswer: async () => ({ holds: true, company: currentCompany }) }),
+      };
+      let made = asked(impl, store, PERSON, HOOK, new Date(), COMPANY_A);
+      expect(await impl.getRequestedRun(PERSON, made.invocationId)).not.toBeNull();
+      expect(await impl.listRequestedRuns(PERSON, HOOK)).toHaveLength(1);
+      currentCompany = COMPANY_B;
+      expect(await impl.getRequestedRun(PERSON, made.invocationId)).toBeNull();
+      expect(await impl.listRequestedRuns(PERSON, HOOK)).toEqual([]);
+    });
+  });
+
   it("returns at most the newest REQUESTED_RUNS_MAX", async () => {
     let name = `requested-runs-bound-${crypto.randomUUID()}`;
-    await withImpl(name, impl => {
+    await withImpl(name, async impl => {
       let store = triggers(impl);
       let now = Date.now();
       // One real request, then copies of its delivery under fresh ids: the per-person rate
@@ -114,7 +142,7 @@ describe("the runs a person asked a trigger for, read back (FAC-116)", () => {
         });
         ids.push(invocationId);
       }
-      let listed = impl.listRequestedRuns(PERSON, HOOK);
+      let listed = await impl.listRequestedRuns(PERSON, HOOK);
       expect(listed).toHaveLength(20);
       expect(listed.map((run: any) => run.invocationId)).toEqual(ids.slice(5).toReversed());
     });

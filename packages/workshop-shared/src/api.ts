@@ -34,6 +34,7 @@ import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
+  WorkflowTriggerDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation, RequestedRun,
 } from "./workflow-definition.js";
 import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
@@ -2787,7 +2788,10 @@ export interface Overseer extends RpcTarget {
    * Save the workflow gadget's current code as a new revision of the caller's own definition, or of
    * a new one. Publishes nothing. Build only; in a shared workspace it also takes the deployment's
    * `build` authority. At most `MAX_WORKSPACE_WORKFLOW_DEFINITIONS` per workspace and
-   * `MAX_WORKFLOW_DEFINITION_REVISIONS` revisions each.
+   * `MAX_WORKFLOW_DEFINITION_REVISIONS` revisions each. With `retain: false` a new definition is
+   * dynamic (FAC-124): it carries `expiresAt` and stops being available for new use then, unless
+   * saved again first (which retains it) or a trigger is pinned to it; at or after its expiry a save
+   * is refused (`WORKFLOW_DEFINITION_EXPIRED`).
    */
   saveWorkflowDefinition(input: WorkflowDefinitionSave): Promise<WorkflowDefinition>;
   /**
@@ -2799,12 +2803,12 @@ export interface Overseer extends RpcTarget {
   /**
    * Pin bound hook `hookId` to one revision the caller may see (published, or their own saved one)
    * of a definition for the gadget the hook wakes, or clear its pin with null. A pinned hook fires
-   * only while that gadget's code is exactly the revision's commit, and records each firing. Build
-   * only; in a shared workspace it also takes the deployment's `build` authority.
+   * A trigger may follow the latest published revision or explicitly select a pinned revision.
+   * Build only; in a shared workspace it also takes the deployment's `build` authority.
    */
-  pinTriggerDefinition(hookId: number, ref: WorkflowDefinitionRef | null): Promise<void>;
-  /** The pin of bound hook `hookId`, or null. Build only. */
-  getTriggerDefinition(hookId: number): Promise<WorkflowDefinitionRef | null>;
+  pinTriggerDefinition(hookId: number, ref: WorkflowTriggerDefinitionRef | null): Promise<void>;
+  /** The selected definition and mode of bound hook `hookId`, or null. Build only. */
+  getTriggerDefinition(hookId: number): Promise<WorkflowTriggerDefinitionRef | null>;
   /** The recorded firings of a definition the caller may see, oldest first. Build only. */
   listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]>;
 

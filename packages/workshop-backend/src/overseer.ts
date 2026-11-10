@@ -9,9 +9,10 @@ import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
+  WorkflowTriggerDefinitionRef,
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
-  REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS,
+  REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
@@ -2657,6 +2658,10 @@ class OverseerImpl implements AgentHooks {
       times.push(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
     }
 
+    // The next dynamic workflow definition to expire (FAC-124), so it is swept on time.
+    let nextExpiry = this.workflowDefinitionStore().nextExpiry();
+    if (nextExpiry !== undefined) times.push(nextExpiry);
+
     // A replay's staged copies still to withdraw (FAC-112), each at its next try.
     for (let entry of this.storage.replayWithdrawals.list()) times.push(entry.nextAttemptAt);
 
@@ -2691,6 +2696,7 @@ class OverseerImpl implements AgentHooks {
   async runAlarmTasks(): Promise<void> {
     this.#inAlarmHandler = true;
     try {
+      this.#sweepTemporary();
       this.toolLane.sweep();
       await this.#retryDueWidgetWithdrawals();
       await this.retryReplayWithdrawals();
@@ -2708,7 +2714,24 @@ class OverseerImpl implements AgentHooks {
     } finally {
       this.#inAlarmHandler = false;
       this.#agentKeepAliveTime = undefined;
+      // Runs that ended above may have been all that kept an expired definition.
+      this.#sweepTemporary();
       this.#updateAlarm();
+    }
+  }
+
+  /**
+   * Removes expired temporary configuration (FAC-124): today, dynamic workflow definitions past
+   * their TTL that no trigger or live run keeps (`WorkspaceWorkflowDefinitionStore.sweepExpired`).
+   * FAC-137's temporary canvases join here, under the same rule: expiry ends future availability and
+   * never deletes records or stops work. A failure is logged and retried at the next alarm.
+   */
+  #sweepTemporary(): void {
+    try {
+      let swept = this.workflowDefinitionStore().sweepExpired();
+      if (swept > 0) this.logger.info("swept expired workflow definitions", { event: "workflow.definitions.expired", definitionCount: swept });
+    } catch (error) {
+      this.logger.error("temporary sweep failed", { event: "workflow.definitions.expire.failed", error });
     }
   }
 
@@ -7295,9 +7318,17 @@ class OverseerImpl implements AgentHooks {
    * else, and for a request that made no run. A run admitted and never queued within
    * `WORKFLOW_RUN_START_WINDOW_MS` reads `uncertain` (`not-started`); before that, `queued`.
    */
-  getRequestedRun(profileId: string, invocationId: string): RequestedRun | null {
+  async getRequestedRun(profileId: string, invocationId: string): Promise<RequestedRun | null> {
     let delivery = this.workflowDefinitionStore().deliveryOfInvocation(invocationId);
     if (!delivery?.run || delivery.invocation?.requestedBy !== profileId) return null;
+    let company: string | null;
+    try {
+      company = await requireWorkflowInvoke(this,
+          this.users.idFromName(profileId).toString(), delivery.hookId);
+    } catch {
+      return null;
+    }
+    if (company !== delivery.run.company) return null;
     let outcome: WorkflowRunOutcome;
     let reason: RequestedRun["reason"];
     if (delivery.result) {
@@ -7323,9 +7354,11 @@ class OverseerImpl implements AgentHooks {
    * The runs `profileId` asked trigger `hookId` for (FAC-116): the newest `REQUESTED_RUNS_MAX`,
    * newest first, each exactly as `getRequestedRun` reads it for them. Nobody else's.
    */
-  listRequestedRuns(profileId: string, hookId: number): RequestedRun[] {
-    return this.workflowDefinitionStore().requestedDeliveries(profileId, hookId, REQUESTED_RUNS_MAX)
-      .flatMap(delivery => this.getRequestedRun(profileId, delivery.invocation!.id) ?? []);
+  async listRequestedRuns(profileId: string, hookId: number): Promise<RequestedRun[]> {
+    let runs = await Promise.all(this.workflowDefinitionStore()
+      .requestedDeliveries(profileId, hookId, REQUESTED_RUNS_MAX)
+      .map(delivery => this.getRequestedRun(profileId, delivery.invocation!.id)));
+    return runs.filter((run): run is RequestedRun => run !== null);
   }
 
   // What identifies the write run `runId` (delivery `deliveryId`) proposes now (FAC-112): the
@@ -12389,7 +12422,11 @@ class OverseerImpl implements AgentHooks {
   }
 
   workflowDefinitionStore(): WorkspaceWorkflowDefinitionStore {
-    return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage);
+    // A dynamic definition lasts the deployment's TTL (FAC-124), read only when one is created.
+    return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage, {
+      now: () => Date.now(),
+      dynamicTtlMs: () => dynamicDefinitionTtlMs(this.env.WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS),
+    });
   }
 
   /** See the module-level `requireSharedConfiguration`. */
@@ -14294,7 +14331,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let profile = await this.#getClientProfile();
     return this.impl.workflowDefinitionStore().publish(profile, id, revision);
   }
-  async pinTriggerDefinition(hookId: number, ref: WorkflowDefinitionRef | null): Promise<void> {
+  async pinTriggerDefinition(hookId: number, ref: WorkflowTriggerDefinitionRef | null): Promise<void> {
     await this.#requireSharedConfiguration("build", "shared");
     let profile = await this.#getClientProfile();
     let hook = this.impl.storage.boundHooks.get(hookId);
@@ -14304,7 +14341,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.workflowDefinitionStore().pinTrigger(profile.id, hookId,
         hook.gadgetId ?? this.impl.defaultGadgetId ?? null, ref);
   }
-  async getTriggerDefinition(hookId: number): Promise<WorkflowDefinitionRef | null> {
+  async getTriggerDefinition(hookId: number): Promise<WorkflowTriggerDefinitionRef | null> {
     return this.impl.workflowDefinitionStore().pinOf(hookId);
   }
   async listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]> {
@@ -16998,7 +17035,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async saveWorkflowDefinition(_input: WorkflowDefinitionSave): Promise<WorkflowDefinition> { this.#deny(); }
   async publishWorkflowDefinition(_id: string, _revision: number): Promise<WorkflowDefinition> { this.#deny(); }
-  async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
+  async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   // An operator listed on a trigger's control may ask it to run, and sees only those controls; it
@@ -17665,7 +17702,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async listWorkflowDefinitions(): Promise<WorkflowDefinition[]> { this.#deny(); }
   async saveWorkflowDefinition(_input: WorkflowDefinitionSave): Promise<WorkflowDefinition> { this.#deny(); }
   async publishWorkflowDefinition(_id: string, _revision: number): Promise<WorkflowDefinition> { this.#deny(); }
-  async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
+  async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }

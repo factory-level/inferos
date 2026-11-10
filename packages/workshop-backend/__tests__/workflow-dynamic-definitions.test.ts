@@ -5,9 +5,9 @@
 // one storage transaction reading the clock inside it, so whichever runs first wins by one time
 // rule. Over the production overseer storage on a mock, with a clock the test moves.
 import { describe, expect, it } from "vitest";
-import { dynamicDefinitionTtlMs, WORKFLOW_DEFINITION_EXPIRED } from "@gadgets/workshop-shared/workflow-definition";
+import { dynamicDefinitionTtlMs, isLiveWorkflowDelivery, WORKFLOW_DEFINITION_EXPIRED } from "@gadgets/workshop-shared/workflow-definition";
 import { makeOverseerStorage } from "../src/overseer.js";
-import { isLiveDelivery, WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
+import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { makeMockStorage } from "./mock-storage.js";
 
 const ADA = { type: "user" as const, id: "ada-profile", name: "Ada" };
@@ -18,6 +18,7 @@ const HOUR = 60 * 60 * 1000;
 const START = Date.UTC(2026, 10, 10, 9, 0, 0);
 const commit = (n: number) => n.toString(16).padStart(40, "0");
 const everyoneBuilds = () => true;
+const headOf = (id: number) => (id === GADGET ? commit(1) : undefined);
 
 /** One workspace whose clock the test moves, with a 24 h TTL unless `ttl` says otherwise. */
 function workspace(ttl: () => number = () => 24 * HOUR) {
@@ -25,9 +26,8 @@ function workspace(ttl: () => number = () => 24 * HOUR) {
   let storage = makeOverseerStorage(durable);
   let clock = { now: START };
   let store = new WorkspaceWorkflowDefinitionStore(durable, storage, { now: () => clock.now, dynamicTtlMs: ttl });
-  let headOf = (id: number) => (id === GADGET ? commit(1) : undefined);
   let temporary = () => store.save(ADA, { title: "One-off", gadgetId: GADGET, retain: false }, headOf);
-  return { store, storage, clock, headOf, temporary };
+  return { store, storage, clock, temporary };
 }
 
 describe("a dynamic definition", () => {
@@ -40,7 +40,7 @@ describe("a dynamic definition", () => {
   });
 
   it("is retained by saving it, keeping its id and revisions, and expires no more", () => {
-    let { store, clock, headOf, temporary } = workspace();
+    let { store, clock, temporary } = workspace();
     let made = temporary();
     clock.now = START + 23 * HOUR;
     let saved = store.save(ADA, { id: made.id, title: "Kept", gadgetId: GADGET }, headOf);
@@ -52,16 +52,17 @@ describe("a dynamic definition", () => {
     expect(store.get(ADA.id, made.id)?.title).toBe("Kept");
   });
 
-  it("refuses any retain but false, and making a saved definition temporary", () => {
-    let { store, headOf } = workspace();
-    expect(() => store.save(ADA, { title: "X", gadgetId: GADGET, retain: true } as never, headOf)).toThrow("retain");
+  it("refuses a retain that isn't a boolean, and making a saved definition temporary; true keeps one", () => {
+    let { store } = workspace();
+    expect(() => store.save(ADA, { title: "X", gadgetId: GADGET, retain: "no" } as never, headOf)).toThrow("retain");
+    expect(store.save(ADA, { title: "Kept", gadgetId: GADGET, retain: true }, headOf)).not.toHaveProperty("expiresAt");
     let saved = store.save(ADA, { title: "Saved", gadgetId: GADGET }, headOf);
     expect(() => store.save(ADA, { id: saved.id, title: "Saved", gadgetId: GADGET, retain: false }, headOf))
       .toThrow("A saved workflow can't be made temporary.");
   });
 
   it("refuses to create one when the deployment's TTL is misconfigured, and still saves retained ones", () => {
-    let { store, headOf, temporary } = workspace(() => dynamicDefinitionTtlMs("0"));
+    let { store, temporary } = workspace(() => dynamicDefinitionTtlMs("0"));
     expect(temporary).toThrow("WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS");
     expect(store.save(ADA, { title: "Saved", gadgetId: GADGET }, headOf).id).toBeTruthy();
   });
@@ -80,7 +81,7 @@ describe("the TTL setting", () => {
 
 describe("expiry blocks new use (acceptance 1)", () => {
   it("hides an expired definition and refuses every new use of it, exactly from its expiry", () => {
-    let { store, clock, headOf, temporary } = workspace();
+    let { store, clock, temporary } = workspace();
     let made = temporary();
     store.publish(ADA, made.id, 1);
     clock.now = START + 24 * HOUR - 1;
@@ -91,13 +92,13 @@ describe("expiry blocks new use (acceptance 1)", () => {
     expect(store.get(BEN.id, made.id)).toBeNull();
     expect(() => store.publish(ADA, made.id, 1)).toThrow(WORKFLOW_DEFINITION_EXPIRED);
     expect(() => store.save(ADA, { id: made.id, title: "Late", gadgetId: GADGET }, headOf)).toThrow(WORKFLOW_DEFINITION_EXPIRED);
-    expect(() => store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1 })).toThrow();
+    expect(() => store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1, mode: "pinned" })).toThrow();
   });
 
   it("leaves a run already admitted, and its records, running and readable past expiry; cleans up after it ends", () => {
-    let { store, storage, clock, headOf, temporary } = workspace();
+    let { store, storage, clock, temporary } = workspace();
     let made = temporary();
-    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1 });
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1, mode: "pinned" });
     store.setControl(ADA, HOOK, { label: "Run it", invokers: [ADA.id] });
     let invocation = store.beginInvocation(ADA.id, HOOK, null);
     let delivery = store.fire(HOOK, GADGET, headOf, everyoneBuilds, invocation.id)!;
@@ -108,7 +109,7 @@ describe("expiry blocks new use (acceptance 1)", () => {
     expect(store.get(ADA.id, made.id)).toBeNull();
     expect(store.sweepExpired()).toBe(0);
     expect(store.startRun(delivery.deliveryId)?.definitionId).toBe(made.id);
-    expect(isLiveDelivery(storage.workflowDeliveries.get(delivery.deliveryId)!)).toBe(true);
+    expect(isLiveWorkflowDelivery(storage.workflowDeliveries.get(delivery.deliveryId)!)).toBe(true);
     expect(store.sweepExpired()).toBe(0);
     store.endRun(delivery.deliveryId);
     expect(store.sweepExpired()).toBe(1);
@@ -118,7 +119,7 @@ describe("expiry blocks new use (acceptance 1)", () => {
   });
 
   it("deletes only expired dynamic definitions nothing keeps: never a saved one, an unexpired one or another workspace's", () => {
-    let { store, clock, headOf, temporary } = workspace();
+    let { store, clock, temporary } = workspace();
     let other = workspace();
     let expiring = temporary();
     clock.now = START + HOUR;
@@ -135,7 +136,7 @@ describe("expiry blocks new use (acceptance 1)", () => {
   });
 
   it("names the next expiry to wake for, and none once nothing is temporary", () => {
-    let { store, clock, headOf, temporary } = workspace();
+    let { store, clock, temporary } = workspace();
     expect(store.nextExpiry()).toBeUndefined();
     let first = temporary();
     clock.now = START + HOUR;
@@ -148,15 +149,19 @@ describe("expiry blocks new use (acceptance 1)", () => {
 
 describe("a scheduled dynamic definition (acceptance 2)", () => {
   it("is kept, and stays usable, while a trigger is pinned to it; it expires once the pin goes", () => {
-    let { store, clock, headOf, temporary } = workspace();
+    let { store, clock, temporary } = workspace();
     let made = temporary();
-    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1 });
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1, mode: "pinned" });
     clock.now = START + 100 * HOUR;
     expect(store.sweepExpired()).toBe(0);
     expect(store.get(ADA.id, made.id)).not.toBeNull();
-    expect(store.fire(HOOK, GADGET, headOf, everyoneBuilds)).toMatchObject({ definitionId: made.id });
+    let fired = store.fire(HOOK, GADGET, headOf, everyoneBuilds)!;
+    expect(fired).toMatchObject({ definitionId: made.id });
     store.pinTrigger(ADA.id, HOOK, GADGET, null);
     expect(store.get(ADA.id, made.id)).toBeNull();
+    // The scheduled firing's run is live until it settles (FAC-108's rule), and keeps it till then.
+    expect(store.sweepExpired()).toBe(0);
+    store.recordResult(fired.deliveryId, { outcome: "succeeded" });
     expect(store.sweepExpired()).toBe(1);
   });
 });
@@ -167,7 +172,7 @@ describe("saving at the moment of cleanup (acceptance 2)", () => {
     let a = workspace();
     let made = a.temporary();
     a.clock.now = START + 24 * HOUR - 1;
-    a.store.save(ADA, { id: made.id, title: "Kept", gadgetId: GADGET }, a.headOf);
+    a.store.save(ADA, { id: made.id, title: "Kept", gadgetId: GADGET }, headOf);
     a.clock.now = START + 24 * HOUR;
     expect(a.store.sweepExpired()).toBe(0);
     expect(a.store.get(ADA.id, made.id)).not.toBeNull();
@@ -176,7 +181,7 @@ describe("saving at the moment of cleanup (acceptance 2)", () => {
     let b = workspace();
     let gone = b.temporary();
     b.clock.now = START + 24 * HOUR;
-    expect(() => b.store.save(ADA, { id: gone.id, title: "Late", gadgetId: GADGET }, b.headOf)).toThrow(WORKFLOW_DEFINITION_EXPIRED);
+    expect(() => b.store.save(ADA, { id: gone.id, title: "Late", gadgetId: GADGET }, headOf)).toThrow(WORKFLOW_DEFINITION_EXPIRED);
     expect(b.store.sweepExpired()).toBe(1);
 
     // Sweep first, at expiry: the save after it finds nothing to keep.
@@ -184,7 +189,7 @@ describe("saving at the moment of cleanup (acceptance 2)", () => {
     let swept = c.temporary();
     c.clock.now = START + 24 * HOUR;
     expect(c.store.sweepExpired()).toBe(1);
-    expect(() => c.store.save(ADA, { id: swept.id, title: "Late", gadgetId: GADGET }, c.headOf)).toThrow();
+    expect(() => c.store.save(ADA, { id: swept.id, title: "Late", gadgetId: GADGET }, headOf)).toThrow();
     expect(c.store.get(ADA.id, swept.id)).toBeNull();
   });
 });

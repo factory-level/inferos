@@ -105,23 +105,26 @@ export type WorkflowDefinitionSave = {
   gadgetId: WorkpieceId;
   /**
    * `false` creates a dynamic, unsaved definition, which expires at the deployment's TTL
-   * (`dynamicDefinitionTtlMs`) unless saved (FAC-124). Absent keeps the definition: a new one is
-   * saved, and saving an existing dynamic one retains it. Only for a new definition.
+   * (`dynamicDefinitionTtlMs`) unless saved (FAC-124); only for a new definition. Absent or `true`
+   * keeps the definition: a new one is saved, and saving an existing dynamic one retains it.
    */
-  retain?: false;
+  retain?: boolean;
 };
 
 /**
- * A reference to one revision of one definition, as a trigger pins it. It stays on that revision
- * when the definition is republished: moving it is an explicit change to the trigger.
+ * A trigger reference. `mode: "pinned"` preserves the requested revision; omitted mode on a newly
+ * stored trigger means follow-latest. Legacy stored references without a mode remain pinned.
  */
 export type WorkflowDefinitionRef = { definitionId: string; revision: number };
 
-/** One firing of a pinned trigger, and the revision and commit it ran. */
+/** How a trigger resolves the selected definition. Omitted mode defaults to follow-latest on new pins. */
+export type WorkflowTriggerDefinitionRef = WorkflowDefinitionRef & { mode?: "pinned" | "follow-latest" };
+
+/** One firing of a trigger, and the published revision and commit it ran. */
 export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
   /** The bound hook that fired. */
   hookId: number;
-  /** The commit the revision named, and the gadget's head at firing (they are equal). */
+  /** The commit named by the published revision at admission. */
   commitId: string;
   at: Date;
   /**
@@ -157,6 +160,20 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
   /** Where the result was delivered, by destination (FAC-114). Run history is always one. */
   delivery?: WorkflowRunDelivery;
 };
+
+/** Whether a delivery still represents work whose durable record must be retained. */
+export function isLiveWorkflowDelivery(delivery: {
+  run?: unknown;
+  execution?: Pick<WorkflowRunExecution, "state">;
+  result?: Pick<WorkflowRunResult, "outcome">;
+}): boolean {
+  let outcome = delivery.result?.outcome;
+  if (outcome !== undefined) {
+    return outcome === "queued" || outcome === "running" || outcome === "waiting" || outcome === "uncertain";
+  }
+  // Older runs may predate result records. Keep any run without a known terminal execution state.
+  return delivery.run !== undefined && delivery.execution?.state !== "finished" && delivery.execution?.state !== "failed";
+}
 
 /**
  * A requested run's outcome (FAC-114; inferos ADR 0012 §3, proposed):
