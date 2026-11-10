@@ -9,7 +9,7 @@ import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { startHarness, type Harness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
-import { callbackStubFor, connect, nextUsernames, signUp } from "../src/rpc-client.js";
+import { callbackStubFor, connect, logIn, nextUsernames, signUp } from "../src/rpc-client.js";
 
 // Flows in a published console (MVP-37 F2): a use-role employee runs only the flows a builder froze
 // into the console they have open, and every person's startFlow is checked against an authoritative
@@ -334,6 +334,17 @@ describe("a running flow", () => {
 
       await desk.workspace.replaceFlow(desk.intakeFlow.id, desk.intakeFlow.revision,
         { title: "Intake", steps: [confirm.id, triage.id, intake.id] });
+      // A saved flow edit is still only a draft: operators keep the published definition until the
+      // console is explicitly republished, including when they reconnect in a fresh session.
+      using operatorWorkspace = await desk.cara.api.openGadget(desk.workspaceId);
+      expect(snapshotFlows(await operatorWorkspace.getConsole(desk.console.id, "published")))
+        .toEqual([old]);
+      using reconnectedApi = connect(harness.url);
+      using reconnectedCara = await logIn(reconnectedApi, desk.cara.username);
+      using reconnectedWorkspace = await reconnectedCara.openGadget(desk.workspaceId);
+      expect(snapshotFlows(await reconnectedWorkspace.getConsole(desk.console.id, "published")))
+        .toEqual([old]);
+
       const draft = (await desk.workspace.getConsole(desk.console.id, "draft"))!;
       const republished = await desk.workspace.publishConsole(desk.console.id, draft.revision);
       const [fresh] = snapshotFlows(republished);
