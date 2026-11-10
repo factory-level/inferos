@@ -209,7 +209,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
                 <Button type="submit" disabled={canvas.busy || page.children.length >= 12}>Add section</Button>
               </form>
               <CanvasAttachmentsEditor key={`${page.id}:${page.revision}`} target={page.id} node={undefined} attachments={page.attachments}
-                pages={pages} busy={canvas.busy} reader={overseer} gadgets={gadgets} onEdit={canvas.editPage} />
+                pages={pages} busy={canvas.busy} reader={overseer} hooks={overseer} gadgets={gadgets} onEdit={canvas.editPage} />
               {storage.kind === 'durable' && <PageConfigurationPanel overseer={overseer} page={page} busy={canvas.busy} onEdit={canvas.editPage} />}
             </>}
             {selected.kind === 'object' && (() => {
@@ -224,7 +224,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
                 <CanvasNodeEditor key={`${selected.node.id}:${page.revision}`} page={page} node={selected.node} busy={canvas.busy}
                   onEdit={editPageSelected} nestingOnly={!!section} />
                 <CanvasAttachmentsEditor key={`a:${selected.node.id}:${page.revision}`} target={selected.node.id} node={selected.node}
-                  attachments={selected.node.attachments} pages={pages} busy={canvas.busy} reader={overseer} gadgets={gadgets} onEdit={canvas.editPage} />
+                  attachments={selected.node.attachments} pages={pages} busy={canvas.busy} reader={overseer} hooks={overseer} gadgets={gadgets} onEdit={canvas.editPage} />
               </>
             })()}
             {selected.kind === 'widget' && (() => {
@@ -236,7 +236,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
                 <CanvasNodeEditor key={`${selected.node.id}:${page.revision}`} page={page} node={selected.node} busy={canvas.busy}
                   onEdit={editPageSelected} nestingOnly={!!section && index >= 0} />
                 <CanvasAttachmentsEditor key={`a:${selected.node.id}:${page.revision}`} target={selected.node.id} node={selected.node}
-                  attachments={selected.node.attachments} pages={pages} busy={canvas.busy} reader={overseer} gadgets={gadgets} onEdit={canvas.editPage} />
+                  attachments={selected.node.attachments} pages={pages} busy={canvas.busy} reader={overseer} hooks={overseer} gadgets={gadgets} onEdit={canvas.editPage} />
               </>
             })()}
             {selected.kind === 'attachment' && <>
