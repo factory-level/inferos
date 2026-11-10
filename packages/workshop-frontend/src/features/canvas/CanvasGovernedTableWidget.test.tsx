@@ -140,6 +140,23 @@ it('keeps a waiting receipt pending, then refreshes after it resolves', async ()
   expect(button('Propose')?.disabled).toBe(false)
 })
 
+it('stops polling a waiting receipt after the total attempt limit and offers status retry', async () => {
+  const status = vi.fn<() => Promise<{ outcome: 'waiting' }>>().mockResolvedValue({ outcome: 'waiting' })
+  const command = vi.fn<GovernedWriteSession['command']>(async () => ({ outcome: 'proposed', actionId: 'receipt-1', status }))
+  const { session } = queue([ticket(1)], { command })
+  await render(async () => ({ gatekeeperId: 4, resource: 'tickets/queue' as const, session }))
+  await chooseClosed()
+  vi.useFakeTimers()
+  await act(async () => { button('Propose')!.click() })
+  await act(async () => { await vi.advanceTimersByTimeAsync(100_000) })
+  expect(status).toHaveBeenCalledTimes(8)
+  expect(container.textContent).toContain("Could not check this operation's status. It has not been resubmitted.")
+  expect(button('Retry status')).toBeTruthy()
+  expect(button('Propose')?.disabled).toBe(true)
+  expect(command).toHaveBeenCalledTimes(1)
+  vi.useRealTimers()
+})
+
 it('retries a disconnected receipt check without resubmitting the command', async () => {
   const status = vi.fn<() => Promise<{ outcome: 'succeeded' }>>()
     .mockRejectedValueOnce(new Error('connection lost')).mockResolvedValueOnce({ outcome: 'succeeded' })

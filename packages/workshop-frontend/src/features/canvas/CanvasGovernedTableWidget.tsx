@@ -161,6 +161,7 @@ const GovernedTable = ({ resource, session }: { resource: string; session: Gover
 /** One declared command on one row: its one field's allowed values, proposed for a decision. */
 const RECEIPT_POLL_MS = 1_000
 const RECEIPT_POLL_MAX_MS = 30_000
+const RECEIPT_POLL_MAX_ATTEMPTS = 8
 type CommandState = { kind: 'receipt'; outcome: ActionOutcome; reason?: string } | { kind: 'status-error' } | { kind: 'stale'; reason?: string } | { kind: 'error'; message: string } | null
 
 const CommandForm = ({ resource, row, command, description, refresh }: { resource: string; row: GovernedRecord; command: GovernedCommand; description: GovernedDescription; refresh: () => Promise<unknown> }) => {
@@ -176,7 +177,7 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
 
   const checkReceipt = async (current: ActionReceipt) => {
     let delay = RECEIPT_POLL_MS
-    for (;;) {
+    for (let poll = 0; poll < RECEIPT_POLL_MAX_ATTEMPTS; poll++) {
       let status
       try { status = await current.status() }
       catch {
@@ -185,6 +186,10 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
       }
       if (status.outcome === 'waiting' || status.outcome === 'running') {
         if (mounted.current) setState({ kind: 'receipt', outcome: status.outcome, ...(status.reason ? { reason: status.reason } : {}) })
+        if (poll === RECEIPT_POLL_MAX_ATTEMPTS - 1) {
+          if (mounted.current) setState({ kind: 'status-error' })
+          return
+        }
         await new Promise(resolve => setTimeout(resolve, delay))
         if (!mounted.current) return
         delay = Math.min(delay * 2, RECEIPT_POLL_MAX_MS)
