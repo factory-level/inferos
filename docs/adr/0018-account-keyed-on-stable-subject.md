@@ -54,7 +54,7 @@ Proposed by dev.design on 2026-11-10 for FAC-165, for a person to accept.
 
 - Acceptance 1 holds: after an email change, the same subject finds the same account and its workspaces.
 - Acceptance 2 holds for every bound account: another person holding the old address gets a new account (decision 3) and can't sign in to the old one (decision 4).
-- **An account not yet bound** relies on the provider not reassigning a vouched address to someone else before the owner's next sign-in. The proactive pass (decision 7) narrows that window; the analysis is kept with the work item.
+- Legacy unbound accounts bind on first vouched sign-in (decision 3), or earlier through the proactive pass (decision 7).
 - Password, Google, GitHub and Cloudflare sign-in stay email- or username-keyed until their gatekeepers supply subjects. Their providers have stable ids (`sub`, user id), so each can adopt decision 1 later without a new mechanism.
 - A principal is tenant-bound in InferOps, so a person in two companies has two accounts here, as they have two principals there.
 - Immutable history, such as commit identities derived from `profile.id`, keeps the name it was written with.

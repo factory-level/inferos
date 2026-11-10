@@ -139,6 +139,7 @@ export const BACKEND: readonly string[] = [
   "observer-scope-restart.test.ts",
   "observer-verification-failure.test.ts",
   "pending-login.test.ts",
+  "account-subject.test.ts",
   "restricted-actions.test.ts",
   "spawned-agent-tools.test.ts",
   "user-commit-email.test.ts",

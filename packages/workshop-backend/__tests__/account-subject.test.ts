@@ -1,0 +1,246 @@
+// A person's account keyed on their provider's stable subject, not their email (ADR 0018, FAC-165).
+// Through the real login callback, user DO and directory: an email change keeps the account; a
+// second person who takes over the first person's old address gets a new, empty account and can't
+// reach the old one by any email-keyed sign-in; binding happens once, and only for the account's
+// own person; the one-off pass binds what connections already prove, and running it twice binds
+// nothing new. Every subject and address is fresh per test: the directory is one shared object.
+import { describe, expect, it } from "vitest";
+import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
+import type { LoginConnectCallbackImpl, PendingLogin } from "../src/auth/login-flow.js";
+import type { UserDurableObject } from "../src/user.js";
+import { SIGNS_IN_THROUGH_SUBJECT } from "../src/user.js";
+import type { UserDirectoryDurableObject } from "../src/user-directory.js";
+import { bindAccountSubjects, collaboratorAccountName, subjectAccountName } from "../src/account-subject.js";
+import type { FakeSubjectAccount } from "./test-worker.js";
+
+declare module "cloudflare:workers" {
+  interface ProvidedEnv {
+    TEST_PENDING_LOGIN: DurableObjectNamespace<PendingLogin>;
+    TEST_USER: DurableObjectNamespace<UserDurableObject>;
+  }
+}
+
+type Exports = {
+  FakeSubjectAccount(options: { props: { issuer: string; subject: string | null; email?: string } }): Fetcher<FakeSubjectAccount>;
+  TestLoginCallback(options: { props: { pendingId: string; vendorId: string; subject?: boolean } }): Fetcher<LoginConnectCallbackImpl>;
+  UserDurableObject: DurableObjectNamespace<UserDurableObject>;
+  UserDirectoryDurableObject: DurableObjectNamespace<UserDirectoryDurableObject>;
+};
+type Internals = UserDurableObject & {
+  ctx: DurableObjectState & { exports: Exports };
+  storage: {
+    connectedAccounts: { put(record: unknown): void };
+    nextAccountId: { put(n: number): void };
+    passwordHashHash: { put(hash: Uint8Array): void };
+  };
+};
+
+const ISSUER = "https://auth.example.test";
+const fresh = () => crypto.randomUUID().slice(0, 8);
+const subjectName = (subject: string) => subjectAccountName({ issuer: ISSUER, subject });
+
+/** Runs `body` with the worker's own exports, inside a scratch user DO (the only way a test reaches them). */
+async function withExports<T>(body: (exports: Exports) => Promise<T>): Promise<T> {
+  let result!: T;
+  await runInDurableObject(env.TEST_USER.getByName(`host-${fresh()}`), async (instance: UserDurableObject) => {
+    result = await body((instance as Internals).ctx.exports);
+  });
+  return result;
+}
+
+/**
+ * Signs in through the real callback as InferOps would: a vendor that yields a subject. Returns the
+ * account name the session token names, or `error:<message>` when the sign-in was refused.
+ */
+async function signIn(subject: string | null, email?: string): Promise<string> {
+  const pending = env.TEST_PENDING_LOGIN.getByName(`subject-login-${fresh()}`);
+  await pending.begin();
+  return withExports(async exports => {
+    const callback = exports.TestLoginCallback({ props: { pendingId: pending.id.toString(), vendorId: "inferops", subject: true } });
+    const account = exports.FakeSubjectAccount({ props: { issuer: ISSUER, subject, ...(email ? { email } : {}) } });
+    try {
+      const { ticket } = await callback.complete(account as never);
+      await pending.confirm(ticket);
+      const token = await pending.receive();
+      return token!.slice(0, token!.lastIndexOf(":"));
+    } catch (error) {
+      return `error:${(error as Error).message}`;
+    }
+  });
+}
+
+/** An email-keyed account as gatekeeper sign-in made one before ADR 0018. */
+async function legacyAccount(email: string): Promise<DurableObjectStub<UserDurableObject>> {
+  const user = env.TEST_USER.getByName(email);
+  expect(await user.loginOrCreateViaGatekeeper(email, true)).not.toBeNull();
+  return user;
+}
+
+const profileOf = async (name: string) => (await env.TEST_USER.getByName(name).whoamiIfExists())?.id ?? null;
+
+describe("a sign-in keyed on the stable subject (ADR 0018)", () => {
+  it("keeps the same account across an email change, with no manual step (acceptance 1)", async () => {
+    const [a, newAddress] = [`ada-${fresh()}@example.test`, `ada.lovelace-${fresh()}@example.test`];
+    const legacy = await legacyAccount(a);
+    const principal = fresh();
+    // The first sign-in after this lands binds the account to the principal behind it.
+    expect(await signIn(principal, a)).toBe(a);
+    expect(await legacy.isSubjectBound()).toBe(true);
+    // The email changes in InferOps, which then vouches for the new one, or for none at all.
+    expect(await signIn(principal, newAddress)).toBe(a);
+    expect(await signIn(principal)).toBe(a);
+    expect(await profileOf(a)).toBe(a);
+  });
+
+  it("gives a new person a new account named by their subject, and the same one each time", async () => {
+    const principal = fresh();
+    const email = `new-${fresh()}@example.test`;
+    expect(await signIn(principal, email)).toBe(subjectName(principal));
+    expect(await signIn(principal)).toBe(subjectName(principal));
+    expect(await profileOf(subjectName(principal))).toBe(subjectName(principal));
+    // No email-keyed account was made for the address.
+    expect(await profileOf(email)).toBeNull();
+  });
+
+  it("refuses a sign-in with no person behind it", async () => {
+    expect(await signIn(null, `nobody-${fresh()}@example.test`)).toBe("error:This account has no person behind it, so it can't be used to sign in.");
+  });
+});
+
+describe("taking over someone's old address (acceptance 2)", () => {
+  it("gives the second person a new, empty account, and the old one refuses every email-keyed sign-in", async () => {
+    const old = `grace-${fresh()}@example.test`;
+    const legacy = await legacyAccount(old);
+    const [first, second] = [fresh(), fresh()];
+    expect(await signIn(first, old)).toBe(old);
+    // The first person moves on; InferOps later vouches the old address for someone else.
+    expect(await signIn(first, `grace.hopper-${fresh()}@example.test`)).toBe(old);
+    expect(await signIn(second, old)).toBe(subjectName(second));
+    expect(await profileOf(subjectName(second))).toBe(subjectName(second));
+    // Every email-keyed way into the old account is closed to whoever holds the address now.
+    await expect(legacy.loginOrCreateViaGatekeeper(old, true)).rejects.toThrow(SIGNS_IN_THROUGH_SUBJECT);
+    await expect(legacy.authenticateFromCfAccess(old, true)).rejects.toThrow(SIGNS_IN_THROUGH_SUBJECT);
+    // And the first person still has it.
+    expect(await signIn(first)).toBe(old);
+  });
+
+  it("refuses to bind an account for an address the provider doesn't vouch for, or a password account", async () => {
+    const unvouched = `unvouched-${fresh()}@example.test`;
+    const legacy = await legacyAccount(unvouched);
+    const principal = fresh();
+    // InferOps doesn't vouch for the address: the sign-in gets its own account, the old one stays unbound.
+    expect(await signIn(principal)).toBe(subjectName(principal));
+    expect(await legacy.isSubjectBound()).toBe(false);
+
+    const withPassword = `pw-${fresh()}@example.test`;
+    const passwordAccount = await legacyAccount(withPassword);
+    await runInDurableObject(passwordAccount, async (instance: UserDurableObject) => {
+      (instance as Internals).storage.passwordHashHash.put(new Uint8Array(32));
+    });
+    expect(await passwordAccount.bindSubject(subjectName(fresh()))).toBe("password");
+    const other = fresh();
+    expect(await signIn(other, withPassword)).toBe(subjectName(other));
+    expect(await passwordAccount.isSubjectBound()).toBe(false);
+  });
+
+  it("binds once: another subject can't take a bound account, and binding the same one again changes nothing", async () => {
+    const email = `once-${fresh()}@example.test`;
+    const legacy = await legacyAccount(email);
+    const [mine, theirs] = [subjectName(fresh()), subjectName(fresh())];
+    expect(await legacy.bindSubject(mine)).toBe("bound");
+    expect(await legacy.bindSubject(mine)).toBe("bound");
+    expect(await legacy.bindSubject(theirs)).toBe("bound-elsewhere");
+    expect(await env.TEST_USER.getByName(`absent-${fresh()}@example.test`).bindSubject(mine)).toBe("absent");
+  });
+});
+
+describe("finding a person by address (shares never follow an email)", () => {
+  it("finds an address's current, vouched owner, and never a bound account by its old address", async () => {
+    const old = `share-${fresh()}@example.test`;
+    await legacyAccount(old);
+    const ns = () => withExports(async exports => ({ users: exports.UserDurableObject, directory: exports.UserDirectoryDurableObject }));
+    // Before anyone signs in with a subject, the address names its email-keyed account.
+    expect(await collaboratorAccountName(await ns(), old)).toBe(old);
+    const [first, second] = [fresh(), fresh()];
+    const moved = `share.moved-${fresh()}@example.test`;
+    expect(await signIn(first, old)).toBe(old);
+    expect(await signIn(first, moved)).toBe(old);
+    // The first person's address is now `moved`; the old one finds nobody until someone holds it.
+    expect(await collaboratorAccountName(await ns(), moved)).toBe(old);
+    expect(await collaboratorAccountName(await ns(), old)).toBeNull();
+    expect(await signIn(second, old)).toBe(subjectName(second));
+    expect(await collaboratorAccountName(await ns(), old)).toBe(subjectName(second));
+    // A name that isn't an address names its account as before.
+    expect(await collaboratorAccountName(await ns(), "a_username")).toBe("a_username");
+  });
+});
+
+describe("the one-off subject pass (acceptance 3)", () => {
+  it("binds an account from its own connection, creates no account, and binds nothing new on a second run", async () => {
+    const vendorId = `inferops-pass-${fresh()}`;
+    const email = `pass-${fresh()}@example.test`;
+    const principal = fresh();
+    const legacy = await legacyAccount(email);
+    // Lists it in the directory, as any authentication does.
+    await legacy.authenticate((await legacy.loginOrCreateViaGatekeeper(email, true))!);
+    await runInDurableObject(legacy, async (instance: UserDurableObject) => {
+      const user = instance as Internals;
+      user.storage.nextAccountId.put(1);
+      user.storage.connectedAccounts.put({
+        id: 0, vendorId, description: { displayName: "InferOps" },
+        account: user.ctx.exports.FakeSubjectAccount({ props: { issuer: ISSUER, subject: principal, email } }),
+      });
+    });
+    // A connection vouching another address proves nothing about this account.
+    const elsewhere = `pass-other-${fresh()}@example.test`;
+    const other = await legacyAccount(elsewhere);
+    await other.authenticate((await other.loginOrCreateViaGatekeeper(elsewhere, true))!);
+    await runInDurableObject(other, async (instance: UserDurableObject) => {
+      const user = instance as Internals;
+      user.storage.nextAccountId.put(1);
+      user.storage.connectedAccounts.put({
+        id: 0, vendorId, description: { displayName: "InferOps" },
+        account: user.ctx.exports.FakeSubjectAccount({ props: { issuer: ISSUER, subject: fresh(), email: `someone-${fresh()}@example.test` } }),
+      });
+    });
+
+    const ns = await withExports(async exports => ({ users: exports.UserDurableObject, directory: exports.UserDirectoryDurableObject }));
+    const first = await bindAccountSubjects(ns, vendorId);
+    expect(first.bound).toBe(1);
+    expect(first.conflicts).toBe(0);
+    expect(await legacy.isSubjectBound()).toBe(true);
+    expect(await other.isSubjectBound()).toBe(false);
+    const second = await bindAccountSubjects(ns, vendorId);
+    expect(second.bound).toBe(0);
+    expect(second.alreadyBound).toBe(1);
+    // The person's next sign-in reaches the account the pass bound, without vouching an address.
+    expect(await signIn(principal)).toBe(email);
+    // No account was made for the subject itself.
+    expect(await profileOf(subjectName(principal))).toBeNull();
+  });
+
+  it("leaves an account unbound when its subject already signs in to another account", async () => {
+    const vendorId = `inferops-pass-${fresh()}`;
+    const principal = fresh();
+    // The person signed in before the pass without a vouched address, so they have their own account.
+    expect(await signIn(principal)).toBe(subjectName(principal));
+    const email = `pass-conflict-${fresh()}@example.test`;
+    const legacy = await legacyAccount(email);
+    await legacy.authenticate((await legacy.loginOrCreateViaGatekeeper(email, true))!);
+    await runInDurableObject(legacy, async (instance: UserDurableObject) => {
+      const user = instance as Internals;
+      user.storage.nextAccountId.put(1);
+      user.storage.connectedAccounts.put({
+        id: 0, vendorId, description: { displayName: "InferOps" },
+        account: user.ctx.exports.FakeSubjectAccount({ props: { issuer: ISSUER, subject: principal, email } }),
+      });
+    });
+    const ns = await withExports(async exports => ({ users: exports.UserDurableObject, directory: exports.UserDirectoryDurableObject }));
+    const result = await bindAccountSubjects(ns, vendorId);
+    expect(result.conflicts).toBeGreaterThanOrEqual(1);
+    // Not stranded: still unbound, so its own email-keyed sign-in still reaches it.
+    expect(await legacy.isSubjectBound()).toBe(false);
+    expect(await legacy.loginOrCreateViaGatekeeper(email, true)).not.toBeNull();
+  });
+});

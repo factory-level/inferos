@@ -20,6 +20,61 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
       search_text TEXT NOT NULL,
       rev INTEGER NOT NULL
     ) STRICT`);
+    // ADR 0018: which account each stable subject signs in to, written once per subject by the
+    // sign-in that binds it; and the account each vouched address currently belongs to, for finding a
+    // person by address. Reached only from the Workshop's own sign-in and lookups, never a caller.
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS subjects (
+      subject TEXT PRIMARY KEY,
+      account TEXT NOT NULL
+    ) STRICT`);
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS emails (
+      email TEXT PRIMARY KEY,
+      account TEXT NOT NULL
+    ) STRICT`);
+  }
+
+  /** The account name `subject` signs in to (ADR 0018), or null before it was recorded. */
+  accountForSubject(subject: string): string | null {
+    const rows = this.ctx.storage.sql.exec<{ account: string }>(
+      `SELECT account FROM subjects WHERE subject = ?`, subject).toArray();
+    return rows[0]?.account ?? null;
+  }
+
+  /**
+   * Records that `subject` signs in to `account`, unless it already signs in to one: the first
+   * record stands, and the account it names is returned, so a second sign-in racing the first agrees
+   * with it.
+   */
+  recordSubject(subject: string, account: string): string {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO subjects (subject, account) VALUES (?, ?) ON CONFLICT (subject) DO NOTHING`, subject, account);
+    return this.accountForSubject(subject)!;
+  }
+
+  /** The account whose current vouched address `email` is (ADR 0018), or null. */
+  accountForEmail(email: string): string | null {
+    const rows = this.ctx.storage.sql.exec<{ account: string }>(
+      `SELECT account FROM emails WHERE email = ?`, email.toLowerCase()).toArray();
+    return rows[0]?.account ?? null;
+  }
+
+  /**
+   * Records that `account`'s current vouched address is `email`: it replaces whatever address the
+   * account had, and whatever account had the address, so a moved address finds its new owner only.
+   */
+  recordEmail(email: string, account: string): void {
+    const address = email.toLowerCase();
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(`DELETE FROM emails WHERE account = ? AND email != ?`, account, address);
+      this.ctx.storage.sql.exec(
+        `INSERT INTO emails (email, account) VALUES (?, ?) ON CONFLICT (email) DO UPDATE SET account = excluded.account`,
+        address, account);
+    });
+  }
+
+  /** Every account name the directory lists, for the one-off subject pass (ADR 0018 decision 7). */
+  listUserIds(): string[] {
+    return this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM users ORDER BY id`).toArray().map(row => row.id);
   }
 
   /**
