@@ -142,7 +142,7 @@ describe("saving a workflow definition", () => {
 
 describe("triggers and runs", () => {
   it("lets two triggers reference one definition revision, storing a reference, not a copy", () => {
-    let { store, storage, headOf } = workspace();
+    let { store, headOf } = workspace();
     let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     store.pinTrigger(ADA.id, 12, GADGET, { definitionId: saved.id, revision: 1 });
