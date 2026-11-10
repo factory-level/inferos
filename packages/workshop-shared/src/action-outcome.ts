@@ -77,6 +77,7 @@ export const ACTION_OUTCOME_TEXT: Record<ActionOutcome, string> = {
  */
 export const ACTION_RECEIPT_CODES = [
   "STALE_REVISION", "CONFLICT", "NOT_FOUND", "FORBIDDEN", "INVALID", "RATE_LIMITED", "UNAVAILABLE", "PROVIDER_ERROR",
+  "EXPIRED",
 ] as const;
 
 /** One of `ACTION_RECEIPT_CODES`. */
@@ -91,6 +92,7 @@ const RECEIPT_CODE_OF: Readonly<Record<string, ActionReceiptCode>> = {
   INVALID_REQUEST: "INVALID", INVALID_STATE: "INVALID", WORKFLOW_MISMATCH: "INVALID", IDEMPOTENCY_CONFLICT: "INVALID",
   RATE_LIMITED: "RATE_LIMITED",
   UNAVAILABLE: "UNAVAILABLE", TIMEOUT: "UNAVAILABLE",
+  EXPIRED: "EXPIRED", PROPOSAL_EXPIRED: "EXPIRED",
 };
 
 /** The receipt code for a gatekeeper's error code, or `PROVIDER_ERROR` when it gave none or one not listed. */
@@ -108,6 +110,7 @@ export const ACTION_RECEIPT_REASON: Record<ActionReceiptCode, string> = {
   RATE_LIMITED: "The service is limiting requests. Try again later.",
   UNAVAILABLE: "The service couldn't be reached. Try again later.",
   PROVIDER_ERROR: "The service refused this change.",
+  EXPIRED: "It expired before it was decided. Ask for it again.",
 };
 
 /** The fixed sentence for an attempt whose effect isn't known, whatever its code. */

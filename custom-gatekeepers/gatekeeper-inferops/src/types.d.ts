@@ -28,6 +28,7 @@ export interface WriteStatus {
    * * INVALID: the change wasn't accepted as made.
    * * RATE_LIMITED, UNAVAILABLE: try again later.
    * * PROVIDER_ERROR: InferOps refused it for another reason.
+   * * EXPIRED: it wasn't decided in time, and can't be applied now; ask for it again.
    */
   code?: WriteFailureCode;
   /** With code, one fixed sentence explaining it. It never contains InferOps' own error text. */
@@ -37,7 +38,7 @@ export interface WriteStatus {
 /** Why a write didn't simply succeed (see WriteStatus.code). */
 export type WriteFailureCode =
   | "STALE_REVISION" | "CONFLICT" | "NOT_FOUND" | "FORBIDDEN" | "INVALID" | "RATE_LIMITED" | "UNAVAILABLE"
-  | "PROVIDER_ERROR";
+  | "PROVIDER_ERROR" | "EXPIRED";
 
 /**
  * The receipt a write returns. Only its holder can read the write's status. A write that has
@@ -1071,3 +1072,109 @@ export type ServiceQueryPage =
   | { name: "service-jobs"; version: 1; rows: ServiceJob[]; nextCursor: string | null }
   | { name: "service-job-status-counts"; version: 1; rows: ServiceStatusCount[]; nextCursor: string | null }
   | { name: "service-job-recent-activities"; version: 1; rows: ServiceActivity[]; nextCursor: string | null };
+
+/** A change your Dot proposed. It is never made until it is approved. */
+export interface DotProposal {
+  /** InferOps' proposal UUID. */
+  id: string;
+  /** The InferOps operation it would run, such as "issue_create". */
+  tool: string;
+  /** Its arguments as JSON text, exactly as approving it runs them; JSON.parse() it to read them. */
+  input: string;
+  /**
+   * Where it stands now: waiting until it is decided, running while it is being made, succeeded
+   * once made, rejected once declined, failed when InferOps refused it or it expired (EXPIRED),
+   * and unknown when it may or may not have been made.
+   */
+  status: WriteStatus;
+  /** The receipt for it while this session is open and it was proposed in it; else null. */
+  receipt: WriteReceipt | null;
+  createdAt: string;
+  /** After this it can no longer be approved. */
+  expiresAt: string;
+}
+
+/** One message of a Dot conversation. */
+export interface DotMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  /** "running" while the Dot is still answering; "interrupted" when its answer was cut off. */
+  status: "running" | "complete" | "error" | "interrupted";
+  createdAt: string;
+}
+
+/** A Dot conversation as it stands. */
+export interface DotConversation {
+  id: string;
+  title: string;
+  /** The newest messages (at most 50), oldest first. */
+  messages: DotMessage[];
+  /** Pass to read({ before }) for older messages, or null when there are none. */
+  nextCursor: string | null;
+  /** True while a turn is running; ask() fails with CONFLICT until it ends. */
+  running: boolean;
+  /** Every change the Dot proposed in it, newest first. */
+  proposals: DotProposal[];
+}
+
+/** Something that happened while the Dot answered, in order. */
+export type DotProgress =
+  | { type: "text"; delta: string }
+  | { type: "tool"; name: string; status: "started" | "finished" }
+  | { type: "proposal"; proposal: DotProposal }
+  | { type: "error"; message: string };
+
+/** What the Dot is shown besides your prompt, and how you follow its answer. */
+export interface DotAskOptions {
+  /** The page you have open, as an inferops:// link. */
+  page?: string;
+  /** The record you have selected, as an inferops:// link. */
+  record?: string;
+  /** Called for each step as it happens, before ask() resolves. */
+  onProgress?: (event: DotProgress) => void;
+}
+
+/** How one turn ended. */
+export interface DotTurn {
+  runId: string;
+  /**
+   * complete: the Dot answered. error: it couldn't finish (or its answer couldn't be read); ask
+   * again. interrupted: it was cut off (cancel(), a timeout or a lost connection); read() shows
+   * what it said up to then.
+   */
+  status: "complete" | "error" | "interrupted";
+  /** The Dot's answer, as far as it got. */
+  reply: string;
+  /** The changes it proposed in this turn. */
+  proposals: DotProposal[];
+}
+
+/** One of your Dot conversations. */
+export interface DotConversationSession {
+  /** Its UUID: keep it to reopen the conversation later. */
+  id(): Promise<string>;
+  /** The conversation now; with before, the messages before that cursor. */
+  read(options?: { before?: string }): Promise<DotConversation>;
+  /**
+   * Ask your Dot one turn and wait for it to end (at most about two minutes). Fails with
+   * NOT_FOUND when page or record is a link you can't open, FORBIDDEN when your access can't read
+   * them (nothing is asked then), CONFLICT while another turn of this conversation is running, and
+   * UNAVAILABLE when the Dot can't run.
+   */
+  ask(prompt: string, options?: DotAskOptions): Promise<DotTurn>;
+  /** Stop the turn running now, if any; its ask() then ends interrupted. */
+  cancel(): Promise<void>;
+}
+
+/**
+ * Your own Dot in one InferOps workspace, fixed when this capability is created. It acts only as
+ * you, and what it may read or change is what your InferOps access allows. Fails with FORBIDDEN on
+ * a connection that is not your own sign-in.
+ */
+export interface InferOpsDotSession {
+  /** Start a new, empty conversation. */
+  startConversation(): Promise<DotConversationSession>;
+  /** Reopen one of your conversations by its UUID; NOT_FOUND for any other. */
+  openConversation(conversationId: string): Promise<DotConversationSession>;
+}
