@@ -69,16 +69,19 @@ export type WorkflowDefinitionSave = {
 };
 
 /**
- * A reference to one revision of one definition, as a trigger pins it. It stays on that revision
- * when the definition is republished: moving it is an explicit change to the trigger.
+ * A trigger reference. `mode: "pinned"` preserves the requested revision; omitted mode on a newly
+ * stored trigger means follow-latest. Legacy stored references without a mode remain pinned.
  */
 export type WorkflowDefinitionRef = { definitionId: string; revision: number };
 
-/** One firing of a pinned trigger, and the revision and commit it ran. */
+/** How a trigger resolves the selected definition. Omitted mode defaults to follow-latest on new pins. */
+export type WorkflowTriggerDefinitionRef = WorkflowDefinitionRef & { mode?: "pinned" | "follow-latest" };
+
+/** One firing of a trigger, and the published revision and commit it ran. */
 export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
   /** The bound hook that fired. */
   hookId: number;
-  /** The commit the revision named, and the gadget's head at firing (they are equal). */
+  /** The commit named by the published revision at admission. */
   commitId: string;
   at: Date;
   /**
@@ -114,6 +117,27 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
   /** Where the result was delivered, by destination (FAC-114). Run history is always one. */
   delivery?: WorkflowRunDelivery;
 };
+
+/** Whether a delivery still represents work whose durable record must be retained. */
+export function isLiveWorkflowDelivery(delivery: {
+  run?: unknown;
+  at?: Date;
+  execution?: Pick<WorkflowRunExecution, "state">;
+  result?: Pick<WorkflowRunResult, "outcome" | "reason">;
+}, now = Date.now()): boolean {
+  let outcome = delivery.result?.outcome;
+  if (outcome !== undefined) {
+    if (outcome === "uncertain" && delivery.result?.reason === "not-started") return false;
+    return outcome === "queued" || outcome === "running" || outcome === "waiting" || outcome === "uncertain";
+  }
+  // An admitted run that never started wrote nothing; once FAC-114's start window expires, its
+  // uncertain/not-started history is terminal for retention. Any execution state remains live
+  // unless it is known terminal; uncertain writes have a result reason and stay live above.
+  if (!delivery.execution && delivery.run !== undefined && delivery.at &&
+      now - delivery.at.getTime() > WORKFLOW_RUN_START_WINDOW_MS) return false;
+  // Older runs may predate result records. Keep any run without a known terminal execution state.
+  return delivery.run !== undefined && delivery.execution?.state !== "finished" && delivery.execution?.state !== "failed";
+}
 
 /**
  * A requested run's outcome (FAC-114; inferos ADR 0012 §3, proposed):

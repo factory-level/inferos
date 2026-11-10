@@ -24,6 +24,7 @@ covers:
   - packages/workshop-shared/src/canvas.ts
   - packages/workshop-shared/src/governed-data.ts
   - packages/workshop-shared/src/governed-data.test.ts
+  - packages/workshop-backend/__tests__/gatekeeper-lookup.test.ts
   - packages/workshop-shared/src/canvas-model.ts
   - packages/workshop-shared/src/workspace-settings.ts
   - packages/workshop-shared/src/configuration-trace.ts
@@ -41,7 +42,7 @@ covers:
   - scripts/consumer/canvas.ts
   - packages/workshop-backend/src/env.d.ts
   - packages/ui
-updated: 2026-11-05
+updated: 2026-11-10
 ---
 
 # InferOps canvas and transactional widgets
@@ -642,7 +643,9 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
   - Every refusal is a fixed code (`GovernedRequestError`) and names no data.
 - **Listing runs on the server,** in the connector (`listGoverned`), over a snapshot of at most 200 rows the connector already reads under its own authority. It filters, then sorts stably with ties broken by id, then pages. `truncated` says when the snapshot hit its bound. A cursor is bound to its request's filters and sort, so another request's cursor, or one that doesn't decode, is refused (`INVALID_CURSOR`). It is not signed: it carries only an offset into what the same request may already read, so an altered one can only skip within that.
 - **Writes** are only a resource's declared commands (`GovernedCommand`, ADR 0013 W4 to W6). Each is proposed, decided, and applied by the connector. There is no generic create, update or delete.
-  - **The session:** `GovernedWriteSession.command(request)` returns `{ outcome: "proposed" }`, never a result. The row is read again to see the outcome.
+  - **The session:** `GovernedWriteSession.command(request)` returns `{ outcome: "proposed", actionId, status }`, never a result. `actionId` is opaque correlation; it does not authorize a log lookup. `status()` is the FAC-97 receipt capability issued for that exact `ApprovalQueue` submission. It projects that action's existing action-journal record through the originating workspace connection; there is no second store or caller-selected action ID. `waiting` and `running` are pending, and only `succeeded` means done.
+  - **One approval path:** a user's Refine write reaches `Overseer.openGovernedSession` and the gatekeeper's declared `command`; an InferOS agent's governed action reaches the same gatekeeper `ApprovalQueue`. Both submission paths enter the existing action journal. The governed command returns the receipt from its queue submission; agent actions continue through the existing approval/action-log path. The connector applies the action only after approval, and the row is read again to observe resource state.
+  - **Boundary:** this receipt covers InferOS-governed actions only. InferOps Dot's direct `chatbot_proposal` does not enter the InferOS action journal; mapping a Dot action into this receipt belongs to FAC-133, when Dot acts through InferOS chat context.
   - **The request** is validated by `parseGovernedCommand` before anything is read or proposed. It holds only `command`, `id`, `values` and `expectedRevision`:
     - a command the resource declares (otherwise `COMMAND_NOT_DECLARED`);
     - one row id;
