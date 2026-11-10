@@ -379,12 +379,16 @@ export default function BlueprintLandingPage({ rpcStub }: Props) {
   }, [id, authenticatedApi])
 
   const findMatchingAccounts = useCallback((binding: Extract<BlueprintBinding, { type: 'gatekeeper' }>) => {
+    const vendor = vendorById.get(binding.gatekeeperName.toLowerCase())
+    if (!vendor?.supportedResources.some(resource => resource.urlPattern === binding.typeUrlPattern)) {
+      return []
+    }
     return accounts.filter(account =>
       account.vendorId.toLowerCase() === binding.gatekeeperName.toLowerCase() &&
       account.credentialsValid &&
       account.supportedResources.some(resource => resource.urlPattern === binding.typeUrlPattern)
     )
-  }, [accounts])
+  }, [accounts, vendorById])
 
   const findSuggestedModelId = useCallback((suggested: {provider: string, modelName: string}) => {
     const provider = suggested.provider.trim().toLowerCase()

@@ -48,7 +48,7 @@ export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string
     if (api) {
       api.listCanvases().then(result => {
         if (generation.current !== current) return
-        const parsed = result.map(parseCanvasDefinition)
+        const parsed = result.map(value => parseCanvasDefinition(value))
         setViews(parsed); setActiveId((parsed.find(view => view.id === initialViewId) ?? parsed[0])?.id ?? null)
       }).catch(() => {
         if (generation.current === current) setError('Could not load views. Check your connection and access, then reload.')
@@ -86,7 +86,7 @@ export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string
       const current = generation.current
       api.listCanvases().then(result => {
         if (stopped || generation.current !== current || pending.current) return
-        const loaded = result.map(parseCanvasDefinition)
+        const loaded = result.map(value => parseCanvasDefinition(value))
         setViews(previous => sameViews(previous, loaded) ? previous : loaded)
         setActiveId(id => loaded.some(view => view.id === id) ? id : loaded[0]?.id ?? null)
       }).catch(() => {})
@@ -126,7 +126,7 @@ export const useCanvasWorkspace = (storage: CanvasStorage, initialViewId: string
 
   const reload = () => run(async () => {
     if (!api) return () => {}
-    const loaded = (await api.listCanvases()).map(parseCanvasDefinition)
+    const loaded = (await api.listCanvases()).map(value => parseCanvasDefinition(value))
     return () => {
       setViews(loaded); setHistory({})
       setActiveId(id => loaded.some(view => view.id === id) ? id : loaded[0]?.id ?? null)

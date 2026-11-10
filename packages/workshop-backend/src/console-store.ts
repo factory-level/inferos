@@ -1,12 +1,12 @@
 import type { WorkspaceSettings } from "@gadgets/workshop-shared/workspace-settings";
 import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
-import { CANVAS_GADGET_REF, CanvasConflictError, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
+import { CANVAS_GADGET_REF, CanvasConflictError, newerWidgetPlaceholder, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
 import {
   CanvasModelError, canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasRunEffects, canvasRunEventsHeard,
   canvasWidgetEventsHeard, formatCanvasTarget, type CanvasPage,
 } from "@gadgets/workshop-shared/canvas-model";
-import { joinStoredPage, nestedPage, readCanvasDefinition, splitStoredPage, type StoredPagePrompt } from "./canvas-store";
+import { CANVAS_READ, joinStoredPage, nestedPage, readCanvasDefinition, splitStoredPage, type StoredPagePrompt } from "./canvas-store";
 import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleDraftProblem, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
@@ -988,30 +988,35 @@ export class WorkspaceConsoleStore {
 
   /**
    * A screen of one console: as it was published, or (for the draft) the canvas as it is now. Null
-   * if that revision of the console doesn't show the screen.
+   * if that revision of the console doesn't show the screen. It is returned as stored, except that a
+   * widget a newer InferOS stored reads as an inert placeholder (`newerWidgetPlaceholder`).
    */
   screen(consoleId: string, screenId: string, source: ConsoleSource): CanvasDefinition | null {
     let shown = this.get(consoleId, source);
     if (!shown || !consoleScreens(shown).includes(screenId)) return null;
-    if (source === "draft") return readCanvasDefinition(this.storage, screenId);
-    return this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId))?.screen ?? null;
+    let screen = source === "draft" ? readCanvasDefinition(this.storage, screenId, CANVAS_READ)
+      : this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId))?.screen ?? null;
+    // As stored, as this has always been read, but with each newer InferOS's widget as its placeholder.
+    return screen && { ...screen, sections: (screen.sections ?? []).map(section => ({ ...section,
+      widgets: (section.widgets ?? []).map(widget => newerWidgetPlaceholder(widget as unknown as Record<string, unknown>) ?? widget) })) };
   }
 
   /**
    * The page of one console's screen: as its publication froze it, or (for the draft) the page the
    * screen stands for now (see `currentPage`). Null if that revision of the console doesn't show
    * the screen. A publication made before pages were frozen gives its version 1 copy by conversion.
+   * A widget a newer InferOS stored reads as an inert placeholder (`CANVAS_READ`).
    */
   page(consoleId: string, screenId: string, source: ConsoleSource): CanvasPage | null {
     let shown = this.get(consoleId, source);
     if (!shown || !consoleScreens(shown).includes(screenId)) return null;
     if (source === "draft") {
       let row = this.storage.canvases.get(screenId);
-      return row ? nestedPage(this.storage, row) ?? canvasPageFromDefinition(row) : null;
+      return row ? nestedPage(this.storage, row, CANVAS_READ) ?? canvasPageFromDefinition(row, CANVAS_READ) : null;
     }
     let snapshot = this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId));
     if (!snapshot) return null;
-    return snapshot.page ? joinStoredPage(snapshot.page, snapshot.pageSettings, snapshot.pagePrompts) : canvasPageFromDefinition(snapshot.screen);
+    return snapshot.page ? joinStoredPage(snapshot.page, snapshot.pageSettings, snapshot.pagePrompts, CANVAS_READ) : canvasPageFromDefinition(snapshot.screen, CANVAS_READ);
   }
 
   /**
