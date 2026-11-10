@@ -47,11 +47,29 @@ function triggers(impl: any) {
     store.pinTrigger(ADA.id, hook, GADGET, { definitionId: saved.id, revision: 1 });
     store.setControl(ADA, hook, { label: "Run refunds", invokers: [PERSON, OTHER] });
   }
+  impl.env = { ...impl.env, SHARED_CONFIGURATION_GATEKEEPER: "inferops" };
+  impl.storage.boundHooks = {
+    get: (hook: number) => [HOOK, OTHER_HOOK].includes(hook)
+      ? { id: hook, gadgetId: GADGET, enabled: true }
+      : undefined,
+  };
+  impl.storage.gatekeepers = {
+    get: (id: number) => id === CONNECTION ? {
+      creationSpec: { type: "gatekeeper", vendorId: "inferops", resourceUrl: "inferops://acme.operations/project/board/OPS" },
+    } : undefined,
+  };
+  impl.getGadgetRecord = () => ({});
+  impl.visibleBindings = () => [["BOARD", { target: CONNECTION }]];
+  impl.users = {
+    idFromName: (profileId: string) => ({ toString: () => profileId }),
+    idFromString: (id: string) => id,
+    get: () => ({ workflowInvokeAnswer: async () => ({ holds: true, company: COMPANY_A }) }),
+  };
   return store;
 }
 
 /** One run `profileId` asked trigger `hook` for, fired at `at`; returns its invocation and delivery ids. */
-function asked(impl: any, store: any, profileId: string, hook: number, at: Date, company: string | null = null) {
+function asked(impl: any, store: any, profileId: string, hook: number, at: Date, company: string | null = COMPANY_A) {
   let invocation = store.beginInvocation(profileId, hook, company);
   let delivery = store.fire(hook, GADGET, head, () => true, invocation.id)!;
   let stored = impl.storage.workflowDeliveries.get(delivery.deliveryId);
@@ -97,23 +115,32 @@ describe("the runs a person asked a trigger for, read back (FAC-116)", () => {
       .toMatchObject([{ invocationId, outcome: "failed", reason: "runtime-error" }]);
   });
 
-  it("hides a run from the same person when their current company differs", async () => {
+  it("fails closed when either the run or caller has no known company scope", async () => {
+    let name = `requested-runs-unknown-company-${crypto.randomUUID()}`;
+    await withImpl(name, async impl => {
+      let store = triggers(impl);
+      let storedScopeUnknown = asked(impl, store, PERSON, HOOK, new Date(), null);
+      expect(await impl.getRequestedRun(PERSON, storedScopeUnknown.invocationId)).toBeNull();
+      expect(await impl.listRequestedRuns(PERSON, HOOK)).toEqual([]);
+
+      // With no shared-configuration gatekeeper both sides would otherwise be null, and `null === null`
+      // must not turn unknown scope into authorization.
+      impl.env = { ...impl.env, SHARED_CONFIGURATION_GATEKEEPER: undefined };
+      expect(await impl.getRequestedRun(PERSON, storedScopeUnknown.invocationId)).toBeNull();
+      expect(await impl.listRequestedRuns(PERSON, HOOK)).toEqual([]);
+
+      let knownScope = asked(impl, store, PERSON, HOOK, new Date(), COMPANY_A);
+      expect(await impl.getRequestedRun(PERSON, knownScope.invocationId)).toBeNull();
+      expect(await impl.listRequestedRuns(PERSON, HOOK)).toEqual([]);
+    });
+  });
+
+  it("shows a run only while the same person's current company matches the recorded company", async () => {
     let name = `requested-runs-company-${crypto.randomUUID()}`;
     await withImpl(name, async impl => {
       let store = triggers(impl);
       let currentCompany = COMPANY_A;
-      impl.env = { ...impl.env, SHARED_CONFIGURATION_GATEKEEPER: "inferops" };
-      impl.storage.boundHooks = { get: (hook: number) => hook === HOOK ? { id: HOOK, gadgetId: GADGET, enabled: true } : undefined };
-      impl.storage.gatekeepers = { get: (id: number) => id === CONNECTION ? {
-        creationSpec: { type: "gatekeeper", vendorId: "inferops", resourceUrl: "inferops://acme.operations/project/board/OPS" },
-      } : undefined };
-      impl.getGadgetRecord = () => ({});
-      impl.visibleBindings = () => [["BOARD", { target: CONNECTION }]];
-      impl.users = {
-        idFromName: (profileId: string) => ({ toString: () => profileId }),
-        idFromString: (id: string) => id,
-        get: () => ({ workflowInvokeAnswer: async () => ({ holds: true, company: currentCompany }) }),
-      };
+      impl.users.get = () => ({ workflowInvokeAnswer: async () => ({ holds: true, company: currentCompany }) });
       let made = asked(impl, store, PERSON, HOOK, new Date(), COMPANY_A);
       expect(await impl.getRequestedRun(PERSON, made.invocationId)).not.toBeNull();
       expect(await impl.listRequestedRuns(PERSON, HOOK)).toHaveLength(1);

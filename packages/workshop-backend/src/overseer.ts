@@ -7306,7 +7306,9 @@ class OverseerImpl implements AgentHooks {
     } catch {
       return null;
     }
-    if (company !== delivery.run.company) return null;
+    // Null means company scope is unknown (including deployments with no shared-configuration
+    // gatekeeper). Never let two unknown scopes compare equal and disclose a run.
+    if (!company || !delivery.run.company || company !== delivery.run.company) return null;
     let outcome: WorkflowRunOutcome;
     let reason: RequestedRun["reason"];
     if (delivery.result) {

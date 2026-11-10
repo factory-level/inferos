@@ -221,9 +221,17 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowInvocations.delete(invocation.id);
       throw new Error("That run request was for another revision of this workflow. Ask again.");
     }
-    let { stored, revision } = pin.mode === "follow-latest"
-      ? this.#currentPublishedRevision(pin, hookGadgetId)
+    let { stored, revision: currentPublished } = pin.mode === "follow-latest"
+      ? this.#currentPublishedRevision(pin, hookGadgetId, headOf)
       : this.#explicitRevision(pin, hookGadgetId, headOf);
+    // An invocation records the publication current when the person was admitted. A newer
+    // publication may land while it waits for the delivery callback; run its admitted revision.
+    let revision = invocation && pin.mode === "follow-latest"
+      ? stored.revisions.find(candidate => candidate.revision === invocation.revision)
+      : currentPublished;
+    if (!revision || (invocation && pin.mode === "follow-latest" && revision.source.gadgetId !== hookGadgetId)) {
+      throw new Error("That run request was for another revision of this workflow. Ask again.");
+    }
     if (pin.mode !== "follow-latest" && stored.published?.revision !== pin.revision &&
         !ownerCanBuild(stored.owner.id)) {
       throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
@@ -231,8 +239,13 @@ export class WorkspaceWorkflowDefinitionStore {
     return this.durableStorage.transactionSync(() => {
       let deliveries = Array.from(this.storage.workflowDeliveries.list()).toSorted((a, b) => a.id - b.id);
       if (deliveries.length >= MAX_WORKFLOW_DELIVERIES) {
-        let terminal = deliveries.find(candidate => !isLiveWorkflowDelivery(candidate));
-        if (!terminal) throw new Error("Too many workflow runs are in progress.");
+        let now = Date.now();
+        let isLive = (candidate: StoredWorkflowDelivery) => isLiveWorkflowDelivery(candidate, now);
+        let terminal = deliveries.find(candidate => !isLive(candidate));
+        if (!terminal) {
+          let needsReconciliation = deliveries.filter(isLive).length;
+          throw new Error(`Too many workflow runs are in progress; ${needsReconciliation} are waiting for reconciliation.`);
+        }
         this.storage.workflowDeliveries.delete(terminal.id);
       }
       let id = this.storage.nextWorkflowDeliveryId.get();
@@ -273,18 +286,22 @@ export class WorkspaceWorkflowDefinitionStore {
       headOf: (gadgetId: WorkpieceId) => string | undefined): void {
     let pin = this.storage.workflowTriggerPins.get(hookId);
     if (!pin) throw new Error(CANNOT_RUN);
-    if (pin.mode === "follow-latest") this.#currentPublishedRevision(pin, hookGadgetId);
+    if (pin.mode === "follow-latest") this.#currentPublishedRevision(pin, hookGadgetId, headOf);
     else this.#explicitRevision(pin, hookGadgetId, headOf);
   }
 
   // Resolve the selected definition's current published source; saves never publish implicitly.
-  #currentPublishedRevision(pin: StoredTriggerPin, hookGadgetId: WorkpieceId | null) {
+  #currentPublishedRevision(pin: StoredTriggerPin, hookGadgetId: WorkpieceId | null,
+      headOf: (gadgetId: WorkpieceId) => string | undefined) {
     let stored = this.storage.workflowDefinitions.get(pin.definitionId);
     if (!stored?.published) throw new Error("This workflow has no published revision.");
     let revision = stored.revisions.find(r => r.revision === stored!.published!.revision);
     if (!revision) throw new Error("This workflow has no published revision.");
     if (hookGadgetId === null || revision.source.gadgetId !== hookGadgetId)
       throw new Error("This workflow is not available for this trigger.");
+    if (headOf(hookGadgetId) !== revision.source.commitId) {
+      throw new Error(`The workflow changed since revision ${revision.revision} was saved. Save it, then move the trigger.`);
+    }
     return { stored, revision };
   }
 
