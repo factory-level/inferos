@@ -254,8 +254,11 @@ export const RUN_WRITE_EXPIRED =
 export const ACTION_ALREADY_REJECTED = "This action was already rejected.";
 /** A rejection of an action already approved (FAC-118): it was applied, so it can't be rejected now. */
 export const ACTION_ALREADY_APPROVED = "This action was already approved.";
-/** A decision while an approved apply of the same action is in flight (FAC-118): it sends once. */
-export const ACTION_IN_PROGRESS = "This action is being applied; its outcome is recorded when it finishes.";
+/**
+ * A decision while another decision of the same action is under way, an apply or a rejection
+ * (FAC-118): the action reaches the gatekeeper once, and the decision under way stands.
+ */
+export const ACTION_IN_PROGRESS = "This action is being decided; its outcome is recorded when it finishes.";
 
 /**
  * Re-checks, at a protected execution point of a run a person asked for (FAC-104: the run's start,
