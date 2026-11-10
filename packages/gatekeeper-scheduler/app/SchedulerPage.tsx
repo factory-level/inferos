@@ -351,7 +351,7 @@ function ScheduleRow({
   const unavailable = targetTitle === null;
   // Only failed schedules have something to expand: why they need attention. The caret is a sibling
   // of the open button, never nested inside it, so the rest of the row stays one click target.
-  const needsAttention = schedule.status === "dead" || schedule.lastAdmissionRefusal !== undefined;
+  const needsAttention = schedule.status === "dead";
   return (
     <article className={`-mx-2 rounded-lg px-2 py-3 ${unavailable ? "" : "hover:bg-kumo-tint"}`}>
       <div className="flex items-center gap-3">
@@ -408,11 +408,6 @@ function ScheduleRow({
       {needsAttention && expanded && timing.diagnostic && (
         <p className="ml-12 mt-2 rounded-lg bg-kumo-elevated px-3 py-2.5 text-xs leading-5 text-kumo-danger">
           {timing.diagnostic}
-        </p>
-      )}
-      {schedule.lastAdmissionRefusal && expanded && (
-        <p className="ml-12 mt-2 rounded-lg bg-kumo-elevated px-3 py-2.5 text-xs leading-5 text-kumo-danger">
-          The scheduled run at {new Date(schedule.lastAdmissionRefusal.scheduledTime).toLocaleString()} was refused because this trigger reached its occurrence history limit. Older occurrence records must expire before it can run again.
         </p>
       )}
     </article>

@@ -204,12 +204,6 @@ export type ScheduleSummary = {
   missedRuns?: "skip" | "coalesce";
   /** Due slots started so far; present for a bounded recurrence. */
   occurrenceCount?: number;
-  /** Most recent workflow admission refused because its deduplication history reached capacity. */
-  lastAdmissionRefusal?: {
-    code: "workflow_occurrence_limit";
-    scheduledTime: number;
-    refusedAt: number;
-  };
 } & (
   | {
       /** The schedule can still run or retry. */

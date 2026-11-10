@@ -826,7 +826,7 @@ describe("ScheduleDriver", () => {
     );
   });
 
-  it("shows a named occurrence-cap refusal in the schedule owner's history", async () => {
+  it("keeps occurrence-cap refusal in the schedule record but out of schedule summaries", async () => {
     const driver = testEnv.SCHEDULE_DRIVER.getByName("occurrence-cap-refusal");
     const activationTime = Date.now();
     await testEnv.TEST_HOOKS.configure("occurrence-cap");
@@ -842,16 +842,14 @@ describe("ScheduleDriver", () => {
 
     await runDurableObjectAlarm(driver);
 
-    await expect(driver.listWorkspace("workspace-a")).resolves.toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        scheduleId: "capacity-limited",
-        status: "active",
-        lastAdmissionRefusal: expect.objectContaining({
-          code: "workflow_occurrence_limit",
-          scheduledTime: activationTime,
-        }),
-      }),
-    ]));
+    const record = await driver.getSchedule("workspace-a", "capacity-limited");
+    expect(record?.state.lastAdmissionRefusal).toMatchObject({
+      code: "workflow_occurrence_limit",
+      scheduledTime: activationTime,
+    });
+    const workspaceRow = (await driver.listWorkspace("workspace-a")).find(row => row.scheduleId === "capacity-limited");
+    expect(workspaceRow).toBeDefined();
+    expect(workspaceRow).not.toHaveProperty("lastAdmissionRefusal");
     const accountRows = (await driver.listAccount()).schedules;
     const accountRow = accountRows.find(row => row.scheduleId === "capacity-limited");
     expect(accountRow).toBeDefined();
