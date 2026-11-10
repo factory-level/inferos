@@ -20,6 +20,7 @@ afterAll(() => {
   else testGlobal.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment
 })
 
+const toast = vi.hoisted(() => vi.fn<(toast: { title: string }) => void>())
 vi.mock('@cloudflare/kumo', () => ({
   Button: ({ children, onClick, disabled }: { children: ReactNode; onClick?: () => void; disabled?: boolean }) => (
     <button type="button" onClick={onClick} disabled={disabled}>{children}</button>
@@ -30,20 +31,21 @@ vi.mock('@cloudflare/kumo', () => ({
   Select: Object.assign(({ children }: { children: ReactNode }) => <div>{children}</div>, {
     Option: ({ children }: { children: ReactNode }) => <span>{children}</span>,
   }),
-  useKumoToastManager: () => ({ add: vi.fn<(toast: unknown) => void>() }),
+  useKumoToastManager: () => ({ add: toast }),
 }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ currentUser: { id: 'ada', name: 'Ada' } }) }))
 
 const ADA = { type: 'user' as const, id: 'ada', name: 'Ada' }
 const revision = { revision: 1, source: { kind: 'gadget' as const, gadgetId: 3, commitId: 'a'.repeat(40) }, savedAt: new Date(0) }
-const EXPIRES = new Date(Date.UTC(2026, 10, 11, 9, 0))
+// An hour from now, so it is still temporary however late the suite runs.
+const EXPIRES = new Date(Date.now() + 60 * 60 * 1000)
 const temporary: WorkflowDefinition = { id: 't', title: 'One-off', owner: ADA, revisions: [revision], published: null, expiresAt: EXPIRES }
 const kept: WorkflowDefinition = { id: 'k', title: 'Kept', owner: ADA, revisions: [revision], published: null }
 const GADGETS = [{ id: 3, title: 'Refunds' }] as unknown as GadgetSummary[]
 
 let container: HTMLDivElement
 let root: Root
-beforeEach(() => { container = document.createElement('div'); document.body.append(container); root = createRoot(container) })
+beforeEach(() => { toast.mockReset(); container = document.createElement('div'); document.body.append(container); root = createRoot(container) })
 afterEach(() => { act(() => root.unmount()); container.remove() })
 
 const rowOf = (title: string) => [...container.querySelectorAll('li')].find(li => li.textContent?.includes(title))!
@@ -64,4 +66,40 @@ it('says a temporary definition expires, and when, and saves it to keep it', asy
   // The same save, which retains it: no retain: false, and the definition's own id and gadget.
   expect(saveWorkflowDefinition).toHaveBeenCalledWith({ id: 't', title: 'One-off', gadgetId: 3 })
   expect(onChanged).toHaveBeenCalledOnce()
+})
+
+it('says plainly when a save lost the race with expiry, and reloads so the definition leaves the list', async () => {
+  const saveWorkflowDefinition = vi.fn<Overseer['saveWorkflowDefinition']>(async () => {
+    throw new Error('Error: This workflow expired. Create it again.')
+  })
+  const onChanged = vi.fn<() => void>()
+  await act(async () => root.render(<WorkflowDefinitionsSection overseer={{ saveWorkflowDefinition } as unknown as RpcStub<Overseer>}
+    gadgets={GADGETS} definitions={[temporary]} onChanged={onChanged} />))
+  await act(async () => buttonIn(rowOf('One-off'), 'Save to keep')!.click())
+  const told = toast.mock.calls[0]![0].title
+  expect(told).toContain('expired before it was saved')
+  expect(told).toContain('stay in their history')
+  expect(told).not.toMatch(/not found|went wrong/i)
+  expect(onChanged).toHaveBeenCalledOnce()
+})
+
+it('reads a definition whose expiry has passed as expired, with nothing left to save', async () => {
+  const lapsed: WorkflowDefinition = { ...temporary, id: 'x', title: 'Lapsed', expiresAt: new Date(Date.now() - 1000) }
+  await act(async () => root.render(<WorkflowDefinitionsSection overseer={{} as unknown as RpcStub<Overseer>}
+    gadgets={GADGETS} definitions={[lapsed]} onChanged={vi.fn<() => void>()} />))
+  const row = rowOf('Lapsed')
+  expect(row.textContent).toContain('Expired')
+  expect(row.textContent).toContain('stay in their history')
+  expect(buttonIn(row, 'Save to keep')).toBeUndefined()
+  expect(buttonIn(row, 'Save new revision')).toBeUndefined()
+})
+
+it('shows any other refusal in the server\'s own words', async () => {
+  const saveWorkflowDefinition = vi.fn<Overseer['saveWorkflowDefinition']>(async () => {
+    throw new Error('A workflow definition is saved from a workflow gadget with committed code.')
+  })
+  await act(async () => root.render(<WorkflowDefinitionsSection overseer={{ saveWorkflowDefinition } as unknown as RpcStub<Overseer>}
+    gadgets={GADGETS} definitions={[kept]} onChanged={vi.fn<() => void>()} />))
+  await act(async () => buttonIn(rowOf('Kept'), 'Save new revision')!.click())
+  expect(toast.mock.calls[0]![0].title).toBe('A workflow definition is saved from a workflow gadget with committed code.')
 })
