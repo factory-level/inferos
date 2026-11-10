@@ -125,13 +125,19 @@ const GovernedTable = ({ resource, session }: { resource: string; session: Gover
 
   if (described !== null) return <p role="alert" className="text-sm text-kumo-danger">{described}</p>
   if (!description || query.isLoading) return <p aria-busy="true" className="text-sm text-kumo-subtle">Loading rows…</p>
-  if (query.isError) return <div role="alert" className="space-y-2 text-sm text-kumo-danger"><p>{messageOf(query.error)}</p>
+  if (query.isError && !query.data) return <div role="alert" className="space-y-2 text-sm text-kumo-danger"><p>{messageOf(query.error)}</p>
     <Button size="sm" onClick={() => void query.refetch()}>Try again</Button></div>
+  const refreshRows = async () => {
+    const refreshed = await query.refetch()
+    if (refreshed.isError) throw refreshed.error
+    return refreshed
+  }
   const rows = result.data
   const total = result.total ?? 0
   if (rows.length === 0) return <p className="text-sm text-kumo-subtle">No rows.</p>
   const fields = description.fields
   return <div className="min-w-0 space-y-2">
+    {query.isError && <p role="alert" className="text-sm text-kumo-danger">Could not refresh these rows. Showing the last successful read; retry before making another change.</p>}
     <div className="overflow-x-auto">
       <table className="w-full text-left text-sm text-kumo-default">
         <thead><tr>{fields.map(field => <th key={field.name} scope="col" className="px-2 py-1 font-medium">{field.label}</th>)}
@@ -139,7 +145,7 @@ const GovernedTable = ({ resource, session }: { resource: string; session: Gover
         <tbody>{rows.map(row => <tr key={row.id} className="border-t border-kumo-line">
           {fields.map(field => <td key={field.name} className="px-2 py-1"><bdi>{String(row.values[field.name] ?? '')}</bdi></td>)}
           {description.commands.length > 0 && <td className="px-2 py-1">
-            {description.commands.map(command => <CommandForm key={command.name} resource={resource} row={row} command={command} description={description} refresh={query.refetch} />)}
+            {description.commands.map(command => <CommandForm key={command.name} resource={resource} row={row} command={command} description={description} refresh={refreshRows} />)}
           </td>}
         </tr>)}</tbody>
       </table>
@@ -155,7 +161,7 @@ const GovernedTable = ({ resource, session }: { resource: string; session: Gover
 /** One declared command on one row: its one field's allowed values, proposed for a decision. */
 const RECEIPT_POLL_MS = 1_000
 const RECEIPT_POLL_MAX_MS = 30_000
-type CommandState = { kind: 'receipt'; outcome: ActionOutcome; reason?: string } | { kind: 'status-error' } | { kind: 'stale' } | { kind: 'error'; message: string } | null
+type CommandState = { kind: 'receipt'; outcome: ActionOutcome; reason?: string } | { kind: 'status-error' } | { kind: 'stale'; reason?: string } | { kind: 'error'; message: string } | null
 
 const CommandForm = ({ resource, row, command, description, refresh }: { resource: string; row: GovernedRecord; command: GovernedCommand; description: GovernedDescription; refresh: () => Promise<unknown> }) => {
   const field = description.fields.find(item => item.name === command.fields[0])
@@ -185,10 +191,13 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
         continue
       }
       if (mounted.current) setState({ kind: 'receipt', outcome: status.outcome, ...(status.reason ? { reason: status.reason } : {}) })
-      await refresh()
+      let refreshed = true
+      try { await refresh() } catch { refreshed = false }
       if (mounted.current && status.code === 'STALE_REVISION') {
         setValue('')
-        setState({ kind: 'receipt', outcome: status.outcome, reason: `${status.reason ?? 'The row changed since it was read.'} The row was refreshed; review it before proposing again.` })
+        setState({ kind: 'receipt', outcome: status.outcome, reason: `${status.reason ?? 'The row changed since it was read.'} ${refreshed ? 'The row was refreshed; review it before proposing again.' : 'The row could not be refreshed; reload to read it before proposing again.'}` })
+      } else if (mounted.current && !refreshed) {
+        setState({ kind: 'receipt', outcome: status.outcome, reason: 'The outcome is known, but the row could not be refreshed. Reload to read the current record.' })
       }
       if (mounted.current) setPending(false)
       return
@@ -215,9 +224,12 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
       await checkReceipt(submitted)
     } catch (error) {
       const message = messageOf(error)
-      await refresh()
-      if (/STALE_REVISION/.test(message)) { setValue(''); setState({ kind: 'stale' }) }
-      else setState({ kind: 'error', message })
+      let refreshed = true
+      try { await refresh() } catch { refreshed = false }
+      if (/STALE_REVISION/.test(message)) {
+        setValue('')
+        setState({ kind: 'stale', ...(refreshed ? {} : { reason: 'The row could not be refreshed; reload to read it before proposing again.' }) })
+      } else setState({ kind: 'error', message: refreshed ? message : `${message} The row could not be refreshed; reload to read the current record.` })
       setPending(false)
     }
   }
@@ -227,9 +239,9 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
     </Select>
     <Button size="sm" disabled={!value || pending} onClick={() => void propose()}>Propose</Button>
     {state?.kind === 'receipt' && <span role="status" className="text-xs text-kumo-subtle">{ACTION_OUTCOME_TEXT[state.outcome]}{state.reason ? `: ${state.reason}` : ''}</span>}
-    {state?.kind === 'status-error' && <span role="status" className="text-xs text-kumo-danger">Could not check this operation's status. It has not been resubmitted.</span>}
+    {state?.kind === 'status-error' && <span role="status" className="text-xs text-kumo-danger">Could not check this operation's status. It has not been resubmitted. Reload to check it in approvals.</span>}
     {state?.kind === 'status-error' && <Button size="sm" onClick={() => setAttempt(count => count + 1)}>Retry status</Button>}
-    {state?.kind === 'stale' && <span role="status" className="text-xs text-kumo-danger">This row changed since it was read. It has been refreshed; review it and try again.</span>}
+    {state?.kind === 'stale' && <span role="status" className="text-xs text-kumo-danger">This row changed since it was read. {state.reason ?? 'It has been refreshed; review it and try again.'}</span>}
     {state?.kind === 'error' && <span role="status" className="text-xs text-kumo-danger">{state.message}</span>}
   </div>
 }

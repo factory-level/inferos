@@ -149,6 +149,7 @@ it('retries a disconnected receipt check without resubmitting the command', asyn
   await chooseClosed()
   await act(async () => { button('Propose')!.click() }); await settle()
   expect(container.textContent).toContain("Could not check this operation's status. It has not been resubmitted.")
+  expect(container.textContent).toContain('Reload to check it in approvals.')
   await act(async () => { button('Retry status')!.click() }); await settle()
   expect(container.querySelector('[role="status"]')?.textContent).toBe('Applied')
   expect(command).toHaveBeenCalledTimes(1)
@@ -164,6 +165,34 @@ it('refreshes after a stale-revision refusal and asks the person to review the r
   expect(container.querySelector('[role="status"]')?.textContent).toContain('This row changed since it was read.')
   expect(list).toHaveBeenCalledTimes(2)
   expect(button('Propose')?.disabled).toBe(true)
+})
+
+it('keeps a known terminal receipt and clears pending when refreshing the row fails', async () => {
+  const list = vi.fn<GovernedWriteSession['list']>()
+    .mockResolvedValueOnce({ rows: [ticket(1)], nextCursor: null, total: 1, truncated: false })
+    .mockRejectedValueOnce(new Error('connection lost'))
+  const command = vi.fn<GovernedWriteSession['command']>(async () => ({ outcome: 'proposed', actionId: 'receipt-1', status: async () => ({ outcome: 'succeeded' }) }))
+  const { session } = queue([ticket(1)], { list, command })
+  await render(async () => ({ gatekeeperId: 4, resource: 'tickets/queue' as const, session }))
+  await chooseClosed()
+  await act(async () => { button('Propose')!.click() }); await settle()
+  expect(container.textContent).toContain('Applied: The outcome is known, but the row could not be refreshed.')
+  expect(button('Propose')?.disabled).toBe(false)
+  expect(command).toHaveBeenCalledTimes(1)
+})
+
+it('keeps a stale refusal visible and disables proposing when refreshing the row fails', async () => {
+  const list = vi.fn<GovernedWriteSession['list']>()
+    .mockResolvedValueOnce({ rows: [ticket(1)], nextCursor: null, total: 1, truncated: false })
+    .mockRejectedValueOnce(new Error('connection lost'))
+  const command = vi.fn<GovernedWriteSession['command']>(async () => { throw new Error('STALE_REVISION: changed') })
+  const { session } = queue([ticket(1)], { list, command })
+  await render(async () => ({ gatekeeperId: 4, resource: 'tickets/queue' as const, session }))
+  await chooseClosed()
+  await act(async () => { button('Propose')!.click() }); await settle()
+  expect(container.textContent).toContain('The row could not be refreshed; reload to read it before proposing again.')
+  expect(button('Propose')?.disabled).toBe(true)
+  expect(command).toHaveBeenCalledTimes(1)
 })
 
 it('preserves a stale-revision failure receipt and refreshes its row', async () => {
