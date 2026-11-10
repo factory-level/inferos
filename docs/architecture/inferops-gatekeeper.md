@@ -15,6 +15,7 @@ covers:
   - packages/gatekeeper-kit
   - packages/workshop-shared/src/gatekeeper.ts
   - packages/workshop-backend/src/user.ts
+  - packages/workshop-frontend/src/features/auth/AccountSubjectPassCard.tsx
   - packages/workshop-backend/src/account-subject.ts
   - packages/workshop-backend/src/user-directory.ts
   - packages/workshop-backend/__tests__/account-subject.test.ts
@@ -850,6 +851,14 @@ holds. The Workshop (`account-subject.ts`, `auth/login-flow.ts`) keys the person
   own InferOps connection vouches its address, unless the directory already sends that subject to
   another account (a conflict, left unbound, so nothing is stranded). It creates no account, and a
   second run binds nothing new. Accounts the directory doesn't list yet bind at their next sign-in.
+- **Running the pass.** A deployment admin runs it from the Admin page's Access tab
+  (`AccountSubjectPassCard`, over the same `AdminApi.bindAccountSubjects()`; nothing else calls
+  it). Binding can't be undone there, so it takes a second, explicit step: *Bind accounts…* says
+  what binding does, and only *Bind accounts* runs it; *Cancel* runs nothing. While it runs the
+  button is disabled. It then shows the pass's counts only (checked, bound, already bound, and how
+  many were left unbound), never an account, with its own words for nothing to bind and for no
+  account holding a vouching connection. A failure shows the server's message and the pass can be
+  run again. Tests: `AccountSubjectPassCard.test.tsx`.
 - **Admins** (`ADMINS`) are still matched by account name: a bound account keeps its address as its
   name; a new person's account name is its subject form.
 - **Tests:** `account-subject.test.ts` (the email change, a second person on the old address, the
