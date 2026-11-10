@@ -39,6 +39,7 @@ import type {
   WorkflowDefinitionSave, WorkflowDefinitionDuplicate, WorkflowInvocation, RequestedRun, TriggerLifecycle,
 } from "./workflow-definition.js";
 import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
+import type { AgentViewOverlay } from "./agent-widgets.js";
 import type { WidgetPlacementInput, WidgetPlacements } from "./widget-placements.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
@@ -538,6 +539,30 @@ export interface OperateSession extends RpcTarget {
    * Refused with `WIDGET_PLACEMENTS_CONFLICT` or `WIDGET_PLACEMENT_NOT_FOUND`.
    */
   removeWidgetPlacement(placementId: string, expectedRevision: number): Promise<WidgetPlacements>;
+
+  /**
+   * What the operate agent changed in this person's presentation and they haven't kept or dismissed
+   * (FAC-14, agent-widgets.ts): placements it shows with other filters, and placements it
+   * suggests. Never saved or logged, for the company they work in now, and gone when that changes
+   * or the kernel restarts. Nothing in it is on their canvas until they keep or place it.
+   */
+  getAgentView(): Promise<AgentViewOverlay>;
+  /**
+   * Keeps the agent's view of placement `placementId`: saves its filters as the placement's own,
+   * as `saveWidgetPlacement` would with `expectedRevision`, and drops it from the overlay. Refused
+   * as that save is, or with `WIDGET_PLACEMENT_NOT_FOUND` when there's no such view.
+   */
+  keepAgentView(placementId: string, expectedRevision: number): Promise<WidgetPlacements>;
+  /** Drops the agent's view of placement `placementId`, which shows its saved filters again. */
+  dismissAgentView(placementId: string): Promise<AgentViewOverlay>;
+  /**
+   * Places the agent's suggestion `proposalId` as suggested, as `saveWidgetPlacement` would with
+   * `expectedRevision`, and drops it from the overlay. What it shows is opened on its own checked
+   * path every time, like any placement.
+   */
+  acceptAgentPlacement(proposalId: string, expectedRevision: number): Promise<WidgetPlacements>;
+  /** Drops the agent's suggestion `proposalId` without placing it. */
+  dismissAgentPlacement(proposalId: string): Promise<AgentViewOverlay>;
 
   /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
   listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;

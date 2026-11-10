@@ -48,8 +48,57 @@ export function dynamicDefinitionTtlMs(setting: string | undefined): number {
   return hours * 60 * 60 * 1000;
 }
 
-/** Most delivery records one workspace keeps; the oldest is dropped past it. */
-export const MAX_WORKFLOW_DELIVERIES = 1000;
+/** Proposed default maximum number of workflow run records one workspace keeps (FAC-125). */
+export const DEFAULT_MAX_WORKFLOW_DELIVERIES = 10_000;
+/** Default alias used by storage migrations and callers without deployment-specific settings. */
+export const MAX_WORKFLOW_DELIVERIES = DEFAULT_MAX_WORKFLOW_DELIVERIES;
+/** Lowest permitted per-workspace workflow run history limit. */
+export const MIN_MAX_WORKFLOW_DELIVERIES = 1_000;
+/** Highest permitted per-workspace workflow run history limit. */
+export const MAX_MAX_WORKFLOW_DELIVERIES = 100_000;
+/** Proposed default retention for reconciled terminal workflow runs (FAC-125). */
+export const DEFAULT_WORKFLOW_RUN_HISTORY_RETENTION_DAYS = 90;
+/** Lowest configured retention, in days. */
+export const MIN_WORKFLOW_RUN_HISTORY_RETENTION_DAYS = 1;
+/** Highest configured retention, in days. */
+export const MAX_WORKFLOW_RUN_HISTORY_RETENTION_DAYS = 3_650;
+/** Maximum number of due run-history expiry pointers swept per pass. */
+export const WORKFLOW_RUN_HISTORY_SWEEP_BATCH = 100;
+/** Maximum bounded history sweep batches allowed in one synchronous admission transaction. */
+export const WORKFLOW_RUN_HISTORY_ADMISSION_SWEEP_BATCHES = 2;
+/** Delay before retrying a partially drained history backlog from the Durable Object alarm. */
+export const WORKFLOW_RUN_HISTORY_SWEEP_RETRY_MS = 60_000;
+/** Proposed default terminal run-history retention, in milliseconds. */
+export const WORKFLOW_RUN_HISTORY_RETENTION_MS = DEFAULT_WORKFLOW_RUN_HISTORY_RETENTION_DAYS * 24 * 60 * 60_000;
+/** Owner-visible refusal when retained run history is at the configured workspace cap. */
+export const WORKFLOW_RUN_HISTORY_CAP_REFUSAL = "Workflow run history is at its retention limit. Wait for older completed runs to expire, or ask your workspace administrator to raise the run-history limit.";
+
+/**
+ * Resolve a deployment's run-history retention setting to milliseconds, defaulting to the
+ * proposed 90 days. Invalid or out-of-range values throw so the deployment never silently changes
+ * its retention policy.
+ */
+export function workflowRunHistoryRetentionMs(setting: string | undefined): number {
+  let days = setting === undefined ? DEFAULT_WORKFLOW_RUN_HISTORY_RETENTION_DAYS
+    : /^\d+$/.test(setting) ? Number(setting) : Number.NaN;
+  if (!(days >= MIN_WORKFLOW_RUN_HISTORY_RETENTION_DAYS && days <= MAX_WORKFLOW_RUN_HISTORY_RETENTION_DAYS)) {
+    throw new Error(`WORKFLOW_RUN_HISTORY_RETENTION_DAYS must be a whole number of days from ${MIN_WORKFLOW_RUN_HISTORY_RETENTION_DAYS} to ${MAX_WORKFLOW_RUN_HISTORY_RETENTION_DAYS}.`);
+  }
+  return days * 24 * 60 * 60_000;
+}
+
+/**
+ * Resolve a deployment's per-workspace run-history cap, defaulting to the proposed 10,000 records.
+ * Invalid or out-of-range values throw rather than silently selecting another cap.
+ */
+export function maxWorkflowDeliveries(setting: string | undefined): number {
+  let count = setting === undefined ? DEFAULT_MAX_WORKFLOW_DELIVERIES
+    : /^\d+$/.test(setting) ? Number(setting) : Number.NaN;
+  if (!(count >= MIN_MAX_WORKFLOW_DELIVERIES && count <= MAX_MAX_WORKFLOW_DELIVERIES)) {
+    throw new Error(`WORKFLOW_MAX_RUN_HISTORY must be a whole number from ${MIN_MAX_WORKFLOW_DELIVERIES} to ${MAX_MAX_WORKFLOW_DELIVERIES}.`);
+  }
+  return count;
+}
 
 /** Stable error name for a trigger refused because its occurrence tombstones are at capacity. */
 export const WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME = "WorkflowOccurrenceLimitError";
@@ -133,12 +182,28 @@ export type WorkflowDefinitionProvenance = { at: Date; definitionId?: string; ti
  * type, made from the person's own connected account; a model binding needs one of their own models.
  * Never the source's connection, account or resource.
  */
-export type WorkflowRequiredBinding = { name: string; title?: string } & (
+export type WorkflowRequiredBinding = {
+  name: string;
+  title?: string;
+  /**
+   * Why it isn't set up, where `bindingsNeeded` lists it (FAC-123): no connection yet, one made from
+   * another person's account or model, or one made before InferOS recorded whose account it uses.
+   */
+  unmet?: "missing" | "not-owners" | "unattributed";
+} & (
   | { type: "gatekeeper"; vendorId: string; typeUrlPattern: string }
   | { type: "aiModel" });
 
 /** Refused at a run's start and at each of its writes while a required connection isn't set up (FAC-123). */
 export const WORKFLOW_BINDINGS_NEEDED = "This workflow needs its connections set up before it can run.";
+
+/** Refused when a duplicate's connection was made from another person's account or model (FAC-123). */
+export const WORKFLOW_BINDINGS_NOT_OWNERS =
+  "This workflow's connections must be set up from its owner's own accounts and models before it can run.";
+
+/** Refused when a duplicate's connection predates recording whose account it uses (FAC-123). */
+export const WORKFLOW_BINDINGS_UNATTRIBUTED =
+  "One of this workflow's connections was made before InferOS recorded whose account it uses. Set it up again from your own account before it can run.";
 
 /**
  * Duplicating a definition (FAC-123): which one, which of its revisions (the published one unless

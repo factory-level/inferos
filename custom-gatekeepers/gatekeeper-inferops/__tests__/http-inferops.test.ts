@@ -1579,6 +1579,23 @@ describe("widget search by intent (FAC-13)", () => {
     expect(sent).toEqual([`GET /knowledge/widget-search?query=overdue+invoices&k=8 ${CONNECTION.workspaceId}`]);
   });
 
+  it("keeps what a built-in kind declares (FAC-14), and leaves out a declaration it can't read rather than fail", async () => {
+    const metadata = { permission: "project:read", freshnessSeconds: 30, supportedSizes: ["half", "large"],
+      actions: [{ id: "transition-issue", label: "Move issue", reversibility: "reversible", permission: "issue:transition" }] };
+    const { client } = searching(() => Response.json({ ...ANSWER, hits: [{ ...ANSWER.hits[0], metadata }] }));
+    expect((await client.searchWidgets("board", 8)).hits).toEqual([{ ...ANSWER.hits[0], metadata }]);
+    for (const bad of [
+      { ...metadata, permission: "everything" },
+      { ...metadata, freshnessSeconds: -1 },
+      { ...metadata, supportedSizes: ["huge"] },
+      { ...metadata, actions: [{ ...metadata.actions[0], reversibility: "maybe" }] },
+      "project:read",
+    ]) {
+      const { client: other } = searching(() => Response.json({ ...ANSWER, hits: [{ ...ANSWER.hits[0], metadata: bad }] }));
+      expect((await other.searchWidgets("board", 8)).hits).toEqual(ANSWER.hits);
+    }
+  });
+
   it("calls an answer beyond k, or with another source or ranking, malformed", async () => {
     for (const bad of [
       { ...ANSWER, definitions: [ANSWER.definitions[0], ANSWER.definitions[0]] },

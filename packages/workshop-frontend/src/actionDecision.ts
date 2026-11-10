@@ -2,8 +2,8 @@ import type { ActionFailureKind } from '@gadgets/workshop-shared/gatekeeper'
 import { actionFailureKind } from '@gadgets/workshop-shared/gatekeeper'
 import type { ActionLogEntry } from '@gadgets/workshop-shared/api'
 import {
-  ACTION_OUTCOME_TEXT, ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode,
-  type ActionOutcome,
+  ACTION_OUTCOME_TEXT, ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, RUN_DEFINITION_CHANGED, RUN_REQUESTER_REVOKED,
+  RUN_WRITE_EXPIRED, actionOutcome, actionReceiptCode, type ActionOutcome,
 } from '@gadgets/workshop-shared/action-outcome'
 
 /** An action of the journal, as a decision card shows it. */
@@ -25,9 +25,42 @@ export const ACTION_FAILURE_KIND_TEXT: Record<ActionFailureKind, string> = {
   unavailable: "The service couldn't be reached, or didn't say why.",
 }
 
-/** What a person can do about a sign-in to renew, until the page can reconnect it itself. */
+/** What a person can do about a sign-in to renew when the page can't reconnect it for them. */
 export const RECONNECT_GUIDANCE =
   "Reconnect this connection's account in the workspace's connections, then approve it again."
+
+/** What a sign-in to renew says beside its Reconnect button (FAC-119 K2: the server finds the account). */
+export const RECONNECT_PROMPT = 'Reconnect its account, then approve it again.'
+
+/** A block whose reason isn't one of the kernel's known run refusals: never shown in its own words. */
+export const BLOCKED_UNKNOWN_TEXT = 'A check before applying it refused it.'
+
+const KNOWN_BLOCKS = [RUN_REQUESTER_REVOKED, RUN_DEFINITION_CHANGED, RUN_WRITE_EXPIRED]
+
+/**
+ * Why a pending action is blocked (FAC-118), in words: one of the kernel's own run refusals as it
+ * wrote them, which may arrive with an error's name before it; anything else in a fixed sentence,
+ * since it may carry words that aren't the kernel's.
+ */
+export const blockedText = (reason: string): string =>
+  KNOWN_BLOCKS.find(known => reason === known || reason.endsWith(`: ${known}`)) ?? BLOCKED_UNKNOWN_TEXT
+
+/**
+ * Where a decision came from (FAC-119 K2, `ActionLogEntry.context`), in a person's words: which
+ * workflow trigger's run, whether it runs as the trigger's assigned account, and who asked for it
+ * (you, or another person, never named here), or an agent's turn. Null when the entry says nothing
+ * more than who asked.
+ */
+export const contextText = (entry: ActionEntry, viewerProfileId?: string | null): string | null => {
+  const context = entry.context
+  if (!context) return null
+  if (context.kind === 'agent-turn') return "From the agent's turn in a chat"
+  const trigger = context.triggerLabel ? `the workflow trigger “${context.triggerLabel}”` : 'a workflow trigger'
+  const asker = context.requestedBy === null ? ', which fired by itself'
+    : context.requestedBy === undefined ? ''
+      : context.requestedBy === viewerProfileId ? ', which you asked for' : ', which another person asked for'
+  return `From a run of ${trigger}${asker}${context.assigned ? "; it runs as the trigger's assigned account" : ''}`
+}
 
 /** A rejection after an attempt that may have reached the service: rejecting it undid nothing there. */
 export const UNCERTAIN_REJECTION_TEXT =

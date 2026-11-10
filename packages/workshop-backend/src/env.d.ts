@@ -113,6 +113,10 @@ declare global {
       // How long a dynamic, unsaved workflow definition lasts, in whole hours from 1 to 720 (FAC-124).
       // Unset is the proposed default, 24 (workflow-definition.ts `dynamicDefinitionTtlMs`).
       WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS?: string;
+      /** Proposed retention for terminal workflow runs; unset means 90 days (FAC-125). */
+      WORKFLOW_RUN_HISTORY_RETENTION_DAYS?: string;
+      /** Proposed per-workspace workflow run record cap; unset means 10,000 (FAC-125). */
+      WORKFLOW_MAX_RUN_HISTORY?: string;
 
       // Gatekeeper vendor id (e.g. "inferops") that decides who may edit and publish shared
       // configuration: a workspace with collaborators or share links. Unset = Build is decided by

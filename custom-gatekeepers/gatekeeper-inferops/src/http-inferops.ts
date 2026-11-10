@@ -43,7 +43,7 @@ import { parseServiceQuery, serviceQuerySearch } from "./service-queries";
 //   deployment. Local development only; it never backs a connected person.
 
 import { createLogger } from "@gadgets/observability/logger";
-import type { WidgetSearchResult } from "@gadgets/workshop-shared/gatekeeper";
+import type { WidgetMetadata, WidgetSearchResult } from "@gadgets/workshop-shared/gatekeeper";
 import { ResponseTooLargeError, readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
 import {
   HOST_BOARD_LIMITS, type HostBoardColumn, type HostBoardIssue, type HostBoardScope,
@@ -446,6 +446,41 @@ function score(value: unknown, what: string): number {
   return value;
 }
 
+/** A permission id, as InferOps names one (`resource:action`). */
+const PERMISSION = /^[a-z][a-z0-9-]{0,63}:[a-z][a-z0-9-]{0,63}$/;
+/** An action id or a widget size. */
+const WORD = /^[a-z][a-z0-9_-]{0,63}$/;
+
+/**
+ * A built-in widget's declared metadata (FAC-14), or undefined. The field is new in InferOps, so a
+ * shape that doesn't match is left out rather than failing the whole search: the widget is then
+ * described without it, and nothing is granted or refused by it either way.
+ */
+function parseWidgetMetadata(value: unknown): WidgetMetadata | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const raw = value as Record<string, unknown>;
+  const sizes = raw.supportedSizes;
+  const actions = raw.actions;
+  if (typeof raw.permission !== "string" || !PERMISSION.test(raw.permission) ||
+      typeof raw.freshnessSeconds !== "number" || !Number.isSafeInteger(raw.freshnessSeconds) || raw.freshnessSeconds < 0 ||
+      !Array.isArray(sizes) || sizes.length > 3 || !sizes.every(size => size === "small" || size === "half" || size === "large") ||
+      !Array.isArray(actions) || actions.length > 32) {
+    return undefined;
+  }
+  const parsed: WidgetMetadata["actions"] = [];
+  for (const action of actions) {
+    if (typeof action !== "object" || action === null) return undefined;
+    const { id, label, reversibility, permission } = action as Record<string, unknown>;
+    if (typeof id !== "string" || !WORD.test(id) || typeof label !== "string" || label.length === 0 || label.length > 120 ||
+        (reversibility !== "reversible" && reversibility !== "irreversible") ||
+        typeof permission !== "string" || !PERMISSION.test(permission)) {
+      return undefined;
+    }
+    parsed.push({ id, label, reversibility, permission });
+  }
+  return { permission: raw.permission, freshnessSeconds: raw.freshnessSeconds, supportedSizes: sizes, actions: parsed };
+}
+
 /** `widget.search`'s answer (FAC-13): its built-in kinds and definitions, each within `k`. */
 function parseWidgetSearch(raw: unknown, k: number): WidgetSearchResult {
   const response = record(raw, "response");
@@ -457,7 +492,9 @@ function parseWidgetSearch(raw: unknown, k: number): WidgetSearchResult {
   return {
     hits: hits.map(value => {
       const hit = record(value, "hit");
-      return { kind: text(hit.kind, "hit.kind"), description: text(hit.description, "hit.description"), score: score(hit.score, "hit.score") };
+      const metadata = parseWidgetMetadata(hit.metadata);
+      return { kind: text(hit.kind, "hit.kind"), description: text(hit.description, "hit.description"), score: score(hit.score, "hit.score"),
+        ...(metadata ? { metadata } : {}) };
     }),
     definitions: definitions.map(value => {
       const definition = record(value, "definition");
