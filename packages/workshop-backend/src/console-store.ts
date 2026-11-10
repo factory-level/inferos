@@ -3,11 +3,11 @@ import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, Wo
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
 import {
-  canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasRunEffects, canvasRunEventsHeard,
-  canvasWidgetEventsHeard, type CanvasPage,
+  CanvasModelError, canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasRunEffects, canvasRunEventsHeard,
+  canvasWidgetEventsHeard, formatCanvasTarget, type CanvasPage,
 } from "@gadgets/workshop-shared/canvas-model";
 import { joinPageSettings, nestedPage, readCanvasDefinition, splitPageSettings } from "./canvas-store";
-import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleDraftProblem, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
@@ -229,11 +229,30 @@ function viewRefusal(entry: BoundViewEntry, commit: SourceCommit): string | null
 }
 
 /**
+ * Screen `row`'s current nested page, null when it has none, or the model's refusal of a page stored
+ * outside the editor that doesn't parse (FAC-96). What lists a draft's problems reads pages through
+ * this, so one bad page is one problem rather than a throw; publication still parses each page and
+ * refuses with the same words (`publishedPages`).
+ */
+function readNestedPage(storage: Pick<ConsoleStorage, "canvasPages">, row: CanvasDefinition): { page: CanvasPage | null } | { error: CanvasModelError } {
+  try {
+    return { page: nestedPage(storage, row) };
+  } catch (error) {
+    if (error instanceof CanvasModelError) return { error };
+    throw error;
+  }
+}
+
+/**
  * The gadget ids the `inferos.gadget` widgets of screen `row` reference: its nested page's, at any
- * depth, while one is current, otherwise its sections'. A row is read unparsed, as stored.
+ * depth, while one is current, otherwise its sections'. A row is read unparsed, as stored. A page
+ * that doesn't parse places nothing here: it is that screen's own problem (`consoleDraftProblems`),
+ * and publication refuses it when it reaches that screen.
  */
 function placedGadgets(storage: Pick<ConsoleStorage, "canvasPages">, row: CanvasDefinition): WorkpieceId[] {
-  let nested = nestedPage(storage, row);
+  let read = readNestedPage(storage, row);
+  if ("error" in read) return [];
+  let nested = read.page;
   let widgets = nested ? nested.nodes.flatMap(node => node.nodeType === "widget" ? [node] : [])
     : row.sections.flatMap(section => section.widgets);
   return widgets.flatMap(widget => {
@@ -300,7 +319,13 @@ function withFrozenNodes(page: CanvasPage, frozen: Map<WorkpieceId, WorkpieceId>
  */
 function screenRevision(storage: Pick<ConsoleStorage, "canvases" | "canvasPages">, screenId: string): string | null {
   let row = storage.canvases.get(screenId);
-  return row ? (nestedPage(storage, row) ?? row).revision : null;
+  if (!row) return null;
+  let read = readNestedPage(storage, row);
+  if ("page" in read) return (read.page ?? row).revision;
+  // A page that doesn't parse is still captured by the revision it was stored at, so a draft with
+  // one can be checked; publication refuses it when it parses each page.
+  let stored = storage.canvasPages.get(screenId)?.page as { revision?: unknown } | undefined;
+  return typeof stored?.revision === "string" ? stored.revision : row.revision;
 }
 
 /** `screen` with each placed gadget the map names replaced by its frozen install. */
@@ -312,19 +337,30 @@ function withFrozenGadgets(screen: CanvasDefinition, frozen: Map<WorkpieceId, Wo
   }) })) };
 }
 
+// Throws the first of `problems`, in the words publication has always refused with.
+function throwFirst(problems: readonly ConsoleDraftProblem[]): void {
+  if (problems.length > 0) throw new Error(problems[0]!.message);
+}
+
 /**
- * Checks `content`'s widget registry and placements in this workspace, throwing the first problem:
+ * The problems with `content`'s widget registry and placements in this workspace (FAC-96), in order:
  * each entry must pass `consoleWidgetRefusal` (against `commits`, when given), and every widget
  * install (or frozen install) placed on a screen the console shows must be registered and, given
- * `commits`, have a UI. Other gadgets, such as installed apps, are placed as before.
+ * `commits`, have a UI. Other gadgets, such as installed apps, are placed as before. `consoleId`
+ * names the console in each target.
  */
-function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "canvasPages" | "gadgets">, content: OperateConsoleContent,
-    commits?: SourceCommits): void {
+function consoleWidgetProblems(storage: Pick<ConsoleStorage, "canvases" | "canvasPages" | "gadgets">, content: OperateConsoleContent,
+    consoleId: string, commits?: SourceCommits): ConsoleDraftProblem[] {
+  let problems: ConsoleDraftProblem[] = [];
   let registered = new Set<WorkpieceId>();
   let noUi = new Set<WorkpieceId>();
   for (let entry of content.widgets ?? []) {
     let refusal = consoleWidgetRefusal(storage, entry, commits);
-    if (refusal) throw new Error(`Console widget "${entry.label}": ${refusal}`);
+    if (refusal) {
+      problems.push({ code: "widget-refused", target: `console:${consoleId}/widget:${entry.gadgetId}`,
+        message: `Console widget "${entry.label}": ${refusal}`,
+        repair: "Fix the widget's install or files, or remove it from the console's widget registry." });
+    }
     registered.add(entry.gadgetId);
     let record = storage.gadgets.get(entry.gadgetId);
     if (commits && record?.type === "gadget" && hasNoUi(commits.get(record.commitId!))) noUi.add(entry.gadgetId);
@@ -335,15 +371,27 @@ function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "canvasP
   };
   for (let screenId of consoleScreens(content)) {
     let screen = storage.canvases.get(screenId);
-    let unregistered = screen && placedGadgets(storage, screen).find(id => isWidget(id) && !registered.has(id));
-    if (unregistered !== undefined && unregistered !== null) {
-      throw new Error(`Screen ${screenId} shows widget ${unregistered}, which the console's widget registry does not offer.`);
+    if (!screen) continue;
+    // A screen's unregistered widgets first, then those with no UI: publication's order.
+    let placed = placedGadgets(storage, screen);
+    for (let id of placed.filter(id => isWidget(id) && !registered.has(id))) {
+      problems.push({ code: "widget-not-registered", target: formatCanvasTarget({ kind: "page", pageId: screenId }),
+        message: `Screen ${screenId} shows widget ${id}, which the console's widget registry does not offer.`,
+        repair: "Add the widget to the console's widget registry, or remove it from this screen." });
     }
-    let uiLess = screen && placedGadgets(storage, screen).find(id => noUi.has(id));
-    if (uiLess !== undefined && uiLess !== null) {
-      throw new Error(`Screen ${screenId} shows widget ${uiLess}, which has no UI; a console offers its tools only.`);
+    for (let id of placed.filter(id => noUi.has(id))) {
+      problems.push({ code: "widget-no-ui", target: formatCanvasTarget({ kind: "page", pageId: screenId }),
+        message: `Screen ${screenId} shows widget ${id}, which has no UI; a console offers its tools only.`,
+        repair: "Remove the widget from this screen; the console still offers its tools." });
     }
   }
+  return problems;
+}
+
+/** Checks `content`'s widget registry and placements, throwing the first problem (`consoleWidgetProblems`). */
+function checkConsoleWidgets(storage: Pick<ConsoleStorage, "canvases" | "canvasPages" | "gadgets">, content: OperateConsoleContent,
+    commits?: SourceCommits): void {
+  throwFirst(consoleWidgetProblems(storage, content, "", commits));
 }
 
 /**
@@ -536,50 +584,126 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
 // anything is copied, rather than released to operators.
 function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages" | "gadgets" | "boundHooks">, content: OperateConsoleContent,
     checkWidgets: boolean, commits?: SourceCommits) {
-  let shown = new Set(consoleScreens(content));
   return consoleScreens(content).flatMap(screenId => {
     let row = storage.canvases.get(screenId);
     if (!row) return [];
     // Only a nested page has behavior; a version 1 row has none.
     let page = nestedPage(storage, row);
-    if (checkWidgets) {
-      try {
-        // A nested page is parsed whole when read (`nestedPage`); the row's own widgets are checked
-        // here, each as the editor would accept it.
-        for (let section of row.sections ?? []) for (let widget of section.widgets ?? []) parseCanvasWidget(widget);
-      } catch (error) {
-        throw new Error(`Screen ${screenId} can't be published: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
-      }
-    }
-    for (let owner of page ? [page, ...page.nodes] : []) {
-      for (let attachment of owner.attachments) {
-        if (attachment.effect.kind === "navigate" && !shown.has(attachment.effect.page)) {
-          throw new Error(`Screen ${screenId} navigates to page ${attachment.effect.page}, which the console does not show.`);
-        }
-      }
-    }
-    for (let heard of page ? canvasWidgetEventsHeard(page) : []) {
-      let gadgetId = Number(CANVAS_GADGET_REF.exec(heard.targetRef)![1]);
-      if (!widgetDeclaresEvent(storage, commits, gadgetId, heard.event)) {
-        throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId} listens for "${heard.event}", which gadget ${gadgetId} doesn't declare.`);
-      }
-      // Only navigation runs from a widget event, so none can reach a capability (FAC-94).
-      if (canvasPageEffects(page!, heard.targetRef, heard.event).some(effect => effect.kind === "request-action")) {
-        throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId}'s event "${heard.event}" leads to a requested action, which a widget event can't run.`);
-      }
-    }
-    for (let heard of page ? canvasRunEventsHeard(page) : []) {
-      let gadgetId = Number(CANVAS_GADGET_REF.exec(heard.targetRef)![1]);
-      if (storage.boundHooks.get(heard.trigger)?.gadgetId !== gadgetId) {
-        throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId} hears the runs of trigger ${heard.trigger}, which isn't a trigger of gadget ${gadgetId}.`);
-      }
-      // Only navigation runs from a run's result, so none can reach a capability (FAC-116).
-      if (canvasRunEffects(page!, heard.trigger, heard.event).some(effect => effect.kind === "request-action")) {
-        throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId}'s "${heard.event}" for trigger ${heard.trigger} leads to a requested action, which a run's result can't run.`);
-      }
-    }
+    throwFirst(screenProblems(storage, content, screenId, row, page, checkWidgets, commits));
     return [{ screenId, row, page }];
   });
+}
+
+/**
+ * The problems with screen `screenId` of `content`, for publication (FAC-96), in the order
+ * publication checks them: with `checkWidgets`, each row widget must parse; every navigation must
+ * name a page the console shows; and each gadget widget event an attachment listens for must be
+ * declared by that gadget's current commit and lead to no requested action (`publishedPages`).
+ */
+function screenProblems(storage: Pick<ConsoleStorage, "gadgets" | "boundHooks">, content: OperateConsoleContent, screenId: string,
+    row: CanvasDefinition, page: CanvasPage | null, checkWidgets: boolean, commits?: SourceCommits): ConsoleDraftProblem[] {
+  let problems: ConsoleDraftProblem[] = [];
+  let shown = new Set(consoleScreens(content));
+  if (checkWidgets) {
+    // A nested page is parsed whole when read (`nestedPage`); the row's own widgets are checked
+    // here, each as the editor would accept it.
+    for (let section of row.sections ?? []) for (let widget of section.widgets ?? []) {
+      try {
+        parseCanvasWidget(widget);
+      } catch (error) {
+        problems.push({ code: "invalid-widget",
+          target: formatCanvasTarget(typeof widget?.id === "string" ? { kind: "node", pageId: screenId, nodeId: widget.id } : { kind: "page", pageId: screenId }),
+          message: `Screen ${screenId} can't be published: ${error instanceof Error ? error.message : String(error)}`,
+          repair: "Fix the widget's reference or data binding in the editor, or remove the widget." });
+      }
+    }
+  }
+  for (let owner of page ? [page, ...page.nodes] : []) {
+    for (let attachment of owner.attachments) {
+      if (attachment.effect.kind === "navigate" && !shown.has(attachment.effect.page)) {
+        problems.push({ code: "navigation-outside-console",
+          target: formatCanvasTarget({ kind: "attachment", pageId: screenId, attachmentId: attachment.id }),
+          message: `Screen ${screenId} navigates to page ${attachment.effect.page}, which the console does not show.`,
+          repair: "Point the attachment at a page the console shows, add that page to the console, or remove the attachment." });
+      }
+    }
+  }
+  for (let heard of page ? canvasWidgetEventsHeard(page) : []) {
+    let gadgetId = Number(CANVAS_GADGET_REF.exec(heard.targetRef)![1]);
+    let target = formatCanvasTarget({ kind: "attachment", pageId: screenId, attachmentId: heard.attachmentId });
+    if (!widgetDeclaresEvent(storage, commits, gadgetId, heard.event)) {
+      problems.push({ code: "undeclared-event", target,
+        message: `Screen ${screenId} can't be published: its widget ${heard.nodeId} listens for "${heard.event}", which gadget ${gadgetId} doesn't declare.`,
+        repair: "Listen for an event the widget's states.json declares, or remove the attachment." });
+    // Only navigation runs from a widget event, so none can reach a capability (FAC-94).
+    } else if (canvasPageEffects(page!, heard.targetRef, heard.event).some(effect => effect.kind === "request-action")) {
+      problems.push({ code: "event-leads-to-action", target,
+        message: `Screen ${screenId} can't be published: its widget ${heard.nodeId}'s event "${heard.event}" leads to a requested action, which a widget event can't run.`,
+        repair: "Remove the requested action from what this event leads to; a widget event can only navigate." });
+    }
+  }
+  // FAC-116: an attachment hearing a trigger's runs must name a trigger of that gadget, and lead to
+  // no requested action, since a run's result runs only navigation.
+  for (let heard of page ? canvasRunEventsHeard(page) : []) {
+    let gadgetId = Number(CANVAS_GADGET_REF.exec(heard.targetRef)![1]);
+    let target = formatCanvasTarget({ kind: "attachment", pageId: screenId, attachmentId: heard.attachmentId });
+    if (storage.boundHooks.get(heard.trigger)?.gadgetId !== gadgetId) {
+      problems.push({ code: "run-trigger-mismatch", target,
+        message: `Screen ${screenId} can't be published: its widget ${heard.nodeId} hears the runs of trigger ${heard.trigger}, which isn't a trigger of gadget ${gadgetId}.`,
+        repair: "Point the attachment at a trigger of this widget's gadget, or remove the attachment." });
+    } else if (canvasRunEffects(page!, heard.trigger, heard.event).some(effect => effect.kind === "request-action")) {
+      problems.push({ code: "run-leads-to-action", target,
+        message: `Screen ${screenId} can't be published: its widget ${heard.nodeId}'s "${heard.event}" for trigger ${heard.trigger} leads to a requested action, which a run's result can't run.`,
+        repair: "Remove the requested action from what this run's result leads to; a run's result can only navigate." });
+    }
+  }
+  return problems;
+}
+
+/**
+ * Every problem that would stop console draft `stored` being published (FAC-96), in the order
+ * publication checks them: its widget registry and placements, then each screen it shows, its
+ * flows, and its bound views. A page that doesn't parse is one problem at that screen, and the
+ * rest are still listed. The same checks publication runs and throws the first of, so a
+ * builder sees every refusal publication would give, in its words, with a target and a repair.
+ * Reads only this workspace's storage and `commits`; writes nothing. Throws `CONSOLE_CHANGED` when a
+ * gadget's commit moved since `commits` was read, as publication does. The console's size once
+ * published depends on the frozen installs it makes, so only publication checks that.
+ */
+export function consoleDraftProblems(storage: ConsoleStorage, stored: OperateConsole, commits: SourceCommits): ConsoleDraftProblem[] {
+  let { id, revision: _revision, published: _published, ...content } = stored;
+  let problems = consoleWidgetProblems(storage, content, id, commits);
+  for (let screenId of consoleScreens(content)) {
+    let row = storage.canvases.get(screenId);
+    if (!row) continue;
+    let read = readNestedPage(storage, row);
+    if ("error" in read) {
+      problems.push({ code: "invalid-page", target: formatCanvasTarget({ kind: "page", pageId: screenId }), message: read.error.message,
+        repair: read.error.code === "reference-cycle"
+          ? `Remove the loop: attachments on this page raise each other's events, through ${read.error.at}. Delete one of them.`
+          : `It was saved outside the editor and isn't a valid page. Fix or remove ${read.error.at}, then check again.` });
+      continue;
+    }
+    problems.push(...screenProblems(storage, content, screenId, row, read.page, true, commits));
+  }
+  problems.push(...flowProblems(storage, content, id));
+  for (let entry of content.boundViews ?? []) {
+    let target = `console:${id}/bound-view:${entry.id}`;
+    let refusal = boundViewRefusal(storage, entry, commits);
+    if (refusal) {
+      problems.push({ code: "bound-view-refused", target, message: `Console bound view "${entry.label}": ${refusal}`,
+        repair: "Fix the bound view's gadget so it is a view reading this entry's requirements, or remove the bound view." });
+      continue;
+    }
+    let commitId = (storage.gadgets.get(entry.gadgetId) as GadgetRecord).commitId!;
+    let published = { ...entry, frozen: { sourceGadgetId: entry.gadgetId, commitId, specText: commits.get(commitId)!.viewText! } };
+    if (jsonBytes(published) > CONSOLE_SIZE_LIMITS.frozenBoundViewEntry) {
+      problems.push({ code: "bound-view-too-large", target,
+        message: `Console bound view "${entry.label}" is over ${CONSOLE_SIZE_LIMITS.frozenBoundViewEntry} bytes published.`,
+        repair: "Shorten the bound view's spec or label." });
+    }
+  }
+  return problems;
 }
 
 // Whether gadget `gadgetId`'s current commit, one of `commits`, declares `event` among its states
@@ -595,14 +719,28 @@ function widgetDeclaresEvent(storage: Pick<ConsoleStorage, "gadgets">, commits: 
 // and every step must be a screen the console shows, so whoever can open the published console can
 // render every step of a flow it offers; otherwise nothing is published.
 function publishedFlows(storage: Pick<OverseerStorage, "flows">, content: OperateConsoleContent): OperateFlow[] {
-  let screens = new Set(consoleScreens(content));
+  throwFirst(flowProblems(storage, content, ""));
   return (content.flows ?? []).map(id => {
-    let flow = storage.flows.get(id);
-    if (!flow) throw new Error(`Console flow ${id} is not a flow in this workspace`);
-    let outside = flow.steps.find(step => !screens.has(step));
-    if (outside) throw new Error(`Console flow "${flow.title}" has step ${outside}, which the console does not show`);
+    let flow = storage.flows.get(id)!;
     return { id: flow.id, revision: flow.revision, title: flow.title, steps: [...flow.steps],
       ...(flow.pages === undefined ? {} : { pages: structuredClone(flow.pages) }) };
+  });
+}
+
+/** The problems with the flows `content` lists (FAC-96): each must exist, with every step a screen the console shows. */
+function flowProblems(storage: Pick<OverseerStorage, "flows">, content: OperateConsoleContent, consoleId: string): ConsoleDraftProblem[] {
+  let screens = new Set(consoleScreens(content));
+  return (content.flows ?? []).flatMap((id): ConsoleDraftProblem[] => {
+    let target = `console:${consoleId}/flow:${id}`;
+    let flow = storage.flows.get(id);
+    if (!flow) {
+      return [{ code: "flow-missing", target, message: `Console flow ${id} is not a flow in this workspace`,
+        repair: "Remove the flow from the console." }];
+    }
+    let outside = flow.steps.find(step => !screens.has(step));
+    return outside ? [{ code: "flow-step-outside-console", target,
+      message: `Console flow "${flow.title}" has step ${outside}, which the console does not show`,
+      repair: "Add that screen to the console, or remove the step from the flow." }] : [];
   });
 }
 
@@ -997,6 +1135,16 @@ export class WorkspaceConsoleStore {
   capture(id: string, expectedRevision: string): ConsoleCapture {
     this.#requireEnabled();
     return captureConsole(this.storage, this.#current(id, expectedRevision));
+  }
+
+  /**
+   * Every problem that would stop console `id`'s draft at `expectedRevision` being published
+   * (FAC-96, `consoleDraftProblems`), against `commits` read first (`capture`, then
+   * `readSourceCommits`). Writes nothing: the draft, its pages and its revision are unchanged.
+   */
+  draftProblems(id: string, expectedRevision: string, commits: SourceCommits): ConsoleDraftProblem[] {
+    this.#requireEnabled();
+    return consoleDraftProblems(this.storage, this.#current(id, expectedRevision), commits);
   }
 
   /**
