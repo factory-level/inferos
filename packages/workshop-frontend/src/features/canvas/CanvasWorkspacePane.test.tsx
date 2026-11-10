@@ -99,6 +99,24 @@ it('offers only the widget kinds the catalog enables, and hands blueprint widget
   expect(onAskAgent.mock.calls[0][0]).toContain('"Overview" section of the "Operations" canvas')
 })
 
+// FAC-9: a governed table is placed by its reference; its kind and binding follow from it.
+it('adds a governed table by its reference, and shows it as a table', async () => {
+  await render({ kind: 'temporary' })
+  await act(async () => { container.querySelector('form')!.requestSubmit() })
+  const input = container.querySelector<HTMLInputElement>('input[name="table"]')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'tickets://support/queue/billing')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await act(async () => { input.form!.requestSubmit() })
+  await settle()
+  expect(container.textContent).toContain('tickets://support/queue/billing')
+  await act(async () => { button('Done editing')!.click() })
+  await settle()
+  // Shown through the governed table widget, never as a board.
+  expect(container.querySelector('[aria-label="Rows of tickets://support/queue/billing"]')).not.toBeNull()
+})
+
 it('reports the agent hand-off failing instead of dropping it silently', async () => {
   await render({ kind: 'temporary' }, {
     widgetKinds: ['inferos.gadget'],

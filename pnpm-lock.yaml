@@ -1135,9 +1135,6 @@ importers:
 
   packages/workshop-backend:
     dependencies:
-      acorn:
-        specifier: 8.18.0
-        version: 8.18.0
       '@ag-ui/core':
         specifier: 1.0.2
         version: 1.0.2(zod@4.6.5)
@@ -1168,6 +1165,9 @@ importers:
       '@gadgets/workshop-shared':
         specifier: workspace:*
         version: link:../workshop-shared
+      acorn:
+        specifier: 8.18.0
+        version: 8.18.0
       capnweb:
         specifier: 'catalog:'
         version: 0.12.0
@@ -1356,9 +1356,15 @@ importers:
       '@phosphor-icons/react':
         specifier: ^2.1.10
         version: 2.1.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@refinedev/core':
+        specifier: 5.0.12
+        version: 5.0.12(@tanstack/react-query@5.105.3(@types/react@19.2.18)(react@19.2.8))(@types/react-dom@19.2.7(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@tailwindcss/vite':
         specifier: ^4.3.3
         version: 4.3.3(vite@7.3.6(@types/node@26.1.0)(jiti@2.7.0)(lightningcss@1.33.0)(terser@5.51.2)(yaml@2.9.1))
+      '@tanstack/react-query':
+        specifier: 5.105.3
+        version: 5.105.3(@types/react@19.2.18)(react@19.2.8)
       '@tanstack/react-router':
         specifier: ^1.170.39
         version: 1.170.39(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

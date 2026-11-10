@@ -7,7 +7,7 @@
  * A reference identifies a target and an attachment grants nothing; both are checked at use, under
  * the acting person's or run's own authority.
  */
-import { CANVAS_ID, CANVAS_REVISION, newerWidgetPlaceholder, parseCanvasDefinition, parseCanvasWidget, type CanvasDataBinding, type CanvasDefinition, type CanvasReadOptions, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
+import { CANVAS_ID, CANVAS_REVISION, governedResourceOf, newerWidgetPlaceholder, parseCanvasDefinition, parseCanvasWidget, type CanvasDataBinding, type CanvasDefinition, type CanvasReadOptions, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
 import { parseWorkspaceSettings, type WorkspaceSettings } from "./workspace-settings";
 
 /** The schema version this module reads. `CanvasDefinition`, with sections, is version 1. */
@@ -84,6 +84,9 @@ export const CANVAS_WIDGET_ACTIONS: Readonly<Record<CanvasWidgetKind, readonly s
   "inferos.gadget": [],
   // A newer InferOS's widget, shown as a placeholder (FAC-9): nothing may be asked of it.
   "inferos.unsupported": [],
+  // A governed table's writes are its resource's declared commands, proposed through the
+  // governed provider; an attachment requests none.
+  "inferos.governed-table": [],
 };
 
 /** Raise a named event on one node, which hears it only through its own attachments. */
@@ -339,13 +342,18 @@ function parseNode(value: unknown, index: number, options: CanvasReadOptions = {
   return { ...widget, nodeType: "widget", attachments: parseAttachments(w.attachments, id) };
 }
 
+// Every resource a data binding may name.
+const DATA_BINDING_RESOURCES = ["project/board", "knowledge/wiki", "object/table", "tickets/queue"] as const;
+
 function validateDataBinding(value: unknown, kind: unknown, targetRef: unknown, at: string): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) return reject("invalid-data-binding", at);
   const binding = value as Record<string, unknown>;
   const resource = binding.resource;
+  // A governed table's resource is the one its reference names (FAC-9).
   const expected = kind === "inferops.project-board" ? "project/board"
-    : kind === "inferops.wiki" ? "knowledge/wiki" : null;
-  if (expected === null || (resource !== "project/board" && resource !== "knowledge/wiki")) {
+    : kind === "inferops.wiki" ? "knowledge/wiki"
+    : kind === "inferos.governed-table" && typeof targetRef === "string" ? governedResourceOf(targetRef) : null;
+  if (expected === null || !(DATA_BINDING_RESOURCES as readonly unknown[]).includes(resource)) {
     return reject("invalid-data-binding", at);
   }
   if (resource !== expected) return reject("incompatible-data-binding", at);

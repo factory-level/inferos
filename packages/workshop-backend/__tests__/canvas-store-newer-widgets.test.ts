@@ -20,9 +20,9 @@ const BOARD = {
   size: "wide", params: { workflow: "software", showCompleted: false },
 };
 // What a newer InferOS stores: a kind this one doesn't know, with fields it has never seen.
-const NEWER = { id: "rows", kind: "inferos.governed-table", version: 1, targetRef: "tickets://support/queue/billing", size: "full",
-  params: {}, dataBinding: { resource: "tickets/queue", ref: "tickets://support/queue/billing", schemaVersion: 1 } };
-const PLACEHOLDER = { id: "rows", kind: "inferos.unsupported", version: 1, targetRef: "", size: "full", params: {}, storedKind: "inferos.governed-table" };
+const NEWER = { id: "rows", kind: "inferos.future-widget", version: 1, targetRef: "future://thing/1", size: "full",
+  params: {}, dataBinding: { resource: "future/thing", ref: "future://thing/1", schemaVersion: 1 } };
+const PLACEHOLDER = { id: "rows", kind: "inferos.unsupported", version: 1, targetRef: "", size: "full", params: {}, storedKind: "inferos.future-widget" };
 const REFUSED = "This canvas holds a widget from a newer InferOS, so it can't be changed here";
 
 function setUp() {
