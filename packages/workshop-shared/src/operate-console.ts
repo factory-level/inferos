@@ -205,7 +205,9 @@ export type ConsoleDraftProblemCode =
   | "navigation-outside-console" | "undeclared-event" | "event-leads-to-action"
   | "flow-missing" | "flow-step-outside-console" | "bound-view-refused" | "bound-view-too-large"
   /** A screen's page, stored outside the editor, isn't a valid page (`CanvasModelError`). */
-  | "invalid-page";
+  | "invalid-page"
+  /** FAC-116: an attachment hears runs of a trigger that isn't its gadget's, or a run leads to an action. */
+  | "run-trigger-mismatch" | "run-leads-to-action";
 
 /**
  * A published console's widget as a Wiki page embeds it (FAC-12): named by its source gadget, which

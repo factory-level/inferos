@@ -161,6 +161,8 @@ export function parseWidgetStates(text: string): WidgetStateMachine {
   for (let item of spec.transitions) {
     let t = exactObject(item, ["event", "from", "to"], "A transition");
     let event = parseId(t.event, "An event");
+    // Reserved for a requested run's result on a page (FAC-116, canvas-model.ts), never a widget's own.
+    if (event.startsWith("run-result-")) throw new Error(`Event "${event}" is reserved: "run-result-" names a run's result.`);
     let from = parseId(t.from, "A transition's from");
     let to = parseId(t.to, "A transition's to");
     for (let [end, id] of [["from", from], ["to", to]] as const) {

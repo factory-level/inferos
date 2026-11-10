@@ -107,3 +107,12 @@ describe("session state in memory", () => {
     expect(memory.read(`w${MAX_HELD_WIDGET_STATES}`, machine).state).toBe("editing");
   });
 });
+
+// FAC-116: "run-result-" names a requested run's result on a page (canvas-model.ts), so a widget
+// may not declare an event with it; its own events stay its own.
+describe("an event reserved for a run's result (FAC-116)", () => {
+  it("refuses a declared event named for a run's result", () => {
+    expect(() => parse({ ...REQUEST, transitions: [{ event: "run-result-done", from: "viewing", to: "editing" }] }))
+      .toThrow('Event "run-result-done" is reserved: "run-result-" names a run\'s result.');
+  });
+});
