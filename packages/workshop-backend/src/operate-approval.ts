@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
+import { OPERATE_APPROVAL_ERROR_CODES, createOperateApprovalError } from "@gadgets/workshop-shared/operate-approval";
 import type {
   ActionApprovalCorrelation, ActionApprovalProposal, OperateApprovalRequest, OperateApprovalSnapshot,
 } from "@gadgets/workshop-shared/operate-approval";
@@ -28,7 +29,11 @@ export function validateApprovalRequest(input: unknown): OperateApprovalRequest 
 /** A new correlation of one pending action with a person's thread, with the window above, if any. */
 export function approvalCorrelation(person: string, input: OperateApprovalRequest,
     proposal: ActionApprovalCorrelation["proposal"]): ActionApprovalCorrelation {
-  if (JSON.stringify(proposal).length > 8192) throw new Error("Proposal exceeds approval limit");
+  // A permanent "can't decide it here", never an outage: the approvals list still decides it.
+  if (JSON.stringify(proposal).length > 8192) {
+    throw createOperateApprovalError(OPERATE_APPROVAL_ERROR_CODES.refused,
+      "This action is too large to decide here; decide it in the approvals list.");
+  }
   return {person, threadId: input.threadId, runId: input.runId, interruptId: crypto.randomUUID(),
     ...(APPROVAL_INTERRUPT_WINDOW_MS === null ? {} : {expiresAt: Date.now() + APPROVAL_INTERRUPT_WINDOW_MS}),
     proposal};

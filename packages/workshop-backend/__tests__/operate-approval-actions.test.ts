@@ -153,16 +153,58 @@ describe("distinct outcomes (acceptance 2)", () => {
   });
 });
 
-describe("another company (acceptance 3)", () => {
-  it("refuses a decider the deployment's shared configuration doesn't admit, applying nothing", async () => {
-    // holdsSharedConfiguration answers no for a person whose InferOps company isn't this workspace's.
-    const w = workspace({shared: {holds: false}});
+// holdsSharedConfiguration answers no for a person whose InferOps company isn't this workspace's,
+// and for one without the deployment's shared build authority: the decider check refuses both.
+const refusedLeavesNothing = async (w: ReturnType<typeof workspace>, client: Awaited<ReturnType<typeof opened>>) => {
+  await expect(client.operateApproval(input)).rejects.toThrow("APPROVAL_REFUSED");
+  // Even with an answer guessed in advance, nothing is reserved or correlated.
+  await expect(client.operateApproval({...input, runId: "answer", answer: {interruptId: "guess", payload: {approved: false}}}))
+    .rejects.toThrow("APPROVAL_REFUSED");
+  expect(w.storage.actions.get(1)).toMatchObject({state: "pending"});
+  expect(w.storage.actions.get(1)).not.toHaveProperty("aguiApproval");
+  expect(w.storage.actions.byApprovalThread.get(JSON.stringify(["owner-id", input.threadId]))).toBeFalsy();
+  expect(w.apply).not.toHaveBeenCalled();
+};
+
+describe("another company, or no shared build authority (acceptance 3)", () => {
+  it("refuses a caller who may not decide before anything is stored, so a builder can then decide it here", async () => {
+    const shared = {holds: false};
+    const w = workspace({shared});
+    const refused = await opened(w);
+    await refusedLeavesNothing(w, refused);
+
+    // A builder on another identity, whom the shared configuration admits, decides the same action.
+    shared.holds = true;
+    const builder = await openFakeOverseer(w.storage, {impl: w.impl, userId: "builder-2"});
+    const first = await builder.operateApproval(input);
+    expect(first.status).toBe("pending");
+    expect(w.storage.actions.get(1)?.aguiApproval?.person).toBe("builder-2");
+    await builder.operateApproval(answerOf(first, {approved: true}));
+    expect(w.apply).toHaveBeenCalledOnce();
+  });
+
+  it("refuses an action too large to decide here as refused, never as an outage", async () => {
+    const w = workspace();
+    const record = w.storage.actions.get(1)!;
+    w.storage.actions.put({...record, description: {...(record as {description: object}).description,
+      fields: Array.from({length: 10}, (_, i) => ({kind: "text", label: `F${i}`, value: "x".repeat(1000)}))}} as never);
+    const client = await opened(w);
+    await expect(client.operateApproval(input)).rejects.toThrow("APPROVAL_REFUSED");
+    expect(w.storage.actions.get(1)).not.toHaveProperty("aguiApproval");
+  });
+
+  it("clears an answer whose decider check refused at decision time, and decides once authority is back", async () => {
+    const shared = {holds: true};
+    const w = workspace({shared});
     const client = await opened(w);
     const first = await client.operateApproval(input);
+    shared.holds = false;
     await expect(client.operateApproval(answerOf(first, {approved: true}))).rejects.toThrow("APPROVAL_REFUSED");
-    await expect(client.operateApproval(answerOf(first, {approved: true}))).rejects.toThrow("APPROVAL_");
+    expect(w.storage.actions.get(1)?.aguiApproval).not.toHaveProperty("decision");
     expect(w.apply).not.toHaveBeenCalled();
-    expect(w.storage.actions.get(1)?.state).toBe("pending");
+    shared.holds = true;
+    await client.operateApproval(answerOf(first, {approved: true}));
+    expect(w.apply).toHaveBeenCalledOnce();
   });
 });
 

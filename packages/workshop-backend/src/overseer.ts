@@ -272,15 +272,15 @@ export const ACTION_IN_PROGRESS = "This action is being decided; its outcome is 
 /**
  * The approval bridge's typed refusal (FAC-119) for a decision that ended with nothing recorded on
  * the action: by the kernel's own refusals, matched exactly as the kernel wrote them, never by a
- * provider's words. A decider the workspace refuses (its role, the deployment's shared-configuration
- * authority, another company) is `refused`; an action already decided or being decided is
+ * provider's words. A decider the workspace refuses (the deployment's shared-configuration authority,
+ * another company) is `refused` (a use-role session never reaches the bridge: it is denied first); an action already decided or being decided is
  * `notPending`; an error already typed passes through; anything else is `unavailable`.
  */
 export function approvalRefusal(error: unknown): Error {
   if (operateApprovalErrorCode(error) !== null) return error as Error;
   let message = error instanceof Error ? error.message : String(error);
   const ends = (text: string) => message === text || message.endsWith(`: ${text}`);
-  if (ends(SHARED_CONFIGURATION_REFUSED) || ends("Unauthorized")) {
+  if (ends(SHARED_CONFIGURATION_REFUSED)) {
     return createOperateApprovalError(OPERATE_APPROVAL_ERROR_CODES.refused, SHARED_CONFIGURATION_REFUSED);
   }
   if ([ACTION_IN_PROGRESS, ACTION_ALREADY_APPROVED, ACTION_ALREADY_REJECTED].some(ends)) {
@@ -15979,6 +15979,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     const facet = (gatekeeperId: number) => this.impl.getGatekeeperFacet(gatekeeperId) as
       Fetcher<Gatekeeper<unknown> & Required<Pick<Gatekeeper<unknown>, "getApprovalProposal" | "editApprovalProposal">>>;
     let record = read();
+    // Only someone who may decide the action is answered at all, and asked before anything is
+    // stored: a refused caller (another company, or no shared build authority) leaves no
+    // correlation and no answer, so they can't hold the thread a builder decides it on.
+    try {
+      await this.#requireDecider(record);
+    } catch (error) {
+      throw approvalRefusal(error);
+    }
+    record = read();
     if (!record.aguiApproval) {
       if (input.answer || record.state !== "pending") throw createOperateApprovalError(refused, "Approval refused");
       const proposal = await this.#approvalProposalOf(record);
@@ -16096,7 +16105,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         // decision may still be running; that too must not be reported as applied.
         record = read();
         if (!record.lastAttempt && !record.applyStartedAt && record.state === "pending" && !record.blocked) {
-          throw approvalRefusal(error);
+          const refusal = approvalRefusal(error);
+          // A decider check that refused at decision time (authority lost since the answer was
+          // reserved) decided nothing, so the reservation goes too: a refusal persists no answer.
+          if (operateApprovalErrorCode(refusal) === refused && record.aguiApproval?.decision) {
+            delete record.aguiApproval.decision;
+            actions.put(record);
+          }
+          throw refusal;
         }
       }
     }
