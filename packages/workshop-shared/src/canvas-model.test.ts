@@ -434,6 +434,44 @@ describe("widget events drive page effects (FAC-94)", () => {
   });
 });
 
+// FAC-98: a widget event may put a prompt in the person's own chat, as a draft only: nothing is
+// sent, so a field asking for that (`submit`) is refused. The effect names no person, session,
+// company or authority: its only target is the transitioning session's own chat.
+describe("a prompt inserted into the person's chat (FAC-98)", () => {
+  const promptPage = (effect: unknown) => ({
+    schemaVersion: 2, id: "p", revision: "0", title: "P", children: ["a"], attachments: [], nodes: [
+      { nodeType: "object", id: "a", title: "A", columns: 1, children: ["g"], attachments: [] },
+      { nodeType: "widget", id: "g", kind: "inferos.gadget", version: 1, targetRef: "gadget:7", size: "normal", params: {},
+        attachments: [{ id: "ask", version: 1, on: "finish", effect }] },
+    ],
+  });
+
+  test("parses a draft, trimmed, and resolves the event to it", () => {
+    const draft = parseCanvasPage(promptPage({ kind: "insert-prompt", text: "  Summarise this intake  " }));
+    expect(canvasPageEffects(draft, "gadget:7", "finish")).toEqual([{ kind: "insert-prompt", text: "Summarise this intake" }]);
+  });
+
+  test.each([
+    ["asking to send it", { kind: "insert-prompt", text: "x", submit: true }, { code: "unknown-field", at: "ask" }],
+    ["submit false", { kind: "insert-prompt", text: "x", submit: false }, { code: "unknown-field", at: "ask" }],
+    ["empty text", { kind: "insert-prompt", text: "   " }, { code: "invalid-attachment", at: "ask" }],
+    ["text that isn't a string", { kind: "insert-prompt", text: 3 }, { code: "invalid-attachment", at: "ask" }],
+    ["text over the limit", { kind: "insert-prompt", text: "x".repeat(CANVAS_MODEL_LIMITS.promptText + 1) }, { code: "invalid-attachment", at: "ask" }],
+    ["no text", { kind: "insert-prompt" }, { code: "invalid-shape", at: "ask" }],
+    ["a target person", { kind: "insert-prompt", text: "x", user: "someone" }, { code: "unknown-field", at: "ask" }],
+    ["a target session", { kind: "insert-prompt", text: "x", target: "other" }, { code: "unknown-field", at: "ask" }],
+    ["who it runs as", { kind: "insert-prompt", text: "x", runAs: "admin" }, { code: "authority-field", at: "ask.runAs" }],
+    ["a grant", { kind: "insert-prompt", text: "x", grant: "project/write" }, { code: "authority-field", at: "ask.grant" }],
+  ])("refuses %s", (_, effect, expected) => {
+    expect(rejection(() => parseCanvasPage(promptPage(effect)))).toEqual(expected);
+  });
+
+  test("accepts text exactly at the limit", () => {
+    const text = "x".repeat(CANVAS_MODEL_LIMITS.promptText);
+    expect(canvasPageEffects(parseCanvasPage(promptPage({ kind: "insert-prompt", text })), "gadget:7", "finish")).toEqual([{ kind: "insert-prompt", text }]);
+  });
+});
+
 // FAC-116: a run a person asked a trigger for can drive a page effect through an explicit attachment
 // on the trigger's gadget widget, its event naming the trigger; nothing else raises or hears it.
 describe("a requested run's result drives page effects (FAC-116)", () => {

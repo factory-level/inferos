@@ -127,6 +127,8 @@ export const ConsoleDraftPreview = ({ workspaceId, consoleId, onClose }: { works
     {notices.map((notice, index) => <p key={index} role="status" className="text-sm text-kumo-default">
       {notice.kind === 'would-request'
         ? `Would request ${notice.action} of ${notice.target}: it would need the person’s own grant and approval. Nothing was sent.`
+        : notice.kind === 'would-draft'
+        ? `Would put this draft in the person’s chat: “${notice.text}”. Nothing is sent until they send it.`
         : `Would move to ${notice.page}, which this console doesn’t show.`}
     </p>)}
     {screenId && shown === undefined && <p aria-busy="true" className="text-sm text-kumo-subtle">Reading screen {screenId}…</p>}

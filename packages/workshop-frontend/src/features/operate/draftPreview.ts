@@ -2,15 +2,20 @@ import { canvasPageEffects, type CanvasPage } from '@gadgets/workshop-shared/can
 import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import type { OperateEvent, OperatePageState } from '@gadgets/workshop-shared/operate-session'
 
-/** What the simulated preview shows for something it doesn't do: an action it would request, or a move it can't make. */
+/**
+ * What the simulated preview shows for something it doesn't do: an action it would request, a move it
+ * can't make, or a draft it would put in the person's chat (FAC-98).
+ */
 export type PreviewNotice = { kind: 'would-request'; action: string; target: string } | { kind: 'not-shown'; page: string }
+  | { kind: 'would-draft'; text: string }
 
 /**
  * Where `event` on the widget placing `targetRef` leads in the preview (FAC-96), as Operate would
  * run it (FAC-94): the first wired navigation becomes a move of the preview's own page, `showScreen`
  * within the open view or `openView` of a screen view showing it, and every requested action becomes a
- * notice of what would be requested. Nothing is ever sent. A navigation to a page the console
- * doesn't show is a notice too, as publication would refuse it.
+ * notice of what would be requested. A wired draft prompt (FAC-98) is a notice of the draft it would
+ * put in the person's chat. Nothing is ever sent. A navigation to a page the console doesn't show
+ * is a notice too, as publication would refuse it.
  */
 export function previewWidgetEvent(page: CanvasPage, targetRef: string, event: string, draft: OperateConsole,
     state: OperatePageState): { move: OperateEvent | null; notices: PreviewNotice[] } {
@@ -18,6 +23,7 @@ export function previewWidgetEvent(page: CanvasPage, targetRef: string, event: s
   let move: OperateEvent | null = null
   for (const effect of canvasPageEffects(page, targetRef, event)) {
     if (effect.kind === 'request-action') { notices.push({ kind: 'would-request', action: effect.action, target: effect.target }); continue }
+    if (effect.kind === 'insert-prompt') { notices.push({ kind: 'would-draft', text: effect.text }); continue }
     if (move) continue
     const view = draft.views.find(candidate => candidate.id === state.console?.viewId)
     const within = view?.type === 'rollup' ? view.screens.includes(effect.page) : view?.screen === effect.page

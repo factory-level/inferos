@@ -50,6 +50,20 @@ describe("a configuration trace", () => {
     for (const hook of hooks) expect(hook.permits).toContain("Read-only here.");
   });
 
+  test("says a prompt goes only to the person's own chat, as a draft (FAC-98)", () => {
+    const prompted = parseCanvasPage({
+      schemaVersion: 2, id: "p", revision: "0", title: "P", children: ["a"], attachments: [], nodes: [
+        { nodeType: "object", id: "a", title: "A", columns: 1, children: ["g"], attachments: [] },
+        { nodeType: "widget", id: "g", kind: "inferos.gadget", version: 1, targetRef: "gadget:7", size: "normal", params: {}, attachments: [
+          { id: "ask", version: 1, on: "finish", effect: { kind: "insert-prompt", text: "Summarise" } }] },
+      ],
+    });
+    const hooks = traceConfiguration({}, prompted).filter(entry => entry.kind === "page-hook");
+    expect(hooks.map(hook => [hook.target, hook.effect, hook.permits])).toEqual([
+      ["page:p/attachment:ask", "insert-prompt", "Puts a prompt in the person's own chat as a draft; nothing is sent until they send it. It grants nothing."],
+    ]);
+  });
+
   test("traces only the workspace's settings with no page", () => {
     expect(traceConfiguration({ "baseUi.alerts": true }, null).map(entry => entry.kind)).toEqual(["setting", "setting", "setting"]);
   });

@@ -171,3 +171,20 @@ describe("a widget hearing a trigger's runs", () => {
     expect(() => t.consoles.publish(draft.id, draft.revision, capture, read(capture.commitIds))).toThrow(problems[0]!.message);
   });
 });
+
+// FAC-98 merged into FAC-96's shared check: a run's result can't lead to a prompt in the chat.
+describe("a run's result that puts a prompt in the chat", () => {
+  it("is listed with its target and repair, and publication refuses with it", () => {
+    let t = setUp();
+    t.storage.boundHooks.put({ id: 11, actionId: 1, gatekeeperId: 7, gadgetId: 1, vendorId: "scheduler", controller: null,
+      callback: null, description: { title: "Trigger 11" }, enabled: true } as never);
+    wire(t.storage, [{ id: "ask", version: 1, on: canvasRunEvent("run-failed", 11), effect: { kind: "insert-prompt", text: "Retry it" } }]);
+    let draft = t.consoles.create(content(), read(t.consoles.sourceCommitIds(content())));
+    let capture = t.consoles.capture(draft.id, draft.revision);
+    let problems = t.consoles.draftProblems(draft.id, draft.revision, read(capture.commitIds));
+    expect(problems.map(problem => [problem.code, problem.target])).toEqual([["run-leads-to-prompt", "page:floor/attachment:ask"]]);
+    expect(problems[0]!.message).toBe(`Screen floor can't be published: its widget w1's "run-failed" for trigger 11 puts a prompt in the chat, which a run's result can't do yet.`);
+    expect(problems[0]!.repair).toBe("Remove the prompt from what this run's result leads to, or put it on one of the widget's own events.");
+    expect(() => t.consoles.publish(draft.id, draft.revision, capture, read(capture.commitIds))).toThrow(problems[0]!.message);
+  });
+});

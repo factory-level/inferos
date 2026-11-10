@@ -207,7 +207,9 @@ export type ConsoleDraftProblemCode =
   /** A screen's page, stored outside the editor, isn't a valid page (`CanvasModelError`). */
   | "invalid-page"
   /** FAC-116: an attachment hears runs of a trigger that isn't its gadget's, or a run leads to an action. */
-  | "run-trigger-mismatch" | "run-leads-to-action";
+  | "run-trigger-mismatch" | "run-leads-to-action"
+  /** FAC-98: a run's result leads to a prompt in the chat, which only a widget's own event may do. */
+  | "run-leads-to-prompt";
 
 /**
  * A published console's widget as a Wiki page embeds it (FAC-12): named by its source gadget, which

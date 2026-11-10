@@ -32,6 +32,15 @@ describe('a widget event in the simulated preview', () => {
     expect(previewWidgetEvent(page([]), 'gadget:7', 'submit', DRAFT, opened)).toEqual({ move: null, notices: [] })
   })
 
+  // FAC-98: a wired draft prompt is only reported, as the draft it would put in the person's chat;
+  // it moves nothing, and the navigation beside it still moves the preview's own page.
+  it('reports a wired draft prompt as the draft it would put in the chat, beside the navigation', () => {
+    expect(previewWidgetEvent(page([{ kind: 'insert-prompt', text: 'Summarise this intake' }]), 'gadget:7', 'submit', DRAFT, opened))
+      .toEqual({ move: null, notices: [{ kind: 'would-draft', text: 'Summarise this intake' }] })
+    expect(previewWidgetEvent(page([{ kind: 'insert-prompt', text: 'Check it' }, { kind: 'navigate', page: 'review' }]), 'gadget:7', 'submit', DRAFT, opened))
+      .toEqual({ move: { type: 'showScreen', screenId: 'review' }, notices: [{ kind: 'would-draft', text: 'Check it' }] })
+  })
+
   it('shows the running flow’s step, else the open screen or screen view', () => {
     expect(previewScreen(DRAFT, opened)).toBeNull()
     expect(previewScreen(DRAFT, applyOperateEvent(opened, { type: 'showScreen', screenId: 'form' }))).toBe('form')

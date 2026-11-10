@@ -57,6 +57,7 @@ function attachmentPermits(attachment: CanvasAttachment): string {
     case "navigate": return `Moves the person's own page to ${effect.page}. It grants nothing.`;
     case "raise-event": return `Raises "${effect.event}" on ${effect.target}, within this page. It grants nothing.`;
     case "request-action": return `Asks for "${effect.action}" on ${effect.target}; it runs only with the person's own grant and approval.`;
+    case "insert-prompt": return "Puts a prompt in the person's own chat as a draft; nothing is sent until they send it. It grants nothing.";
   }
 }
 
