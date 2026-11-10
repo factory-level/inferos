@@ -9,6 +9,7 @@ import {
   isLiveWorkflowDelivery, MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKFLOW_DELIVERIES,
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, WORKFLOW_RUN_START_WINDOW_MS,
 } from "@gadgets/workshop-shared/workflow-definition";
+import type { WorkflowDefinitionDelivery } from "@gadgets/workshop-shared/workflow-definition";
 import { makeOverseerStorage } from "../src/overseer.js";
 import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { openFakeOverseer } from "./fixtures.js";
@@ -31,6 +32,15 @@ function workspace() {
 }
 
 const everyoneBuilds = () => true;
+
+/** Fill the retained-delivery cap with copies of one valid delivery, without exercising fire in a loop. */
+function fillRetainedDeliveries(storage: ReturnType<typeof makeOverseerStorage>, template: WorkflowDefinitionDelivery) {
+  for (let id = 0; id < MAX_WORKFLOW_DELIVERIES; id++) {
+    if (storage.workflowDeliveries.get(id)) continue;
+    storage.workflowDeliveries.put({ ...template, id });
+  }
+  storage.nextWorkflowDeliveryId.put(MAX_WORKFLOW_DELIVERIES);
+}
 
 describe("workflow delivery retention", () => {
   it("keeps every live outcome and only evicts known terminal outcomes", () => {
@@ -132,7 +142,7 @@ describe("saving a workflow definition", () => {
 
 describe("triggers and runs", () => {
   it("lets two triggers reference one definition revision, storing a reference, not a copy", () => {
-    let { store, headOf } = workspace();
+    let { store, storage, headOf } = workspace();
     let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     store.pinTrigger(ADA.id, 12, GADGET, { definitionId: saved.id, revision: 1 });
@@ -212,7 +222,7 @@ describe("triggers and runs", () => {
   });
 
   it("does not evict a queued run when later deliveries fill the retention window", () => {
-    let { store, headOf } = workspace();
+    let { store, storage, headOf } = workspace();
     let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
@@ -220,20 +230,19 @@ describe("triggers and runs", () => {
     let invocation = store.beginInvocation(BEN.id, 11);
     let first = store.fire(11, GADGET, headOf, everyoneBuilds, invocation.id)!;
     store.queueRun(11, first.deliveryId, "run", []);
-    for (let n = 1; n < MAX_WORKFLOW_DELIVERIES; n++) store.fire(11, GADGET, headOf, everyoneBuilds);
+    fillRetainedDeliveries(storage, first);
     expect(store.run(first.run!.runId)).toMatchObject({ revision: 1, commitId: commit(1) });
     expect(store.queuedRuns()).toContainEqual({ deliveryId: first.deliveryId, hookId: 11, method: "run", args: [] });
   });
 
   it("refuses admission when every retained delivery is uncertain and reports the reconciliation count", () => {
-    let { store, headOf } = workspace();
+    let { store, storage, headOf } = workspace();
     let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
-    for (let n = 0; n < MAX_WORKFLOW_DELIVERIES; n++) {
-      let delivery = store.fire(11, GADGET, headOf, everyoneBuilds)!;
-      store.recordResult(delivery.deliveryId, { outcome: "uncertain", reason: "lost-after-write" });
-    }
+    let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    store.recordResult(first.deliveryId, { outcome: "uncertain", reason: "lost-after-write" });
+    fillRetainedDeliveries(storage, { ...first, result: { outcome: "uncertain", reason: "lost-after-write" } });
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds))
       .toThrow(`Too many workflow runs are in progress; ${MAX_WORKFLOW_DELIVERIES} are waiting for reconciliation.`);
     expect(store.deliveries(ADA.id, saved.id)).toHaveLength(MAX_WORKFLOW_DELIVERIES);
@@ -245,7 +254,8 @@ describe("triggers and runs", () => {
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
-    for (let n = 1; n < MAX_WORKFLOW_DELIVERIES; n++) store.fire(11, GADGET, headOf, everyoneBuilds);
+    let template = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    fillRetainedDeliveries(storage, template);
     let firstStored = storage.workflowDeliveries.get(first.deliveryId)!;
     storage.workflowDeliveries.put({
       ...firstStored, at: new Date(Date.now() - WORKFLOW_RUN_START_WINDOW_MS - 1),
@@ -256,12 +266,13 @@ describe("triggers and runs", () => {
   });
 
   it("evicts the oldest terminal delivery before admitting another run", () => {
-    let { store, headOf } = workspace();
+    let { store, storage, headOf } = workspace();
     let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
-    for (let n = 1; n < MAX_WORKFLOW_DELIVERIES; n++) store.fire(11, GADGET, headOf, everyoneBuilds);
+    let template = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    fillRetainedDeliveries(storage, template);
     store.recordResult(first.deliveryId, { outcome: "failed", reason: "runtime-error" });
     store.fire(11, GADGET, headOf, everyoneBuilds);
     expect(store.deliveries(ADA.id, saved.id)).toHaveLength(MAX_WORKFLOW_DELIVERIES);
