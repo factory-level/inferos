@@ -27,12 +27,6 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
       subject TEXT PRIMARY KEY,
       account TEXT NOT NULL
     ) STRICT`);
-    // The account a subject's first sign-in claimed for it, before that account is bound: every
-    // sign-in for the subject settles this one candidate, so concurrent first sign-ins agree on it.
-    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS subject_claims (
-      subject TEXT PRIMARY KEY,
-      account TEXT NOT NULL
-    ) STRICT`);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS emails (
       email TEXT PRIMARY KEY,
       account TEXT NOT NULL
@@ -47,31 +41,25 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Records that `subject` signs in to `account`, unless it already signs in to one: the first
-   * record stands, and the account it names is returned, so a second sign-in racing the first agrees
-   * with it.
+   * The account `subject` signs in to, claiming `candidate` for it in one step when it has none yet
+   * (set-if-unset): the claim is the subject's mapping from then on, and is never removed. Every
+   * sign-in for the subject gets the same answer however they overlap, so only the account it names
+   * is ever bound to the subject (`resolveSubjectAccount`).
    */
-  recordSubject(subject: string, account: string): string {
-    this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec(
-        `INSERT INTO subjects (subject, account) VALUES (?, ?) ON CONFLICT (subject) DO NOTHING`, subject, account);
-      this.ctx.storage.sql.exec(`DELETE FROM subject_claims WHERE subject = ?`, subject);
-    });
+  claimSubject(subject: string, candidate: string): string {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO subjects (subject, account) VALUES (?, ?) ON CONFLICT (subject) DO NOTHING`, subject, candidate);
     return this.accountForSubject(subject)!;
   }
 
   /**
-   * Claims `account` as the one `subject`'s sign-in will settle, set-if-unset, and returns the
-   * claimed account: the first claim stands until `recordSubject` records the subject. A sign-in
-   * that loses the claim settles the winner's candidate, never its own, so no second account is
-   * ever bound to the subject.
+   * Moves `subject`'s mapping from `from` to `to` only while it still names `from`
+   * (compare-and-set), and returns the mapping after: for a claimed account that can't bind to the
+   * subject, every sign-in that finds so moves it to the same account.
    */
-  claimSubject(subject: string, account: string): string {
-    this.ctx.storage.sql.exec(
-      `INSERT INTO subject_claims (subject, account) VALUES (?, ?) ON CONFLICT (subject) DO NOTHING`,
-      subject, account);
-    return this.ctx.storage.sql.exec<{ account: string }>(
-      `SELECT account FROM subject_claims WHERE subject = ?`, subject).toArray()[0]!.account;
+  moveSubject(subject: string, from: string, to: string): string {
+    this.ctx.storage.sql.exec(`UPDATE subjects SET account = ? WHERE subject = ? AND account = ?`, to, subject, from);
+    return this.accountForSubject(subject)!;
   }
 
   /** The account whose current vouched address `email` is (ADR 0018), or null. */

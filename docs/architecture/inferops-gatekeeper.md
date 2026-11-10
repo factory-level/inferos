@@ -832,11 +832,13 @@ holds. The Workshop (`account-subject.ts`, `auth/login-flow.ts`) keys the person
   unchanged; only the `emails` index folds case) (`UserDurableObject.bindSubject`, set-if-unset):
   never a password account, never one another subject holds. Without a vouched email, the person
   gets their own account.
-- **Claimed before it is bound.** The directory claims the first sign-in's candidate for the subject
-  (`subject_claims`, set-if-unset) before any account is bound, and every sign-in for that subject
-  settles that one candidate, then records it. So two first sign-ins at once with different
-  addresses bind one account and both sign in to it, and a sign-in that stopped between binding and
-  recording is settled by the next one, never leaving a bound account unreachable. The one-off pass
+- **Claimed in one step, then bound.** The directory's subject mapping is itself the claim: one
+  set-if-unset step (`claimSubject`) records the first sign-in's candidate and returns whichever
+  account won, with no read before it, and the mapping is never removed. Every sign-in for that
+  subject then binds the winner (set-if-unset, the same answer for each), never its own candidate;
+  a winner that can't bind is moved, compare-and-set, to the subject's own name (`moveSubject`). So
+  overlapping first sign-ins with different addresses bind one account and all sign in to it, and a
+  sign-in that stopped between claiming and binding is settled by the next one. The one-off pass
   claims the same way.
 - **A bound account signs in only through its subject.** Gatekeeper email sign-in and Cloudflare
   Access refuse it (`SIGNS_IN_THROUGH_SUBJECT`), so an address that later belongs to someone else
@@ -851,8 +853,9 @@ holds. The Workshop (`account-subject.ts`, `auth/login-flow.ts`) keys the person
 - **Admins** (`ADMINS`) are still matched by account name: a bound account keeps its address as its
   name; a new person's account name is its subject form.
 - **Tests:** `account-subject.test.ts` (the email change, a second person on the old address, the
-  binding rules, finding by address, the pass and its conflict, two first sign-ins at once, a
-  sign-in that stopped before recording, an address with capitals) and the gatekeeper's
+  binding rules, finding by address, the pass and its conflict, two first sign-ins at once, one
+  acting on an answer from before another finished, a sign-in that stopped before binding, an
+  address with capitals) and the gatekeeper's
   `inferlab-login.test.ts` and `account.test.ts`.
 
 ### Sign-in proxy

@@ -128,8 +128,10 @@ describe("taking over someone's old address (acceptance 2)", () => {
     expect(await signIn(second, old)).toBe(subjectName(second));
     expect(await profileOf(subjectName(second))).toBe(subjectName(second));
     // Every email-keyed way into the old account is closed to whoever holds the address now.
-    await expect(legacy.loginOrCreateViaGatekeeper(old, true)).rejects.toThrow(SIGNS_IN_THROUGH_SUBJECT);
-    await expect(legacy.authenticateFromCfAccess(old, true)).rejects.toThrow(SIGNS_IN_THROUGH_SUBJECT);
+    // Caught on the call itself: `rejects` leaves the RPC promise's rejection reported as unhandled.
+    const refusal = (call: Promise<unknown>) => call.then(() => "signed in", (error: Error) => error.message);
+    expect(await refusal(legacy.loginOrCreateViaGatekeeper(old, true))).toBe(SIGNS_IN_THROUGH_SUBJECT);
+    expect(await refusal(legacy.authenticateFromCfAccess(old, true))).toBe(SIGNS_IN_THROUGH_SUBJECT);
     // And the first person still has it.
     expect(await signIn(first)).toBe(old);
   });
@@ -207,20 +209,57 @@ describe("two first sign-ins for one subject at once (FAC-165 round 1)", () => {
     expect(await collaboratorAccountName(NS(), bound[0] ? second : first)).toBe(bound[0] ? second : first);
   });
 
-  it("recovers a sign-in that stopped between binding and recording: the next one settles the same account", async () => {
+  it("settles a sign-in that stopped between claiming and binding: the next one binds that account", async () => {
     const [first, second] = [`stop-a-${fresh()}@example.test`, `stop-b-${fresh()}@example.test`];
     await legacyAccount(first);
     await legacyAccount(second);
     const subject = subjectName(fresh());
-    // The first sign-in claimed its account and bound it, then stopped before recording.
+    // The first sign-in claimed its account, then stopped before binding it.
     const directory = env.TEST_USER_DIRECTORY.getByName("");
     expect(await directory.claimSubject(subject, first)).toBe(first);
-    expect(await env.TEST_USER.getByName(first).bindSubject(subject)).toBe("bound");
-    expect(await directory.accountForSubject(subject)).toBeNull();
-    // A later sign-in, even with another address, settles that claim: the bound account isn't stranded.
+    expect(await env.TEST_USER.getByName(first).isSubjectBound()).toBe(false);
+    // A later sign-in, even with another address, binds the claimed account and signs in to it.
     expect(await resolveSubjectAccount(NS(), subject, second)).toBe(first);
-    expect(await directory.accountForSubject(subject)).toBe(first);
+    expect(await env.TEST_USER.getByName(first).isSubjectBound()).toBe(true);
     expect(await env.TEST_USER.getByName(second).isSubjectBound()).toBe(false);
+  });
+
+  it("agrees with a sign-in that finished while another's first answer was still on its way", async () => {
+    const [late, early] = [`late-${fresh()}@example.test`, `early-${fresh()}@example.test`];
+    await legacyAccount(late);
+    await legacyAccount(early);
+    const subject = subjectName(fresh());
+    // The late sign-in's first directory answer is held until the early sign-in has finished:
+    // whatever the late one asked first, it acts on an answer from before the early one ran.
+    let earlyDone!: () => void;
+    const finished = new Promise<void>(resolve => (earlyDone = resolve));
+    let held = false;
+    const real = env.TEST_USER_DIRECTORY.getByName("");
+    const slowDirectory = {
+      getByName: () => new Proxy(real, {
+        get(target, key) {
+          const stub = target as unknown as Record<string | symbol, (...a: unknown[]) => Promise<unknown>>;
+          if (typeof key !== "string" || key === "then") return stub[key];
+          // An RPC stub's method is called through the stub itself, never with `apply`.
+          return async (...args: unknown[]) => {
+            const answer = await stub[key]!(...args);
+            if (!held) {
+              held = true;
+              await finished;
+            }
+            return answer;
+          };
+        },
+      }),
+    } as unknown as DurableObjectNamespace<UserDirectoryDurableObject>;
+    const lateName = resolveSubjectAccount({ users: env.TEST_USER, directory: slowDirectory }, subject, late);
+    const earlyName = await resolveSubjectAccount(NS(), subject, early);
+    earlyDone();
+    expect(await lateName).toBe(earlyName);
+    const bound = [await env.TEST_USER.getByName(late).isSubjectBound(),
+                   await env.TEST_USER.getByName(early).isSubjectBound()];
+    expect(bound.filter(Boolean)).toHaveLength(1);
+    expect(await real.accountForSubject(subject)).toBe(earlyName);
   });
 });
 
