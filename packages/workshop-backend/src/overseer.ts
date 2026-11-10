@@ -13813,9 +13813,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     }
     let delivery = this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
         gadgetId => this.impl.getGadgetHead(gadgetId),
-        profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build",
-        invocationId,
-        profileId => profileId === ownerProfileId ? "build" : sharing.getEffectiveRole(profileId) ?? null);
+        profileId => profileId === ownerProfileId ? "build" : sharing.getEffectiveRole(profileId) ?? null,
+        invocationId);
     // The request is taken: from here a failure is the run's own (invokeWorkflowTrigger).
     // Only for an invokeTrigger call still waiting on it: a late delivery leaves nothing behind.
     if (delivery?.invocation && this.impl.takenInvocations.has(delivery.invocation.id)) {
@@ -14563,7 +14562,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // Workflow definitions: saving is building and publishing is publishing, each gated as such in a
   // shared workspace; the store decides ownership and visibility (workflow-definition-store.ts).
   async listWorkflowDefinitions(): Promise<WorkflowDefinition[]> {
-    return this.impl.workflowDefinitionStore().list((await this.#getClientProfile()).id);
+    return this.impl.workflowDefinitionStore().list((await this.#getClientProfile()).id, "build");
   }
   // An editor a definition is shared with (FAC-122) saves it here too: this is a build session.
   async saveWorkflowDefinition(input: WorkflowDefinitionSave): Promise<WorkflowDefinition> {
@@ -14598,7 +14597,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let profile = await this.#getClientProfile();
     let hook = this.impl.storage.boundHooks.get(hookId);
     if (!hook) throw new Error("No such hook.");
-    // Clearing the pin removes the trigger's assignment too: retire it first (#374 round 2).
+    // Only the definition's owner or an editor changes what the trigger runs (FAC-122), checked
+    // before anything changes. Clearing the pin removes the trigger's assignment too: retire it first
+    // (#374 round 2).
+    this.impl.workflowDefinitionStore().requireTriggerChangeable(profile.id, hookId);
     if (ref === null) this.impl.retireTriggerAssignment(hookId);
     this.impl.workflowDefinitionStore().pinTrigger(profile.id, hookId,
         hook.gadgetId ?? this.impl.defaultGadgetId ?? null, ref);
@@ -14607,7 +14609,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.impl.workflowDefinitionStore().pinOf(hookId);
   }
   async listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]> {
-    return this.impl.workflowDefinitionStore().deliveries((await this.#getClientProfile()).id, definitionId);
+    return this.impl.workflowDefinitionStore().deliveries((await this.#getClientProfile()).id, definitionId, "build");
   }
   // A control lets named people run a pinned trigger now; setting one is building. Running one is
   // the listed person's own request, checked against the authenticated session's profile.

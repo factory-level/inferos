@@ -13,6 +13,7 @@ import {
 import {
   CANNOT_RUN, SHARED_ONLY_AUDIENCE, WORKSPACE_AUDIENCE, WorkspaceWorkflowDefinitionStore, type WorkflowDefinitionAudience,
 } from "../src/workflow-definition-store.js";
+import { openFakeOverseer } from "./fixtures.js";
 import { makeMockStorage } from "./mock-storage.js";
 
 const ADA = { type: "user" as const, id: "ada-profile", name: "Ada" };
@@ -33,10 +34,10 @@ function workspace(audience: WorkflowDefinitionAudience = SHARED_ONLY_AUDIENCE) 
   let store = new WorkspaceWorkflowDefinitionStore(durable, storage, audience);
   let head = commit(1);
   let headOf = (id: number) => (id === GADGET ? head : undefined);
-  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
+  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
   store.publish(ADA, saved.id, 1);
   head = commit(2);
-  store.save(ADA, { id: saved.id, title: "Refund", gadgetId: GADGET }, headOf);
+  store.save(ADA, { id: saved.id, title: "Refund", gadgetId: GADGET }, headOf, "build");
   return { durable, storage, store, id: saved.id, headOf, setHead: (n: number) => { head = commit(n); } };
 }
 
@@ -138,6 +139,79 @@ describe("editing a shared definition", () => {
   });
 });
 
+// #427 round 1 (r2): only the owner or an editor changes what a trigger runs, and run history is
+// theirs alone, so a read or run share never reaches configuration or another run's data.
+describe("trigger configuration and run history (#427 round 1)", () => {
+  it("lets neither a read-only nor a run-only builder pin a trigger to the definition, or unpin it", () => {
+    for (let rights of [READ, RUN]) {
+      let { store, id } = workspace();
+      store.share(ADA, id, BEN.id, rights, "build");
+      expect(() => store.pinTrigger(BEN.id, HOOK, GADGET, { definitionId: id, revision: 1, mode: "pinned" }))
+        .toThrow("Workflow definition not found.");
+      store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: id, revision: 1, mode: "pinned" });
+      expect(() => store.pinTrigger(BEN.id, HOOK, GADGET, null)).toThrow("can't change the workflow this trigger runs");
+      expect(() => store.pinTrigger(BEN.id, HOOK, GADGET, { definitionId: id, revision: 1 }))
+        .toThrow("can't change the workflow this trigger runs");
+      expect(store.pinOf(HOOK)).toMatchObject({ definitionId: id, revision: 1, mode: "pinned" });
+    }
+  });
+
+  it("lets an editor move a trigger off the definition only to one they may also edit", () => {
+    let { store, id, headOf } = workspace();
+    store.share(ADA, id, BEN.id, EDIT, "build");
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: id, revision: 1, mode: "pinned" });
+    let other = store.save(CARA, { title: "Other", gadgetId: GADGET }, headOf, "build");
+    store.publish(CARA, other.id, 1);
+    // Cara's definition is published (the workspace reads it) but Ben may not edit it.
+    expect(() => store.pinTrigger(BEN.id, HOOK, GADGET, { definitionId: other.id, revision: 1 })).toThrow("Workflow definition not found.");
+    store.pinTrigger(BEN.id, HOOK, GADGET, null);
+    expect(store.pinOf(HOOK)).toBeNull();
+  });
+
+  it("refuses a read-only builder's unpin through the Overseer before the trigger's assignment is touched", async () => {
+    let { store, storage, id } = workspace();
+    store.share(ADA, id, BEN.id, READ, "build");
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: id, revision: 1, mode: "pinned" });
+    let retireTriggerAssignment = vi.fn();
+    let overseer = await openFakeOverseer({}, { role: "build", impl: {
+      env: {}, isSharedConfiguration: async () => false,
+      workflowDefinitionStore: () => store, definitionRoles: async () => () => "build" as const,
+      retireTriggerAssignment, defaultGadgetId: GADGET,
+      storage: Object.assign(storage, {
+        containsRestrictedData: { get: () => false }, title: { get: () => "Test Workspace" },
+        operateSession: { get: () => false },
+        boundHooks: { get: (hookId: number) => (hookId === HOOK ? { id: HOOK, gadgetId: GADGET } : undefined) },
+      }),
+      users: { idFromString: (value: string) => value, get: () => ({ whoami: async () => BEN, recordSharedGadgetOpen: async () => {} }) },
+    } });
+    await expect(overseer.pinTriggerDefinition(HOOK, null)).rejects.toThrow("can't change the workflow this trigger runs");
+    expect(retireTriggerAssignment).not.toHaveBeenCalled();
+    expect(store.pinOf(HOOK)).toMatchObject({ definitionId: id });
+    // Nor does their deliveries read reach the run history.
+    await expect(overseer.listWorkflowDeliveries(id)).rejects.toThrow("Workflow definition not found.");
+  });
+
+  it("shows run history to the owner and editors only: a reader and a runner get none, their own runs included", () => {
+    let { store, id, headOf, setHead } = workspace();
+    setHead(1);
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: id, revision: 1, mode: "pinned" });
+    store.setControl(ADA, HOOK, { label: "Refund", invokers: [BEN.id] });
+    store.share(ADA, id, BEN.id, RUN, "use");
+    store.fire(HOOK, GADGET, headOf, () => "use", store.beginInvocation(BEN.id, HOOK, null).id);
+    // An owner's unpublished revision's run too.
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: id, revision: 1, mode: "pinned" });
+    for (let [who, rights, role] of [[BEN, RUN, "use"], [CARA, READ, "build"]] as const) {
+      store.share(ADA, id, who.id, rights, role);
+      expect(() => store.deliveries(who.id, id, role)).toThrow("Workflow definition not found.");
+    }
+    expect(store.deliveries(ADA.id, id, "build")).toHaveLength(1);
+    store.share(ADA, id, CARA.id, EDIT, "build");
+    expect(store.deliveries(CARA.id, id, "build")).toHaveLength(1);
+    // A missing role grants nothing, an editor's included.
+    expect(() => store.deliveries(CARA.id, id, null)).toThrow("Workflow definition not found.");
+  });
+});
+
 describe("running a shared definition", () => {
   it("needs both the run right and the trigger's run control; an edit share gives no run", () => {
     let { store, id } = workspace();
@@ -220,14 +294,14 @@ describe("revocation and records (acceptance 2)", () => {
     store.share(ADA, id, BEN.id, RUN, "use");
     let invocation = store.beginInvocation(BEN.id, HOOK, null);
     store.share(ADA, id, BEN.id, null, "use");
-    expect(() => store.fire(HOOK, GADGET, headOf, () => true, invocation.id, () => "use")).toThrow(CANNOT_RUN);
+    expect(() => store.fire(HOOK, GADGET, headOf, () => "use", invocation.id)).toThrow(CANNOT_RUN);
     expect(store.isWaiting(invocation.id)).toBe(false);
   });
 
   it("stops a run already admitted at its next protected point once the run right is revoked or they leave", async () => {
     let { impl, store, id, headOf, roles } = overseerWith();
     store.share(ADA, id, BEN.id, RUN, "use");
-    let delivery = store.fire(HOOK, GADGET, headOf, () => true, store.beginInvocation(BEN.id, HOOK, null).id, () => "use")!;
+    let delivery = store.fire(HOOK, GADGET, headOf, () => "use", store.beginInvocation(BEN.id, HOOK, null).id)!;
     let check = await requireRunRequester(impl as never, HOOK, delivery.deliveryId);
     check.revalidate();
     store.share(ADA, id, BEN.id, READ, "use");
@@ -250,7 +324,7 @@ describe("revocation and records (acceptance 2)", () => {
     setAnswer({ holds: true, company: COMPANY_A });
     await invokeWorkflowTrigger(impl as never, "ben-user", BEN.id, HOOK);
     let requestId = invoke.mock.calls[0]![0].invocationId;
-    let delivery = store.fire(HOOK, GADGET, headOf, () => true, requestId, () => "use")!;
+    let delivery = store.fire(HOOK, GADGET, headOf, () => "use", requestId)!;
     setAnswer({ holds: true, company: COMPANY_B });
     await expect(requireRunRequester(impl as never, HOOK, delivery.deliveryId)).rejects.toThrow(RUN_REQUESTER_REVOKED);
   });

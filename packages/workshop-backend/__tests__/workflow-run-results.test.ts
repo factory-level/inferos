@@ -76,12 +76,12 @@ function admitted(impl: any) {
   });
   let store = impl.workflowDefinitionStore();
   const head = (id: number) => (id === GADGET ? commit(1) : undefined);
-  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, head);
+  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, head, "build");
   store.publish(ADA, saved.id, 1);
   store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1 });
   store.setControl(ADA, HOOK, { label: "Run refunds", invokers: [PERSON] });
   let invocation = store.beginInvocation(PERSON, HOOK, null);
-  let delivery = store.fire(HOOK, GADGET, head, () => true, invocation.id)!;
+  let delivery = store.fire(HOOK, GADGET, head, () => "build" as const, invocation.id)!;
   return { delivery, invocationId: invocation.id, definitionId: saved.id };
 }
 
@@ -186,7 +186,7 @@ describe("a requested run's result, read by the person who asked (FAC-114)", () 
     await withImpl(name, async impl => {
       let made = admitted(impl);
       let store = impl.workflowDefinitionStore();
-      expect(() => store.fire(HOOK, GADGET, () => commit(1), () => true, made.invocationId))
+      expect(() => store.fire(HOOK, GADGET, () => commit(1), () => "build" as const, made.invocationId))
         .toThrow("That run request is unknown or already ran.");
       expect([...impl.storage.workflowDeliveries.list()]).toHaveLength(1);
       expect(await impl.getRequestedRun(PERSON, made.invocationId)).toMatchObject({ outcome: "queued" });

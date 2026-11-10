@@ -269,14 +269,14 @@ function pinnedStore() {
   let durable = makeMockStorage();
   let storage = makeOverseerStorage(durable);
   let store = new WorkspaceWorkflowDefinitionStore(durable, storage);
-  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, () => commit(1));
+  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, () => commit(1), "build");
   store.publish(ADA, saved.id, 1);
   store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1 });
   store.setControl(ADA, HOOK, { label: "Refund", invokers: ["operator"] });
   return { store, saved };
 }
 const headOf = () => commit(1);
-const everyoneBuilds = () => true;
+const everyoneBuilds = () => "build" as const;
 
 describe("an assignment", () => {
   it("is only for a pinned trigger, gets a fresh reference each time, and goes with the pin or the hook", () => {

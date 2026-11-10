@@ -117,7 +117,7 @@ function admitted(impl: any, opts: { assigned?: boolean } = {}) {
   });
   let store = impl.workflowDefinitionStore();
   const head = (id: number) => (id === GADGET ? commit(1) : undefined);
-  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, head);
+  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, head, "build");
   store.publish(ADA, saved.id, 1);
   store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1 });
   store.setControl(ADA, HOOK, { label: "Run refunds", invokers: [PERSON] });
@@ -127,7 +127,7 @@ function admitted(impl: any, opts: { assigned?: boolean } = {}) {
     });
   }
   let invocation = store.beginInvocation(PERSON, HOOK, null);
-  return store.fire(HOOK, GADGET, head, () => true, invocation.id)!;
+  return store.fire(HOOK, GADGET, head, () => "build" as const, invocation.id)!;
 }
 
 const deliveryOf = (impl: any, id: number) => impl.storage.workflowDeliveries.get(id);
@@ -465,7 +465,7 @@ describe("withdrawing a replay's staged copy (FAC-112)", () => {
     await withImpl(`run-exec-withdraw-two-${crypto.randomUUID()}`, async impl => {
       let first = admitted(impl, { assigned: true });
       let store = impl.workflowDefinitionStore();
-      let second = store.fire(HOOK, GADGET, (gid: number) => (gid === GADGET ? commit(1) : undefined), () => true,
+      let second = store.fire(HOOK, GADGET, (gid: number) => (gid === GADGET ? commit(1) : undefined), () => "build" as const,
           store.beginInvocation(PERSON, HOOK, null).id)!;
       let withdrawn: string[] = [];
       onPrototype(impl, "openAssignedActionFacet", async (record: any) => ({
@@ -608,7 +608,7 @@ describe("a failed run's recorded outcome (FAC-112)", () => {
     let done = await settled(name, id);
     expect(done.execution).toMatchObject({ state: "failed", failure: "runtime-error" });
     expect(JSON.stringify(done)).not.toContain(SENTINEL);
-    let listed = await withImpl(name, impl => impl.workflowDefinitionStore().deliveries(ADA.id, definitionId));
+    let listed = await withImpl(name, impl => impl.workflowDefinitionStore().deliveries(ADA.id, definitionId, "build"));
     expect(JSON.stringify(listed)).not.toContain(SENTINEL);
   });
 });

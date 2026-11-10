@@ -116,7 +116,7 @@ export class WorkspaceWorkflowDefinitionStore {
    * with them to edit with every revision, and otherwise one they may read with its published
    * revision only (FAC-122; `#rights`).
    */
-  list(viewer: string, role: CollaboratorRole | null = "build"): WorkflowDefinition[] {
+  list(viewer: string, role: CollaboratorRole | null): WorkflowDefinition[] {
     let shown: WorkflowDefinition[] = [];
     for (let stored of this.storage.workflowDefinitions.list()) {
       let view = this.#viewOf(stored, viewer, role);
@@ -126,7 +126,7 @@ export class WorkspaceWorkflowDefinitionStore {
   }
 
   /** One definition as `viewer` may see it, or null when it doesn't exist for them. */
-  get(viewer: string, id: string, role: CollaboratorRole | null = "build"): WorkflowDefinition | null {
+  get(viewer: string, id: string, role: CollaboratorRole | null): WorkflowDefinition | null {
     let stored = this.storage.workflowDefinitions.get(id);
     return stored ? this.#viewOf(stored, viewer, role) : null;
   }
@@ -229,7 +229,7 @@ export class WorkspaceWorkflowDefinitionStore {
    * same commit again changes only the title. Publishes nothing.
    */
   save(caller: AiChatAuthorInfo, input: WorkflowDefinitionSave,
-       headOf: (gadgetId: WorkpieceId) => string | undefined, role: CollaboratorRole | null = "build"): WorkflowDefinition {
+       headOf: (gadgetId: WorkpieceId) => string | undefined, role: CollaboratorRole | null): WorkflowDefinition {
     let title = parseWorkflowDefinitionTitle(input.title);
     let commitId = headOf(input.gadgetId);
     if (!commitId) throw new Error("A workflow definition is saved from a workflow gadget with committed code.");
@@ -273,7 +273,7 @@ export class WorkspaceWorkflowDefinitionStore {
    * FAC-122). Triggers already pinned to another revision stay on it.
    */
   publish(caller: AiChatAuthorInfo, id: string, revision: number,
-          { editorsMayPublish = false, role = "build" }: { editorsMayPublish?: boolean; role?: CollaboratorRole | null } = {})
+          { editorsMayPublish = false, role = null }: { editorsMayPublish?: boolean; role?: CollaboratorRole | null } = {})
       : WorkflowDefinition {
     return this.durableStorage.transactionSync(() => {
       let stored = editorsMayPublish ? this.#editable(caller.id, id, role) : this.#owned(caller.id, id);
@@ -292,6 +292,11 @@ export class WorkspaceWorkflowDefinitionStore {
   pinTrigger(viewer: string, hookId: number, hookGadgetId: WorkpieceId | null,
              ref: WorkflowTriggerDefinitionRef | null): void {
     this.durableStorage.transactionSync(() => {
+      // Pinning is a build act (the Overseer allows it to build sessions only), and changing what a
+      // trigger runs needs the owner's or an editor's right (FAC-122), on the definition pinned now as
+      // on the one pinned to: a read or run share never changes a trigger.
+      const role = "build";
+      this.requireTriggerChangeable(viewer, hookId);
       // A waiting request was admitted for the revision pinned then: any pin change drops it.
       this.#dropInvocations(hookId);
       if (ref === null) {
@@ -301,7 +306,8 @@ export class WorkspaceWorkflowDefinitionStore {
         this.storage.workflowTriggerAssignments.delete(hookId);
         return;
       }
-      let view = this.get(viewer, ref.definitionId);
+      this.#editable(viewer, ref.definitionId, role);
+      let view = this.get(viewer, ref.definitionId, role);
       let revision = view?.revisions.find(r => r.revision === ref.revision);
       if (!view || !revision) throw new Error(NOT_FOUND);
       // An editor sees unpublished revisions, but only the owner may run one (FAC-122).
@@ -312,6 +318,19 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowTriggerPins.put({ hookId, definitionId: ref.definitionId,
         revision: ref.revision, mode: ref.mode ?? "follow-latest" });
     });
+  }
+
+  /**
+   * Refuses unless `viewer` (a builder) owns or may edit the definition trigger `hookId` is pinned
+   * to now (FAC-122), before anything about the trigger is changed: its pin, or the assignment that
+   * goes with it. A trigger with no pin, or one whose definition is gone, may be changed.
+   */
+  requireTriggerChangeable(viewer: string, hookId: number): void {
+    let current = this.storage.workflowTriggerPins.get(hookId);
+    let definition = current ? this.storage.workflowDefinitions.get(current.definitionId) : undefined;
+    if (definition && !this.#rights(definition, viewer, "build").edit) {
+      throw new Error("You can't change the workflow this trigger runs.");
+    }
   }
 
   /** The pin of bound hook `hookId`, or null. */
@@ -328,15 +347,16 @@ export class WorkspaceWorkflowDefinitionStore {
    * Decides a firing of bound hook `hookId`, which wakes `hookGadgetId`. With no pin, there's
    * nothing to decide (null). With one, it refuses unless the pinned revision still exists, its
    * gadget's head is exactly the revision's commit (so what runs is what the revision names), and,
-   * for a revision that isn't the published one, its owner can still build here (`ownerCanBuild`).
+   * for a revision that isn't the published one, its owner can still build here; and, for a person's
+   * request, that they may still run its definition (FAC-122). `roleOf` gives each person's role in
+   * this workspace now, null for none: nothing is assumed for someone it doesn't know.
    * It never falls back to another revision or another person. Otherwise it records the delivery
    * and returns it.
    */
   fire(hookId: number, hookGadgetId: WorkpieceId | null,
        headOf: (gadgetId: WorkpieceId) => string | undefined,
-       ownerCanBuild: (profileId: string) => boolean,
-       invocationId?: string,
-       roleOf: (profileId: string) => CollaboratorRole | null = () => "build"): (WorkflowDefinitionDelivery & { deliveryId: number }) | null {
+       roleOf: (profileId: string) => CollaboratorRole | null,
+       invocationId?: string): (WorkflowDefinitionDelivery & { deliveryId: number }) | null {
     // A delivery a person asked for names an invocation minted here for this trigger, not yet run;
     // anything else starts nothing.
     let invocation = invocationId === undefined ? undefined : this.storage.workflowInvocations.get(invocationId);
@@ -384,7 +404,7 @@ export class WorkspaceWorkflowDefinitionStore {
       throw new Error("The workflow changed; ask again");
     }
     if (pin.mode !== "follow-latest" && stored.published?.revision !== pin.revision &&
-        !ownerCanBuild(stored.owner.id)) {
+        roleOf(stored.owner.id) !== "build") {
       throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
     }
     return this.durableStorage.transactionSync(() => {
@@ -831,9 +851,14 @@ export class WorkspaceWorkflowDefinitionStore {
     });
   }
 
-  /** The recorded deliveries of a definition visible to `viewer`, oldest first. */
-  deliveries(viewer: string, definitionId: string): WorkflowDefinitionDelivery[] {
-    if (!this.get(viewer, definitionId)) throw new Error(NOT_FOUND);
+  /**
+   * The recorded deliveries of a definition, oldest first, to its owner and its editors only
+   * (FAC-122): deliveries name every run's revision and commit, unpublished ones included, and who
+   * asked, as whom it ran and its result. A reader or runner is told it doesn't exist, and sees
+   * their own requested runs through `requestedDeliveries` instead.
+   */
+  deliveries(viewer: string, definitionId: string, role: CollaboratorRole | null): WorkflowDefinitionDelivery[] {
+    this.#editable(viewer, definitionId, role);
     let shown: WorkflowDefinitionDelivery[] = [];
     for (let { id: _, ...delivery } of this.storage.workflowDeliveries.list()) {
       if (delivery.definitionId === definitionId) shown.push(delivery);

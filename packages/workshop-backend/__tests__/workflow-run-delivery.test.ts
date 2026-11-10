@@ -101,12 +101,12 @@ function setUp(impl: any, options: Setup = {}) {
     controller: null, callback: null, description: { title: "Refunds" }, enabled: true,
   });
   let store = impl.workflowDefinitionStore();
-  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, head);
+  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, head, "build");
   store.publish(ADA, saved.id, 1);
   store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1 });
   store.setControl(ADA, HOOK, { label: "Run refunds", invokers: [PERSON] });
   let invocation = store.beginInvocation(PERSON, HOOK, null);
-  let delivery = store.fire(HOOK, GADGET, head, () => true, invocation.id)!;
+  let delivery = store.fire(HOOK, GADGET, head, () => "build" as const, invocation.id)!;
   let deliveryId = delivery.deliveryId as number;
   let canvas = () => impl.storage.workflowDeliveries.get(deliveryId)?.delivery?.canvas;
   /** Settle the run to `outcome`, deliver it, and wait for the delivery to finish. */
