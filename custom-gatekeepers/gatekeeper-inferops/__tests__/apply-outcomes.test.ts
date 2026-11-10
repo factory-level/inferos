@@ -4,7 +4,8 @@
 
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vitest";
-import { canPass, classifyAttempt, BOARD_WRITES, RECONCILE_ONLY } from "../src/apply-attempts";
+import { canPass, classifyAttempt, failureKind, BOARD_WRITES, RECONCILE_ONLY } from "../src/apply-attempts";
+import { InferOpsError, inferOpsErrorCode, isPolicyRefusal } from "../src/inferops-client";
 import type { BindingProps } from "./worker";
 
 const READY = "20000000-0000-4000-8000-000000000001";
@@ -49,6 +50,31 @@ describe("classifying an attempt", () => {
     expect(canPass("UNAUTHORIZED", false)).toBe(true);
     expect(canPass("NOT_FOUND", false)).toBe(false);
     expect(canPass(null, false)).toBe(false);
+  });
+});
+
+// As #settle reads it from the error InferOps answered with.
+const kindOf = (error: unknown) => failureKind(inferOpsErrorCode(error), isPolicyRefusal(error));
+
+
+// FAC-119: what kind of reason a failure was, from its code and InferOps' policy flag only, never its
+// words: a workflow-policy refusal and a missing permission are both FORBIDDEN on the wire.
+describe("the kind of a failure", () => {
+  it("tells a workflow-policy refusal from a missing permission, though both are FORBIDDEN", () => {
+    expect(kindOf(new InferOpsError("FORBIDDEN", "The workflow policy refused it.", { policy: true }))).toBe("policy");
+    expect(kindOf(new InferOpsError("FORBIDDEN", "Missing permission: project:write"))).toBe("permission");
+    // The words never decide: a permission refusal mentioning policy is still a permission.
+    expect(kindOf(new InferOpsError("FORBIDDEN", "workflow policy says no"))).toBe("permission");
+  });
+
+  it("reads an expired sign-in, a conflict, an invalid request and anything else apart", () => {
+    expect(kindOf(new InferOpsError("UNAUTHORIZED", "Sign in again."))).toBe("sign-in");
+    for (let code of ["STALE_REVISION", "CONFLICT", "IDEMPOTENCY_CONFLICT"] as const) {
+      expect(kindOf(new InferOpsError(code, "x"))).toBe("conflict");
+    }
+    expect(kindOf(new InferOpsError("INVALID_REQUEST", "x"))).toBe("invalid");
+    expect(kindOf(new InferOpsError("UNAVAILABLE", "x"))).toBe("unavailable");
+    expect(kindOf(new Error("socket hang up"))).toBe("unavailable");
   });
 });
 

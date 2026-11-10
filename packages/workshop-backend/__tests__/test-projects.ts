@@ -94,6 +94,7 @@ export const WORKERD_LIGHT: readonly string[] = [
   "access.test.ts",
   "action-log-pagination.test.ts",
   "operate-approval.test.ts",
+  "operate-approval-actions.test.ts",
   "ai-models.test.ts",
   "bundled-blueprints.test.ts",
   "commit-reads.test.ts",
@@ -151,6 +152,7 @@ export const BACKEND: readonly string[] = [
   "user-commit-email.test.ts",
   "user-models.test.ts",
   "workflow-assigned-writes.test.ts",
+  "action-failure-kinds.test.ts",
   "worktree-session.test.ts",
 ];
 
