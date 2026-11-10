@@ -2618,7 +2618,8 @@ export type ActionLogEntry = {
 export type GovernedSessionHandle = {
   gatekeeperId: WorkpieceId;
   resource: GovernedResource;
-  session: GovernedWriteSession;
+  /** Dispose it to release the session when done with the resource. */
+  session: GovernedWriteSession & { [Symbol.dispose](): void };
 };
 
 export type BoundHookInfo = {

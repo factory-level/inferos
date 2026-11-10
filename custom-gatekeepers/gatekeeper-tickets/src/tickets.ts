@@ -14,7 +14,8 @@ import {
 } from "@gadgets/gatekeeper-kit/actions";
 import { createLogger } from "@gadgets/observability/logger";
 import {
-  GovernedRequestError, listGoverned, parseGovernedCommand, parseGovernedListRequest,
+  GovernedRequestError, listGoverned, parseGovernedCommand, parseGovernedListRequest, parseTicketsQueueRef,
+  TICKETS_QUEUE_ID_MAX,
 } from "@gadgets/workshop-shared/governed-data";
 import type {
   AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper,
@@ -60,11 +61,15 @@ type BindingProps = { accountId: string; workspace: string; queueId: string };
 /** The props of one account, as the Workshop's stub for it carries them. */
 type AccountProps = { accountId: string };
 
-/** The workspace and queue a resource URL names, or an error saying why it names none. */
-function parseQueueUrl(url: string): { workspace: string; queueId: string } {
-  const match = /^tickets:\/\/([a-z0-9-]+)\/queue\/([A-Za-z0-9_-]+)$/.exec(url);
-  if (!match) throw new Error(`Not a Tickets queue URL: expected tickets://<workspace>/queue/<id>.`);
-  return { workspace: match[1]!, queueId: match[2]! };
+/**
+ * The workspace and queue a resource URL names, or an error saying why it names none. The grammar
+ * is the host's governed reference's own (`parseTicketsQueueRef`), so a queue bound here can always
+ * be opened there, and an id longer than `TICKETS_QUEUE_ID_MAX` is refused at binding.
+ */
+export function parseQueueUrl(url: string): { workspace: string; queueId: string } {
+  const parsed = parseTicketsQueueRef(url);
+  if (!parsed) throw new Error(`Not a Tickets queue URL: expected tickets://<workspace>/queue/<id>, the id at most ${TICKETS_QUEUE_ID_MAX} characters.`);
+  return parsed;
 }
 
 /** The message an agent sees for a provider refusal. Never echoes a value the agent sent. */

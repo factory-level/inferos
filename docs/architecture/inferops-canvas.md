@@ -636,6 +636,9 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
   - **The tickets queue** (`gatekeeper-tickets`) declares one, `setStatus`, on `status` (`open`, `pending` or `closed`). It proposes exactly what the session's own `setStatus` proposes, so it carries the same checks, the same approval and the same apply. Its fields are fixed, so a list request is checked in full before the queue is read.
 - **How the host reaches one** (`Overseer.openGovernedSession(ref)`): the trusted host never fetches upstream.
   - **References:** the ref must name a governed resource (`governedResourceOf`: a custom table, `inferops://<tenant>.<workspace>/object/table/<tableId>`, or a tickets queue, `tickets://<workspace>/queue/<id>`, exactly as their connectors accept them). Anything else is refused.
+  - **One grammar per reference:**
+    - **A tickets queue:** `parseTicketsQueueRef` is the one grammar, an id of at most `TICKETS_QUEUE_ID_MAX` (64) characters. The tickets connector binds by it, so an over-long id is refused at binding, never bound and then unopenable.
+    - **A custom table:** the host is InferOps' own slugs, as the InferOps connector parses them.
   - **The connection** is found as `getGatekeeperByResourceUrl` finds one: the oldest described with that URL, never minted. A connection blocked for a restart is refused. No connection gives null.
   - **The session** is opened as the caller (`openGatekeeperSession`, from the user), and the host gets `{gatekeeperId, resource, session}`. That session (`GovernedSessionImpl`) passes only `describe`, `list`, `get` and `command` to the connector's session. Its other methods (`listRecords`, `setStatus`, …) aren't reachable through it, so the governed limits hold in the kernel, not as a client's promise.
   - **A resource that declares no commands** (a custom table) refuses `command` as "This resource takes no commands."
