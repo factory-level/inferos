@@ -2615,6 +2615,18 @@ export type ActionAttempt = {
 /** The kind of caller that asked for an action log entry (see `ActionLogEntry.requestedBy`). */
 export type ActionRequester = "agent" | "person" | "gadget" | "hook";
 
+/**
+ * Where a pending decision came from (FAC-119; `ActionLogEntry.context`), by reference only.
+ * `workflow-run`: a workflow trigger's run proposed it. `assigned` says it runs as the trigger's
+ * assigned service account (FAC-102) rather than as the person who asked; `requestedBy` is the
+ * profile id of the person who asked for the run, or null when the trigger fired it itself;
+ * `triggerLabel` is the trigger's run-control label, when it has one. `agent-turn`: an agent's turn
+ * in a chat proposed it, the chat itself not named.
+ */
+export type ActionContext =
+  | { kind: "workflow-run"; hookId: WorkpieceId; assigned: boolean; runId?: string; requestedBy?: string | null; triggerLabel?: string }
+  | { kind: "agent-turn" };
+
 export type ActionLogEntry = {
   /** Sequential ID number for the action. Counts up from when the workspace was created. */
   id: number;
@@ -2643,6 +2655,13 @@ export type ActionLogEntry = {
 } & ({
   type: "action";
   description: ActionDescription;
+  /**
+   * Where a pending decision came from, beyond who asked (FAC-119): bounded and reference-only, for
+   * a person deciding it to know which run or turn it belongs to. Never a credential, a credential
+   * reference, a chat or gadget id, or anything of another action. Absent when the record says no
+   * more than `requestedBy`.
+   */
+  context?: ActionContext;
   /**
    * Who resolved the action (approved or rejected it). Set when the action leaves "pending"; absent
    * while still pending (or for legacy actions resolved before this was tracked). For an
@@ -3079,6 +3098,17 @@ export interface Overseer extends RpcTarget {
    * operate session.
    */
   listWidgetInstances(blueprintId: string, version: number): Promise<ConsoleWidgetInstance[]>;
+  /**
+   * Starts reconnecting the connected account that connection `gatekeeperId` uses (FAC-119), for a
+   * decision whose last attempt found its sign-in expired: the same flow as
+   * `AuthenticatedApi.reconnectAccount`, for the caller's own account only. The account is resolved
+   * here, so no client ever holds a connection's account id. Refused, starting nothing, with
+   * `GATEKEEPER_RECONNECT_NOT_YOURS` when the connection uses another person's account (another
+   * company's included), and `GATEKEEPER_RECONNECT_UNKNOWN` when it records no account (one made
+   * before it was recorded, a built-in one, or an account since removed) or doesn't exist. Not
+   * available to the use role; the operate session reconnects its own workspace's connections.
+   */
+  reconnectGatekeeper(gatekeeperId: WorkpieceId): Promise<ConnectFlowStart>;
   /**
    * Open an app a console places, as its published revision `revision` fenced it (FAC-89 part 2):
    * `gadgetId` is the live app, with its own storage and bindings, never a copy (see
@@ -5826,6 +5856,13 @@ export type BlueprintScreenshotUpload = {
  * (`AuthenticatedApi.holdsSharedConfiguration`) doesn't let the caller share, publish or change a
  * shared workspace, so a client can show it as is. It names no role.
  */
+/** `Overseer.reconnectGatekeeper`'s refusal for a connection that uses another person's account. */
+export const GATEKEEPER_RECONNECT_NOT_YOURS =
+    "This connection uses another person's account, so only they can reconnect it.";
+/** `Overseer.reconnectGatekeeper`'s refusal when the connection records no account to reconnect. */
+export const GATEKEEPER_RECONNECT_UNKNOWN =
+    "This connection doesn't say which account it uses. Reconnect the account in your connections.";
+
 export const SHARED_CONFIGURATION_REFUSED =
     "You don't have permission to share or publish configuration other people use.";
 
