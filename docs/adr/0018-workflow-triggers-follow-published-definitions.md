@@ -15,12 +15,22 @@ so changing their behavior in place would be unsafe.
 
 ## Decision
 
-New trigger definitions default to `follow-latest`: each admitted run resolves the definition's
-current published revision. A trigger can explicitly select `pinned` to retain its revision.
+New trigger definitions default to `follow-latest`: a request records the published revision at
+admission. Its delivery callback may run that revision after a newer publication only while the
+gadget head still matches the admitted revision's commit. If the head moved, firing refuses with
+“The workflow changed; ask again” so the run cannot record one revision while executing another.
+A trigger can explicitly select `pinned` to retain its revision.
 Existing stored pins without a mode continue to mean `pinned`; they are never migrated silently.
-Each delivery records its starting definition, revision and commit, so a run already admitted stays
-on that version after another publication. Follow-latest refuses to run a definition without a
-publication. Unpublished saves never change the version it runs.
+Each delivery records its starting definition, revision and commit. Follow-latest refuses to run a
+definition without a publication, and also refuses when the gadget head is not the commit of the
+current publication. Unpublished saves never change the version it runs.
+
+Delivery retention is capped at 1,000. Terminal deliveries and runs that never started within the
+10-minute start window may be evicted FIFO. Runs with queued, running, waiting or possibly-applied
+uncertain work remain live. If all retained deliveries need completion or reconciliation, admission
+refuses and reports their count. Requested-run reads in company-scoped deployments require known,
+matching stored and current company scopes. Deployments without company-scoped gatekeeper authority
+use the requester's identity as the scope.
 
 ## Consequences
 

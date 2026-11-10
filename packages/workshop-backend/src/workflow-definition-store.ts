@@ -31,8 +31,11 @@ export type QueuedWorkflowRun = { deliveryId: number; hookId: number; method: st
 /**
  * How the store tells time and how long a dynamic definition lasts (FAC-124). `dynamicTtlMs` is read
  * only when a dynamic definition is created, so a misconfigured deployment refuses just that.
+ * `onChange` is called after anything that can change what is due to expire (a save, a pin added
+ * or removed, a trigger forgotten, a run ended or settled), so the Overseer reschedules its alarm
+ * for `nextExpiry`.
  */
-export type DefinitionRetention = { now: () => number; dynamicTtlMs: () => number };
+export type DefinitionRetention = { now: () => number; dynamicTtlMs: () => number; onChange?: () => void };
 
 const DEFAULT_RETENTION: DefinitionRetention = { now: () => Date.now(), dynamicTtlMs: () => dynamicDefinitionTtlMs(undefined) };
 
@@ -98,11 +101,12 @@ export class WorkspaceWorkflowDefinitionStore {
     return new Set(Array.from(this.storage.workflowTriggerPins.list(), pin => pin.definitionId));
   }
 
-  // The definitions a live run names (FAC-108's `isLiveWorkflowDelivery`): kept until it ends.
-  #liveIds(): Set<string> {
+  // The definitions a live run names (FAC-108's `isLiveWorkflowDelivery`, at this store's clock):
+  // kept until it ends.
+  #liveIds(now: number): Set<string> {
     let live = new Set<string>();
     for (let delivery of Array.from(this.storage.workflowDeliveries.list())) {
-      if (isLiveWorkflowDelivery(delivery)) live.add(delivery.definitionId);
+      if (isLiveWorkflowDelivery(delivery, now)) live.add(delivery.definitionId);
     }
     return live;
   }
@@ -114,29 +118,43 @@ export class WorkspaceWorkflowDefinitionStore {
    * either ran before it (and retained the definition) or is refused after it. Returns how many.
    */
   sweepExpired(): number {
-    return this.durableStorage.transactionSync(() => {
-      let now = this.retention.now();
-      let pinned = this.#pinnedIds();
-      let live = this.#liveIds();
-      let swept = 0;
-      for (let stored of Array.from(this.storage.workflowDefinitions.list())) {
-        if (this.#available(stored, now, pinned) || live.has(stored.id)) continue;
-        this.storage.workflowDefinitions.delete(stored.id);
-        swept++;
-      }
-      return swept;
-    });
+    return this.durableStorage.transactionSync(() => this.#sweepAt(this.retention.now()));
   }
 
-  /** The earliest expiry still to come among dynamic definitions, to wake for (FAC-124), or undefined. */
+  // The sweep's body, for a caller already in a transaction: deletes what expired by `now` and
+  // nothing keeps, and returns how many.
+  #sweepAt(now: number): number {
+    let pinned = this.#pinnedIds();
+    let live = this.#liveIds(now);
+    let swept = 0;
+    for (let stored of Array.from(this.storage.workflowDefinitions.list())) {
+      if (this.#available(stored, now, pinned) || live.has(stored.id)) continue;
+      this.storage.workflowDefinitions.delete(stored.id);
+      swept++;
+    }
+    return swept;
+  }
+
+  /**
+   * When to wake to sweep (FAC-124), or undefined: the earliest expiry among dynamic definitions no
+   * trigger is pinned to. One already past counts (it is due now) unless a live run keeps it, whose
+   * end is followed by a sweep anyway; so unpinning an expired definition wakes for it at once.
+   */
   nextExpiry(): number | undefined {
     let now = this.retention.now();
+    let pinned = this.#pinnedIds();
+    let live = this.#liveIds(now);
     let next: number | undefined;
-    for (let stored of this.storage.workflowDefinitions.list()) {
+    for (let stored of Array.from(this.storage.workflowDefinitions.list())) {
       let at = stored.expiresAt?.getTime();
-      if (at !== undefined && at > now && (next === undefined || at < next)) next = at;
+      if (at === undefined || pinned.has(stored.id) || (at <= now && live.has(stored.id))) continue;
+      if (next === undefined || at < next) next = at;
     }
     return next;
+  }
+
+  #changed(): void {
+    this.retention.onChange?.();
   }
 
   /** The definitions `viewer` may see: their own in full, and others' published revision only. */
@@ -172,10 +190,13 @@ export class WorkspaceWorkflowDefinitionStore {
     if (!commitId) throw new Error("A workflow definition is saved from a workflow gadget with committed code.");
     // Read before the transaction: a misconfigured TTL refuses only creating a dynamic definition.
     let ttl = input.id === undefined && input.retain === false ? this.retention.dynamicTtlMs() : undefined;
-    return this.durableStorage.transactionSync(() => {
+    let result = this.durableStorage.transactionSync(() => {
       let now = new Date(this.retention.now());
       let source = { kind: "gadget" as const, gadgetId: input.gadgetId, commitId };
       if (input.id === undefined) {
+        // Expired definitions nothing keeps no longer count toward the limit: sweep them first, in
+        // this transaction, at this clock (FAC-124, #416 round 1).
+        this.#sweepAt(now.getTime());
         if (Array.from(this.storage.workflowDefinitions.list({ limit: MAX_WORKSPACE_WORKFLOW_DEFINITIONS })).length
             >= MAX_WORKSPACE_WORKFLOW_DEFINITIONS) {
           throw new Error("Workspace workflow definition limit reached.");
@@ -211,6 +232,8 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowDefinitions.put(next);
       return next;
     });
+    this.#changed();
+    return result;
   }
 
   /**
@@ -254,6 +277,7 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowTriggerPins.put({ hookId, definitionId: ref.definitionId,
         revision: ref.revision, mode: ref.mode ?? "follow-latest" });
     });
+    this.#changed();
   }
 
   /** The pin of bound hook `hookId`, or null. */
@@ -299,9 +323,22 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowInvocations.delete(invocation.id);
       throw new Error("That run request was for another revision of this workflow. Ask again.");
     }
-    let { stored, revision } = pin.mode === "follow-latest"
-      ? this.#currentPublishedRevision(pin, hookGadgetId)
+    let { stored, revision: currentPublished } = pin.mode === "follow-latest"
+      ? this.#currentPublishedRevision(pin, hookGadgetId, headOf)
       : this.#explicitRevision(pin, hookGadgetId, headOf);
+    // Follow-latest invocations may wait while the gadget changes. Never record a run against an
+    // older commit while the trigger would execute the newer gadget head.
+    let revision = invocation && pin.mode === "follow-latest"
+      ? stored.revisions.find(candidate => candidate.revision === invocation.revision)
+      : currentPublished;
+    if (!revision || (invocation && pin.mode === "follow-latest" && revision.source.gadgetId !== hookGadgetId)) {
+      throw new Error("That run request was for another revision of this workflow. Ask again.");
+    }
+    if (invocation && pin.mode === "follow-latest" &&
+        headOf(hookGadgetId!) !== revision.source.commitId) {
+      this.storage.workflowInvocations.delete(invocation.id);
+      throw new Error("The workflow changed; ask again");
+    }
     if (pin.mode !== "follow-latest" && stored.published?.revision !== pin.revision &&
         !ownerCanBuild(stored.owner.id)) {
       throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
@@ -309,8 +346,13 @@ export class WorkspaceWorkflowDefinitionStore {
     return this.durableStorage.transactionSync(() => {
       let deliveries = Array.from(this.storage.workflowDeliveries.list()).toSorted((a, b) => a.id - b.id);
       if (deliveries.length >= MAX_WORKFLOW_DELIVERIES) {
-        let terminal = deliveries.find(candidate => !isLiveWorkflowDelivery(candidate));
-        if (!terminal) throw new Error("Too many workflow runs are in progress.");
+        let now = Date.now();
+        let isLive = (candidate: StoredWorkflowDelivery) => isLiveWorkflowDelivery(candidate, now);
+        let terminal = deliveries.find(candidate => !isLive(candidate));
+        if (!terminal) {
+          let needsReconciliation = deliveries.filter(isLive).length;
+          throw new Error(`Too many workflow runs are in progress; ${needsReconciliation} are waiting for reconciliation.`);
+        }
         this.storage.workflowDeliveries.delete(terminal.id);
       }
       let id = this.storage.nextWorkflowDeliveryId.get();
@@ -351,18 +393,22 @@ export class WorkspaceWorkflowDefinitionStore {
       headOf: (gadgetId: WorkpieceId) => string | undefined): void {
     let pin = this.storage.workflowTriggerPins.get(hookId);
     if (!pin) throw new Error(CANNOT_RUN);
-    if (pin.mode === "follow-latest") this.#currentPublishedRevision(pin, hookGadgetId);
+    if (pin.mode === "follow-latest") this.#currentPublishedRevision(pin, hookGadgetId, headOf);
     else this.#explicitRevision(pin, hookGadgetId, headOf);
   }
 
   // Resolve the selected definition's current published source; saves never publish implicitly.
-  #currentPublishedRevision(pin: StoredTriggerPin, hookGadgetId: WorkpieceId | null) {
+  #currentPublishedRevision(pin: StoredTriggerPin, hookGadgetId: WorkpieceId | null,
+      headOf: (gadgetId: WorkpieceId) => string | undefined) {
     let stored = this.storage.workflowDefinitions.get(pin.definitionId);
     if (!stored?.published) throw new Error("This workflow has no published revision.");
     let revision = stored.revisions.find(r => r.revision === stored!.published!.revision);
     if (!revision) throw new Error("This workflow has no published revision.");
     if (hookGadgetId === null || revision.source.gadgetId !== hookGadgetId)
       throw new Error("This workflow is not available for this trigger.");
+    if (headOf(hookGadgetId) !== revision.source.commitId) {
+      throw new Error(`The workflow changed since revision ${revision.revision} was saved. Save it, then move the trigger.`);
+    }
     return { stored, revision };
   }
 
@@ -594,6 +640,7 @@ export class WorkspaceWorkflowDefinitionStore {
         if (invocation.hookId === hookId) this.storage.workflowInvocations.delete(invocation.id);
       }
     });
+    this.#changed();
   }
 
   /**
@@ -689,6 +736,7 @@ export class WorkspaceWorkflowDefinitionStore {
         },
       });
     });
+    this.#changed();
   }
 
   /** The delivery a person's request `invocationId` made, or null (FAC-114): at most one, ever. */
@@ -739,6 +787,7 @@ export class WorkspaceWorkflowDefinitionStore {
       },
       delivery: { ...delivery.delivery, history: "delivered" },
     });
+    this.#changed();
   }
 
   /** The recorded deliveries of a definition visible to `viewer`, oldest first. */

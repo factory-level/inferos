@@ -5,7 +5,7 @@
 // one storage transaction reading the clock inside it, so whichever runs first wins by one time
 // rule. Over the production overseer storage on a mock, with a clock the test moves.
 import { describe, expect, it } from "vitest";
-import { dynamicDefinitionTtlMs, isLiveWorkflowDelivery, WORKFLOW_DEFINITION_EXPIRED } from "@gadgets/workshop-shared/workflow-definition";
+import { dynamicDefinitionTtlMs, isLiveWorkflowDelivery, MAX_WORKSPACE_WORKFLOW_DEFINITIONS, WORKFLOW_DEFINITION_EXPIRED } from "@gadgets/workshop-shared/workflow-definition";
 import { makeOverseerStorage } from "../src/overseer.js";
 import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { makeMockStorage } from "./mock-storage.js";
@@ -15,7 +15,8 @@ const BEN = { type: "user" as const, id: "ben-profile", name: "Ben" };
 const GADGET = 3;
 const HOOK = 7;
 const HOUR = 60 * 60 * 1000;
-const START = Date.UTC(2026, 10, 10, 9, 0, 0);
+// Real time: `fire` stamps a delivery with the wall clock, which FAC-108's live-run rule reads.
+const START = Date.now();
 const commit = (n: number) => n.toString(16).padStart(40, "0");
 const everyoneBuilds = () => true;
 const headOf = (id: number) => (id === GADGET ? commit(1) : undefined);
@@ -149,7 +150,7 @@ describe("expiry blocks new use (acceptance 1)", () => {
 
 describe("a scheduled dynamic definition (acceptance 2)", () => {
   it("is kept, and stays usable, while a trigger is pinned to it; it expires once the pin goes", () => {
-    let { store, clock, temporary } = workspace();
+    let { store, storage, clock, temporary } = workspace();
     let made = temporary();
     store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1, mode: "pinned" });
     clock.now = START + 100 * HOUR;
@@ -159,9 +160,9 @@ describe("a scheduled dynamic definition (acceptance 2)", () => {
     expect(fired).toMatchObject({ definitionId: made.id });
     store.pinTrigger(ADA.id, HOOK, GADGET, null);
     expect(store.get(ADA.id, made.id)).toBeNull();
-    // The scheduled firing's run is live until it settles (FAC-108's rule), and keeps it till then.
-    expect(store.sweepExpired()).toBe(0);
-    store.recordResult(fired.deliveryId, { outcome: "succeeded" });
+    // That firing's run never started within its start window, so by FAC-108's rule it is no
+    // longer live work, and nothing keeps the definition (a live run that does is the test above).
+    expect(isLiveWorkflowDelivery(storage.workflowDeliveries.get(fired.deliveryId)!, clock.now)).toBe(false);
     expect(store.sweepExpired()).toBe(1);
   });
 });
@@ -192,4 +193,48 @@ describe("saving at the moment of cleanup (acceptance 2)", () => {
     expect(() => c.store.save(ADA, { id: swept.id, title: "Late", gadgetId: GADGET }, headOf)).toThrow();
     expect(c.store.get(ADA.id, swept.id)).toBeNull();
   });
+});
+
+// #416 round 1: the store says when what it must sweep has changed, so the Overseer can reschedule
+// its alarm; and the next expiry includes one already past that nothing keeps any more.
+describe("telling the Overseer when to wake", () => {
+  it("reports each change to what expires: a new dynamic definition, retaining it, a pin added or removed", () => {
+    let durable = makeMockStorage();
+    let clock = { now: START };
+    let changes = 0;
+    let store = new WorkspaceWorkflowDefinitionStore(durable, makeOverseerStorage(durable),
+      { now: () => clock.now, dynamicTtlMs: () => 24 * HOUR, onChange: () => { changes++; } });
+    let made = store.save(ADA, { title: "One-off", gadgetId: GADGET, retain: false }, headOf);
+    expect(changes).toBeGreaterThanOrEqual(1);
+    let before = changes;
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1, mode: "pinned" });
+    expect(changes).toBeGreaterThan(before);
+    before = changes;
+    store.pinTrigger(ADA.id, HOOK, GADGET, null);
+    expect(changes).toBeGreaterThan(before);
+    before = changes;
+    store.save(ADA, { id: made.id, title: "Kept", gadgetId: GADGET }, headOf);
+    expect(changes).toBeGreaterThan(before);
+  });
+
+  it("names an expired definition nothing keeps as due now, and never one a pin or a live run keeps", () => {
+    let { store, clock, temporary } = workspace();
+    let made = temporary();
+    store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1, mode: "pinned" });
+    clock.now = START + 30 * HOUR;
+    expect(store.nextExpiry()).toBeUndefined();
+    store.pinTrigger(ADA.id, HOOK, GADGET, null);
+    expect(store.nextExpiry()).toBe(START + 24 * HOUR);
+  });
+});
+
+// #416 round 1, r1's LOW: expired definitions nothing keeps don't hold the definition limit, even
+// before any alarm has swept them.
+it("lets a new definition be created when the limit is full of expired, unkept ones", () => {
+  let { store, clock, temporary } = workspace();
+  for (let i = 0; i < MAX_WORKSPACE_WORKFLOW_DEFINITIONS; i++) temporary();
+  expect(() => store.save(ADA, { title: "One more", gadgetId: GADGET }, headOf)).toThrow("limit");
+  clock.now = START + 24 * HOUR;
+  expect(store.save(ADA, { title: "One more", gadgetId: GADGET }, headOf).id).toBeTruthy();
+  expect(store.list(ADA.id).map(d => d.title)).toEqual(["One more"]);
 });
