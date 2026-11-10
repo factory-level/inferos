@@ -208,6 +208,7 @@ export class ScheduleDriver extends DurableObject {
     using hookCall = capabilities.initiator.startHook({ invocationId });
     // @ts-expect-error Worker RPC's mapped return type wraps the already-stubbed hook result.
     const hookResult: HookResult = await hookCall;
+    if ("alreadyDelivered" in hookResult) return;
     const now = Date.now();
     await hookResult.approvalQueue.authorizeObservation({
       title: `Run scheduled task on request: ${stored.title}`,
@@ -471,7 +472,7 @@ export class ScheduleDriver extends DurableObject {
 
       const admitted = this.#markAdmitted(prepared, Date.now());
       if (!admitted || !hookResult) return false;
-      if ("alreadyDelivered" in hookResult && hookResult.alreadyDelivered) {
+      if ("alreadyDelivered" in hookResult) {
         this.#completePending(prepared, Date.now());
         return false;
       }
