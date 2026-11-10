@@ -113,6 +113,20 @@ describe("a Dot turn", () => {
     expect((await hooks.log()).actions).toHaveLength(1);
   });
 
+  it("says a knowledge write changes the page as the person, live, names its page, and never says it publishes (FAC-136)", async () => {
+    const page = "inferops://acme.handbook/knowledge/page/00000000-0000-4000-8000-0000000000aa";
+    const { hooks, conversation } = await setup(script({
+      proposals: [proposal({ tool: "knowledge_page_edit", input: { page, expectedVersion: 3, body: "Refunds take 5 days." } })],
+    }));
+    await conversation.read();
+    const [card] = (await hooks.log()).actions;
+    expect(card).toMatchObject({ kind: "inferops.dot-confirm", title: "Your Dot proposes a change to a wiki page" });
+    expect(card!.description).toContain("Your Dot will change this page as you, and readers see it right away.");
+    expect(card!.description).not.toMatch(/publish/i);
+    expect(card!.fields.Page).toBe(page);
+    expect(card!.fields.Operation).toBe("knowledge_page_edit");
+  });
+
   it("stages on reading a proposal no relay saw, so a cut turn's change is still decided here", async () => {
     const { hooks, conversation } = await setup(script({ proposals: [proposal()] }));
     const read = await conversation.read();
@@ -293,5 +307,18 @@ describe("a proposal's status, in FAC-97's words", () => {
   it("summarizes an answer to identifying scalars only, bounded", () => {
     const summary = summarizeDotOutcome({ issue: { identifier: "ENG-7", description: "body", title: "t".repeat(500) }, deliveries: [{ id: 1 }] });
     expect(summary).toEqual({ "issue.identifier": "ENG-7", "issue.title": "t".repeat(200) });
+  });
+});
+
+describe("a knowledge write's target (FAC-136)", () => {
+  it("names an edit's page and a create's workspace by link, and nothing for any other tool or a non-link", async () => {
+    const { dotKnowledgeTarget } = await import("../src/dot");
+    const link = "inferops://acme.handbook/knowledge/page/00000000-0000-4000-8000-0000000000aa";
+    expect(dotKnowledgeTarget("knowledge_page_edit", { page: link })).toEqual({ label: "Page", link });
+    expect(dotKnowledgeTarget("knowledge_page_create", { workspace: "inferops://acme.handbook/knowledge/page" }))
+      .toEqual({ label: "New page in", link: "inferops://acme.handbook/knowledge/page" });
+    expect(dotKnowledgeTarget("issue_create", { page: link })).toBeNull();
+    expect(dotKnowledgeTarget("knowledge_page_edit", { page: "https://example.com" })).toBeNull();
+    expect(dotKnowledgeTarget("knowledge_page_edit", null)).toBeNull();
   });
 });
