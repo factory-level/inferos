@@ -79,6 +79,8 @@ export async function openFakeOverseer(
   let userId = role === "build" ? ownerId : "viewer-id";
   let overseer = {
     open: OverseerDurableObject.prototype.open,
+    // The Durable Object's own id, which open() compares with an operate session's recorded one.
+    ctx: { id: { toString: () => "workspace-id" } },
     impl: {
       ownerId,
       // A deployment with no optional authorization settings (e.g. SHARED_CONFIGURATION_GATEKEEPER).
