@@ -28,7 +28,7 @@ function pinned() {
   let store = new WorkspaceWorkflowDefinitionStore(durable, storage);
   let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
   store.publish(ADA, saved.id, 1);
-  store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1 });
+  store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1, mode: "pinned" });
   return { durable, storage, store, definitionId: saved.id };
 }
 

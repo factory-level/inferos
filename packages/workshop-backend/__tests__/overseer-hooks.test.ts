@@ -54,7 +54,7 @@ describe("OverseerDurableObject.startHook", () => {
     let head = "a".repeat(40);
     let owner = { type: "user" as const, id: "owner-profile", name: "Owner" };
     let saved = definitions.save(owner, { title: "Intake", gadgetId: 3 }, () => head);
-    definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1 });
+    definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1, mode: "pinned" });
     let config = async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG);
     let hook = { enabled: true, vendorId: "email", callback: { deliver: async () => "ok" } };
 
@@ -74,7 +74,7 @@ describe("OverseerDurableObject.startHook", () => {
     let head = "a".repeat(40);
     let owner = { type: "user" as const, id: "owner-profile", name: "Owner" };
     let saved = definitions.save(owner, { title: "Intake", gadgetId: 3 }, () => head);
-    definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1 });
+    definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1, mode: "pinned" });
     definitions.setControl(owner, 1, { label: "Run", invokers: ["operator-profile"] });
     let invocation = definitions.beginInvocation("operator-profile", 1, null);
     let onSchedule = vi.fn(async () => "ran in the caller");
