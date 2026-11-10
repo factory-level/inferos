@@ -1,4 +1,4 @@
-// A person's account keyed on their provider's stable subject, not their email (ADR 0018, FAC-165).
+// A person's account keyed on their provider's stable subject, not their email (ADR 0019, FAC-165).
 // Through the real login callback, user DO and directory: an email change keeps the account; a
 // second person who takes over the first person's old address gets a new, empty account and can't
 // reach the old one by any email-keyed sign-in; binding happens once, and only for the account's
@@ -68,7 +68,7 @@ async function signIn(subject: string | null, email?: string): Promise<string> {
   }
 }
 
-/** An email-keyed account as gatekeeper sign-in made one before ADR 0018. */
+/** An email-keyed account as gatekeeper sign-in made one before ADR 0019. */
 async function legacyAccount(email: string): Promise<DurableObjectStub<UserDurableObject>> {
   const user = env.TEST_USER.getByName(email);
   expect(await user.loginOrCreateViaGatekeeper(email, true)).not.toBeNull();
@@ -83,7 +83,7 @@ const refusal = (call: Promise<unknown>) => call.then(() => "signed in", (error:
 
 const profileOf = async (name: string) => (await env.TEST_USER.getByName(name).whoamiIfExists())?.id ?? null;
 
-describe("a sign-in keyed on the stable subject (ADR 0018)", () => {
+describe("a sign-in keyed on the stable subject (ADR 0019)", () => {
   it("keeps the same account across an email change, with no manual step (acceptance 1)", async () => {
     const [a, newAddress] = [`ada-${fresh()}@example.test`, `ada.lovelace-${fresh()}@example.test`];
     const legacy = await legacyAccount(a);

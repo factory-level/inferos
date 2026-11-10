@@ -99,6 +99,24 @@ it('offers only the widget kinds the catalog enables, and hands blueprint widget
   expect(onAskAgent.mock.calls[0][0]).toContain('"Overview" section of the "Operations" canvas')
 })
 
+// FAC-9: a governed table is placed by its reference; its kind and binding follow from it.
+it('adds a governed table by its reference, and shows it as a table', async () => {
+  await render({ kind: 'temporary' })
+  await act(async () => { container.querySelector('form')!.requestSubmit() })
+  const input = container.querySelector<HTMLInputElement>('input[name="table"]')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'tickets://support/queue/billing')
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+  await act(async () => { input.form!.requestSubmit() })
+  await settle()
+  expect(container.textContent).toContain('tickets://support/queue/billing')
+  await act(async () => { button('Done editing')!.click() })
+  await settle()
+  // Shown through the governed table widget, never as a board.
+  expect(container.querySelector('[aria-label="Rows of tickets://support/queue/billing"]')).not.toBeNull()
+})
+
 it('reports the agent hand-off failing instead of dropping it silently', async () => {
   await render({ kind: 'temporary' }, {
     widgetKinds: ['inferos.gadget'],
@@ -412,6 +430,42 @@ it('says a gadget widget with no states declares no events, and offers none', as
   await pickWidget()
   expect(inspector().textContent).toContain('This widget declares no events and its gadget has no triggers, so nothing on the page can listen for one.')
   expect(button('Add attachment')).toBeUndefined()
+})
+
+// FAC-98: a gadget widget's own events may put a prompt in the person's chat, as a draft only.
+const typeDraft = async (text: string) => {
+  const area = inspector().querySelector<HTMLTextAreaElement>('textarea')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(area, text)
+    area.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+it("adds a draft prompt on a gadget widget's own event, with no way to send it, and describes it", async () => {
+  const { api, storage } = editable([gadgetView(7)])
+  api.editCanvasPage.mockImplementation(async () => ({ ...canvasPageFromDefinition(gadgetView(7)), revision: '1' }))
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-stateful'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  const form = inspector().querySelector('[aria-label="Add a draft prompt"]')!
+  expect(form.textContent).toContain('It is never sent for them')
+  expect(form.textContent).not.toMatch(/send it|submit/i)
+  await choose('When it happens', 'submit')
+  await typeDraft('  Summarise this intake  ')
+  await act(async () => { button('Add draft prompt')!.click() })
+  expect(api.editCanvasPage).toHaveBeenLastCalledWith('ops', '0', [{ type: 'setAttachments', target: 'g',
+    attachments: [{ id: expect.any(String), version: 1, on: 'submit', effect: { kind: 'insert-prompt', text: 'Summarise this intake' } }] }])
+})
+
+it('offers no draft prompt on run results alone, nor on a widget with no states', async () => {
+  hooks = async () => [hook(11, 7, 'Refunds')]
+  const { storage } = editable([gadgetView(7)])
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-plain'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  // Run results are offered for navigation, never for a prompt.
+  expect(button('Add attachment')).toBeDefined()
+  expect(inspector().querySelector('[aria-label="Add a draft prompt"]')).toBeNull()
 })
 
 it('reads the nested page only in edit mode, so viewing (as the use role does) never asks for it', async () => {

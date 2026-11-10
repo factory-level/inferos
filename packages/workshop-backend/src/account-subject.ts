@@ -1,4 +1,4 @@
-// A person's account keyed on their provider's stable subject, not their email (ADR 0018, FAC-165).
+// A person's account keyed on their provider's stable subject, not their email (ADR 0019, FAC-165).
 // A sign-in that carries a subject finds the account through the directory's subject index; an
 // existing email-keyed account is bound to its subject once, and only by its own person; a bound
 // account then signs in only through its subject.
@@ -33,7 +33,7 @@ type Namespaces = {
 };
 
 /**
- * The name of the account `subject` signs in to (ADR 0018 decisions 2 and 3): the account the vouched
+ * The name of the account `subject` signs in to (ADR 0019 decisions 2 and 3): the account the vouched
  * `email` names, when that account binds to it (an existing gatekeeper account, not bound to another
  * subject, not a password account); else a new account named by the subject. Writes no account
  * itself: the caller's sign-in creates a new one.
@@ -55,7 +55,7 @@ export async function resolveSubjectAccount(ns: Namespaces, subject: string, ema
 }
 
 /**
- * The account a person is added by (ADR 0018 decision 6): an address finds the account it is the
+ * The account a person is added by (ADR 0019 decision 6): an address finds the account it is the
  * current vouched address of; failing that, the account it names, unless that account is bound to a
  * subject, whose old name never finds it. Any other name (a username, a subject's account name)
  * names its account. Null when nothing is found. Only the name is returned; the caller reads the
@@ -70,7 +70,7 @@ export async function collaboratorAccountName(ns: Namespaces, name: string): Pro
 }
 
 /**
- * The one-off subject pass (ADR 0018 decision 7): for each email-keyed account the directory lists,
+ * The one-off subject pass (ADR 0019 decision 7): for each email-keyed account the directory lists,
  * the subject its own `vendorId` connection names (`UserDurableObject.subjectFromConnections`) is
  * bound, unless the directory already sends that subject to another account (a conflict, left
  * unbound, so no account is stranded). Binding is set-if-unset on the account, then recorded; it

@@ -936,6 +936,14 @@ interface ChatInterfaceProps {
   operateWelcome?: string;
   operateCenteredStart?: boolean;
   operateSuggestions?: { pages: { id: string; title: string }[]; onOpen: (viewId: string) => void };
+  /**
+   * A draft an Operate widget event put in this chat (FAC-98): seeded into whichever composer is
+   * showing, after anything already typed, each time `nonce` changes. It is never sent for the
+   * person; they send it, edit it or clear it.
+   */
+  operateSeed?: { text: string; nonce: number };
+  /** Called once `operateSeed` is in a composer, so the page clears it (see `ChatComposer`). */
+  onOperateSeedApplied?: () => void;
 }
 
 // Whether a chat proposes changes the client can act on: the server delivers the touched
@@ -1059,6 +1067,8 @@ function ChatInterface({
   outputOfWorkpiece,
   operateOnly = false,
   operateWelcome,
+  operateSeed,
+  onOperateSeedApplied,
   operateCenteredStart,
   operateSuggestions,
 }: ChatInterfaceProps) {
@@ -3815,6 +3825,7 @@ function ChatInterface({
               getOverseer={getOverseer} onSend={handleSend} isAgentActive={false}
               models={availableModels} selectedModel={selectedModel === null ? null : { id: selectedModel }}
               onModelChange={handleModelChange} minRows={1}
+              seedText={operateSeed?.text} seedNonce={operateSeed?.nonce} seedAppend onSeedApplied={onOperateSeedApplied}
               blockedReason={!chatListReady || chatList.length > 0 ? "Opening your conversation…" : undefined}
               draftStorageKey={currentUser ? composerDraftStorageKey(currentUser.id, `workspace:${workspaceId}:new`) : undefined}
             />
@@ -4749,6 +4760,10 @@ function ChatInterface({
                     key={`${workspaceId}:${selectedChatId}`}
                     chatKey={selectedChatId}
                     minRows={operateOnly ? 1 : 2}
+                    seedText={operateOnly ? operateSeed?.text : undefined}
+                    seedNonce={operateOnly ? operateSeed?.nonce : undefined}
+                    seedAppend
+                    onSeedApplied={operateOnly ? onOperateSeedApplied : undefined}
                     createCapsuleGatekeeper={(accountId, url) =>
                       overseer.newGatekeeper(accountId, url)
                     }

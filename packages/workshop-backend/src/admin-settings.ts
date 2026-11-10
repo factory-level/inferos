@@ -696,7 +696,7 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * The one-off subject pass (ADR 0018 decision 7, FAC-165): binds each email-keyed account that
+   * The one-off subject pass (ADR 0019 decision 7, FAC-165): binds each email-keyed account that
    * holds a connection of the deployment's `SHARED_CONFIGURATION_GATEKEEPER` vendor to the principal
    * behind it, when that connection vouches the account's own address. An account whose subject the
    * directory already sends elsewhere is left unbound (a conflict), so no account is stranded.

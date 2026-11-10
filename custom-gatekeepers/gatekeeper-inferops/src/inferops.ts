@@ -266,7 +266,7 @@ export default {
 type AccountProps = {
   accountId: string; email?: string; connected?: boolean;
   /**
-   * The InferLab principal behind a sign-in or connect (ADR 0018, FAC-165): the configured auth
+   * The InferLab principal behind a sign-in or connect (ADR 0019, FAC-165): the configured auth
    * origin as issuer, and InferLab's `user.id`. Absent on auto-provisioned accounts, and on accounts
    * connected before it was recorded, whose stored identity answers instead.
    */
@@ -755,7 +755,7 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
       // demo account is provided automatically.
       autoProvisionsAccount: !identity,
       providesAuth: identity,
-      // Sign-in keys the Workshop account on the InferLab principal, not the email (ADR 0018).
+      // Sign-in keys the Workshop account on the InferLab principal, not the email (ADR 0019).
       providesSubject: identity,
     };
   }
@@ -1218,7 +1218,7 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   }
 
   /**
-   * The InferLab principal behind this account (ADR 0018): the one its sign-in or connect recorded,
+   * The InferLab principal behind this account (ADR 0019): the one its sign-in or connect recorded,
    * else, for an account connected before that, the `userId` its stored identity holds, issued by
    * the configured auth origin. Null for an account with no person behind it (auto-provisioned).
    */

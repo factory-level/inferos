@@ -25,4 +25,5 @@ Create records from [`0000-template.md`](0000-template.md).
 | [0015. One InferOps account connection serves every board and Wiki the person can open](0015-inferops-account-connection.md) | accepted | 2026-11-03 |
 | [0016. A builder's own console publication lists its widgets in InferOps directly, not through the approval queue](0016-console-widget-index-writes.md) | proposed | 2026-11-04 |
 | [0017. A page may override the workspace's settings, by registry key only](0017-page-settings-override.md) | proposed | 2026-11-06 |
-| [0018. A person's account is keyed on the provider's stable subject, not their email](0018-account-keyed-on-stable-subject.md) | proposed | 2026-11-10 |
+| [0018. Workflow triggers can follow a definition's latest publication](0018-workflow-triggers-follow-published-definitions.md) | proposed | 2026-11-10 |
+| [0019. A person's account is keyed on the provider's stable subject, not their email](0019-account-keyed-on-stable-subject.md) | proposed | 2026-11-10 |

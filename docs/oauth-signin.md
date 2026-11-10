@@ -17,7 +17,7 @@ only (ignored unless the allowlist is non-empty, to avoid locking everyone out).
 
 A gatekeeper that declares `providesSubject` (InferOps) keys the account on the provider's stable
 subject instead, so an email change keeps the account
-([ADR 0018](adr/0018-account-keyed-on-stable-subject.md), proposed; see the InferOps gatekeeper's
+([ADR 0019](adr/0019-account-keyed-on-stable-subject.md), proposed; see the InferOps gatekeeper's
 architecture doc). For every other gatekeeper, the primary account key is the user's **verified email**. Signing in with any allowlisted
 gatekeeper that yields the same verified email resolves to the same account — its `UserDurableObject`
 is addressed by `idFromName(email)` (the same scheme as Cloudflare Access). Each gatekeeper must only

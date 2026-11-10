@@ -11,8 +11,14 @@ const noConsoleLogs = () => ''
 const ignore = () => {}
 
 /** One mounted conversation moves between the home composer, centered assistant and side panel. */
-export const OperateChatPanel = ({ workspace, layout = 'side', welcome, consoleActions, onClose }: {
+export const OperateChatPanel = ({ workspace, layout = 'side', welcome, consoleActions, offerWidgets = true, draft, onDraftApplied, onClose }: {
   workspace: SessionWorkspace | null
+  /** Whether the pane offers the console's widgets: the resolved `chatPane.widgets` is "console" (FAC-95). */
+  offerWidgets?: boolean
+  /** A draft a widget put in this chat (FAC-98), seeded into the composer; never sent for the person. */
+  draft?: { text: string; nonce: number } | null
+  /** Called once the draft is in the composer. */
+  onDraftApplied?: () => void
   layout?: 'home' | 'side' | 'full' | 'hidden'
   welcome?: string
   onClose: () => void
@@ -20,6 +26,8 @@ export const OperateChatPanel = ({ workspace, layout = 'side', welcome, consoleA
 }) => {
   const split = useResizableSplit(layout === 'side', 'right')
   const [chatId, setChatId] = useState<number | null>(null)
+  // Shown from the first draft a widget inserts until the panel is closed.
+  const [inserted, setInserted] = useState(false)
   return <>
     <div role="separator" aria-orientation="vertical" aria-label="Resize operate chat" aria-valuemin={280} aria-valuemax={Math.max(280, window.innerWidth - 400)} aria-valuenow={Math.round(split.width)} aria-valuetext={`${Math.round(split.width)} pixels`}
       hidden={layout !== 'side'}
@@ -32,10 +40,14 @@ export const OperateChatPanel = ({ workspace, layout = 'side', welcome, consoleA
       {layout === 'side' && <header className="flex h-12 shrink-0 items-center justify-between border-b border-kumo-line px-4">
         <span className="text-sm font-medium text-kumo-default">Assistant</span>
         <div className="flex items-center gap-1">
-          {consoleActions && <ConsoleWidgetActions entry={consoleActions.entry} onOpen={consoleActions.onOpenWidget} onOpenHostBoard={consoleActions.onOpenHostBoard} onOpenBoundView={consoleActions.onOpenBoundView} />}
-          <Button size="sm" variant="ghost" aria-label="Close assistant" onClick={onClose}><XIcon size={15} aria-hidden /></Button>
+          {consoleActions && offerWidgets && <ConsoleWidgetActions entry={consoleActions.entry} onOpen={consoleActions.onOpenWidget} onOpenHostBoard={consoleActions.onOpenHostBoard} onOpenBoundView={consoleActions.onOpenBoundView} />}
+          <Button size="sm" variant="ghost" aria-label="Close assistant" onClick={() => { setInserted(false); onClose() }}><XIcon size={15} aria-hidden /></Button>
         </div>
       </header>}
+      {inserted && <p role="status" className="flex items-center justify-between gap-2 border-b border-kumo-line px-4 py-2 text-xs text-kumo-subtle">
+        Inserted as a draft. Nothing is sent until you send it.
+        <Button size="sm" variant="ghost" onClick={() => setInserted(false)}>Dismiss</Button>
+      </p>}
       {workspace
         ? <ChatInterface key={workspace.id} workspaceId={workspace.id} overseer={workspace.stub}
             restricted={workspace.restricted} selectedChatId={chatId} onNavigateToChat={setChatId}
@@ -44,7 +56,8 @@ export const OperateChatPanel = ({ workspace, layout = 'side', welcome, consoleA
             onOpenGadget={ignore} outputOfWorkpiece={() => undefined} operateOnly
             operateWelcome={layout === 'full' || layout === 'side' ? welcome ?? 'How can I help you today?' : undefined}
             operateCenteredStart={layout === 'full'}
-            operateSuggestions={layout === 'full' && consoleActions ? { pages: consoleActions.entry.console.views.map(view => ({ id: view.id, title: view.title })), onOpen: consoleActions.onOpenView } : undefined} />
+            operateSuggestions={layout === 'full' && consoleActions ? { pages: consoleActions.entry.console.views.map(view => ({ id: view.id, title: view.title })), onOpen: consoleActions.onOpenView } : undefined}
+            operateSeed={draft ?? undefined} onOperateSeedApplied={() => { setInserted(true); onDraftApplied?.() }} />
         : <p role="status" className="p-4 text-sm text-kumo-subtle">Opening your assistant…</p>}
     </section>
   </>

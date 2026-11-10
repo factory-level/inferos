@@ -645,7 +645,7 @@ describe("connecting", () => {
     expect(await hooks().describeAccount(account)).toMatchObject({ uniqueName: "ada@example.com" });
   });
 
-  // ADR 0018 (FAC-165): the Workshop keys a person's account on the InferLab principal. An account
+  // ADR 0019 (FAC-165): the Workshop keys a person's account on the InferLab principal. An account
   // connected before it was recorded names the principal its stored identity holds, so the one-off
   // subject pass can bind it; an auto-provisioned one names none.
   it("names the principal behind it, even when connected before the principal was recorded", async () => {
@@ -1146,9 +1146,12 @@ describe("custom tables as the person", () => {
 });
 
 describe("workspace members as the person", () => {
-  const vars = env as unknown as { INFEROPS_MEMBERS_ENABLED?: string };
+  const vars = env as unknown as { INFEROPS_MEMBERS_ENABLED?: string; INFEROPS_COMPANY?: string };
   beforeEach(() => { vars.INFEROPS_MEMBERS_ENABLED = "true"; });
-  afterEach(() => { delete vars.INFEROPS_MEMBERS_ENABLED; });
+  afterEach(() => {
+    delete vars.INFEROPS_MEMBERS_ENABLED;
+    delete vars.INFEROPS_COMPANY;
+  });
   const MEMBERS_URL = "inferops://acme.operations/portal/members";
   const unavailable = (host: string) => `No InferOps member list is available to you on ${host}.`;
 
@@ -1208,6 +1211,22 @@ describe("workspace members as the person", () => {
       .toBe(true);
   });
 
+  it("refuses a portal/members binding backed by another company's stored account", async () => {
+    const companyA = "a0000000-0000-4000-8000-00000000000a";
+    const companyB = "b0000000-0000-4000-8000-00000000000b";
+    inferlab.tenantId = companyA;
+    vars.INFEROPS_COMPANY = companyA;
+    const account = await connect("members-other-company");
+
+    // Model a connection saved before this deployment was assigned to company B. The guard must
+    // run before the resource probe, without revealing anything about company A's member list.
+    vars.INFEROPS_COMPANY = companyB;
+    const before = inferlab.apiCalls.length;
+    const refused = await hooks().bindAccount("m-other-company", account, MEMBERS_URL);
+    expect(refused).toContain("belongs to another company");
+    expect(inferlab.apiCalls.slice(before)).toEqual([]);
+  });
+
   it("refuses reads once the session has ended, and once the account is revoked", async () => {
     const ended = await connect("members-ended");
     expect(await hooks().bindAccount("m-ended", ended, MEMBERS_URL)).toBeNull();
@@ -1264,6 +1283,39 @@ describe("workspace members as the person", () => {
     expect(await hooks().bindAccount("m-shared", owner, MEMBERS_URL)).toBeNull();
     const member = await connect("members-member");
     expect(await hooks().addMembersObserverFrom("m-shared", member)).toContain("cannot be shared");
+  });
+});
+
+describe("dispatch company boundary", () => {
+  const vars = env as unknown as {
+    CODING_WORKBENCH_ENABLED?: string;
+    CODING_WORKBENCH_REPOS?: string;
+    INFEROPS_COMPANY?: string;
+  };
+  afterEach(() => {
+    delete vars.CODING_WORKBENCH_ENABLED;
+    delete vars.CODING_WORKBENCH_REPOS;
+    delete vars.INFEROPS_COMPANY;
+  });
+
+  it("refuses a dispatch binding backed by another company's stored account before project lookup", async () => {
+    const companyA = "a0000000-0000-4000-8000-00000000000a";
+    const companyB = "b0000000-0000-4000-8000-00000000000b";
+    inferlab.tenantId = companyA;
+    vars.INFEROPS_COMPANY = companyA;
+    vars.CODING_WORKBENCH_ENABLED = "true";
+    vars.CODING_WORKBENCH_REPOS = "40000000-0000-4000-8000-000000000001";
+    const account = await connect("dispatch-other-company");
+
+    // An existing account cannot keep using its credentials after the deployment's company
+    // changes. In particular, the project existence probe must not reach the other company's API.
+    vars.INFEROPS_COMPANY = companyB;
+    const before = inferlab.apiCalls.length;
+    const refused = await hooks().bindAccount(
+      "dispatch-other-company", account, "inferops://acme.operations/project/dispatch/DEMO",
+    );
+    expect(refused).toContain("belongs to another company");
+    expect(inferlab.apiCalls.slice(before)).toEqual([]);
   });
 });
 

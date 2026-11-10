@@ -4,7 +4,7 @@ status: proposed
 date: 2026-11-10
 ---
 
-# 0018. A person's account is keyed on the provider's stable subject, not their email
+# 0019. A person's account is keyed on the provider's stable subject, not their email
 
 ## Context
 

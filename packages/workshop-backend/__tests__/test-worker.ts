@@ -138,7 +138,7 @@ export class FakeGatekeeperAccount extends WorkerEntrypoint<
 }
 
 /**
- * A sign-in account that yields a stable subject (ADR 0018, FAC-165): `subject` null for one with no
+ * A sign-in account that yields a stable subject (ADR 0019, FAC-165): `subject` null for one with no
  * person behind it, `email` only when the provider vouches for one. Its connected-account form
  * answers the same, for the subject pass.
  */

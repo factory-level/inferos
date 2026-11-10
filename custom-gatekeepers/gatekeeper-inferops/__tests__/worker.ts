@@ -345,7 +345,7 @@ class TestVerifier extends RpcTarget {
 
 /** The emails sign-in and connect flows reported to each `TestConnectCallback`, by label. */
 export const signIns: Array<{ label: string; email: string | null }> = [];
-/** The principal each sign-in's account names (ADR 0018), by label. */
+/** The principal each sign-in's account names (ADR 0019), by label. */
 export const signInSubjects: Array<{ label: string; subject: { issuer: string; subject: string } | null }> = [];
 /** The stage ids reconnects reported, by label. */
 export const reconnects: Array<{ label: string; stageId: string }> = [];
@@ -499,7 +499,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     return this.#account(props).getAuthenticatedEmail();
   }
 
-  /** The principal an account names (ADR 0018), as plain data. */
+  /** The principal an account names (ADR 0019), as plain data. */
   async authenticatedSubject(props: AccountProps): Promise<{ issuer: string; subject: string } | null> {
     const found = await (this.#account(props) as unknown as Required<Pick<GatekeeperUser, "getAuthenticatedSubject">>)
       .getAuthenticatedSubject();

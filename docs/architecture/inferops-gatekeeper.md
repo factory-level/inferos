@@ -163,7 +163,7 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   - **Sign-in** signs the session out again with `POST /auth/logout`, and hands
     `callback.complete` an account carrying the InferLab principal (`subject`: the auth origin as
     issuer and `user.id`, `subjectOf`) and the normalized email only when `emailVerified` is
-    `true`. The Workshop keys the account on the principal ([ADR 0018](../adr/0018-account-keyed-on-stable-subject.md),
+    `true`. The Workshop keys the account on the principal ([ADR 0019](../adr/0019-account-keyed-on-stable-subject.md),
     FAC-165), so an email InferLab doesn't vouch for (after an email change) is just not passed on.
     The exchange only answers for a `kind = 'sso'` root, opened after the provider edge
     authenticated the browser as that principal; invitations, impersonation and dev logins never
@@ -819,7 +819,7 @@ hook) as arguments, and apply, reject and revert are functions over a binding.
 
 ### Accounts keyed on the principal
 
-FAC-165, [ADR 0018](../adr/0018-account-keyed-on-stable-subject.md) (proposed). The vendor declares
+FAC-165, [ADR 0019](../adr/0019-account-keyed-on-stable-subject.md) (proposed). The vendor declares
 `providesSubject`, and every account answers `getAuthenticatedSubject()`: the principal its sign-in
 or connect recorded, else, for an account connected before that, the `userId` its stored identity
 holds. The Workshop (`account-subject.ts`, `auth/login-flow.ts`) keys the person's account on it:

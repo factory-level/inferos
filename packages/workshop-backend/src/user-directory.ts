@@ -20,7 +20,7 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
       search_text TEXT NOT NULL,
       rev INTEGER NOT NULL
     ) STRICT`);
-    // ADR 0018: which account each stable subject signs in to, written once per subject by the
+    // ADR 0019: which account each stable subject signs in to, written once per subject by the
     // sign-in that binds it; and the account each vouched address currently belongs to, for finding a
     // person by address. Reached only from the Workshop's own sign-in and lookups, never a caller.
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS subjects (
@@ -33,7 +33,7 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
     ) STRICT`);
   }
 
-  /** The account name `subject` signs in to (ADR 0018), or null before it was recorded. */
+  /** The account name `subject` signs in to (ADR 0019), or null before it was recorded. */
   accountForSubject(subject: string): string | null {
     const rows = this.ctx.storage.sql.exec<{ account: string }>(
       `SELECT account FROM subjects WHERE subject = ?`, subject).toArray();
@@ -62,7 +62,7 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
     return this.accountForSubject(subject)!;
   }
 
-  /** The account whose current vouched address `email` is (ADR 0018), or null. */
+  /** The account whose current vouched address `email` is (ADR 0019), or null. */
   accountForEmail(email: string): string | null {
     const rows = this.ctx.storage.sql.exec<{ account: string }>(
       `SELECT account FROM emails WHERE email = ?`, email.toLowerCase()).toArray();
@@ -83,7 +83,7 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
     });
   }
 
-  /** Every account name the directory lists, for the one-off subject pass (ADR 0018 decision 7). */
+  /** Every account name the directory lists, for the one-off subject pass (ADR 0019 decision 7). */
   listUserIds(): string[] {
     return this.ctx.storage.sql.exec<{ id: string }>(`SELECT id FROM users ORDER BY id`).toArray().map(row => row.id);
   }

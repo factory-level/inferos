@@ -371,4 +371,41 @@ describe("ChatComposer", () => {
       .toContain("new connection skill")));
     expect(listSlashCommands).toHaveBeenCalledTimes(2);
   });
+
+  // FAC-98: an Operate widget's draft goes after what the person has typed, replacing nothing, and is
+  // never sent for them; its owner hears it applied, so a remount doesn't seed it again.
+  it("appends a seeded draft after typed text, sends nothing, and reports it applied", async () => {
+    const onSend = vi.fn<Parameters<typeof ChatComposer>[0]["onSend"]>();
+    const onSeedApplied = vi.fn<() => void>();
+    const overseer = {} as RpcStub<Overseer>;
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const view = (seed?: { text: string; nonce: number }) => (
+      <ChatComposer createCapsuleGatekeeper={async () => null} getOverseer={() => overseer} onSend={onSend}
+        isAgentActive={false} models={[]} selectedModel={{ id: "model-a" }} onModelChange={() => {}}
+        seedText={seed?.text} seedNonce={seed?.nonce} seedAppend onSeedApplied={onSeedApplied} />
+    );
+    await act(async () => root!.render(view()));
+    const textarea = container.querySelector<HTMLTextAreaElement>('[role="combobox"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "My own words  ");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(onSeedApplied).not.toHaveBeenCalled();
+
+    await act(async () => root!.render(view({ text: "Summarise this intake", nonce: 1 })));
+    expect(textarea.value).toBe("My own words\n\nSummarise this intake");
+    expect(onSeedApplied).toHaveBeenCalledTimes(1);
+    expect(onSend).not.toHaveBeenCalled();
+
+    // Into an empty composer it is the whole draft.
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => root!.render(view({ text: "Check the work", nonce: 2 })));
+    expect(textarea.value).toBe("Check the work");
+    expect(onSend).not.toHaveBeenCalled();
+  });
 });

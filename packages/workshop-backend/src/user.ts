@@ -16,7 +16,7 @@ import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisionin
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { subjectAccountName, type SubjectBinding } from "./account-subject";
 
-/** Why a bound account refuses an email-keyed sign-in (ADR 0018 decision 4). Safe to show. */
+/** Why a bound account refuses an email-keyed sign-in (ADR 0019 decision 4). Safe to show. */
 export const SIGNS_IN_THROUGH_SUBJECT = "This account signs in with InferOps. Use InferOps sign-in.";
 /** A subject's sign-in reached an account bound to another (never expected; the directory decides). */
 const SUBJECT_MISMATCH = "This account belongs to another sign-in.";
@@ -522,7 +522,7 @@ function makeUserStorage(storage: DurableObjectStorage) {
       //
       // null = password disabled (e.g. because some other auth mechanism is used)
       passwordHashHash: <Uint8Array | null>null,
-      // ADR 0018 (FAC-165): the stable subject this account is bound to (`subjectAccountName`), or
+      // ADR 0019 (FAC-165): the stable subject this account is bound to (`subjectAccountName`), or
       // null. Once set it never changes, and the account then signs in only through that subject.
       boundSubject: <string | null>null,
       // The address the subject's provider last vouched for, for display and finding them by
@@ -710,7 +710,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * existing users can still sign in.
    */
   async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {
-    // A bound account signs in only through its subject (ADR 0018 decision 4).
+    // A bound account signs in only through its subject (ADR 0019 decision 4).
     if (this.storage.boundSubject.get() !== null) throw new Error(SIGNS_IN_THROUGH_SUBJECT);
     const isNew = !this.storage.created.get();
     if (isNew) {
@@ -798,7 +798,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * returns null instead of creating one — existing users can still sign in.
    */
   async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
-    // A bound account signs in only through its subject (ADR 0018 decision 4): an address that now
+    // A bound account signs in only through its subject (ADR 0019 decision 4): an address that now
     // belongs to someone else reaches nothing here.
     if (this.storage.boundSubject.get() !== null) throw new Error(SIGNS_IN_THROUGH_SUBJECT);
     if (!this.storage.created.get()) {
@@ -824,7 +824,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * Binds this email-keyed account to `subject` (ADR 0018 decision 3), set-if-unset with no await
+   * Binds this email-keyed account to `subject` (ADR 0019 decision 3), set-if-unset with no await
    * between the check and the write: `bound` when it is (now, or already) bound to `subject`;
    * `bound-elsewhere` when another subject holds it; `password` for a password account, which never
    * binds; `absent` when there is no account here, which this writes nothing for. The caller has
@@ -841,13 +841,13 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return bound === subject ? "bound" : "bound-elsewhere";
   }
 
-  /** Whether this account is bound to a subject (ADR 0018), and so found only through it. */
+  /** Whether this account is bound to a subject (ADR 0019), and so found only through it. */
   async isSubjectBound(): Promise<boolean> {
     return this.storage.boundSubject.get() !== null;
   }
 
   /**
-   * Signs in through `subject` (ADR 0018), creating the account on first use when `allowCreate`:
+   * Signs in through `subject` (ADR 0019), creating the account on first use when `allowCreate`:
    * its profile id is `name`, the account name the directory resolved (the subject's own name, or
    * the address of the email-keyed account it bound), so a profile id still names its account. A
    * new account is bound to `subject` as it is made; an existing one must already be bound to it.
@@ -875,7 +875,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
-   * For the one-off subject pass (ADR 0018 decision 7): the subject this email-keyed account would
+   * For the one-off subject pass (ADR 0019 decision 7): the subject this email-keyed account would
    * bind to, read from a connection of `vendorId` it holds, when that connection's vouched email is
    * the account's own address; its bound subject if it already has one; else null. Reads only: the
    * pass checks the directory, then binds with `bindSubject`.

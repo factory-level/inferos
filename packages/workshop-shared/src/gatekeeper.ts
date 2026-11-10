@@ -75,7 +75,7 @@ export type VendorDescription = {
   /**
    * True if this vendor's sign-in also yields the provider's stable subject for the person
    * (`GatekeeperUser.getAuthenticatedSubject()`), which the Workshop keys their account on instead of
-   * the email (ADR 0018, FAC-165). Only meaningful with `providesAuth`. Defaults to false: the
+   * the email (ADR 0019, FAC-165). Only meaningful with `providesAuth`. Defaults to false: the
    * vendor's sign-in stays keyed on its verified email.
    */
   providesSubject?: boolean;
@@ -718,7 +718,7 @@ export interface GatekeeperConnectCallback extends WorkerEntrypoint {
   credentialsRestored(expiresAt?: Date): Promise<void>;
 }
 
-/** A provider's stable id for a person (ADR 0018): who issued it, and their id there. */
+/** A provider's stable id for a person (ADR 0019): who issued it, and their id there. */
 export type GatekeeperSubject = {
   /** The provider deployment that issued the subject, as an origin (InferOps: its auth origin). */
   issuer: string;
@@ -824,7 +824,7 @@ export interface GatekeeperUser extends WorkerEntrypoint {
 
   /**
    * For vendors that advertise `providesSubject`, the provider's stable id for the person behind
-   * this account (ADR 0018, FAC-165): `issuer` names the provider deployment, and `subject` is its
+   * this account (ADR 0019, FAC-165): `issuer` names the provider deployment, and `subject` is its
    * id for them, which outlives an email change. The Workshop keys the account on it, so it MUST be
    * the provider's own identifier for the authenticated person, never something a user chooses.
    * Null when the account has no person behind it. Called only on vendors that declare it.

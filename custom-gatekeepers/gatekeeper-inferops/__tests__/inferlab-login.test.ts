@@ -185,7 +185,7 @@ describe("sign-in flow", () => {
     expect(response?.status).toBe(200);
     expect(await response!.text()).toContain("ticket-ok");
     expect(signIns).toContainEqual({ label: "ok", email: "ada@example.com" });
-    // The Workshop keys the account on the principal behind it (ADR 0018).
+    // The Workshop keys the account on the principal behind it (ADR 0019).
     expect(signInSubjects).toContainEqual({ label: "ok", subject: { issuer: "http://localhost:8080", subject: "u1" } });
     expect(requests).toHaveLength(1);
     expect(requests[0].url).toBe("http://localhost:8080/auth/token");
@@ -249,7 +249,7 @@ describe("sign-in flow", () => {
     expect(signIns.some(s => s.label === "rejected")).toBe(false);
   });
 
-  // ADR 0018: the account is keyed on the principal, and the exchange only ever answers for a
+  // ADR 0019: the account is keyed on the principal, and the exchange only ever answers for a
   // browser the provider edge authenticated as it (a `kind = 'sso'` root). An email InferLab doesn't
   // vouch for (after an email change, say) is simply not passed on: never a key, never an address.
   it("signs in an account whose email InferLab doesn't vouch for by its principal, passing no email", async () => {

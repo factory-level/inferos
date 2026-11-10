@@ -25,15 +25,20 @@ const refusalOf = (err: unknown) => {
  * page. A refused event shows the server's words; a conflict (the state moved elsewhere) reloads
  * the latest state rather than overwriting it. A widget that declares no states shows nothing.
  * `onStateChange` hears the state it shows (null while none is known), so the widget can be told.
+ * `onPrompt` hears the draft a transition's event is wired to put in the person's chat (FAC-98,
+ * `snapshot.prompt`): the page puts it in the composer, and nothing is sent for them.
  */
-export const WidgetStateBar = ({ session, widgetRef, onStateChange }: {
+export const WidgetStateBar = ({ session, widgetRef, onStateChange, onPrompt }: {
   session: RpcStub<OperateSession>
   widgetRef: OperateWidgetRef
   onStateChange?: (state: string | null) => void
+  onPrompt?: (text: string) => void
 }) => {
   const [loaded, setLoadedState] = useState<Loaded>({ status: 'loading' })
   const onStateChangeRef = useRef(onStateChange)
   onStateChangeRef.current = onStateChange
+  const onPromptRef = useRef(onPrompt)
+  onPromptRef.current = onPrompt
   const setLoaded = (next: Loaded) => {
     setLoadedState(next)
     onStateChangeRef.current?.(next.status === 'ready' ? next.snapshot.state : null)
@@ -65,6 +70,7 @@ export const WidgetStateBar = ({ session, widgetRef, onStateChange }: {
     try {
       const snapshot = await session.transitionWidget({ workspaceId, consoleId, revision, gadgetId }, event, expectedSeq)
       setLoaded({ status: 'ready', snapshot })
+      if (snapshot.prompt) onPromptRef.current?.(snapshot.prompt.text)
     } catch (err) {
       const { code, message } = refusalOf(err)
       if (code === WIDGET_STATE_ERROR_CODES.conflict) {

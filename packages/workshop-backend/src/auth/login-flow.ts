@@ -177,7 +177,7 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
 
 /**
  * `subject`: the vendor declares `providesSubject`, so the account is keyed on the subject its
- * sign-in yields (ADR 0018), not on the email.
+ * sign-in yields (ADR 0019), not on the email.
  */
 type LoginCallbackProps = { pendingId: string; vendorId: string; subject?: boolean };
 
@@ -232,7 +232,7 @@ export class LoginConnectCallbackImpl
       try {
         secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
       } catch (error) {
-        // A bound account signs in only through its subject (ADR 0018 decision 4).
+        // A bound account signs in only through its subject (ADR 0019 decision 4).
         if (error instanceof Error && error.message === SIGNS_IN_THROUGH_SUBJECT) {
           loginLogger.info("gatekeeper login finished", {
             event: "gatekeeper.login.finished", outcome: "bound_to_subject",
@@ -275,7 +275,7 @@ export class LoginConnectCallbackImpl
   }
 
   /**
-   * A sign-in keyed on the subject the vendor yields (ADR 0018): the account the directory resolves
+   * A sign-in keyed on the subject the vendor yields (ADR 0019): the account the directory resolves
    * for it (`resolveSubjectAccount`), signed in through it. An email the provider vouches for may bind
    * an email-keyed account once, and is recorded as the account's current address; without one the
    * sign-in still proceeds, and the address is not used.

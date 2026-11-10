@@ -227,7 +227,7 @@ export function exchangeFromTokenResponse(body: string): InferLabExchange {
   };
 }
 
-/** The InferLab principal a flow signed in, as the Workshop keys accounts on it (ADR 0018). */
+/** The InferLab principal a flow signed in, as the Workshop keys accounts on it (ADR 0019). */
 export function subjectOf(origin: string, exchange: InferLabExchange): GatekeeperSubject {
   return { issuer: origin, subject: exchange.identity.userId };
 }
@@ -335,7 +335,7 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
       case "signin": {
         if (!callback) throw new Error("This sign-in attempt has no callback.");
         // Only the principal and a vouched email are kept: the session itself is ended, since
-        // signing in grants nothing. The Workshop keys the account on the principal (ADR 0018), so an
+        // signing in grants nothing. The Workshop keys the account on the principal (ADR 0019), so an
         // email InferLab doesn't vouch for (after an email change, say) is simply not passed on.
         const email = exchange.emailVerified ? exchange.identity.email : undefined;
         await logoutInferLabSession(origin, exchange.grant.refreshToken, inferLabFetch(this.env));
