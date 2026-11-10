@@ -40,8 +40,8 @@ former cap. The first admission and first alarm sweep both initialize the index;
 and alarm passes use the index directly. This bound assumes no other writer or import added legacy
 rows beyond that former cap.
 
-Each delivery retains its definition owner's profile id. Build-authorized workspace editors and
-that owner can list history by definition id even after a temporary definition is swept. Other
+Each delivery retains its definition owner's profile id. The recorded owner and a persisted edit
+share can list history by definition id even after a temporary definition is swept. Other
 people receive the same not-found response as an unknown definition. Definition expiry does not
 delete run history or action receipts.
 
