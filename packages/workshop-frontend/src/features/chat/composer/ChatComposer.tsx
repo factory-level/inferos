@@ -96,6 +96,8 @@ export const ChatComposer = ({
   minRows = 2,
   seedText,
   seedNonce,
+  seedAppend = false,
+  onSeedApplied,
   draftStorageKey,
   draftUpdateBanner,
   blockedReason,
@@ -143,6 +145,12 @@ export const ChatComposer = ({
    * whenever `seedNonce` changes, so the same text can be re-seeded by bumping the nonce. */
   seedText?: string;
   seedNonce?: number;
+  /** Put the seed after any text already typed, on a new paragraph, rather than replacing it, so a
+   * person's unsent words are never lost (an Operate widget's inserted draft, FAC-98). */
+  seedAppend?: boolean;
+  /** Called once a seed is in the composer, so its owner can clear it and a remount (another chat,
+   * a reload of the panel) never seeds it again. */
+  onSeedApplied?: () => void;
   /** Session-storage key used to recover this composer's draft prompt after a page refresh. */
   draftStorageKey?: string;
   /** Optional label for the attach menu item. */
@@ -319,8 +327,12 @@ export const ChatComposer = ({
   useEffect(() => {
     if (seedNonce === undefined) return;
     recordDraftEdit();
-    const text = seedText ?? "";
-    replaceComposerDocument({ text, capsules: [], formats: [], command: null });
+    const seed = seedText ?? "";
+    const typed = inputValueRef.current;
+    const text = seedAppend && typed.trim() ? `${typed.trimEnd()}\n\n${seed}` : seed;
+    if (seedAppend) updateComposerDocument(previous => ({ ...previous, text }));
+    else replaceComposerDocument({ text, capsules: [], formats: [], command: null });
+    onSeedApplied?.();
     requestAnimationFrame(() => {
       const ta = composerTextareaRef.current;
       if (!ta) return;

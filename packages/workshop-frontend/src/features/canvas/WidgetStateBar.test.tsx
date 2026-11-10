@@ -51,9 +51,11 @@ function fakeSession(overrides: Partial<Record<'getWidgetState' | 'transitionWid
   }
   return session
 }
-async function render(session: ReturnType<typeof fakeSession>, onStateChange?: (state: string | null) => void) {
+async function render(session: ReturnType<typeof fakeSession>, onStateChange?: (state: string | null) => void,
+    onPrompt?: (text: string) => void) {
   await act(async () => {
-    root.render(<WidgetStateBar session={session as unknown as RpcStub<OperateSession>} widgetRef={REF} onStateChange={onStateChange} />)
+    root.render(<WidgetStateBar session={session as unknown as RpcStub<OperateSession>} widgetRef={REF} onStateChange={onStateChange}
+      onPrompt={onPrompt} />)
   })
 }
 const buttons = () => [...container.querySelectorAll('button')].map(b => b.textContent)
@@ -129,4 +131,20 @@ it('reports the state it shows, so the widget can be told, and none while it has
     getWidgetState: async () => { throw new Error('WidgetStateError: WIDGET_HAS_NO_STATES: This widget declares no local states.') },
   }), state => heard.push(state))
   expect(heard.at(-1)).toBeNull()
+})
+
+// FAC-98: an event wired to insert a prompt hands its draft to the page, once per transition; the
+// bar sends nothing itself (the session has no send, and only the transition is called).
+it('hands a wired draft prompt to the page, and nothing for a transition without one', async () => {
+  const onPrompt = vi.fn<(text: string) => void>()
+  const session = fakeSession({ transitionWidget: async () => ({ ...EDITING, prompt: { text: 'Summarise this intake' } }) })
+  await render(session, undefined, onPrompt)
+  await act(async () => button('edit').click())
+  expect(onPrompt.mock.calls).toEqual([['Summarise this intake']])
+  expect(session.dispatch).not.toHaveBeenCalled()
+
+  const plain = vi.fn<(text: string) => void>()
+  await render(fakeSession(), undefined, plain)
+  await act(async () => button('edit').click())
+  expect(plain).not.toHaveBeenCalled()
 })
