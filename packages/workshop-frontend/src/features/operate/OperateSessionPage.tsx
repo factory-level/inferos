@@ -173,11 +173,14 @@ export const OperateSessionPage = () => {
     setDraft({ text, nonce: ++draftNonce.current })
     if (hideChat && !configuring && !tools && !state.chatOpen) send({ type: 'setChatOpen', open: true })
   }
-  // The chat pane offers the console's widgets only where chatPane.widgets is "console": the shown
-  // screen's resolved value, else (a flow, or while it is read) the workspace's value the
-  // publication froze, else the default. It grants nothing; it only hides the offer.
-  const chatWidgets = pageChatWidgets ?? resolveWorkspaceSetting('chatPane.widgets',
-    run?.source === 'published' ? entry?.console.published?.settings ?? {} : {}).value
+  // The chat pane offers the console's widgets only where chatPane.widgets is "console". On a
+  // console's page that is the shown screen's resolved value, and while it is unknown (being read,
+  // or the read failed) nothing is offered: a page that overrides it to "none" never shows the offer
+  // first. A flow has no screen page here, so it uses the workspace's value the publication froze.
+  // It grants nothing; it only hides the offer.
+  const chatWidgets = state.flow
+    ? resolveWorkspaceSetting('chatPane.widgets', run?.source === 'published' ? entry?.console.published?.settings ?? {} : {}).value
+    : pageChatWidgets
 
   return <OperatePromptProvider value={insertDraft}>
   <ConsoleWorkspaceShell onOpenWidget={target => void openWidget(target)} onNavigate={() => setWidgetTarget(null)}>

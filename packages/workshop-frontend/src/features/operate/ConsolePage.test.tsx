@@ -280,7 +280,15 @@ it("reports the shown screen's chatPane.widgets: the page's override, else the f
   await settle()
   expect(heard).toHaveBeenLastCalledWith('console')
 
-  // A page that can't be read says nothing: the Operate page then falls back on its own.
+  // While a read is pending it says unknown (null), never a value it hasn't read.
+  heard.mockClear()
+  getConsolePage.mockReturnValue(new Promise(() => {}))
+  render({ entry: { ...entry, console: published }, run: run({ viewId: 'board', revision: '7', screenId: 's1' }), onChatPaneWidgets: heard })
+  await settle()
+  expect(heard.mock.calls.length).toBeGreaterThan(0)
+  expect(heard.mock.calls.flat().every(value => value === null)).toBe(true)
+
+  // A page that can't be read says unknown too: the Operate page then offers nothing.
   getConsolePage.mockRejectedValue(new Error('refused'))
   render({ entry: { ...entry, console: published }, run: run({ viewId: 'overview', screenId: 's1', revision: '1' }), onChatPaneWidgets: heard })
   await settle()

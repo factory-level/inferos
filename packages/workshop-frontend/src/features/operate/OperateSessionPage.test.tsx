@@ -318,8 +318,17 @@ describe('a widget prompt and the chat pane', () => {
     expect(chat().getAttribute('data-offer-widgets')).toBe(offered)
   })
 
-  it('falls back to the default (console) while the screen has not said', () => {
+  // r2 on #412: unknown (the page read still pending, or failed) is not "no override"; nothing is
+  // offered until the screen says, so a page overriding it to "none" never shows the offer first.
+  it('offers no widgets while the shown screen has not said (pending or failed read)', () => {
+    testState.chatWidgets = null
     render(RUN)
+    expect(chat().getAttribute('data-offer-widgets')).toBe('false')
+  })
+
+  it("uses the frozen workspace value in a flow, which has no screen page here", () => {
+    testState.chatWidgets = null
+    render({ ...RUN, flow: { workspaceId: 'ws1', flowId: 'f', title: 'Shift', steps: ['board'], index: 0 } } as OperatePageState)
     expect(chat().getAttribute('data-offer-widgets')).toBe('true')
   })
 })

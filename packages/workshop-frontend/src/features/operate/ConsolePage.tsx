@@ -49,7 +49,8 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   /**
    * Hears the shown screen's `chatPane.widgets` (FAC-95, enforced by FAC-98): the page's override,
    * else the workspace's value the publication froze (a draft's: the workspace's now), else the
-   * default; null while it is read or when it can't be.
+   * default. Null means unknown: it is reported as each read starts, when a read fails, and when the
+   * page goes, so the listener can fail closed until a value arrives.
    */
   onChatPaneWidgets?: (value: WorkspaceSettingValue<'chatPane.widgets'> | null) => void
 }) => {
@@ -69,7 +70,9 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   const frozenSettings = entry?.console.published?.settings
   useEffect(() => {
     const report = onChatPaneWidgetsRef.current
-    if (!report || !overseer) return
+    if (!report) return
+    report(null)
+    if (!overseer) return
     let current = true
     const stub = overseer.stub
     const workspace = run.source === 'published' ? Promise.resolve(frozenSettings ?? {})
