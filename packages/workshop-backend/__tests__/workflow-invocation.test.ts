@@ -117,6 +117,7 @@ describe("through the Overseer", () => {
       assertGatekeeperUsable: () => {},
       // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
       requireHookBound: () => {},
+      requireTriggerStarts: () => {},
       invokeTrigger(this: never, userId: string, profileId: string, hookId: number) {
         return invokeWorkflowTrigger(this, userId, profileId, hookId);
       },
@@ -434,7 +435,7 @@ describe("what an invoker sees, and what reaches the gatekeeper", () => {
     let invoke = vi.fn(async (_request: unknown) => {});
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
     let impl = {
-      env: {}, storage: { boundHooks: { get: () => hook } }, assertGatekeeperUsable: () => {}, requireHookBound: () => {},
+      env: {}, storage: { boundHooks: { get: () => hook } }, assertGatekeeperUsable: () => {}, requireHookBound: () => {}, requireTriggerStarts: () => {},
       workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const, takenInvocations: new Map<string, boolean>(), getGadgetHead: headOf,
     };
     let direct = invokeWorkflowTrigger as unknown as (...args: unknown[]) => Promise<unknown>;
@@ -471,6 +472,7 @@ async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolea
     assertGatekeeperUsable: () => {},
     // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
     requireHookBound: () => {},
+    requireTriggerStarts: () => {},
     getGadgetRecord: () => ({}),
     visibleBindings: () => bindings,
     storage: Object.assign(makeOverseerStorage(makeMockStorage()), {

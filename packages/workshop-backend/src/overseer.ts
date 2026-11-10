@@ -12894,24 +12894,30 @@ class OverseerImpl implements AgentHooks {
   async pauseTrigger(hookId: number, by: AiChatAuthorInfo): Promise<TriggerLifecycle> {
     let record = this.storage.boundHooks.get(hookId);
     if (!record) throw new Error("Invalid hook ID.");
+    let draining = this.beginPause(hookId, by);
+    await disableHookRecord(this, record);
+    this.settleDrain(hookId);
+    return this.triggerLifecycleOf(hookId) ?? draining;
+  }
+
+  /**
+   * The first half of pausing trigger `hookId` as `by` (FAC-117), before the hook's own disable is
+   * awaited: records it draining with its time, and drops its waiting requests. A trigger already
+   * draining or paused is left as it is.
+   */
+  beginPause(hookId: number, by: AiChatAuthorInfo): TriggerLifecycle {
     let existing = this.triggerLifecycleOf(hookId);
     if (existing && existing.state !== "active") return existing;
     let now = new Date();
     let draining: TriggerLifecycle = { hookId, state: "draining", pausedAt: now, changedBy: by, changedAt: now };
     this.storage.workflowTriggerLifecycles.put(draining);
     this.workflowDefinitionStore().dropWaitingInvocations(hookId);
-    if (record.enabled) {
-      await record.controller.disable();
-      // Re-read after the await: a delete meanwhile already reached the goal state (no hook).
-      let current = this.storage.boundHooks.get(hookId);
-      if (current?.enabled) {
-        current.enabled = false;
-        this.storage.boundHooks.put(current);
-        stampBindHookAction(this.storage, current.actionId, false);
-      }
-    }
-    this.settleDrain(hookId);
-    return this.triggerLifecycleOf(hookId) ?? draining;
+    return draining;
+  }
+
+  /** Trigger `hookId` is active again (FAC-117): no lifecycle record. */
+  clearTriggerLifecycle(hookId: number): void {
+    this.storage.workflowTriggerLifecycles.delete(hookId);
   }
 
   /**
@@ -16712,19 +16718,25 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       this.impl.enableHookRecord(record);
     }
     // Active again: no lifecycle record (FAC-117). Runs admitted while it drained go on as before.
-    this.impl.storage.workflowTriggerLifecycles.delete(id);
+    this.impl.clearTriggerLifecycle(id);
   }
 
-  // Disabling a hook is pausing its trigger (FAC-117): it drains (OverseerImpl.pauseTrigger).
+  // Disabling a hook is pausing its trigger (FAC-117): it drains.
   async disableHook(id: number): Promise<void> {
     await this.pauseTrigger(id);
   }
 
   // A trigger's lifecycle (FAC-117), gated as the hook toggles are: building, plus the deployment's
-  // `build` authority in a shared workspace.
+  // `build` authority in a shared workspace. Pausing is recorded first (beginPause), so a firing
+  // admitted while the hook's own disable is in flight is refused as admitted after it.
   async pauseTrigger(hookId: number): Promise<TriggerLifecycle> {
     await this.#requireSharedConfiguration("build", "shared");
-    return this.impl.pauseTrigger(hookId, await this.#getClientProfile());
+    let record = this.impl.storage.boundHooks.get(hookId);
+    if (!record) throw new Error("Invalid hook ID.");
+    let draining = this.impl.beginPause(hookId, await this.#getClientProfile());
+    await disableHookRecord(this.impl, record);
+    this.impl.settleDrain(hookId);
+    return this.impl.triggerLifecycleOf(hookId) ?? draining;
   }
   async activateTrigger(hookId: number): Promise<TriggerLifecycle | null> {
     await this.enableHook(hookId);
@@ -19516,6 +19528,22 @@ function hookContinuesRun(impl: Pick<OverseerImpl, "storage" | "workflowDefiniti
   let admitted = impl.workflowDefinitionStore().admittedAt(deliveryId);
   return lifecycle?.state === "draining" && lifecycle.pausedAt !== undefined && admitted !== undefined &&
     admitted.getTime() < lifecycle.pausedAt.getTime();
+}
+
+/**
+ * Disable hook `record` gatekeeper-side, then flip its record, as `disableHook` always has. The record
+ * is re-read after the await: a `deleteHook`/`removeGatekeeper` landing while the disable was in
+ * flight already reached the goal state (no hook), and putting the captured record back would
+ * resurrect it as a zombie; deleting the record stays the authoritative kill.
+ */
+async function disableHookRecord(impl: Pick<OverseerImpl, "storage">, record: BoundHookRecord): Promise<void> {
+  if (!record.enabled) return;
+  await record.controller.disable();
+  let current = impl.storage.boundHooks.get(record.id);
+  if (!current) return;
+  current.enabled = false;
+  impl.storage.boundHooks.put(current);
+  stampBindHookAction(impl.storage, current.actionId, false);
 }
 
 /** `requireLiveHook` for a run already admitted (FAC-117): a draining trigger's earlier runs go on. */
