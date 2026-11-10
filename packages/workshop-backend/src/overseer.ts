@@ -18,10 +18,9 @@ import type {
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
-  WORKFLOW_BINDINGS_NEEDED, parseWorkflowDefinitionTitle,
+  WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS, WORKFLOW_BINDINGS_UNATTRIBUTED, parseWorkflowDefinitionTitle,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { checkAssignments, requireBound, requirementsOf, unmetBindings } from "./workflow-duplicate.js";
-import { WORKFLOW_BINDINGS_NOT_OWNERS, WORKFLOW_BINDINGS_UNATTRIBUTED } from "@gadgets/workshop-shared/workflow-definition";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
@@ -12794,9 +12793,11 @@ class OverseerImpl implements AgentHooks {
   }
 
   /**
-   * Refuses with `WORKFLOW_BINDINGS_NEEDED` while the gadget bound hook `hookId` wakes needs a
-   * connection set up (FAC-123): at admission, at firing, as a run starts and before each of its
-   * writes. Synchronous, so a protected point can call it after its last await.
+   * Refuses while the gadget bound hook `hookId` wakes needs a connection set up (FAC-123), in the
+   * words that say why: `WORKFLOW_BINDINGS_NEEDED` (not set up), `WORKFLOW_BINDINGS_NOT_OWNERS` (set
+   * up from another person's connection) or `WORKFLOW_BINDINGS_UNATTRIBUTED` (from one that doesn't
+   * record whose it is). At admission, at firing, as a run starts and before each of its writes.
+   * Synchronous, so a protected point can call it after its last await.
    */
   requireHookBound(hookId: number): void {
     let hook = this.storage.boundHooks.get(hookId);
@@ -14813,7 +14814,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let profile = await this.#getClientProfile();
     let store = this.impl.workflowDefinitionStore();
     let gadgetId = store.ownedGadget(profile.id, id);
-    let required = this.impl.getGadgetRecord(gadgetId).requiredBindings ?? [];
+    let gadget = this.impl.getGadgetRecord(gadgetId);
+    let required = gadget.requiredBindings ?? [];
+    // A duplicate made before its owner was recorded (#438 r1): `ownedGadget` has just proved the
+    // caller owns the definition, so their own connections are the ones that fill it from now on.
+    if (required.length > 0 && gadget.requiredBindingsOwner === undefined) {
+      gadget.requiredBindingsOwner = this.clientUserId;
+      this.impl.storage.gadgets.put(gadget);
+    }
     if (required.length === 0) throw new Error("This workflow has no connections to set up.");
     let checked = checkAssignments(required, bindings);
     if (checked.size === 0) throw new TypeError("Choose a connection to set up.");

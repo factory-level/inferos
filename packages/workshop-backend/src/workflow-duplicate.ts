@@ -95,6 +95,13 @@ export function bindingsRefusal(unmet: readonly WorkflowRequiredBinding[]): stri
   return WORKFLOW_BINDINGS_NEEDED;
 }
 
+/**
+ * Refuses while `gadget` (absent: nothing to check) has a requirement not set up, in the words that
+ * name why (`bindingsRefusal`): not set up at all (`WORKFLOW_BINDINGS_NEEDED`), set up from another
+ * person's connection (`WORKFLOW_BINDINGS_NOT_OWNERS`), or from one that doesn't record whose it is
+ * (`WORKFLOW_BINDINGS_UNATTRIBUTED`). Checked at a run's admission, at its firing, as it starts and
+ * before each of its writes, so a connection removed or replaced later stops the next one.
+ */
 export function requireBound(gadget: RequiringGadget | undefined, specOf: SpecOf, madeByOf?: MadeByOf): void {
   let unmet = gadget ? unmetBindings(gadget, specOf, madeByOf) : [];
   if (unmet.length > 0) throw new Error(bindingsRefusal(unmet));

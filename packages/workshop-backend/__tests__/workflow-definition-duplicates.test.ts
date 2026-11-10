@@ -519,6 +519,18 @@ describe("setting up a duplicate's connections", () => {
     expect(ben.gadgets.get(copy.revisions[0]!.source.gadgetId).bindings).toEqual({});
   });
 
+  it("fixes a duplicate made before its owner was recorded: rebinding records the owner, and it is then set up", async () => {
+    let { overseer, sourceId, gadgets, store } = await session();
+    let copy = await overseer.duplicateWorkflowDefinition({ sourceId, title: "Mine" });
+    let gadget = gadgets.get(copy.revisions[0]!.source.gadgetId);
+    // As #435 made it, before #438: requirements with no recorded owner.
+    delete gadget.requiredBindingsOwner;
+    let done = await overseer.rebindWorkflowDefinition(copy.id, { BOARD: BOARD_AT(ACME_BOARD), MODEL: BEN_MODEL });
+    expect(gadget.requiredBindingsOwner).toBe("owner-id");
+    expect(done.bindingsNeeded).toBeUndefined();
+    expect(store.get(BEN.id, copy.id, "build")!.bindingsNeeded).toBeUndefined();
+  });
+
   it("refuses to replace a connection a chat is changing", async () => {
     let { overseer, sourceId, gadgets, created } = await session();
     let copy = await overseer.duplicateWorkflowDefinition({ sourceId, title: "Mine" });
