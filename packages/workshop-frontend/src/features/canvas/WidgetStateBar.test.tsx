@@ -148,3 +148,13 @@ it('hands a wired draft prompt to the page, and nothing for a transition without
   await act(async () => button('edit').click())
   expect(plain).not.toHaveBeenCalled()
 })
+
+it("keeps a placement's own state (FAC-13): its id travels with every read and transition", async () => {
+  const session = fakeSession()
+  await act(async () => {
+    root.render(<WidgetStateBar session={session as unknown as RpcStub<OperateSession>} widgetRef={{ ...REF, placementId: 'p-7' }} />)
+  })
+  expect(session.getWidgetState).toHaveBeenCalledWith({ ...REF, placementId: 'p-7' })
+  await act(async () => { button('edit').click() })
+  expect(session.transitionWidget).toHaveBeenCalledWith({ ...REF, placementId: 'p-7' }, 'edit', 0)
+})
