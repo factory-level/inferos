@@ -29,6 +29,7 @@ import type { ConsoleToolCaller } from "../src/console-tools";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import type { UserDurableObject } from "../src/user.js";
 import { runAgent } from "../src/agent";
+import { isConsoleToolTainted } from "../src/chat-taint";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -404,6 +405,16 @@ describe("the operate session asking, as its owner", () => {
       expect(await refusal(s.impl.setSessionWidgetView("p-1", { status: 3 }))).toMatch(WIDGET_PLACEMENT_ERROR_CODES.invalid);
     }));
 
+  it("suggests a built-in widget only of a kind the owner's own search returned in this session", () =>
+    withSession("use", async s => {
+      let board = { type: "builtin", kind: "project/board", target: "inferops://acme.operations/project/board/ENG" };
+      expect(await refusal(s.impl.proposeSessionPlacement({ ref: board }))).toBe(AGENT_WIDGET_UNAVAILABLE);
+      await s.impl.findSessionWidgets("boards");
+      expect((await s.impl.proposeSessionPlacement({ ref: board })).proposals).toMatchObject([{ ref: board }]);
+      expect(await refusal(s.impl.proposeSessionPlacement({ ref: { ...board, kind: "project/invented" } })))
+        .toBe(AGENT_WIDGET_UNAVAILABLE);
+    }));
+
   it("moves within the open console only when the console, read as the owner, holds the view, at the sequence it read", () =>
     withSession("use", async (s) => {
       await s.impl.operatePage({ type: "openView", viewId: "w" });
@@ -444,7 +455,20 @@ async function withChat(operate: boolean, fn: (impl: any, asked: unknown[][]) =>
     if (operate) impl.storage.operateSession.put(true);
     impl.storage.chatMeta.put({ id: CHAT, title: "Chat", started: new Date(0), lastActive: new Date(0) });
     let asked: unknown[][] = [];
-    impl.findSessionWidgets = async (...args: unknown[]) => { asked.push(["find", ...args]); return { status: "unavailable", reason: "not-connected" }; };
+    // Each reading hook records whether the chat was already marked when it was reached.
+    let marked = () => isConsoleToolTainted(impl.storage, CHAT);
+    impl.findSessionWidgets = async (...args: unknown[]) => {
+      asked.push(["find", ...args, { markedAtEntry: marked() }]);
+      return { status: "unavailable", reason: "not-connected" };
+    };
+    impl.describeSessionWidget = async (...args: unknown[]) => {
+      asked.push(["describe", { markedAtEntry: marked() }]);
+      return { status: "unavailable", reason: AGENT_WIDGET_UNAVAILABLE };
+    };
+    impl.readSessionWidgetState = async (...args: unknown[]) => {
+      asked.push(["read", { markedAtEntry: marked() }]);
+      throw new Error("synthetic failure");
+    };
     impl.setSessionWidgetView = async (...args: unknown[]) => { asked.push(["view", ...args]); return { views: [], proposals: [] }; };
     impl.proposeSessionPlacement = async (...args: unknown[]) => { asked.push(["propose", ...args]); return { views: [], proposals: [] }; };
     await fn(impl, asked);
@@ -498,9 +522,62 @@ describe("the widget tools", () => {
         done(),
       ]);
       expect(asked).toEqual([
-        ["find", "counts"],
+        ["find", "counts", { markedAtEntry: true }],
         ["view", "p-1", { status: "open" }],
         ["propose", { ref: { type: "builtin", kind: "project/board", target: "inferops://acme.operations/project/board/ENG" } }],
       ]);
     }));
 });
+
+// The three reading tools return words people wrote, so each marks the chat as a console tool does
+// (chat-taint.ts) before anything is asked, and the chat then meets the same gates.
+describe("the widget tools that read", () => {
+  const REF = { workspaceId: "w", consoleId: "c", revision: "1", widgetId: 7 };
+  const READS = [
+    ["findWidgets", { query: "counts" }],
+    ["describeWidget", REF],
+    ["readWidgetState", REF],
+  ] as const;
+
+  for (let [name, input] of READS) {
+    it(`${name} marks the chat before it is answered, refused or failing alike`, () =>
+      withChat(true, async (impl, asked) => {
+        expect(isConsoleToolTainted(impl.storage, CHAT)).toBe(false);
+        await runScriptedTurn(impl, [step(fauxToolCall(name, input)), done()]);
+        expect(asked).toHaveLength(1);
+        expect(asked[0]!.at(-1)).toEqual({ markedAtEntry: true });
+        expect(isConsoleToolTainted(impl.storage, CHAT)).toBe(true);
+      }));
+  }
+
+  it("setWidgetView and proposePlacement, which return only the overlay, leave the chat unmarked", () =>
+    withChat(true, async impl => {
+      await runScriptedTurn(impl, [
+        step(fauxToolCall("setWidgetView", { placementId: "p-1", filters: {} })),
+        step(fauxToolCall("proposePlacement", { type: "builtin", kind: "project/board", target: "inferops://acme.operations/project/board/ENG" })),
+        done(),
+      ]);
+      expect(isConsoleToolTainted(impl.storage, CHAT)).toBe(false);
+    }));
+
+  it("after one, the chat fetches nothing, requests no connection and gets no env.GIT, as after a console tool", () =>
+    withChat(true, async impl => {
+      let fetched: string[] = [];
+      impl.getWebFetchEnv = () => { fetched.push("env"); throw new Error("no network in this test"); };
+      let { contexts } = await runScriptedTurn(impl, [
+        step(fauxToolCall("findWidgets", { query: "counts" })),
+        step(fauxToolCall("webFetch", { url: "https://example.com/" })),
+        done(),
+      ]);
+      let results = contexts[2]!.messages.flatMap(message => message.role === "toolResult" ? [message] : []);
+      expect(results.at(-1)).toMatchObject({ toolName: "webFetch", isError: true });
+      expect(JSON.stringify(results.at(-1))).toMatch(/read console tool output/);
+      expect(fetched).toEqual([]);
+      // The same mark gates the connection request and executeCode's bindings (chat-taint.test.ts
+      // covers each binding a marked chat's env drops).
+      let request = await impl.requestConnection(CHAT, { vendorId: "slack", reason: "x", bindingName: "SLACK" });
+      expect(request).toEqual({ requested: false, message: expect.stringMatching(/read console tool output/) });
+      expect(() => impl.describeGitBinding(CHAT, "GIT")).toThrow(/can no longer use env.GIT/);
+    }));
+});
+

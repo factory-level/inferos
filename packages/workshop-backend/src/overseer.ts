@@ -13359,6 +13359,11 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  // FAC-14: the built-in kinds the owner's own widget search has returned in this session, which
+  // InferOps returns only to someone holding each kind's declared permission. A built-in suggestion
+  // must name one of them. In memory only: after a restart the agent finds again, never more.
+  #foundBuiltinKinds = new Set<string>();
+
   /**
    * The widgets the operate session's owner may use that match `query` (FAC-14, the agent's
    * `findWidgets`): their own widget search, through their own InferOps accounts (built-in kinds,
@@ -13394,6 +13399,7 @@ class OverseerImpl implements AgentHooks {
         }
       }));
     }
+    for (let {kind} of answer.hits) this.#foundBuiltinKinds.add(kind);
     return {
       status: "searched", ranking: answer.ranking, denied: answer.denied, unsearched: answer.unsearched, unreached,
       builtins: answer.hits.map(({kind, description, metadata}) => ({kind, description, ...(metadata ? {metadata} : {})})),
@@ -13460,9 +13466,10 @@ class OverseerImpl implements AgentHooks {
   /**
    * Suggests a placement to the owner (FAC-14, the agent's `proposePlacement`): held in their agent
    * overlay and placed only if they place it. A console widget is suggested only when its own
-   * workspace offers it to them now (`listWidgetInstancesFor`). A built-in widget is a kind and an
-   * `inferops://` reference, which authorizes nothing: like any placement, what it shows is opened
-   * on its own checked path every time.
+   * workspace offers it to them now (`listWidgetInstancesFor`); a built-in widget only by a kind
+   * the owner's own `findSessionWidgets` returned in this session (InferOps' permission filter).
+   * Its `inferops://` reference authorizes nothing: like any placement, what it shows is opened on
+   * its own checked path every time.
    */
   async proposeSessionPlacement(input: unknown): Promise<AgentViewOverlay> {
     let {owner, caller} = await this.#sessionPerson();
@@ -13475,6 +13482,8 @@ class OverseerImpl implements AgentHooks {
       if (!found?.[0]?.some(instance => instance.consoleId === ref.consoleId && instance.sourceGadgetId === ref.sourceGadgetId)) {
         throw new Error(AGENT_WIDGET_UNAVAILABLE);
       }
+    } else if (!this.#foundBuiltinKinds.has(ref.kind)) {
+      throw new Error(AGENT_WIDGET_UNAVAILABLE);
     }
     return await owner.proposeAgentPlacement(proposal);
   }
