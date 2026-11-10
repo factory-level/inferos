@@ -10,7 +10,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ACTION_FAILURE_KINDS } from '@gadgets/workshop-shared/gatekeeper'
-import { GATEKEEPER_RECONNECT_NOT_YOURS, type ConnectFlowStart } from '@gadgets/workshop-shared/api'
+import { GATEKEEPER_RECONNECT_REFUSED, type ConnectFlowStart } from '@gadgets/workshop-shared/api'
 import { RUN_DEFINITION_CHANGED } from '@gadgets/workshop-shared/action-outcome'
 import {
   ACTION_FAILURE_KIND_TEXT, BLOCKED_UNKNOWN_TEXT, RECONNECT_GUIDANCE, RECONNECT_PROMPT, blockedText, contextText, decisionOf,
@@ -143,10 +143,10 @@ describe('Reconnect (FAC-119 K2)', () => {
   })
 
   it("says why it can't, in the kernel's words, and offers nothing for another failure kind", async () => {
-    const onReconnect = vi.fn<() => Promise<ConnectFlowStart>>(async () => { throw new Error(`Error: ${GATEKEEPER_RECONNECT_NOT_YOURS}`) })
+    const onReconnect = vi.fn<() => Promise<ConnectFlowStart>>(async () => { throw new Error(`Error: ${GATEKEEPER_RECONNECT_REFUSED}`) })
     await act(async () => root.render(<ActionDecision entry={signIn()} onReconnect={onReconnect} />))
     await act(async () => reconnectButton()!.click())
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe(GATEKEEPER_RECONNECT_NOT_YOURS)
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(GATEKEEPER_RECONNECT_REFUSED)
     await act(async () => root.render(<ActionDecision entry={entry({ lastAttempt: attempt({ kind: 'permission', retryable: true }) })} onReconnect={onReconnect} />))
     expect(reconnectButton()).toBeUndefined()
     // Without a way to reconnect here, the guidance says where.

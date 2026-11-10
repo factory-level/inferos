@@ -1,8 +1,6 @@
 import { useState } from 'react'
 import { Button } from '@cloudflare/kumo'
-import {
-  GATEKEEPER_RECONNECT_NOT_YOURS, GATEKEEPER_RECONNECT_UNKNOWN, type ConnectFlowStart,
-} from '@gadgets/workshop-shared/api'
+import { GATEKEEPER_RECONNECT_REFUSED, type ConnectFlowStart } from '@gadgets/workshop-shared/api'
 import { canApproveAgain } from '../actionAttempt'
 import {
   RECONNECT_GUIDANCE, RECONNECT_PROMPT, REJECTED_BECAUSE_TEXT, UNCERTAIN_REJECTION_TEXT, blockedText, contextText,
@@ -11,16 +9,16 @@ import {
 import { openConnectWindow } from '../connectHandoff'
 import { ActionResultList } from './ActionReceipt'
 
-/** A reconnect's refusal, in the kernel's own words when it is one of its two, else a fixed sentence. */
+/** A reconnect's refusal: the kernel's one refusal in its own words, anything else in a fixed sentence. */
 const reconnectRefusal = (error: unknown): string => {
   const message = error instanceof Error ? error.message : String(error)
-  return [GATEKEEPER_RECONNECT_NOT_YOURS, GATEKEEPER_RECONNECT_UNKNOWN].find(known => message.endsWith(known))
-    ?? "Couldn't start reconnecting just now. Try again, or reconnect it in the workspace's connections."
+  return message.endsWith(GATEKEEPER_RECONNECT_REFUSED) ? GATEKEEPER_RECONNECT_REFUSED
+    : "Couldn't start reconnecting just now. Try again, or reconnect it in the workspace's connections."
 }
 
 /**
  * Reconnect for a sign-in to renew (FAC-119 K2): the server finds the connection's account, and
- * only the person whose account it is can reconnect it; a refusal says why in the kernel's words.
+ * only the person whose account it is can reconnect it; a refusal is the kernel's one sentence.
  */
 const ReconnectAction = ({ onReconnect }: { onReconnect: () => Promise<ConnectFlowStart> }) => {
   const [state, setState] = useState<{ status: 'idle' | 'opening' } | { status: 'refused'; text: string }>({ status: 'idle' })
