@@ -42,6 +42,7 @@ export default async function(self, env) {
       title: "Daily brief",
       description: "Prepare the morning calendar and inbox brief.",
       occurrences: { count: 10 },
+      missedRuns: "coalesce",
     },
   );
 }
@@ -66,7 +67,10 @@ never both; `runAt()` accepts neither.
 The count bounds *due slots*, not successful runs. A slot consumes one count as soon as it becomes
 due and takes a `runId`, even if admission or callback delivery then fails; admission failures skip
 the slot without retrying it. Retries reuse the same `runId` and do not consume another count.
-Missed occurrences remain skipped and do not count.
+Missed occurrences remain skipped and do not count. The default `missedRuns: "skip"` advances past
+multiple elapsed slots without invoking the callback. Set `missedRuns: "coalesce"` to invoke it once
+for the latest elapsed slot that remains within the schedule's `until` or `count` bound; a single due
+slot is delivered normally in either mode. Bounded catch-up is not supported.
 
 A bound is checked against live state, so a schedule that reaches it reports `completed`. A schedule
 whose cutoff already passed by the time its hook is enabled reports `expired` instead: it never got
@@ -102,7 +106,9 @@ advance to their next future occurrence; a due one-shot expires.
 ## Cadence behavior
 
 - Recurrences preserve the phase established at registration.
-- Missed occurrences are skipped, not replayed or caught up.
+- Multiple elapsed slots are skipped by default. `missedRuns: "coalesce"` runs once for the latest
+  missed slot within the configured bound; a late alarm cannot admit a slot after `until`. Bounded
+  catch-up is not supported.
 - Fixed intervals measure elapsed time and therefore shift relative to local clocks across DST.
 - Calendar schedules retain their requested local wall-clock cadence across DST.
 - A nonexistent spring-forward time moves forward by the transition gap.

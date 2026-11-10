@@ -30,7 +30,25 @@ describe("schedule input validation", () => {
         normalizeInterval(3_600_000, 0),
         0,
       ),
-    ).toEqual({ ...options, occurrences: { count: 3 } });
+    ).toEqual({ ...options, missedRuns: "skip", occurrences: { count: 3 } });
+
+    expect(
+      normalizeRecurringScheduleOptions(
+        { ...options, missedRuns: "coalesce" },
+        normalizeInterval(3_600_000, 0),
+        0,
+      ),
+    ).toEqual({ ...options, missedRuns: "coalesce" });
+    expect(() => normalizeRecurringScheduleOptions(
+      { ...options, missedRuns: "catch-up" } as unknown as RecurringScheduleOptions,
+      normalizeInterval(3_600_000, 0),
+      0,
+    )).toThrow("Missed runs must be skipped or coalesced");
+    expect(() => normalizeRecurringScheduleOptions(
+      { ...options, missedRuns: "skip" },
+      normalizeOneShot(1_000, 0),
+      0,
+    )).toThrow("recurring schedules");
 
     const registeredAt = ms("2026-08-02T00:00:00Z");
     expect(
@@ -47,7 +65,7 @@ describe("schedule input validation", () => {
         ),
         registeredAt,
       ),
-    ).toEqual({ ...options, occurrences: { until: ms("2026-08-03T13:00:00Z") } });
+    ).toEqual({ ...options, missedRuns: "skip", occurrences: { until: ms("2026-08-03T13:00:00Z") } });
   });
 
   it("rejects invalid recurring occurrence limits", () => {

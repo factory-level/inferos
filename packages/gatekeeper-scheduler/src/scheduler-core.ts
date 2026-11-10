@@ -47,10 +47,18 @@ export function normalizeRecurringScheduleOptions(
   options: RecurringScheduleOptions,
   spec: ScheduleSpec,
   registeredAt: number,
-): ScheduleOptions & { occurrences?: NormalizedScheduleOccurrences } {
+): ScheduleOptions & { occurrences?: NormalizedScheduleOccurrences; missedRuns?: "skip" | "coalesce" } {
   const normalized = normalizeScheduleOptions(options);
+  const missedRuns = options.missedRuns ?? "skip";
+  if (missedRuns !== "skip" && missedRuns !== "coalesce") {
+    throw new TypeError("Missed runs must be skipped or coalesced.");
+  }
+  if (spec.kind === "once" && options.missedRuns !== undefined) {
+    throw new TypeError("Missed-run policies apply only to recurring schedules.");
+  }
+  const withPolicy = { ...normalized, ...(spec.kind !== "once" ? { missedRuns } : {}) };
   const bound = options.occurrences;
-  if (bound === undefined) return normalized;
+  if (bound === undefined) return withPolicy;
   if (!bound || typeof bound !== "object") {
     throw new TypeError("Schedule occurrences must specify count or until.");
   }
@@ -59,7 +67,7 @@ export function normalizeRecurringScheduleOptions(
   }
   if ("count" in bound) {
     assertSafePositiveInteger(bound.count, "Schedule occurrence count");
-    return { ...normalized, occurrences: { count: bound.count } };
+    return { ...withPolicy, occurrences: { count: bound.count } };
   }
   // An object carrying neither key lands here, where normalizeOneShot rejects the missing time.
   const { fireAt } = normalizeOneShot(bound.until, registeredAt);
@@ -67,7 +75,7 @@ export function normalizeRecurringScheduleOptions(
   if (first === undefined || first > fireAt) {
     throw new RangeError("Schedule occurrence cutoff precedes the first occurrence.");
   }
-  return { ...normalized, occurrences: { until: fireAt } };
+  return { ...withPolicy, occurrences: { until: fireAt } };
 }
 
 /** Creates a canonical elapsed-time schedule anchored at registration. */

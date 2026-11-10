@@ -15,11 +15,14 @@ export type ScheduleRegistration = {
   scheduleId: string;
   spec: ScheduleSpec;
   occurrences?: NormalizedScheduleOccurrences;
+  missedRuns?: "skip" | "coalesce";
 };
 
 type ScheduleProgress = ScheduleRegistration & {
   /** Logical occurrences started so far. Set only when `occurrences` bounds the recurrence. */
   occurrenceCount?: number;
+  /** Most recent occurrence refused during workflow admission; visible to the schedule owner. */
+  lastAdmissionRefusal?: { code: "workflow_occurrence_limit"; scheduledTime: number; refusedAt: number };
 };
 
 /** An enabled schedule waiting for its next occurrence. */
@@ -103,6 +106,43 @@ export function beginDueRun(
   if (schedule.status === "active") {
     if (schedule.nextFire > now) return schedule;
     if (!runId) throw new TypeError("A run ID is required.");
+    // Preserve the delivery failure boundary for a corrupted stored spec: the normal admission
+    // path records pending state before it rejects. A failed probe here must not short-circuit it.
+    let following: number | undefined;
+    try {
+      following = nextFireAfter(schedule.spec, schedule.nextFire);
+    } catch {
+      following = undefined;
+    }
+    // One late slot is normal alarm jitter. Multiple elapsed slots indicate downtime or a delayed
+    // scheduler pass: skip them by default, or coalesce them into a single run at the latest slot.
+    if (following !== undefined && following <= now) {
+      const nextFire = nextFireAfter(schedule.spec, now);
+      if (schedule.missedRuns !== "coalesce") {
+        if (nextFire === undefined || !withinLimit(schedule, nextFire)) {
+          return { ...copyProgress(schedule), status: "completed", completedAt: now };
+        }
+        return { ...copyProgress(schedule), status: "active", nextFire };
+      }
+      // Coalescing may collapse missed slots, but an `until` bound still caps the slot being
+      // admitted. If the scheduler wakes after the cutoff, use the last missed slot on or before
+      // that cutoff rather than manufacturing a post-bound occurrence.
+      const coalesceThrough = schedule.occurrences && "until" in schedule.occurrences
+        ? Math.min(now, schedule.occurrences.until)
+        : now;
+      const scheduledTime = latestFireAtOrBefore(schedule.spec, schedule.nextFire, coalesceThrough);
+      return {
+        ...copyProgress(schedule),
+        status: "pending",
+        stage: "admission",
+        runId,
+        scheduledTime,
+        attempts: 0,
+        occurrenceCount: schedule.occurrences ? (schedule.occurrenceCount ?? 0) + 1 : undefined,
+        leaseExpiresAt,
+        nextFire: undefined,
+      };
+    }
     return {
       ...copyProgress(schedule),
       status: "pending",
@@ -136,13 +176,15 @@ export function admitRun(
   leaseExpiresAt: number,
 ): EnabledSchedule {
   if (!isPending(schedule, runId, "admission")) return schedule;
-  return {
+  let admitted: PendingSchedule = {
     ...schedule,
     stage: "delivery",
     attempts: schedule.attempts + 1,
     leaseExpiresAt,
     nextFire: recurringNextFire(schedule, now),
   };
+  delete admitted.lastAdmissionRefusal;
+  return admitted;
 }
 
 /** Abandons a run after admission rejects without consuming a callback attempt. */
@@ -150,9 +192,13 @@ export function rejectRun(
   schedule: EnabledSchedule,
   runId: string,
   rejectedAt: number,
+  refusal?: { code: "workflow_occurrence_limit"; scheduledTime: number },
 ): EnabledSchedule {
   if (!isPending(schedule, runId, "admission")) return schedule;
-  const common = copyProgress(schedule);
+  const common = {
+    ...copyProgress(schedule),
+    ...(refusal ? { lastAdmissionRefusal: { ...refusal, refusedAt: rejectedAt } } : {}),
+  };
   if (schedule.spec.kind === "once") {
     return { ...common, status: "expired", expiredAt: rejectedAt };
   }
@@ -231,10 +277,34 @@ function recurringNextFire(schedule: ScheduleProgress, now: number): number | un
   return nextFire !== undefined && withinLimit(schedule, nextFire) ? nextFire : undefined;
 }
 
+/** Finds the final scheduled instant in [first, now] without replaying every missed interval. */
+function latestFireAtOrBefore(spec: ScheduleSpec, first: number, now: number): number {
+  let low = first;
+  let high = now;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const next = nextFireAfter(spec, middle);
+    if (next === undefined || next > now) high = middle - 1;
+    else low = middle;
+  }
+  // `low` converges on the final slot: immediately before it, nextFireAfter still finds it.
+  let candidate = nextFireAfter(spec, low - 1);
+  if (candidate === undefined || candidate > now) throw new Error("No missed schedule slot was found.");
+  return candidate;
+}
+
 function copyProgress(
-  { workspaceId, scheduleId, spec, occurrences, occurrenceCount }: ScheduleProgress,
+  { workspaceId, scheduleId, spec, occurrences, occurrenceCount, missedRuns, lastAdmissionRefusal }: ScheduleProgress,
 ): ScheduleProgress {
-  return { workspaceId, scheduleId, spec, occurrences, occurrenceCount };
+  return {
+    workspaceId,
+    scheduleId,
+    spec,
+    occurrences,
+    occurrenceCount,
+    missedRuns,
+    ...(lastAdmissionRefusal ? { lastAdmissionRefusal } : {}),
+  };
 }
 
 function withinLimit(schedule: ScheduleProgress, nextFire: number): boolean {

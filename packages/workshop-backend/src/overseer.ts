@@ -30,6 +30,9 @@ import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
   type StoredWorkflowDefinitionShare, type WorkflowDefinitionAudience, WORKSPACE_AUDIENCE,
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
+  type StoredWorkflowOccurrence,
+  type StoredWorkflowOccurrenceExpiry,
+  type StoredWorkflowOccurrenceCount,
   type QueuedWorkflowRun,
 } from "./workflow-definition-store";
 import { collaboratorAccountName } from "./account-subject";
@@ -72,7 +75,7 @@ import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId,
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, type HookOccurrence, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
 import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionOutcome, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -1909,6 +1912,11 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       workflowDefinitionShares: collection<StoredWorkflowDefinitionShare>()({ primaryKey: "key" }),
       workflowTriggerPins: collection<StoredTriggerPin>()({ primaryKey: "hookId" }),
       workflowDeliveries: collection<StoredWorkflowDelivery>()({ primaryKey: "id" }),
+      // Seven-day idempotency tombstones for server-verified trigger occurrences (FAC-113).
+      workflowOccurrences: collection<StoredWorkflowOccurrence>()({ primaryKey: "key" }),
+      // Ordered expiry pointers and per-trigger counts keep admission bounded (FAC-113).
+      workflowOccurrenceExpiries: collection<StoredWorkflowOccurrenceExpiry>()({ primaryKey: "key" }),
+      workflowOccurrenceCounts: collection<StoredWorkflowOccurrenceCount>()({ primaryKey: "hookId" }),
       // Who may ask a pinned trigger to run now, and the requests admitted but not yet delivered
       // (FAC-102; see workflow-definition-store.ts).
       workflowTriggerControls: collection<StoredTriggerControl>()({ primaryKey: "hookId" }),
@@ -13839,9 +13847,10 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     return new NativeRpcStub(this.impl.getGadgetHookEntrypoint(id));
   }
 
-  async startHook(hookId: number, request?: HookInvocation): Promise<{
-    callback: NativeRpcStub<RpcTarget>, approvalQueue: ApprovalQueue
-  }> {
+  async startHook(hookId: number, request?: HookInvocation | { occurrence: HookOccurrence }): Promise<
+    | { alreadyDelivered: true }
+    | { callback: NativeRpcStub<RpcTarget>; approvalQueue: ApprovalQueue }
+  > {
     let record = requireLiveHook(this.impl, hookId);
 
     let vendorId = record.vendorId ??
@@ -13866,7 +13875,21 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // firing is recorded with it (workflow-definition-store.ts); it never falls back to another.
     // A delivery a person asked for (invokeTrigger) names the invocation admitted for it; the store
     // accepts only that, once, and records who asked as a claim beside the run.
-    let invocationId = typeof request?.invocationId === "string" ? request.invocationId : undefined;
+    let invocationId = request && "invocationId" in request && typeof request.invocationId === "string"
+      ? request.invocationId : undefined;
+    if (invocationId !== undefined && request && "occurrence" in request) {
+      throw new Error("A hook delivery cannot be both requested and externally triggered.");
+    }
+    let occurrence = request && "occurrence" in request ? request.occurrence : undefined;
+    if (occurrence?.kind === "schedule" &&
+        (vendorId !== "scheduler" || !Number.isSafeInteger(occurrence.scheduledTime) || occurrence.scheduledTime < 0)) {
+      throw new Error("The scheduled occurrence is invalid.");
+    }
+    if (occurrence?.kind === "event" &&
+        (vendorId !== "email" || occurrence.provider !== "cloudflare-email" ||
+         typeof occurrence.deliveryId !== "string" || !occurrence.deliveryId || occurrence.deliveryId.length > 256)) {
+      throw new Error("The event occurrence is invalid.");
+    }
     // Assignments off (FAC-102): a request for a trigger assigned before never runs, neither as the
     // service account nor on the gadget's own callback, and is refused before it is taken.
     if (invocationId !== undefined && !workflowAssignmentsEnabled(this.env) &&
@@ -13880,19 +13903,20 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     let delivery = this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
         gadgetId => this.impl.getGadgetHead(gadgetId),
         profileId => profileId === ownerProfileId ? "build" : sharing.getEffectiveRole(profileId) ?? null,
-        invocationId);
+        invocationId, occurrence);
+    if (delivery && "alreadyDelivered" in delivery) return delivery;
     // The request is taken: from here a failure is the run's own (invokeWorkflowTrigger).
     // Only for an invokeTrigger call still waiting on it: a late delivery leaves nothing behind.
     if (delivery?.invocation && this.impl.takenInvocations.has(delivery.invocation.id)) {
       this.impl.takenInvocations.set(delivery.invocation.id, true);
     }
 
-    // A delivery a person asked for runs in this workspace, from its stored record (FAC-112): the
-    // firing's one call queues it and returns, and the alarm runs it (OverseerImpl.queueWorkflowRun),
-    // so nothing of the run waits on the caller. An assigned trigger's run executes as its service
-    // account (FAC-102), in a run-scoped worker, never through the gadget's own callback and the
-    // bindings people connected; either kind re-checks the person when it starts (FAC-104).
-    if (delivery?.invocation) {
+    // Every pinned workflow delivery runs from its stored record: the firing's one call queues it
+    // and returns, and the alarm runs it later. This includes server-verified schedule/event
+    // occurrences; they must not fall through to the gadget's live callback after a run was
+    // admitted. A person-requested assigned trigger runs as its service account; other deliveries
+    // use the gadget's bindings and trigger identity.
+    if (delivery?.run) {
       let caller: GatekeeperCaller = delivery.executedAs
         ? {from: "systemRun", hookId, deliveryId: delivery.deliveryId}
         : {from: "hook"};
@@ -14208,15 +14232,18 @@ type GatekeeperHookLoopbackProps = {
 export class GatekeeperHookLoopback
     extends WorkerEntrypoint<Cloudflare.Env, GatekeeperHookLoopbackProps>
     implements HookInitiator<RpcTarget> {
-  startHook(request?: HookInvocation): Promise<
-      {callback: NativeRpcStub<RpcTarget>, approvalQueue: NativeRpcStub<ApprovalQueue>}> {
+  startHook(request?: HookInvocation | { occurrence: HookOccurrence }): Promise<
+      | { alreadyDelivered: true }
+      | {callback: NativeRpcStub<RpcTarget>, approvalQueue: NativeRpcStub<ApprovalQueue>}> {
     let ns = this.ctx.exports.OverseerDurableObject;
     let overseer: DurableObjectStub<OverseerDurableObject> =
         ns.get(ns.idFromString(this.ctx.props.overseerId));
 
     // Get an ApprovalQueue for this hook invocation from the overseer. Only the invocation id is
     // passed on; the overseer decides whether it names a request it admitted for this hook.
-    let invocation = typeof request?.invocationId === "string" ? {invocationId: request.invocationId} : undefined;
+    let invocation = request && "invocationId" in request && typeof request.invocationId === "string"
+      ? {invocationId: request.invocationId}
+      : request && "occurrence" in request ? { occurrence: request.occurrence } : undefined;
     // @ts-ignore seems the RPC types aren't working here
     return overseer.startHook(this.ctx.props.hookId, invocation);
   }

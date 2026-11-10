@@ -1,4 +1,3 @@
-// Vite+ per-package settings. The build:configurator task definition is shared by all gatekeepers
-// with a configurator UI and ships as an export of `@gadgets/scripts`, alongside the builder it
-// runs.
-export { default } from '@gadgets/scripts/gatekeeper-configurator'
+// Shared by gatekeepers with a configurator and tests: keeps build tasks and registers tests in the
+// root Vite+ test task graph.
+export { withTests as default } from '@gadgets/scripts/gatekeeper-configurator'
