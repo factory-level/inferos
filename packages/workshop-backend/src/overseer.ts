@@ -18,7 +18,7 @@ import type {
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
-  WORKFLOW_BINDINGS_NEEDED, parseWorkflowDefinitionTitle,
+  WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS, WORKFLOW_BINDINGS_UNATTRIBUTED, parseWorkflowDefinitionTitle,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { checkAssignments, requireBound, requirementsOf, unmetBindings } from "./workflow-duplicate.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
@@ -245,7 +245,8 @@ export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
   if (message === SYSTEM_RUN_ASSIGNMENT_CHANGED || message === WORKFLOW_ASSIGNMENTS_DISABLED ||
       message === TRIGGER_AUTO_RETIRED) return "assignment-changed";
   if (message === "Hook has been deleted or disabled.") return "trigger-gone";
-  if (message === WORKFLOW_BINDINGS_NEEDED) return "bindings-needed";
+  if (message === WORKFLOW_BINDINGS_NEEDED || message === WORKFLOW_BINDINGS_NOT_OWNERS ||
+      message === WORKFLOW_BINDINGS_UNATTRIBUTED) return "bindings-needed";
   return "runtime-error";
 }
 
@@ -755,6 +756,10 @@ type GatekeeperRecord = {
   // created before this was kept, and connections made otherwise, have none.
   connectedBy?: GatekeeperConnectedBy;
 
+  // Set at creation on a model connection (FAC-123): the User whose configured model it uses, so a
+  // duplicated workflow's requirement is filled only by its owner's own model. Absent on older ones.
+  modelOf?: string;
+
   // OBSOLETE: Before we had support for multiple gadgets per workspace, the binding name and
   // blueprint annotation information lived on the GatekeeperRecord. These properties continue
   // to be declared only to support migrating them away. The version 0 -> 1 migration copies
@@ -864,6 +869,9 @@ export type GadgetRecord = {
    * Kept for the gadget's life, so a connection removed later stops its runs again (`requireBound`).
    */
   requiredBindings?: WorkflowRequiredBinding[];
+
+  /** The User whose own connections alone fill `requiredBindings`: the duplicate's owner (FAC-123). */
+  requiredBindingsOwner?: string;
 
   /**
    * Present while the gadget is provisional: it was created within the given chat and follows
@@ -12803,22 +12811,31 @@ class OverseerImpl implements AgentHooks {
     }, this.definitionAudience, gadgetId => this.bindingsNeeded(gadgetId));
   }
 
+  #specOf = (target: WorkpieceId) => this.storage.gatekeepers.get(target)?.creationSpec;
+  // Whose account or model connection `target` uses (FAC-123), when recorded.
+  #madeByOf = (target: WorkpieceId) => {
+    let record = this.storage.gatekeepers.get(target);
+    return record?.connectedBy?.userId ?? record?.modelOf;
+  };
+
   // The connections gadget `gadgetId` still needs set up (FAC-123): none unless it is a duplicate's.
   bindingsNeeded(gadgetId: WorkpieceId): WorkflowRequiredBinding[] {
     let gadget = this.storage.gadgets.get(gadgetId);
-    return gadget?.type === "gadget" ? unmetBindings(gadget, target => this.storage.gatekeepers.get(target)?.creationSpec) : [];
+    return gadget?.type === "gadget" ? unmetBindings(gadget, this.#specOf, this.#madeByOf) : [];
   }
 
   /**
-   * Refuses with `WORKFLOW_BINDINGS_NEEDED` while the gadget bound hook `hookId` wakes needs a
-   * connection set up (FAC-123): at admission, at firing, as a run starts and before each of its
-   * writes. Synchronous, so a protected point can call it after its last await.
+   * Refuses while the gadget bound hook `hookId` wakes needs a connection set up (FAC-123), in the
+   * words that say why: `WORKFLOW_BINDINGS_NEEDED` (not set up), `WORKFLOW_BINDINGS_NOT_OWNERS` (set
+   * up from another person's connection) or `WORKFLOW_BINDINGS_UNATTRIBUTED` (from one that doesn't
+   * record whose it is). At admission, at firing, as a run starts and before each of its writes.
+   * Synchronous, so a protected point can call it after its last await.
    */
   requireHookBound(hookId: number): void {
     let hook = this.storage.boundHooks.get(hookId);
     let gadgetId = hook ? hook.gadgetId ?? this.defaultGadgetId : undefined;
     let gadget = gadgetId === undefined ? undefined : this.storage.gadgets.get(gadgetId);
-    requireBound(gadget?.type === "gadget" ? gadget : undefined, target => this.storage.gatekeepers.get(target)?.creationSpec);
+    requireBound(gadget?.type === "gadget" ? gadget : undefined, this.#specOf, this.#madeByOf);
   }
 
   /**
@@ -15053,6 +15070,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
           undefined, sourceGadget.output, commitId);
       if (required.length > 0) {
         gadget.requiredBindings = required;
+        // Only the duplicator's own connections fill them, by any route (FAC-123).
+        gadget.requiredBindingsOwner = this.clientUserId;
         this.impl.storage.gadgets.put(gadget);
       }
       return gadget.id;
@@ -15068,7 +15087,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let profile = await this.#getClientProfile();
     let store = this.impl.workflowDefinitionStore();
     let gadgetId = store.ownedGadget(profile.id, id);
-    let required = this.impl.getGadgetRecord(gadgetId).requiredBindings ?? [];
+    let gadget = this.impl.getGadgetRecord(gadgetId);
+    let required = gadget.requiredBindings ?? [];
+    // A duplicate made before its owner was recorded (#438 r1): `ownedGadget` has just proved the
+    // caller owns the definition, so their own connections are the ones that fill it from now on.
+    if (required.length > 0 && gadget.requiredBindingsOwner === undefined) {
+      gadget.requiredBindingsOwner = this.clientUserId;
+      this.impl.storage.gadgets.put(gadget);
+    }
     if (required.length === 0) throw new Error("This workflow has no connections to set up.");
     let checked = checkAssignments(required, bindings);
     if (checked.size === 0) throw new TypeError("Choose a connection to set up.");
@@ -16260,6 +16286,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let result = await this.impl.addGatekeeper(
         this.impl.ctx.exports.LanguageModelGatekeeper({props}), creationSpec,
         this.clientUserId, this.#mintedCapabilityKind(), isMockModel(chatMeta.aiModel!.config));
+    // Whose model it uses (FAC-123): a duplicate's model requirement is filled only by its owner's.
+    let modelConnection = this.impl.storage.gatekeepers.get(await result.getId());
+    if (modelConnection) {
+      modelConnection.modelOf = this.clientUserId;
+      this.impl.storage.gatekeepers.put(modelConnection);
+    }
     await this.recordConnectionCreated(result, "ai_model");
     return result;
   }
