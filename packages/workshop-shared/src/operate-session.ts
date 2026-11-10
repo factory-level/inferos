@@ -379,8 +379,35 @@ export type OperateEvent =
    */
   | { type: "companyChanged" };
 
-/** Who appended an event to a session. */
-export type OperateEventActor = "person" | "agent";
+/**
+ * Who appended an event to a session: the person, the operate agent, or a run the person asked for
+ * whose result the published page wires to a navigation (FAC-116, `workflow-run`).
+ */
+export type OperateEventActor = "person" | "agent" | "workflow-run";
+
+/**
+ * A navigation a requested run's settled result asks of its requester's page (FAC-116;
+ * UserDurableObject.applyRunNavigation), checked by the run's workspace against the page it read:
+ * the published console and revision open on it, the page's `pageSeq`, and the move (`showScreen`
+ * within the open view or `openView` of another). `invocationId` and `attachmentId` identify it, so
+ * it moves a page at most once.
+ */
+export type RunNavigationRequest = {
+  workspaceId: string;
+  consoleId: string;
+  revision: string;
+  pageSeq: number;
+  invocationId: string;
+  attachmentId: string;
+  move: Extract<OperateEvent, { type: "showScreen" | "openView" }>;
+};
+
+/**
+ * What became of a `RunNavigationRequest`: `shown`; `not-open` (no page was open: kept briefly in
+ * memory for a reconnect of the same session); `already` (this run moved this page before); or
+ * `refused` (the page moved, or shows another console, revision or a running flow).
+ */
+export type RunNavigationOutcome = "shown" | "not-open" | "already" | "refused";
 
 /** One entry of a session's event log. */
 export type OperateEventRecord = {

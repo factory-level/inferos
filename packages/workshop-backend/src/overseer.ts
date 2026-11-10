@@ -1,7 +1,7 @@
 import type { ActionApprovalCorrelation, OperateApprovalRequest, OperateApprovalSnapshot } from "@gadgets/workshop-shared/operate-approval";
 import { approvalCorrelation, approvalSnapshot, validateApprovalRequest } from "./operate-approval";
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
-import type { CanvasPage, CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
+import { canvasRunEffects, canvasRunEventsHeard, type CanvasPage, type CanvasPageOperation, type CanvasRunEvent } from "@gadgets/workshop-shared/canvas-model";
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
@@ -55,7 +55,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreenMove, consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -7163,6 +7163,94 @@ class OverseerImpl implements AgentHooks {
       result = { outcome: "succeeded" };
     }
     store.recordResult(deliveryId, { ...result, ...(kept !== undefined ? { report: kept } : {}) });
+    this.deliverRunToCanvas(deliveryId);
+  }
+
+  /** Published console `consoleId` and its screens' pages, as `deliverRunToCanvas` reads them (FAC-116). */
+  publishedConsoleForRun(consoleId: string): { saved: OperateConsole | null; page(screenId: string): CanvasPage | null } {
+    let consoles = this.#consoleStore();
+    return { saved: consoles.get(consoleId, "published"), page: screenId => consoles.page(consoleId, screenId, "published") };
+  }
+
+  /**
+   * Delivers requested run `deliveryId`'s first final result to its requester's page (FAC-116;
+   * inferos ADR 0012, proposed), at most once per invocation: only a `succeeded`, `failed` or
+   * `uncertain` result, and only while `delivery.canvas` is unset, which it sets to `pending` before
+   * anything else, so a result settled again (a later reconciliation, a write re-evaluated) is never
+   * delivered twice. Not awaited, like `announceConsoleRevision`.
+   *
+   * The page it reaches is the requester's own, showing this workspace's published console, with no
+   * flow running, on a screen whose page wires that result (`canvasRunEffects`) to a `navigate` the
+   * console shows (`consoleScreenMove`). Nothing wired there leaves the result in run history only
+   * (`canvas` cleared). Before the move the requester is re-checked (`requireRunRequester`: still
+   * on the trigger's control, the trigger enabled, the same company and executor) along with their
+   * role here (owner, or at least `use`), and the console's revision must be the one their page
+   * shows. Their user Durable Object then applies it only to an open page that hasn't moved
+   * (`applyRunNavigation`): `canvas` is `delivered` when it moved, `undelivered` otherwise.
+   */
+  deliverRunToCanvas(deliveryId: number): void {
+    let store = this.workflowDefinitionStore();
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    let outcome = delivery?.result?.outcome;
+    if (!delivery?.invocation || !delivery.run || delivery.delivery?.canvas !== undefined ||
+        (outcome !== "succeeded" && outcome !== "failed" && outcome !== "uncertain")) {
+      return;
+    }
+    store.setCanvasDelivery(deliveryId, "pending");
+    let { hookId, invocation } = delivery;
+    let event = `run-${outcome}` as CanvasRunEvent;
+    let workspaceId = this.ctx.id.toString();
+    let settle = (state: "delivered" | "undelivered" | undefined, reason: string) => {
+      store.setCanvasDelivery(deliveryId, state);
+      if (state === "undelivered") {
+        this.logger.info("a run's result didn't reach its requester's page", {
+          event: "workflow.run.canvas.undelivered", gadgetId: workspaceId, hookId, operation: reason,
+        });
+      }
+    };
+    void (async () => {
+      let user = this.users.get(this.users.idFromName(invocation.requestedBy));
+      let page = await user.getOperatePage();
+      let open = page.state.console;
+      if (!open || page.state.flow || open.source !== "published" || open.workspaceId !== workspaceId) {
+        return settle(undefined, "not-shown");
+      }
+      let consoles = this.publishedConsoleForRun(open.consoleId);
+      let saved = consoles.saved;
+      let view = saved?.views.find(candidate => candidate.id === open.viewId);
+      let screenId = open.screenId ?? (view?.type === "screen" ? view.screen : null);
+      let shown = saved && saved.revision === open.revision && screenId !== null ? consoles.page(screenId) : null;
+      let heard = shown ? canvasRunEventsHeard(shown).find(entry => entry.trigger === hookId && entry.event === event) : undefined;
+      let target = heard && shown ? canvasRunEffects(shown, hookId, event).find(effect => effect.kind === "navigate") : undefined;
+      if (!saved || !heard || !target) return settle(undefined, "not-wired");
+      let move = consoleScreenMove(saved, open.viewId, target.page);
+      if (!move) return settle("undelivered", "not-shown");
+      let check: RunRequesterCheck;
+      try {
+        check = await requireRunRequester(this, hookId, deliveryId);
+        let userId = this.users.idFromName(invocation.requestedBy).toString();
+        if (userId !== this.ownerId &&
+            !(await this.authorizeCollaborator(invocation.requestedBy, user, { requireRole: "use" }))) {
+          return settle("undelivered", "revoked");
+        }
+        check.revalidate();
+      } catch {
+        return settle("undelivered", "revoked");
+      }
+      if (this.publishedConsoleForRun(open.consoleId).saved?.revision !== open.revision) {
+        return settle("undelivered", "changed");
+      }
+      let answer = await user.applyRunNavigation({
+        workspaceId, consoleId: open.consoleId, revision: open.revision, pageSeq: page.seq,
+        invocationId: invocation.id, attachmentId: heard.attachmentId, move,
+      });
+      settle(answer === "shown" ? "delivered" : "undelivered", answer);
+    })().catch(error => {
+      this.logger.warn("failed to deliver a run's result to its requester's page", {
+        event: "workflow.run.canvas.failed", gadgetId: workspaceId, hookId, error,
+      });
+      store.setCanvasDelivery(deliveryId, "undelivered");
+    });
   }
 
   /**

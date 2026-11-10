@@ -597,6 +597,17 @@ export class WorkspaceWorkflowDefinitionStore {
     return mine.toSorted((a, b) => b.at.getTime() - a.at.getTime() || b.id - a.id).slice(0, limit);
   }
 
+  /**
+   * Record where delivery `deliveryId`'s result stands on the requester's page (FAC-116), or, with
+   * `state` undefined, that it has nowhere there to go (run history only).
+   */
+  setCanvasDelivery(deliveryId: number, state: "pending" | "delivered" | "undelivered" | undefined): void {
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    if (!delivery) return;
+    let { canvas: _, ...rest } = delivery.delivery ?? {};
+    this.storage.workflowDeliveries.put({ ...delivery, delivery: { ...rest, ...(state === undefined ? {} : { canvas: state }) } });
+  }
+
   /** Record delivery `deliveryId`'s result (FAC-114), with run history delivered; unchanged if it's the same. */
   recordResult(deliveryId: number, result: Omit<WorkflowRunResult, "settledAt">): void {
     let delivery = this.storage.workflowDeliveries.get(deliveryId);

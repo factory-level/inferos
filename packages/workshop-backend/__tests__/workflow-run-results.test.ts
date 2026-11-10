@@ -111,7 +111,10 @@ describe("a requested run's result, read by the person who asked (FAC-114)", () 
     // The report the run returned is kept for builders, with history delivered.
     let [stored] = await withImpl(name, impl => [...impl.storage.workflowDeliveries.list()]);
     expect(stored.result).toMatchObject({ outcome: "succeeded", report: { summary: "done" } });
-    expect(stored.delivery).toEqual({ history: "delivered" });
+    expect(stored.delivery.history).toBe("delivered");
+    // Delivery to the requester's page (FAC-116) is its own destination: their page shows nothing
+    // here, and a restart can cut it off while pending, which never reads as delivered.
+    expect(stored.delivery.canvas).not.toBe("delivered");
   });
 
   it("is waiting while a write it proposed waits, and succeeded once that write applies", async () => {
