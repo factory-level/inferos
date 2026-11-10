@@ -326,13 +326,18 @@ export class WorkspaceWorkflowDefinitionStore {
     let { stored, revision: currentPublished } = pin.mode === "follow-latest"
       ? this.#currentPublishedRevision(pin, hookGadgetId, headOf)
       : this.#explicitRevision(pin, hookGadgetId, headOf);
-    // An invocation records the publication current when the person was admitted. A newer
-    // publication may land while it waits for the delivery callback; run its admitted revision.
+    // Follow-latest invocations may wait while the gadget changes. Never record a run against an
+    // older commit while the trigger would execute the newer gadget head.
     let revision = invocation && pin.mode === "follow-latest"
       ? stored.revisions.find(candidate => candidate.revision === invocation.revision)
       : currentPublished;
     if (!revision || (invocation && pin.mode === "follow-latest" && revision.source.gadgetId !== hookGadgetId)) {
       throw new Error("That run request was for another revision of this workflow. Ask again.");
+    }
+    if (invocation && pin.mode === "follow-latest" &&
+        headOf(hookGadgetId!) !== revision.source.commitId) {
+      this.storage.workflowInvocations.delete(invocation.id);
+      throw new Error("The workflow changed; ask again");
     }
     if (pin.mode !== "follow-latest" && stored.published?.revision !== pin.revision &&
         !ownerCanBuild(stored.owner.id)) {
