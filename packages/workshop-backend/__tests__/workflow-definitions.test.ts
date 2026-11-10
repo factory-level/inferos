@@ -11,7 +11,7 @@ import {
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { WorkflowDefinitionDelivery } from "@gadgets/workshop-shared/workflow-definition";
 import { makeOverseerStorage } from "../src/overseer.js";
-import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
+import { MAX_WORKFLOW_OCCURRENCES_PER_TRIGGER, WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { openFakeOverseer } from "./fixtures.js";
 import { makeMockStorage } from "./mock-storage.js";
 
@@ -161,6 +161,111 @@ describe("triggers and runs", () => {
       .toMatchObject({ hookId: 11, definitionId: saved.id, revision: 1, commitId: commit(1) });
     store.fire(12, GADGET, headOf, everyoneBuilds);
     expect(store.deliveries(ADA.id, saved.id, "build").map(d => [d.hookId, d.revision])).toEqual([[11, 1], [12, 1]]);
+  });
+
+  it("deduplicates a schedule slot by trigger and planned UTC instant", () => {
+    let { store, headOf, storage } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+
+    const slot = 1_800_000_000_000;
+    expect(store.fire(11, GADGET, headOf, everyoneBuilds, undefined,
+      { kind: "schedule", scheduledTime: slot })).toMatchObject({ deliveryId: 0, hookId: 11 });
+    expect(store.fire(11, GADGET, headOf, everyoneBuilds, undefined,
+      { kind: "schedule", scheduledTime: slot })).toMatchObject({ deliveryId: 0, hookId: 11 });
+    expect(store.fire(11, GADGET, headOf, everyoneBuilds, undefined,
+      { kind: "schedule", scheduledTime: slot + 60_000 })).toMatchObject({ deliveryId: 1 });
+    expect(Array.from(storage.workflowDeliveries.list(), d => d.hookId)).toEqual([11, 11]);
+  });
+
+  it("deduplicates trusted event deliveries per trigger and provider identity", () => {
+    let { store, headOf, storage } = workspace();
+    let saved = store.save(ADA, { title: "Email intake", gadgetId: GADGET }, headOf);
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 21, GADGET, { definitionId: saved.id, revision: 1 });
+    store.pinTrigger(ADA.id, 22, GADGET, { definitionId: saved.id, revision: 1 });
+    const occurrence = { kind: "event" as const, provider: "cloudflare-email", deliveryId: "sha256:abc" };
+
+    store.fire(21, GADGET, headOf, everyoneBuilds, undefined, occurrence);
+    expect(store.fire(21, GADGET, headOf, everyoneBuilds, undefined, occurrence))
+      .toMatchObject({ deliveryId: 0, hookId: 21 });
+    // Same provider delivery is independent for another trigger; a distinct byte digest is distinct
+    // even when the email's sender-supplied Message-ID happens to match.
+    expect(store.fire(22, GADGET, headOf, everyoneBuilds, undefined, occurrence)).toMatchObject({ deliveryId: 1 });
+    expect(store.fire(21, GADGET, headOf, everyoneBuilds, undefined,
+      { ...occurrence, deliveryId: "sha256:different-bytes" })).toMatchObject({ deliveryId: 2 });
+    expect(Array.from(storage.workflowDeliveries.list())).toHaveLength(3);
+  });
+
+  it("gives separate manual presses separate server-minted occurrences", () => {
+    let { store, headOf, storage } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    store.fire(11, GADGET, headOf, everyoneBuilds);
+    store.fire(11, GADGET, headOf, everyoneBuilds);
+    expect(Array.from(storage.workflowDeliveries.list())).toHaveLength(2);
+    expect(Array.from(storage.workflowOccurrences.list())).toHaveLength(2);
+  });
+
+  it("sweeps expired tombstones in bounded expiry order and deduplicates by key", () => {
+    const now = Date.now();
+    let { store, storage, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    for (let index = 0; index < 101; index++) {
+      let key = `11:expired:${index}`;
+      let expiryKey = `${String(now - 1).padStart(16, "0")}:${key}`;
+      storage.workflowOccurrences.put({ key, hookId: 11, deliveryId: index, expiresAt: now - 1 });
+      storage.workflowOccurrenceExpiries.put({ key: expiryKey, occurrenceKey: key, hookId: 11 });
+    }
+    storage.workflowOccurrenceCounts.put({ hookId: 11, count: 101 });
+
+    const occurrence = { kind: "schedule" as const, scheduledTime: 1_800_000_000_000 };
+    let first = store.fire(11, GADGET, headOf, everyoneBuilds, undefined, occurrence)!;
+    expect(Array.from(storage.workflowOccurrences.list())).toHaveLength(2); // 100 swept, one expired, one new
+    expect(store.fire(11, GADGET, headOf, everyoneBuilds, undefined, occurrence))
+      .toMatchObject({ deliveryId: first.deliveryId });
+  });
+
+  it("refuses at the per-trigger dedupe cap without deleting live tombstones", () => {
+    let { store, storage, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    storage.workflowOccurrenceCounts.put({ hookId: 11, count: MAX_WORKFLOW_OCCURRENCES_PER_TRIGGER });
+    let existing = { key: "11:live", hookId: 11, deliveryId: 0, expiresAt: Date.now() + 60_000 };
+    storage.workflowOccurrences.put(existing);
+    storage.workflowOccurrenceExpiries.put({
+      key: `${String(existing.expiresAt).padStart(16, "0")}:${existing.key}`,
+      occurrenceKey: existing.key,
+      hookId: 11,
+    });
+
+    expect(() => store.fire(11, GADGET, headOf, everyoneBuilds, undefined,
+      { kind: "schedule", scheduledTime: 1_800_000_000_000 })).toThrow(/deduplication limit/);
+    expect(storage.workflowOccurrences.get(existing.key)).toEqual(existing);
+  });
+
+  it("resumes an admitted occurrence after a crash and queues it only once", () => {
+    let { store, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Scheduled", gadgetId: GADGET }, headOf);
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    const occurrence = { kind: "schedule" as const, scheduledTime: 1_800_000_000_000 };
+    let admitted = store.fire(11, GADGET, headOf, everyoneBuilds, undefined, occurrence)!;
+    let retried = store.fire(11, GADGET, headOf, everyoneBuilds, undefined, occurrence)!;
+    expect(retried.deliveryId).toBe(admitted.deliveryId);
+    store.queueRun(11, admitted.deliveryId, "onSchedule", [{ scheduledTime: occurrence.scheduledTime }]);
+    store.queueRun(11, retried.deliveryId, "onSchedule", [{ scheduledTime: occurrence.scheduledTime }]);
+    expect(store.queuedRuns()).toEqual([{
+      deliveryId: admitted.deliveryId,
+      hookId: 11,
+      method: "onSchedule",
+      args: [{ scheduledTime: occurrence.scheduledTime }],
+    }]);
   });
 
   it("keeps an explicit revision pin and requires an explicit move", () => {

@@ -17,8 +17,8 @@
 // bound counts due slots, not successful runs: a slot is consumed once it becomes due and takes a
 // `runId`, even if delivery then fails. Retries reuse that `runId` and do not consume another.
 //
-// Recurring schedules skip missed occurrences instead of replaying them. Callback failures may be
-// retried with the same `runId`, so callback work should be idempotent.
+// Recurring schedules skip missed occurrences by default. `missedRuns: "coalesce"` admits one run
+// at the latest missed slot after downtime. Callback failures may be retried with the same `runId`.
 
 /** Day-of-week token, RRULE-style: `SU` is Sunday through `SA` for Saturday. */
 export type Weekday = "SU" | "MO" | "TU" | "WE" | "TH" | "FR" | "SA";
@@ -120,6 +120,8 @@ export type NormalizedScheduleOccurrences =
 export interface RecurringScheduleOptions extends ScheduleOptions {
   /** Optional finite bound. Counted occurrences are due logical runs, including failed delivery. */
   occurrences?: ScheduleOccurrences;
+  /** Missed recurrence slots are skipped by default; coalesce admits one at the latest missed slot. */
+  missedRuns?: "skip" | "coalesce";
 }
 
 /** Canonical interval cadence returned by `list()`. */
@@ -198,6 +200,8 @@ export type ScheduleSummary = {
   cadence: ScheduleCadence;
   /** Finite recurrence bound, when configured. */
   occurrences?: NormalizedScheduleOccurrences;
+  /** How this recurrence handles missed slots. Defaults to `skip`. */
+  missedRuns?: "skip" | "coalesce";
   /** Due slots started so far; present for a bounded recurrence. */
   occurrenceCount?: number;
 } & (

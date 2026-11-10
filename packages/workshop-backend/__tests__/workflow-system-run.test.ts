@@ -313,7 +313,7 @@ describe("an assignment", () => {
 });
 
 /** An Overseer whose startHook fires HOOK from `store`, with a recording runAssignedDelivery. */
-function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled = true) {
+function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled = true, vendorId = "scheduler") {
   let takenInvocations = new Map<string, boolean>();
   let gadgetCallback = { onSchedule: vi.fn(async () => "gadget's own") };
   let runSpy = vi.fn(async (..._args: unknown[]) => "as the service account");
@@ -327,6 +327,8 @@ function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled
       env: {},
       takenInvocations,
       assertGatekeeperUsable: () => {},
+      // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
+      requireHookBound: () => {},
       // The operator who asks is a collaborator here (FAC-122's run right reads their role).
       getSharingManager: async () => ({ getEffectiveRole: (profileId: string) => (profileId === "operator" ? "use" : undefined) }),
       getOwnerProfileId: async () => ADA.id,
@@ -338,7 +340,7 @@ function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled
       queueWorkflowRun: (hookId: number, deliveryId: number, method: string | null, args: unknown[]) =>
         store.queueRun(hookId, deliveryId, method, args),
       storage: {
-        boundHooks: { get: () => ({ id: HOOK, enabled: true, vendorId: "scheduler", gatekeeperId: 1, gadgetId: GADGET, callback: gadgetCallback }) },
+        boundHooks: { get: () => ({ id: HOOK, enabled: true, vendorId, gatekeeperId: 1, gadgetId: GADGET, callback: gadgetCallback }) },
         gatekeepers: { get: () => undefined },
       },
     },
@@ -370,27 +372,29 @@ describe("startHook for a trigger with an assignment", () => {
     expect(store.queuedRuns()).toHaveLength(1);
   });
 
-  it("keeps a scheduled firing on the gadget's own callback, as before", async () => {
+  it("queues a scheduled workflow delivery instead of falling through to the live gadget callback", async () => {
     let { store } = pinnedStore();
     store.setAssignment(ADA, HOOK, INFEROPS);
     let { overseer, gadgetCallback, runSpy } = overseerFor(store);
     let { callback } = await overseer.startHook(HOOK);
-    await expect((callback as any).onSchedule({ runId: "s" })).resolves.toBe("gadget's own");
+    await expect((callback as any).onSchedule({ runId: "s" })).resolves.toBeUndefined();
     expect(runSpy).not.toHaveBeenCalled();
-    expect(gadgetCallback.onSchedule).toHaveBeenCalled();
+    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
+    expect(store.queuedRuns()).toHaveLength(1);
   });
 
   // FAC-104 (r1) and FAC-112: a run a person asked for, on the gadget's own bindings, re-checks the
   // person when the workspace starts it (workflow-run-execution.test.ts), so a person taken off the
   // control after asking runs nothing; the firing's call only queues it.
 
-  it("leaves a scheduled firing, which no person asked for, unaffected by the control", async () => {
+  it("queues an automated firing without consulting a person's invocation control", async () => {
     let { store } = pinnedStore();
     let { overseer, gadgetCallback } = overseerFor(store);
     let { callback } = await overseer.startHook(HOOK);
     store.setControl(ADA, HOOK, { label: "Run", invokers: ["someone-else"] });
-    await expect((callback as any).onSchedule({ runId: "s2" })).resolves.toBe("gadget's own");
-    expect(gadgetCallback.onSchedule).toHaveBeenCalled();
+    await expect((callback as any).onSchedule({ runId: "s2" })).resolves.toBeUndefined();
+    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
+    expect(store.queuedRuns()).toHaveLength(1);
   });
 
   it("queues an unassigned trigger's request for the gadget's own code, which the firing never calls", async () => {
@@ -402,6 +406,68 @@ describe("startHook for a trigger with an assignment", () => {
     expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
     let [queued] = store.queuedRuns();
     expect(store.deliveryRun(queued!.deliveryId)?.run?.executor).toEqual({ kind: "gadget_bindings" });
+  });
+});
+
+describe("trusted trigger occurrence envelopes", () => {
+  it("accepts schedule slots only from the scheduler and email identities only from email ingress", async () => {
+    let { store } = pinnedStore();
+    let scheduler = overseerFor(store, true, "scheduler").overseer;
+    await expect(scheduler.startHook(HOOK, {
+      occurrence: { kind: "schedule", scheduledTime: 1_800_000_000_000 },
+    })).resolves.toHaveProperty("callback");
+    await expect(scheduler.startHook(HOOK, {
+      occurrence: { kind: "event", provider: "cloudflare-email", deliveryId: "abc" },
+    })).rejects.toThrow("The event occurrence is invalid.");
+
+    let { store: emailStore } = pinnedStore();
+    let email = overseerFor(emailStore, true, "email").overseer;
+    await expect(email.startHook(HOOK, {
+      occurrence: { kind: "event", provider: "cloudflare-email", deliveryId: "abc" },
+    })).resolves.toHaveProperty("callback");
+    await expect(email.startHook(HOOK, {
+      occurrence: { kind: "schedule", scheduledTime: 1_800_000_000_000 },
+    })).rejects.toThrow("The scheduled occurrence is invalid.");
+
+    // A caller holding an unrelated gatekeeper hook cannot claim either trusted producer's
+    // occurrence identity. Manual calls omit the envelope and receive an overseer-minted id.
+    let { store: clientStore } = pinnedStore();
+    let client = overseerFor(clientStore, true, "grokbot").overseer;
+    await expect(client.startHook(HOOK, {
+      occurrence: { kind: "schedule", scheduledTime: 1_800_000_000_000 },
+    })).rejects.toThrow("The scheduled occurrence is invalid.");
+    await expect(client.startHook(HOOK, {
+      occurrence: { kind: "event", provider: "cloudflare-email", deliveryId: "client-chosen" },
+    })).rejects.toThrow("The event occurrence is invalid.");
+    let firstManual = await client.startHook(HOOK);
+    let secondManual = await client.startHook(HOOK);
+    expect("alreadyDelivered" in firstManual).toBe(false);
+    expect("alreadyDelivered" in secondManual).toBe(false);
+    if (!("callback" in firstManual) || !("callback" in secondManual)) {
+      throw new Error("Expected manual trigger callbacks.");
+    }
+    await (firstManual.callback as any).onSchedule({ runId: "manual-1" });
+    await (secondManual.callback as any).onSchedule({ runId: "manual-2" });
+    expect(clientStore.queuedRuns()).toHaveLength(2);
+  });
+
+  it("resumes only the same queued workflow when a verified scheduler occurrence is redelivered", async () => {
+    let { store } = pinnedStore();
+    let { overseer, gadgetCallback } = overseerFor(store, true, "scheduler");
+    const request = { occurrence: { kind: "schedule" as const, scheduledTime: 1_800_000_000_000 } };
+    let first = await overseer.startHook(HOOK, request);
+    let second = await overseer.startHook(HOOK, request);
+    expect("alreadyDelivered" in first).toBe(false);
+    expect("alreadyDelivered" in second).toBe(false);
+    if (!("callback" in first) || !("callback" in second)) throw new Error("Expected queued workflow callbacks.");
+    await (first.callback as any).onSchedule({ runId: "scheduler-run", scheduledTime: request.occurrence.scheduledTime });
+    await (second.callback as any).onSchedule({ runId: "scheduler-run", scheduledTime: request.occurrence.scheduledTime });
+    expect(store.queuedRuns()).toHaveLength(1);
+    expect(gadgetCallback.onSchedule).not.toHaveBeenCalled();
+    await expect(overseer.startHook(HOOK, {
+      invocationId: "not-an-admitted-invocation",
+      occurrence: request.occurrence,
+    } as any)).rejects.toThrow("A hook delivery cannot be both requested and externally triggered.");
   });
 });
 
@@ -475,6 +541,8 @@ async function assignmentSession(role: "build" | "use", holdsPublish: boolean, e
   let full = Object.assign(impl as object, {
     isSharedConfiguration: async () => true,
     assertGatekeeperUsable: () => {},
+    // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
+    requireHookBound: () => {},
     setTriggerAssignment(this: never, caller: typeof ADA, hookId: number, settings: { gatekeeperId: number } | null) {
       return setWorkflowTriggerAssignment(this, caller, hookId, settings);
     },
@@ -707,6 +775,8 @@ describe("retiring an assignment (#374 round 2)", () => {
     let full = Object.assign(impl as object, {
       isSharedConfiguration: async () => false,
       assertGatekeeperUsable: () => {},
+      // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
+      requireHookBound: () => {},
       retireTriggerAssignment(this: never, hookId: number) { retireTriggerAssignment(this, hookId); },
       users: {
         idFromString: (id: string) => id,

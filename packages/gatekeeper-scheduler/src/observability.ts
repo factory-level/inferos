@@ -12,6 +12,8 @@ export type SchedulerObservabilityFields = {
   batchSize: number;
   backlogCount: number;
   startHookRejectedCount: number;
+  refusalCode?: "workflow_occurrence_limit";
+  scheduledTime?: number;
   vendorId: string;
 };
 

@@ -36,7 +36,7 @@ import type {
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionRights, WorkflowDefinitionShare,
   WorkflowTriggerDefinitionRef,
-  WorkflowDefinitionSave, WorkflowInvocation, RequestedRun,
+  WorkflowDefinitionSave, WorkflowDefinitionDuplicate, WorkflowInvocation, RequestedRun,
 } from "./workflow-definition.js";
 import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
 import type { WidgetPlacementInput, WidgetPlacements } from "./widget-placements.js";
@@ -2926,6 +2926,27 @@ export interface Overseer extends RpcTarget {
     : Promise<WorkflowDefinitionShare[]>;
   /** Who the caller's own definition `id` is shared with by name, and how (FAC-122). Build only. */
   listWorkflowDefinitionShares(id: string): Promise<WorkflowDefinitionShare[]>;
+  /**
+   * Duplicate definition `input.sourceId` into a new definition of the caller's own (FAC-123), in
+   * this workspace: a fresh revision 1 of a new workflow gadget at the source revision's commit, so
+   * later changes to the source never reach it. The caller must be able to read the source; they get
+   * its published revision, or any revision when they may edit it. Nothing else is copied: no share,
+   * publication, trigger, assignment, run or connection. Each of the source gadget's connections
+   * becomes a required binding (`bindingsNeeded`), filled only from `input.bindings` (the caller's
+   * own accounts and models, checked as at install, InferOps' company included) or later with
+   * `rebindWorkflowDefinition`; until each is set up, its runs are refused
+   * (`WORKFLOW_BINDINGS_NEEDED`). A dynamic source (FAC-124) makes a dynamic duplicate with a fresh
+   * expiry unless `retain: true`; an expired one is refused. Build only; in a shared workspace it
+   * also takes the deployment's `build` authority.
+   */
+  duplicateWorkflowDefinition(input: WorkflowDefinitionDuplicate): Promise<WorkflowDefinition>;
+  /**
+   * Set up connections for the caller's own definition `id`'s required bindings (FAC-123), each from
+   * their own connected account or model, checked as at install; a binding already set up is
+   * replaced. All are checked before any is made. Owner only. Build only; in a shared workspace it
+   * also takes the deployment's `build` authority.
+   */
+  rebindWorkflowDefinition(id: string, bindings: Record<string, BlueprintBindingAssignment>): Promise<WorkflowDefinition>;
   /**
    * Pin bound hook `hookId` to one revision the caller may see (published, or their own saved one)
    * of a definition for the gadget the hook wakes, or clear its pin with null. A pinned hook fires

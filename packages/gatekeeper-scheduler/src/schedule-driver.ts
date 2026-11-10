@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import type { RpcStub, RpcTarget } from "cloudflare:workers";
 import { reportIssue } from "@gadgets/observability/error-reporting";
 import type { ApprovalQueue, HookInitiator } from "@gadgets/workshop-shared/gatekeeper";
+import { WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME } from "@gadgets/workshop-shared/workflow-definition";
 import {
   admitRun,
   beginDueRun,
@@ -52,7 +53,7 @@ type StoredCapabilities = {
 type HookResult = {
   callback: RpcStub<ScheduleHookTarget>;
   approvalQueue: RpcStub<ApprovalQueue>;
-};
+} | { alreadyDelivered: true };
 
 export type ScheduleActivation = ScheduleRegistration & {
   title: string;
@@ -207,6 +208,7 @@ export class ScheduleDriver extends DurableObject {
     using hookCall = capabilities.initiator.startHook({ invocationId });
     // @ts-expect-error Worker RPC's mapped return type wraps the already-stubbed hook result.
     const hookResult: HookResult = await hookCall;
+    if ("alreadyDelivered" in hookResult) return;
     const now = Date.now();
     await hookResult.approvalQueue.authorizeObservation({
       title: `Run scheduled task on request: ${stored.title}`,
@@ -227,6 +229,8 @@ export class ScheduleDriver extends DurableObject {
   async listWorkspace(workspaceId: string): Promise<ScheduleSummary[]> {
     if (this.#requireMetadata().revoked) return [];
     return this.#listSchedules(workspaceSchedulePrefix(workspaceId))
+      // Admission refusal details stay in the schedule record and logs; neither collaborator nor
+      // account-wide summaries include them.
       .map(([, schedule]) => toScheduleSummary(schedule))
       .toSorted(compareScheduleSummaries);
   }
@@ -443,19 +447,35 @@ export class ScheduleDriver extends DurableObject {
     let hookResult: HookResult | undefined;
     try {
       // @ts-expect-error Worker RPC promises are disposable even though the mapped type omits it.
-      using hookCall = capabilities.initiator.startHook();
+      using hookCall = capabilities.initiator.startHook({
+        occurrence: { kind: "schedule", scheduledTime: prepared.scheduledTime },
+      });
       try {
         // Await admission rather than pipeline: its rejection must skip this occurrence before the
         // callback attempt is counted or either returned capability is used.
         // @ts-expect-error Worker RPC's mapped return type wraps the already-stubbed hook result.
         hookResult = await hookCall;
-      } catch {
-        this.#rejectPending(prepared, Date.now());
+      } catch (error) {
+        const refusal = error instanceof Error && error.name === WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME
+          ? { code: "workflow_occurrence_limit" as const, scheduledTime: prepared.scheduledTime }
+          : undefined;
+        if (refusal) {
+          logger.info("scheduled run refused by workflow occurrence limit", {
+            event: "schedule.admission.refused",
+            refusalCode: refusal.code,
+            scheduledTime: refusal.scheduledTime,
+          });
+        }
+        this.#rejectPending(prepared, Date.now(), refusal);
         return true;
       }
 
       const admitted = this.#markAdmitted(prepared, Date.now());
       if (!admitted || !hookResult) return false;
+      if ("alreadyDelivered" in hookResult) {
+        this.#completePending(prepared, Date.now());
+        return false;
+      }
 
       const firing: ScheduledFiring = {
         scheduleId: prepared.scheduleId,
@@ -558,8 +578,12 @@ export class ScheduleDriver extends DurableObject {
     });
   }
 
-  #rejectPending(prepared: PreparedRun, rejectedAt: number): void {
-    this.#settle(prepared, undefined, (state) => rejectRun(state, prepared.runId, rejectedAt));
+  #rejectPending(
+    prepared: PreparedRun,
+    rejectedAt: number,
+    refusal?: { code: "workflow_occurrence_limit"; scheduledTime: number },
+  ): void {
+    this.#settle(prepared, undefined, (state) => rejectRun(state, prepared.runId, rejectedAt, refusal));
   }
 
   #failPending(
@@ -710,6 +734,7 @@ function toScheduleSummary(schedule: StoredSchedule): ScheduleSummary {
     description: schedule.description,
     cadence: toScheduleCadence(schedule.state.spec),
     occurrences: schedule.state.occurrences,
+    ...(schedule.state.spec.kind !== "once" ? { missedRuns: schedule.state.missedRuns ?? "skip" } : {}),
     occurrenceCount: schedule.state.occurrences ? schedule.state.occurrenceCount ?? 0 : undefined,
   };
   const state = schedule.state;

@@ -24,6 +24,58 @@ const oneShot: ScheduleRegistration = {
 };
 
 describe("schedule state", () => {
+  it("skips multiple missed slots by default and coalesces at the latest missed slot explicitly", () => {
+    const active = createSchedule(recurring, 0);
+    expect(beginDueRun(active, 240_000, "skip", 600_000)).toEqual({
+      ...recurring,
+      status: "active",
+      nextFire: 300_000,
+    });
+    expect(beginDueRun(createSchedule({ ...recurring, missedRuns: "coalesce" }, 0),
+      240_000, "coalesce", 600_000)).toMatchObject({
+      status: "pending",
+      stage: "admission",
+      runId: "coalesce",
+      scheduledTime: 240_000,
+      occurrenceCount: undefined,
+    });
+  });
+
+  it("coalesces only through an until cutoff even when the alarm is later", () => {
+    const bounded: ScheduleRegistration = {
+      ...recurring,
+      missedRuns: "coalesce",
+      occurrences: { until: 120_000 },
+    };
+    expect(beginDueRun(createSchedule(bounded, 0), 300_000, "late", 600_000)).toMatchObject({
+      status: "pending",
+      stage: "admission",
+      runId: "late",
+      scheduledTime: 120_000,
+      occurrenceCount: 1,
+    });
+  });
+
+  it("coalesces within the remaining count and completes after the final admitted slot", () => {
+    const bounded: ScheduleRegistration = {
+      ...recurring,
+      missedRuns: "coalesce",
+      occurrences: { count: 2 },
+    };
+    const oneRemaining = {
+      ...createSchedule(bounded, 0),
+      occurrenceCount: 1,
+    };
+    const finalSlot = beginDueRun(oneRemaining, 300_000, "last", 600_000);
+    expect(finalSlot).toMatchObject({
+      status: "pending",
+      scheduledTime: 300_000,
+      occurrenceCount: 2,
+    });
+    const completed = completeRun(admitRun(finalSlot, "last", 300_000, 600_000), "last", 300_000);
+    expect(completed).toMatchObject({ status: "completed", occurrenceCount: 2 });
+  });
+
   it("creates enabled state from the original phase and expires a past one-shot", () => {
     expect(createSchedule(recurring, 90_000)).toEqual({
       ...recurring,

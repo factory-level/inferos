@@ -5,16 +5,23 @@ import {
   WORKFLOW_DEFINITION_EXPIRED, WORKFLOW_INVOCATION_TTL_MS, dynamicDefinitionTtlMs, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
   type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery,
   type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunFailure, type WorkflowRunResult,
-  type WorkflowTriggerDefinitionRef, isLiveWorkflowDelivery,
+  type WorkflowTriggerDefinitionRef, isLiveWorkflowDelivery, WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME,
   type WorkflowRunRecord, MAX_WORKFLOW_DEFINITION_SHARES, parseWorkflowDefinitionRights,
   type WorkflowDefinitionRights, type WorkflowDefinitionShare,
+  type WorkflowDefinitionProvenance, type WorkflowRequiredBinding,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
+import type { HookOccurrence } from "@gadgets/workshop-shared/gatekeeper";
 
 /** A workflow definition as stored: every saved revision, whoever is looking. */
-export type StoredWorkflowDefinition = Omit<WorkflowDefinition, "revisions"> & {
+export type StoredWorkflowDefinition = Omit<WorkflowDefinition, "revisions" | "duplicatedFrom" | "bindingsNeeded"> & {
   revisions: WorkflowDefinitionRevision[];
+  /** A duplicate's source (FAC-123), in full; each viewer is shown only what they may see of it. */
+  duplicatedFrom?: { definitionId: string; revision: number; at: Date };
 };
+
+/** Which connections a workflow gadget still needs set up (FAC-123), for its definition's owner. */
+export type BindingsNeededOf = (gadgetId: WorkpieceId) => WorkflowRequiredBinding[];
 
 /** New trigger rows record their resolution mode; legacy rows without mode retain explicit pins. */
 export type StoredTriggerPin = { hookId: number; definitionId: string; revision: number; mode?: "pinned" | "follow-latest" };
@@ -50,6 +57,17 @@ const NO_RIGHTS: ViewerRights = { read: false, run: false, edit: false, shared: 
 
 /** A stored delivery, numbered so the oldest can be dropped. */
 export type StoredWorkflowDelivery = WorkflowDefinitionDelivery & { id: number };
+
+/** Dedupe tombstones survive delivery-history eviction for the configured occurrence window. */
+export type StoredWorkflowOccurrence = { key: string; hookId: number; deliveryId: number; expiresAt: number };
+/** Ordered expiry pointer, allowing bounded cleanup without scanning all occurrence keys. */
+export type StoredWorkflowOccurrenceExpiry = { key: string; occurrenceKey: string; hookId: number };
+/** Count is maintained transactionally with occurrence insertion and expiry. */
+export type StoredWorkflowOccurrenceCount = { hookId: number; count: number };
+const WORKFLOW_OCCURRENCE_TTL_MS = 7 * 24 * 60 * 60_000;
+/** A trigger refuses new firings at this limit; live-window dedupe is never silently discarded. */
+export const MAX_WORKFLOW_OCCURRENCES_PER_TRIGGER = 10_000;
+const WORKFLOW_OCCURRENCE_EXPIRY_SWEEP_LIMIT = 100;
 
 /**
  * A run a person asked for, queued in the workspace that executes it (FAC-112): the firing's one
@@ -116,12 +134,14 @@ const NOT_FOUND = "Workflow definition not found.";
 export class WorkspaceWorkflowDefinitionStore {
   constructor(private durableStorage: DurableObjectStorage,
       private storage: Pick<OverseerStorage,
-          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId" |
+          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "workflowOccurrences" |
+          "workflowOccurrenceExpiries" | "workflowOccurrenceCounts" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
           "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired" |
           "workflowRunQueue" | "workflowDefinitionShares">,
       private retention: DefinitionRetention = DEFAULT_RETENTION,
-      private audience: WorkflowDefinitionAudience = WORKSPACE_AUDIENCE) {}
+      private audience: WorkflowDefinitionAudience = WORKSPACE_AUDIENCE,
+      private bindingsNeededOf: BindingsNeededOf = () => []) {}
 
   // FAC-124: whether `stored` is available for new use at `now`: retained, not yet expired, or
   // scheduled (a trigger is pinned to it, which keeps it while the pin exists).
@@ -235,11 +255,112 @@ export class WorkspaceWorkflowDefinitionStore {
   #viewOf(stored: StoredWorkflowDefinition, viewer: string, role: CollaboratorRole | null): WorkflowDefinition | null {
     let rights = this.#rights(stored, viewer, role);
     let access = { read: rights.read, run: rights.run, edit: rights.edit };
-    let marks = { access, ...(rights.shared ? { sharedWithMe: true } : {}) };
-    if (rights.edit) return { ...stored, revisions: [...stored.revisions], ...marks };
+    let { duplicatedFrom, ...rest } = stored;
+    let marks = {
+      access, ...(rights.shared ? { sharedWithMe: true } : {}),
+      ...(duplicatedFrom ? { duplicatedFrom: this.#provenanceFor(duplicatedFrom, viewer, role) } : {}),
+      ...this.#bindingsNeededFor(stored, viewer),
+    };
+    if (rights.edit) return { ...rest, revisions: [...stored.revisions], ...marks };
     if (!rights.read || !stored.published) return null;
     let revision = stored.revisions.find(r => r.revision === stored.published!.revision);
-    return revision ? { ...stored, revisions: [revision], ...marks } : null;
+    return revision ? { ...rest, revisions: [revision], ...marks } : null;
+  }
+
+  // A duplicate's source as `viewer` may see it (FAC-123): its id and title only when the source is
+  // visible to them now, its revision only when that revision is too; otherwise just when. Read from
+  // the source's own rights, so it never says more than listing the source would.
+  #provenanceFor(from: NonNullable<StoredWorkflowDefinition["duplicatedFrom"]>, viewer: string,
+                 role: CollaboratorRole | null): WorkflowDefinitionProvenance {
+    let source = this.storage.workflowDefinitions.get(from.definitionId);
+    if (!source || !this.#available(source, this.retention.now())) return { at: from.at };
+    let rights = this.#rights(source, viewer, role);
+    let seen = rights.edit
+      ? source.revisions.map(r => r.revision)
+      : rights.read && source.published ? [source.published.revision] : [];
+    if (seen.length === 0) return { at: from.at };
+    return { at: from.at, definitionId: source.id, title: source.title,
+      ...(seen.includes(from.revision) ? { revision: from.revision } : {}) };
+  }
+
+  // The connections the owner still has to set up (FAC-123), from the latest revision's gadget;
+  // nothing for anyone else, and nothing once each is set up.
+  #bindingsNeededFor(stored: StoredWorkflowDefinition, viewer: string): { bindingsNeeded?: WorkflowRequiredBinding[] } {
+    if (stored.owner.id !== viewer) return {};
+    let latest = stored.revisions[stored.revisions.length - 1];
+    let needed = latest ? this.bindingsNeededOf(latest.source.gadgetId) : [];
+    return needed.length > 0 ? { bindingsNeeded: needed } : {};
+  }
+
+  /**
+   * The source of a duplicate `viewer` (role `role` here) asks for (FAC-123): definition `id` at
+   * `revision`, which must be one they may see (any of an editable one's, else its published one),
+   * and the published one (or the latest, when they may edit it) when absent. Refused as not found
+   * when the definition isn't visible to them, and as expired when it is but is past its expiry.
+   * Reads only: `duplicate` checks it again as it writes.
+   */
+  duplicateSource(viewer: string, id: string, revision: number | undefined, role: CollaboratorRole | null)
+      : { source: StoredWorkflowDefinition; revision: WorkflowDefinitionRevision } {
+    if (typeof id !== "string") throw new Error(NOT_FOUND);
+    if (revision !== undefined && !Number.isSafeInteger(revision)) throw new TypeError("A revision is a whole number.");
+    let stored = this.storage.workflowDefinitions.get(id);
+    let view = stored ? this.#viewOf(stored, viewer, role) : null;
+    if (!stored || !view) throw new Error(NOT_FOUND);
+    if (!this.#available(stored, this.retention.now())) throw new Error(WORKFLOW_DEFINITION_EXPIRED);
+    let chosen = revision === undefined
+      ? (view.access?.edit ? view.revisions[view.revisions.length - 1] : view.revisions.find(r => r.revision === stored.published?.revision))
+      : view.revisions.find(r => r.revision === revision);
+    if (!chosen) throw new Error("No such revision.");
+    return { source: stored, revision: chosen };
+  }
+
+  /**
+   * Duplicates `source` at `revision` (as `duplicateSource` chose, checked again here at this clock)
+   * into a new definition owned by `caller` (FAC-123): one revision 1, of the gadget `makeGadget`
+   * creates in this transaction at the same commit, with a record of where it came from. Nothing else
+   * of the source is copied: no share, publication, pin, control, assignment or delivery. A dynamic
+   * source makes a dynamic duplicate with a fresh expiry, unless `retain` is true.
+   */
+  duplicate(caller: AiChatAuthorInfo, chosen: { source: StoredWorkflowDefinition; revision: WorkflowDefinitionRevision },
+            input: { title: unknown; retain?: unknown }, role: CollaboratorRole | null,
+            makeGadget: (commitId: string) => WorkpieceId): WorkflowDefinition {
+    let title = parseWorkflowDefinitionTitle(input.title);
+    if (input.retain !== undefined && typeof input.retain !== "boolean") throw new TypeError("retain is true, false or absent.");
+    let dynamic = chosen.source.expiresAt !== undefined && input.retain !== true;
+    // Read before the transaction, as save does: a misconfigured TTL refuses only a dynamic copy.
+    let ttl = dynamic ? this.retention.dynamicTtlMs() : undefined;
+    let result = this.durableStorage.transactionSync(() => {
+      let now = new Date(this.retention.now());
+      let again = this.duplicateSource(caller.id, chosen.source.id, chosen.revision.revision, role);
+      this.#sweepAt(now.getTime());
+      if (Array.from(this.storage.workflowDefinitions.list({ limit: MAX_WORKSPACE_WORKFLOW_DEFINITIONS })).length
+          >= MAX_WORKSPACE_WORKFLOW_DEFINITIONS) {
+        throw new Error("Workspace workflow definition limit reached.");
+      }
+      let commitId = again.revision.source.commitId;
+      let gadgetId = makeGadget(commitId);
+      let created: StoredWorkflowDefinition = {
+        id: crypto.randomUUID(), title, owner: caller,
+        revisions: [{ revision: 1, source: { kind: "gadget", gadgetId, commitId }, savedAt: now }],
+        published: null,
+        duplicatedFrom: { definitionId: again.source.id, revision: again.revision.revision, at: now },
+        ...(ttl === undefined ? {} : { expiresAt: new Date(now.getTime() + ttl) }),
+      };
+      this.storage.workflowDefinitions.put(created);
+      return created;
+    });
+    this.#changed();
+    return this.#viewOf(result, caller.id, role)!;
+  }
+
+  /**
+   * `caller`'s own definition `id`, available now, and the gadget its latest revision names, for
+   * setting up its connections (FAC-123). The owner only: refused as not found to anyone else.
+   */
+  ownedGadget(caller: string, id: string): WorkpieceId {
+    let stored = this.#owned(caller, id);
+    if (!this.#available(stored, this.retention.now())) throw new Error(WORKFLOW_DEFINITION_EXPIRED);
+    return stored.revisions[stored.revisions.length - 1]!.source.gadgetId;
   }
 
   /**
@@ -386,7 +507,8 @@ export class WorkspaceWorkflowDefinitionStore {
       if (!stored.revisions.some(r => r.revision === revision)) throw new Error("No such revision.");
       let next = { ...stored, published: { revision, at: new Date(), by: caller } };
       this.storage.workflowDefinitions.put(next);
-      return next;
+      // As the caller may see it: a duplicate's source is shown only as far as they may see it (FAC-123).
+      return this.#viewOf(next, caller.id, role)!;
     });
   }
 
@@ -463,17 +585,25 @@ export class WorkspaceWorkflowDefinitionStore {
   fire(hookId: number, hookGadgetId: WorkpieceId | null,
        headOf: (gadgetId: WorkpieceId) => string | undefined,
        roleOf: (profileId: string) => CollaboratorRole | null,
-       invocationId?: string): (WorkflowDefinitionDelivery & { deliveryId: number }) | null {
+       invocationId?: string, occurrence?: HookOccurrence):
+       ({ alreadyDelivered: true } | (WorkflowDefinitionDelivery & { deliveryId: number })) | null {
     // A delivery a person asked for names an invocation minted here for this trigger, not yet run;
     // anything else starts nothing.
     let invocation = invocationId === undefined ? undefined : this.storage.workflowInvocations.get(invocationId);
     if (invocationId !== undefined && invocation?.hookId !== hookId) {
       throw new Error("That run request is unknown or already ran.");
     }
-    if (invocation && Date.now() - invocation.requestedAt.getTime() > WORKFLOW_INVOCATION_TTL_MS) {
+    if (invocation && this.retention.now() - invocation.requestedAt.getTime() > WORKFLOW_INVOCATION_TTL_MS) {
       this.storage.workflowInvocations.delete(invocation.id);
       throw new Error("That run request expired. Ask again.");
     }
+    const occurrenceKey = invocation
+      ? `manual:${hookId}:${invocation.id}`
+      : occurrence?.kind === "schedule"
+        ? `schedule:${hookId}:${occurrence.scheduledTime}`
+        : occurrence?.kind === "event"
+          ? `event:${hookId}:${encodeURIComponent(occurrence.provider)}:${encodeURIComponent(occurrence.deliveryId)}`
+          : `press:${hookId}:${crypto.randomUUID()}`;
     let pin = this.storage.workflowTriggerPins.get(hookId);
     if (!pin) {
       if (invocation) throw new Error(CANNOT_RUN);
@@ -515,9 +645,32 @@ export class WorkspaceWorkflowDefinitionStore {
       throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
     }
     return this.durableStorage.transactionSync(() => {
+      let now = this.retention.now();
+      this.#sweepExpiredOccurrences(now);
+      // Prefix the storage key with the trigger so a per-trigger limit is constant-time to check.
+      // The original occurrence identity remains in the suffix for readable durable evidence.
+      let storedKey = `${hookId}:${occurrenceKey}`;
+      let seenOccurrence = this.storage.workflowOccurrences.get(storedKey);
+      if (seenOccurrence && seenOccurrence.expiresAt > now) {
+        // A crash can happen after admission but before the caller queues the run. Return the
+        // original delivery while it is retained so the same verified occurrence can finish that
+        // admission. queueRun is idempotent once execution is recorded.
+        let existing = this.storage.workflowDeliveries.get(seenOccurrence.deliveryId);
+        if (existing) {
+          let { id: _, ...shown } = existing;
+          return { ...shown, deliveryId: existing.id };
+        }
+        return { alreadyDelivered: true as const };
+      }
+      if (seenOccurrence) this.#deleteOccurrence(seenOccurrence);
+      let occurrenceCount = this.storage.workflowOccurrenceCounts.get(hookId)?.count ?? 0;
+      if (occurrenceCount >= MAX_WORKFLOW_OCCURRENCES_PER_TRIGGER) {
+        let error = new Error("This trigger reached its occurrence deduplication limit. Retry after older occurrences expire.");
+        error.name = WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME;
+        throw error;
+      }
       let deliveries = Array.from(this.storage.workflowDeliveries.list()).toSorted((a, b) => a.id - b.id);
       if (deliveries.length >= MAX_WORKFLOW_DELIVERIES) {
-        let now = Date.now();
         let isLive = (candidate: StoredWorkflowDelivery) => isLiveWorkflowDelivery(candidate, now);
         let terminal = deliveries.find(candidate => !isLive(candidate));
         if (!terminal) {
@@ -550,9 +703,37 @@ export class WorkspaceWorkflowDefinitionStore {
       };
       if (invocation) this.storage.workflowInvocations.delete(invocation.id);
       this.storage.workflowDeliveries.put(delivery);
+      let expiresAt = now + WORKFLOW_OCCURRENCE_TTL_MS;
+      this.storage.workflowOccurrences.put({
+        key: storedKey, hookId, deliveryId: id, expiresAt,
+      });
+      this.storage.workflowOccurrenceExpiries.put({
+        key: `${String(expiresAt).padStart(16, "0")}:${storedKey}`, occurrenceKey: storedKey, hookId,
+      });
+      this.storage.workflowOccurrenceCounts.put({ hookId, count: occurrenceCount + 1 });
       let { id: _, ...shown } = delivery;
       return { ...shown, deliveryId: id };
     });
+  }
+
+  /** Remove at most 100 due tombstones, in expiry order, on each admission. */
+  #sweepExpiredOccurrences(now: number): void {
+    let before = `${String(now + 1).padStart(16, "0")}:`;
+    for (let expiry of this.storage.workflowOccurrenceExpiries.list({ end: before, limit: WORKFLOW_OCCURRENCE_EXPIRY_SWEEP_LIMIT })) {
+      this.#deleteOccurrenceKey(expiry.occurrenceKey, expiry.hookId, expiry.key);
+    }
+  }
+
+  #deleteOccurrence(occurrence: StoredWorkflowOccurrence): void {
+    let expiryKey = `${String(occurrence.expiresAt).padStart(16, "0")}:${occurrence.key}`;
+    this.#deleteOccurrenceKey(occurrence.key, occurrence.hookId, expiryKey);
+  }
+
+  #deleteOccurrenceKey(occurrenceKey: string, hookId: number, expiryKey: string): void {
+    if (!this.storage.workflowOccurrences.delete(occurrenceKey)) return;
+    this.storage.workflowOccurrenceExpiries.delete(expiryKey);
+    let count = this.storage.workflowOccurrenceCounts.get(hookId)?.count ?? 0;
+    this.storage.workflowOccurrenceCounts.put({ hookId, count: Math.max(0, count - 1) });
   }
 
   /**
@@ -851,15 +1032,16 @@ export class WorkspaceWorkflowDefinitionStore {
   }
 
   /**
-   * Queue the run delivery `deliveryId` admitted for a person (FAC-112), with the firing's one call:
-   * recorded together with its `execution` (`queued`) in one step, so the run is queued exactly when
-   * its record says so. Refuses a delivery no person asked for, a run already queued or ended
-   * (`WORKFLOW_RUN_ALREADY_STARTED`), and arguments storage can't hold (a function or a stub).
+   * Queue an admitted workflow delivery with the firing's one call: recorded together with its
+   * `execution` (`queued`) in one step. For a verified external occurrence, retrying the same
+   * delivery after a crash is a no-op once queued; a person-requested delivery retains the
+   * single-use refusal. Arguments storage cannot hold a function or stub.
    */
   queueRun(hookId: number, deliveryId: number, method: string | null, args: unknown[]): void {
     let delivery = this.storage.workflowDeliveries.get(deliveryId);
-    if (!delivery?.invocation || !delivery.run || delivery.hookId !== hookId) throw new Error(CANNOT_RUN);
+    if (!delivery?.run || delivery.hookId !== hookId) throw new Error(CANNOT_RUN);
     if (delivery.execution || this.storage.workflowRunQueue.get(deliveryId)) {
+      if (!delivery.invocation) return;
       throw new Error(WORKFLOW_RUN_ALREADY_STARTED);
     }
     try {

@@ -1,5 +1,5 @@
 import type { ActionOutcome } from "./action-outcome.js";
-import type { AiChatAuthorInfo, WorkpieceId } from "./api.js";
+import type { AiChatAuthorInfo, BlueprintBindingAssignment, WorkpieceId } from "./api.js";
 
 // A workflow definition: the reusable description of a workflow, stored in one workspace and
 // owned by the person who saved it (inferops docs/human/architecture/workflows.md). Saving keeps a
@@ -50,6 +50,9 @@ export function dynamicDefinitionTtlMs(setting: string | undefined): number {
 
 /** Most delivery records one workspace keeps; the oldest is dropped past it. */
 export const MAX_WORKFLOW_DELIVERIES = 1000;
+
+/** Stable error name for a trigger refused because its occurrence tombstones are at capacity. */
+export const WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME = "WorkflowOccurrenceLimitError";
 
 /** What a revision runs: a workflow gadget of the workspace at one commit of its code. */
 export type WorkflowDefinitionSource = {
@@ -103,6 +106,52 @@ export type WorkflowDefinition = {
    * use, unless saved first or kept by a trigger pinned to it. Saving removes it.
    */
   expiresAt?: Date;
+  /**
+   * Present on a duplicate (FAC-123): the definition and revision it was copied from, and when. A
+   * record only: it grants nothing, and nothing of the source follows it. The source's id, title and
+   * revision are shown only to a viewer who can see that source (and that revision); anyone else
+   * sees just `at`, "duplicated from a workflow".
+   */
+  duplicatedFrom?: WorkflowDefinitionProvenance;
+  /**
+   * For the owner only (FAC-123): the connections this definition's workflow gadget still needs set
+   * up before it can run, by binding name. A duplicate starts with all of them; empty or absent once
+   * each is bound. `rebindWorkflowDefinition` sets them up.
+   */
+  bindingsNeeded?: WorkflowRequiredBinding[];
+};
+
+/**
+ * Where a duplicate came from (FAC-123), as one viewer may see it: `definitionId` and `title` only
+ * when they can see the source, `revision` only when they can see that revision too.
+ */
+export type WorkflowDefinitionProvenance = { at: Date; definitionId?: string; title?: string; revision?: number };
+
+/**
+ * A connection a duplicated workflow needs before it can run (FAC-123): the binding name its code
+ * uses, and what may fill it. A gatekeeper binding needs a connection of the same vendor and resource
+ * type, made from the person's own connected account; a model binding needs one of their own models.
+ * Never the source's connection, account or resource.
+ */
+export type WorkflowRequiredBinding = { name: string; title?: string } & (
+  | { type: "gatekeeper"; vendorId: string; typeUrlPattern: string }
+  | { type: "aiModel" });
+
+/** Refused at a run's start and at each of its writes while a required connection isn't set up (FAC-123). */
+export const WORKFLOW_BINDINGS_NEEDED = "This workflow needs its connections set up before it can run.";
+
+/**
+ * Duplicating a definition (FAC-123): which one, which of its revisions (the published one unless
+ * the caller may edit it), the copy's title, connections for its required bindings (each from the
+ * caller's own accounts or models; any left out stay to set up), and `retain` as for
+ * `WorkflowDefinitionSave` (a dynamic source makes a dynamic duplicate unless `retain: true`).
+ */
+export type WorkflowDefinitionDuplicate = {
+  sourceId: string;
+  revision?: number;
+  title: string;
+  bindings?: Record<string, BlueprintBindingAssignment>;
+  retain?: boolean;
 };
 
 /**
@@ -313,10 +362,11 @@ export type WorkflowRunExecution = {
  * - `requester-revoked`: the person who asked may no longer run it;
  * - `assignment-changed`: the trigger's assignment changed, ended or is off;
  * - `trigger-gone`: the trigger was disabled or deleted;
+ * - `bindings-needed`: a connection its workflow needs isn't set up (FAC-123);
  * - `runtime-error`: anything else the run threw.
  */
 export type WorkflowRunFailure =
-  "requester-revoked" | "assignment-changed" | "trigger-gone" | "runtime-error";
+  "requester-revoked" | "assignment-changed" | "trigger-gone" | "bindings-needed" | "runtime-error";
 
 /**
  * Who asked for a run (FAC-111, inferops ADR 0011's requester): the person whose control press

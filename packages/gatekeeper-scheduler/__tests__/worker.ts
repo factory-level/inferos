@@ -12,11 +12,12 @@ type TestExports = {
   SchedulerScopeTestFacet: DurableObjectClass<SchedulerScopeTestFacet>;
 };
 
-type TestMode = "success" | "start-reject" | "authorization-reject" | "callback-reject";
+type TestMode = "success" | "start-reject" | "occurrence-cap" | "authorization-reject" | "callback-reject";
 type BlockPoint = "start" | "authorization" | "callback";
 
 let mode: TestMode = "success";
 let events: string[] = [];
+let occurrences: Array<{ kind: "schedule"; scheduledTime: number }> = [];
 let callbackScheduleIds: string[] = [];
 let firings: object[] = [];
 let activeCallbacks = 0;
@@ -151,12 +152,18 @@ class TestCallback extends RpcTarget {
 
 /** Test-only persistent hook initiator. */
 export class TestHooks extends WorkerEntrypoint {
-  async startHook(request?: { invocationId: string }): Promise<{ callback: TestCallback; approvalQueue: TestApprovalQueue }> {
+  async startHook(request?: { invocationId: string } | { occurrence: { kind: "schedule"; scheduledTime: number } }): Promise<{ callback: TestCallback; approvalQueue: TestApprovalQueue }> {
     events.push("start");
-    if (request) events.push(`request:${request.invocationId}`);
+    if (request && "invocationId" in request) events.push(`request:${request.invocationId}`);
+    if (request && "occurrence" in request) occurrences.push(request.occurrence);
     mark("start");
     await pauseIfBlocked("start");
     if (mode === "start-reject") throw new Error("opaque admission rejection");
+    if (mode === "occurrence-cap") {
+      const error = new Error("This trigger reached its occurrence deduplication limit.");
+      error.name = "WorkflowOccurrenceLimitError";
+      throw error;
+    }
     const callback = new TestCallback();
     const approvalQueue = new TestApprovalQueue();
     this.ctx.waitUntil(holdSessionUntilDisposed([callback.disposed, approvalQueue.disposed]));
@@ -209,6 +216,7 @@ export class TestHooks extends WorkerEntrypoint {
   read() {
     return {
       events: [...events],
+      occurrences: [...occurrences],
       callbackScheduleIds: [...callbackScheduleIds],
       firings: [...firings],
       maxActiveCallbacks,
@@ -224,6 +232,7 @@ export class TestHooks extends WorkerEntrypoint {
     timeline = [];
     mode = "success";
     events = [];
+    occurrences = [];
     callbackScheduleIds = [];
     firings = [];
     activeCallbacks = 0;

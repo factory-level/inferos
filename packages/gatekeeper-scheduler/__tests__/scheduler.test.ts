@@ -79,6 +79,7 @@ describe("ScheduleSessionImpl", () => {
       workspaceId: "workspace-a",
       scheduleId: "schedule-a",
       spec: { kind: "interval", everyMs: 60_000, anchorMs: 1_000 },
+      missedRuns: "skip",
       title: "Heartbeat",
       description: "Run the heartbeat callback.",
     });
