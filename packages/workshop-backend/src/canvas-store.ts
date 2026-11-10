@@ -1,6 +1,6 @@
 import type { WorkspaceSettings } from "@gadgets/workshop-shared/workspace-settings";
 import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type CanvasContent, type CanvasDefinition, type CanvasOperation } from "@gadgets/workshop-shared/canvas";
-import { applyCanvasPageOperations, canvasDefinitionFromPage, canvasDefinitionProjection, canvasPageFromDefinition, parseCanvasPage, parseCanvasWorkspacePages, type CanvasPage, type CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
+import { applyCanvasPageOperations, canvasDefinitionFromPage, canvasDefinitionProjection, canvasPageFromDefinition, parseCanvasPage, parseCanvasWorkspacePages, type CanvasAttachment, type CanvasPage, type CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
 import { readCanvasCatalog } from "./canvas-catalog";
 import type { OverseerStorage } from "./overseer";
 
@@ -9,7 +9,7 @@ import type { OverseerStorage } from "./overseer";
  * revision when this was saved: if the row has moved, code without pages edited it, and the row wins.
  */
 export interface StoredCanvasPage {
-  /** The nested page, without its settings (see `settings`). */
+  /** The nested page, without its settings or prompts (see `settings` and `prompts`). */
   page: CanvasPage;
   /** The revision of the `canvases` row this page replaces while the two agree. */
   basedOnRevision: string;
@@ -19,20 +19,81 @@ export interface StoredCanvasPage {
    * and leaves the overrides inert. Absent when the page overrides nothing.
    */
   settings?: WorkspaceSettings;
+  /**
+   * The page's `insert-prompt` attachments (FAC-98), kept beside the page rather than in it, so a
+   * reader from before that effect, which refuses an effect kind it doesn't know, still reads the
+   * page and never fires them. Absent when the page has none.
+   */
+  prompts?: StoredPagePrompt[];
 }
 
 /**
- * A page split for storage (FAC-95 follow-up): the page as a reader before page settings takes
- * it, and its settings to keep beside it. `joinPageSettings` puts them back.
+ * One `insert-prompt` attachment kept beside its page (FAC-98): the page or node holding it
+ * (`owner`, its id), its position among that owner's attachments, and the attachment itself.
  */
-export function splitPageSettings(page: CanvasPage): { page: CanvasPage; settings?: WorkspaceSettings } {
-  const { settings, ...rest } = page;
-  return settings ? { page: rest, settings } : { page: rest };
+export interface StoredPagePrompt {
+  /** The id of the page or node whose attachments held it. */
+  owner: string;
+  /** Its index in that owner's attachments, before any were taken out. */
+  index: number;
+  /** The attachment, as the page held it. */
+  attachment: CanvasAttachment;
 }
 
-/** A stored page with the settings kept beside it, parsed back into one page. */
-export function joinPageSettings(page: unknown, settings: WorkspaceSettings | undefined): CanvasPage {
-  return parseCanvasPage(settings ? { ...(page as object), settings } : page);
+/** A page as storage keeps it: what an earlier reader parses, and what is kept beside it. */
+export interface SplitStoredPage {
+  /** The page without its settings or its prompts. */
+  page: CanvasPage;
+  /** Its settings overrides (FAC-95), when it has any. */
+  settings?: WorkspaceSettings;
+  /** Its `insert-prompt` attachments (FAC-98), when it has any. */
+  prompts?: StoredPagePrompt[];
+}
+
+/**
+ * A page split for storage, so a reader from before page settings (FAC-95 follow-up) or before
+ * `insert-prompt` (FAC-98) still parses it and leaves what it doesn't know inert: the settings and
+ * the prompt attachments go beside the page. `joinStoredPage` puts them back.
+ */
+export function splitStoredPage(page: CanvasPage): SplitStoredPage {
+  const { settings, ...rest } = page;
+  const prompts: StoredPagePrompt[] = [];
+  const keep = (owner: string, attachments: CanvasAttachment[]) => attachments.filter((attachment, index) => {
+    if (attachment.effect.kind !== "insert-prompt") return true;
+    prompts.push({ owner, index, attachment });
+    return false;
+  });
+  const stripped = { ...rest, attachments: keep(page.id, page.attachments),
+    nodes: page.nodes.map(node => ({ ...node, attachments: keep(node.id, node.attachments) })) } as CanvasPage;
+  return { page: stripped, ...(settings ? { settings } : {}), ...(prompts.length > 0 ? { prompts } : {}) };
+}
+
+/**
+ * A stored page with its settings and prompts put back, parsed into one page. Each prompt returns
+ * to its owner at its index; one whose owner the page no longer holds throws, as a corrupt record.
+ */
+export function joinStoredPage(page: unknown, settings: WorkspaceSettings | undefined, prompts?: readonly StoredPagePrompt[]): CanvasPage {
+  let joined = settings ? { ...(page as object), settings } : page;
+  if (prompts && prompts.length > 0) joined = withPrompts(joined as Record<string, unknown>, prompts);
+  return parseCanvasPage(joined);
+}
+
+// `page` with each prompt back among its owner's attachments, in ascending index order so each lands
+// where it was. The stored page is untrusted shape, so only what's there is copied.
+function withPrompts(page: Record<string, unknown>, prompts: readonly StoredPagePrompt[]): Record<string, unknown> {
+  const restore = (owner: unknown, attachments: unknown) => {
+    const list = Array.isArray(attachments) ? [...attachments] : [];
+    for (const prompt of prompts.filter(item => item.owner === owner).sort((a, b) => a.index - b.index)) {
+      list.splice(prompt.index, 0, prompt.attachment);
+    }
+    return list;
+  };
+  const nodes = Array.isArray(page.nodes) ? page.nodes as Record<string, unknown>[] : [];
+  const owners = new Set([page.id, ...nodes.map(node => node.id)]);
+  const lost = prompts.find(prompt => !owners.has(prompt.owner));
+  if (lost) throw new Error(`A stored prompt names ${lost.owner}, which its page doesn't hold`);
+  return { ...page, attachments: restore(page.id, page.attachments),
+    nodes: nodes.map(node => ({ ...node, attachments: restore(node.id, node.attachments) })) };
 }
 
 /**
@@ -61,7 +122,7 @@ export function currentPage(storage: Pick<OverseerStorage, "canvasPages">, row: 
 /** The nested page that currently replaces `row`, if any: one based on the row's revision. */
 export function nestedPage(storage: Pick<OverseerStorage, "canvasPages">, row: Pick<CanvasDefinition, "id" | "revision">): CanvasPage | null {
   const stored = storage.canvasPages.get(row.id);
-  return stored?.basedOnRevision === row.revision ? joinPageSettings(stored.page, stored.settings) : null;
+  return stored?.basedOnRevision === row.revision ? joinStoredPage(stored.page, stored.settings, stored.prompts) : null;
 }
 
 /**
@@ -208,7 +269,7 @@ export class WorkspaceCanvasStore {
       this.storage.canvases.put(definition);
       this.storage.canvasPages.delete(page.id);
     } else {
-      this.storage.canvasPages.put({ ...splitPageSettings(updated), basedOnRevision: row.revision });
+      this.storage.canvasPages.put({ ...splitStoredPage(updated), basedOnRevision: row.revision });
     }
     return updated;
   }

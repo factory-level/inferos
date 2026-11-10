@@ -175,14 +175,12 @@ describe("a run's result at publication (FAC-116)", () => {
   });
 });
 
-// FAC-98: a widget's own event may put a prompt in the person's chat, as a draft or sent as them; a
-// run's result can't put one there yet (only its navigation is delivered, FAC-116), so publication
-// refuses `insert-prompt` reached from a run's result, `submit` or not, publishing nothing.
+// FAC-98: a widget's own event may put a draft prompt in the person's chat; a run's result can't put
+// one there yet (only its navigation is delivered, FAC-116), so publication refuses `insert-prompt`
+// reached from a run's result, publishing nothing.
 describe("a prompt inserted into the person's chat at publication (FAC-98)", () => {
-  it.for([
-    ["a draft", { kind: "insert-prompt", text: "Summarise this intake" }],
-    ["a submitted prompt", { kind: "insert-prompt", text: "File the intake", submit: true }],
-  ] as const)("publishes %s on a widget's declared event", ([, effect]) => {
+  it("publishes a draft prompt on a widget's declared event", () => {
+    let effect = { kind: "insert-prompt", text: "Summarise this intake" } as const;
     let t = setUp("stateful");
     wire(t.storage, "edit", false, effect);
     let published = publish(t).run();
@@ -190,10 +188,8 @@ describe("a prompt inserted into the person's chat at publication (FAC-98)", () 
     expect(widget).toMatchObject({ attachments: [{ id: "next", on: "edit", effect }] });
   });
 
-  it.for([
-    ["a draft", { kind: "insert-prompt", text: "Summarise the run" }],
-    ["a submitted prompt", { kind: "insert-prompt", text: "Retry the run", submit: true }],
-  ] as const)("refuses %s from a run's result, publishing nothing", ([, effect]) => {
+  it("refuses a prompt from a run's result, publishing nothing", () => {
+    let effect = { kind: "insert-prompt", text: "Summarise the run" } as const;
     let t = setUp("plain");
     hook(t.storage, 11, 1);
     wire(t.storage, canvasRunEvent("run-failed", 11), false, effect);

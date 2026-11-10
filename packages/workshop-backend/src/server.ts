@@ -1062,8 +1062,8 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   // navigated for an unwired event, a widget the page doesn't place, a console not open at that
   // revision, a running flow (it moves by its own routes, FAC-87) or a page that can't be read; the
   // widget's transition has already happened and stands. FAC-98: the first wired `insert-prompt`
-  // on that same page is returned as `prompt`, to this session alone and written nowhere, for the
-  // person's own chat to draft or send as them. Nothing else runs: publication refuses a widget
+  // on that same page is returned as `prompt`, to this session alone and written nowhere, as a
+  // draft for the person's own composer; nothing is sent. Nothing else runs: publication refuses a widget
   // event that leads to a requested action (`publishedPages`), so none grants authority.
   async #wiredEffects(ref: OperateWidgetRef, event: string): Promise<{ navigation?: WidgetNavigation; prompt?: WidgetPrompt }> {
     let page = await this.user().getOperatePage();
@@ -1086,7 +1086,7 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     if (!saved || !shown) return {};
     let effects = canvasPageEffects(shown, `gadget:${ref.gadgetId}`, event);
     let wired = effects.find(effect => effect.kind === "insert-prompt");
-    let prompt = wired ? { prompt: { text: wired.text, submit: wired.submit === true } } : {};
+    let prompt = wired ? { prompt: { text: wired.text } } : {};
     let target = effects.find(effect => effect.kind === "navigate");
     if (!target) return prompt;
     let screenId = target.page;

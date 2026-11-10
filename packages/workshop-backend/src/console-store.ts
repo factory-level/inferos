@@ -6,7 +6,7 @@ import {
   canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasRunEffects, canvasRunEventsHeard,
   canvasWidgetEventsHeard, type CanvasPage,
 } from "@gadgets/workshop-shared/canvas-model";
-import { joinPageSettings, nestedPage, readCanvasDefinition, splitPageSettings } from "./canvas-store";
+import { joinStoredPage, nestedPage, readCanvasDefinition, splitStoredPage, type StoredPagePrompt } from "./canvas-store";
 import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
@@ -366,12 +366,18 @@ export type ConsoleScreenSnapshot = {
    * from before page settings still reads the snapshot. Absent when the page overrides nothing.
    */
   pageSettings?: WorkspaceSettings;
+  /**
+   * That page's `insert-prompt` attachments (FAC-98), kept beside `page` rather than in it, so a
+   * reader from before that effect still reads the snapshot and never fires them. Absent when it has none.
+   */
+  pagePrompts?: StoredPagePrompt[];
 };
 
-// A frozen page as its snapshot stores it: the page without its settings, and the settings beside it.
-function frozenPageRecord(page: CanvasPage): Pick<ConsoleScreenSnapshot, "page" | "pageSettings"> {
-  const split = splitPageSettings(page);
-  return { page: split.page, ...(split.settings ? { pageSettings: split.settings } : {}) };
+// A frozen page as its snapshot stores it: the page without its settings or prompts, and those beside it.
+function frozenPageRecord(page: CanvasPage): Pick<ConsoleScreenSnapshot, "page" | "pageSettings" | "pagePrompts"> {
+  const split = splitStoredPage(page);
+  return { page: split.page, ...(split.settings ? { pageSettings: split.settings } : {}),
+    ...(split.prompts ? { pagePrompts: split.prompts } : {}) };
 }
 
 /** The storage key of one published console screen. Ids never contain "/". */
@@ -864,7 +870,7 @@ export class WorkspaceConsoleStore {
     }
     let snapshot = this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId));
     if (!snapshot) return null;
-    return snapshot.page ? joinPageSettings(snapshot.page, snapshot.pageSettings) : canvasPageFromDefinition(snapshot.screen);
+    return snapshot.page ? joinStoredPage(snapshot.page, snapshot.pageSettings, snapshot.pagePrompts) : canvasPageFromDefinition(snapshot.screen);
   }
 
   /**

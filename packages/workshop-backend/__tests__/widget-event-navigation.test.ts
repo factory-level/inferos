@@ -114,8 +114,7 @@ describe("a widget event wired to navigate (FAC-94)", () => {
 // FAC-98: a widget event wired to `insert-prompt` returns the prompt to the transitioning session
 // alone, for its own person's chat. Nothing is written to the operate page or its log, so no other
 // session or person receives it, and the prompt carries no target of its own.
-const prompt = (id: string, text: string, submit?: true) =>
-  ({ id, version: 1, on: "submit", effect: { kind: "insert-prompt", text, ...(submit ? { submit } : {}) } });
+const prompt = (id: string, text: string) => ({ id, version: 1, on: "submit", effect: { kind: "insert-prompt", text } });
 
 describe("a widget event wired to insert a prompt (FAC-98)", () => {
   it("returns a draft prompt to the transitioning session, writing nothing to the page or its log", async () => {
@@ -123,20 +122,20 @@ describe("a widget event wired to insert a prompt (FAC-98)", () => {
     let page = await user.getOperatePage();
     let events = await user.listOperateEvents(0, 50);
     let snapshot = await impl.transitionWidget(REF, "submit", 0);
-    expect(snapshot).toMatchObject({ state: "submitted", prompt: { text: "Summarise this intake", submit: false } });
+    expect(snapshot).toMatchObject({ state: "submitted", prompt: { text: "Summarise this intake" } });
     expect(await user.getOperatePage()).toEqual(page);
     expect(await user.listOperateEvents(0, 50)).toEqual(events);
   });
 
-  it("says a submitted prompt is to be sent, beside the navigation the same event runs", async () => {
-    let { impl } = await session("done", undefined, [prompt("ask", "File the intake", true)]);
+  it("returns the draft beside the navigation the same event runs", async () => {
+    let { impl } = await session("done", undefined, [prompt("ask", "File the intake")]);
     expect(await impl.transitionWidget(REF, "submit", 0)).toMatchObject({
-      navigation: { screenId: "done", outcome: "shown" }, prompt: { text: "File the intake", submit: true } });
+      navigation: { screenId: "done", outcome: "shown" }, prompt: { text: "File the intake" } });
   });
 
   it("returns only the first wired prompt", async () => {
-    let { impl } = await session("done", undefined, [prompt("one", "First"), prompt("two", "Second", true)]);
-    expect((await impl.transitionWidget(REF, "submit", 0)).prompt).toEqual({ text: "First", submit: false });
+    let { impl } = await session("done", undefined, [prompt("one", "First"), prompt("two", "Second")]);
+    expect((await impl.transitionWidget(REF, "submit", 0)).prompt).toEqual({ text: "First" });
   });
 
   it("returns none for an unwired event, another revision, or a running flow", async () => {

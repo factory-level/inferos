@@ -434,9 +434,9 @@ describe("widget events drive page effects (FAC-94)", () => {
   });
 });
 
-// FAC-98: a widget event may put a prompt in the person's own chat, a draft by default or sent as
-// them with `submit: true`. The effect names no person, session, company or authority: its only
-// target is the transitioning session's own chat, so any field naming one is refused.
+// FAC-98: a widget event may put a prompt in the person's own chat, as a draft only: nothing is
+// sent, so a field asking for that (`submit`) is refused. The effect names no person, session,
+// company or authority: its only target is the transitioning session's own chat.
 describe("a prompt inserted into the person's chat (FAC-98)", () => {
   const promptPage = (effect: unknown) => ({
     schemaVersion: 2, id: "p", revision: "0", title: "P", children: ["a"], attachments: [], nodes: [
@@ -446,16 +446,14 @@ describe("a prompt inserted into the person's chat (FAC-98)", () => {
     ],
   });
 
-  test("parses a draft by default, and a submitted prompt, trimmed, and resolves the event to it", () => {
+  test("parses a draft, trimmed, and resolves the event to it", () => {
     const draft = parseCanvasPage(promptPage({ kind: "insert-prompt", text: "  Summarise this intake  " }));
     expect(canvasPageEffects(draft, "gadget:7", "finish")).toEqual([{ kind: "insert-prompt", text: "Summarise this intake" }]);
-    const sent = parseCanvasPage(promptPage({ kind: "insert-prompt", text: "File it", submit: true }));
-    expect(canvasPageEffects(sent, "gadget:7", "finish")).toEqual([{ kind: "insert-prompt", text: "File it", submit: true }]);
   });
 
   test.each([
-    ["submit false", { kind: "insert-prompt", text: "x", submit: false }, { code: "invalid-attachment", at: "ask" }],
-    ["submit as a string", { kind: "insert-prompt", text: "x", submit: "yes" }, { code: "invalid-attachment", at: "ask" }],
+    ["asking to send it", { kind: "insert-prompt", text: "x", submit: true }, { code: "unknown-field", at: "ask" }],
+    ["submit false", { kind: "insert-prompt", text: "x", submit: false }, { code: "unknown-field", at: "ask" }],
     ["empty text", { kind: "insert-prompt", text: "   " }, { code: "invalid-attachment", at: "ask" }],
     ["text that isn't a string", { kind: "insert-prompt", text: 3 }, { code: "invalid-attachment", at: "ask" }],
     ["text over the limit", { kind: "insert-prompt", text: "x".repeat(CANVAS_MODEL_LIMITS.promptText + 1) }, { code: "invalid-attachment", at: "ask" }],
@@ -463,7 +461,7 @@ describe("a prompt inserted into the person's chat (FAC-98)", () => {
     ["a target person", { kind: "insert-prompt", text: "x", user: "someone" }, { code: "unknown-field", at: "ask" }],
     ["a target session", { kind: "insert-prompt", text: "x", target: "other" }, { code: "unknown-field", at: "ask" }],
     ["who it runs as", { kind: "insert-prompt", text: "x", runAs: "admin" }, { code: "authority-field", at: "ask.runAs" }],
-    ["a grant", { kind: "insert-prompt", text: "x", submit: true, grant: "project/write" }, { code: "authority-field", at: "ask.grant" }],
+    ["a grant", { kind: "insert-prompt", text: "x", grant: "project/write" }, { code: "authority-field", at: "ask.grant" }],
   ])("refuses %s", (_, effect, expected) => {
     expect(rejection(() => parseCanvasPage(promptPage(effect)))).toEqual(expected);
   });

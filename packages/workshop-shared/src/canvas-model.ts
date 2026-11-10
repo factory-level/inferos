@@ -113,18 +113,16 @@ export interface CanvasRequestActionEffect {
 }
 
 /**
- * Put a prompt in the chat of the person whose event this is (FAC-98): as a draft they send
- * themselves, the default, or sent as them with `submit`. It names no person, company, chat or
- * model: it reaches only the session that raised the event, and a sent prompt is that person's own
- * message, so the turn it starts runs under their own grants and approvals and grants nothing.
+ * Put a prompt in the chat of the person whose event this is, as a draft (FAC-98). Nothing is sent:
+ * the person reads it and sends it themselves, or not. It names no person, company, chat or model,
+ * so it reaches only the session that raised the event, and grants nothing. There is no option to
+ * send it: a field asking for one (`submit`) is refused like any unknown field.
  */
 export interface CanvasInsertPromptEffect {
   /** Effect kind. */
   kind: "insert-prompt";
   /** The prompt, 1 to `CANVAS_MODEL_LIMITS.promptText` characters, trimmed. */
   text: string;
-  /** Present, and only `true`, to send it as the person; absent, it is a draft. */
-  submit?: true;
 }
 
 /** What an attachment does. Unknown kinds are rejected. */
@@ -279,13 +277,11 @@ function parseEffect(value: unknown, at: string): CanvasEffect {
     return { kind, target: parseId(e.target, at), action: parseEvent(e.action, at) };
   }
   if (kind === "insert-prompt") {
-    // `submit` is the one optional field, and only `true`: a draft is the default (FAC-98).
-    const { submit, ...required } = value as Record<string, unknown>;
-    const e = fields(required, ["kind", "text"], at);
-    if (submit !== undefined && submit !== true) return reject("invalid-attachment", at);
+    // A draft only (FAC-98): `submit` or any other field is refused.
+    const e = fields(value, ["kind", "text"], at);
     const text = typeof e.text === "string" ? e.text.trim() : "";
     if (text.length === 0 || text.length > CANVAS_MODEL_LIMITS.promptText) return reject("invalid-attachment", at);
-    return submit ? { kind, text, submit } : { kind, text };
+    return { kind, text };
   }
   return reject("unknown-effect", at);
 }

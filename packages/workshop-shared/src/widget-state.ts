@@ -91,16 +91,15 @@ export type WidgetStateSnapshot = {
   navigation?: WidgetNavigation;
   /**
    * Present only when the transition's event is wired to an `insert-prompt` effect on that same
-   * published page (FAC-98): the first such prompt, for the transitioning person's own chat. `submit`
-   * false puts it in their composer as a draft; true sends it as them, through the same send as their
-   * own Send. It carries no target: it reaches only the session that made the transition, and what
-   * it asks for still needs that person's own grants and approval.
+   * published page (FAC-98): the first such prompt, a draft for the transitioning person's own
+   * composer. Nothing is sent: the person sends it themselves, or not. It carries no target: it
+   * reaches only the session that made the transition.
    */
   prompt?: WidgetPrompt;
 };
 
-/** A prompt a wired widget event puts in the transitioning person's own chat (FAC-98). */
-export type WidgetPrompt = { text: string; submit: boolean };
+/** A draft prompt a wired widget event puts in the transitioning person's own chat (FAC-98). */
+export type WidgetPrompt = { text: string };
 
 /**
  * Where a wired widget event navigated the person's operate page (FAC-94). `shown` when the page now
