@@ -177,10 +177,21 @@ export type WikiReference =
   | { kind: 'issue'; href: string; boardRef: string; identifier: string }
   /** A Wiki page (`knowledge/document/<slug>`). */
   | { kind: 'page'; href: string; host: string; slug: string }
+  /**
+   * A published console's widget (`knowledge/inferos-widget/<workspace>/<console>/<source gadget>`,
+   * FAC-12), named by its source gadget and the definition the link was written for. It opens
+   * through that workspace with the person's own access; the Wiki's connection doesn't pass to it.
+   */
+  | { kind: 'gadget'; href: string; workspaceId: string; consoleId: string; sourceGadgetId: number; blueprintId: string; version: number }
   /** Anything else InferOps can embed that this canvas does not show. */
   | { kind: 'unsupported'; href: string }
 
 const KEY = /^[A-Za-z0-9_-]+$/
+// The `knowledge/inferos-widget` grammar InferOps declares: an id segment, a gadget id, a version.
+const SEGMENT = /^[A-Za-z0-9_-]{1,128}$/
+const GADGET_ID = /^(0|[1-9][0-9]{0,15})$/
+const VERSION = /^[1-9][0-9]{0,8}$/
+const unquoted = (value: string | null) => value?.replace(/^["']|["']$/g, '') ?? null
 // InferOps' `projectIdentifierOf`: the project key is the issue key before its number.
 const ISSUE_KEY = /^([A-Za-z0-9]+)-\d+$/
 
@@ -191,6 +202,16 @@ export const parseWikiReference = (href: string): WikiReference => {
   try { url = new URL(href) } catch { return { kind: 'unsupported', href } }
   const host = url.hostname.toLowerCase()
   const segments = url.pathname.split('/').filter(Boolean)
+  if (url.protocol === 'inferops:' && host.split('.').length === 2 && segments[0] === 'knowledge' && segments[1] === 'inferos-widget') {
+    const [, , workspaceId, consoleId, gadget] = segments
+    const blueprintId = unquoted(url.searchParams.get('blueprint'))
+    const version = unquoted(url.searchParams.get('version'))
+    if (segments.length !== 5 || !SEGMENT.test(workspaceId!) || !SEGMENT.test(consoleId!) || !GADGET_ID.test(gadget!) ||
+        !blueprintId || blueprintId.length > 128 || !version || !VERSION.test(version)) {
+      return { kind: 'unsupported', href }
+    }
+    return { kind: 'gadget', href, workspaceId: workspaceId!, consoleId: consoleId!, sourceGadgetId: Number(gadget), blueprintId, version: Number(version) }
+  }
   if (url.protocol !== 'inferops:' || host.split('.').length !== 2 || segments.length !== 3 || segments[0] !== 'project') {
     return { kind: 'unsupported', href }
   }

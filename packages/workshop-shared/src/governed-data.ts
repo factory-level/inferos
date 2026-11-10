@@ -41,6 +41,8 @@ export interface GovernedField {
   sortable: boolean;
   /** Holds personal data: shown when read, never filtered or sorted on, so it can't be probed. */
   personal?: boolean;
+  /** The only values a command may set it to, when it has a fixed set (a text field's statuses). */
+  options?: readonly string[];
 }
 
 /**
@@ -115,9 +117,39 @@ export interface GovernedReadSession {
   get(id: string): Promise<GovernedRow | null>;
 }
 
+/**
+ * A request to run one declared command on one row (`parseGovernedCommand`): the command's own
+ * fields, and the row's revision as it was read, so a row changed since is refused at apply.
+ */
+export interface GovernedCommandRequest {
+  command: string;
+  id: string;
+  values: Record<string, string | number | boolean>;
+  /** The row's revision as it was read: a nonnegative decimal string. */
+  expectedRevision: string;
+}
+
+/**
+ * What running a command returns: it was proposed, never done. A person or a rule decides it, and
+ * the connector applies it; the row is read again to see the outcome.
+ */
+export interface GovernedCommandReceipt {
+  outcome: "proposed";
+}
+
+/**
+ * A governed resource session that also takes its declared commands (FAC-9; ADR 0013 W4–W6). A
+ * command is validated against `describe()` before anything is read or proposed.
+ */
+export interface GovernedWriteSession extends GovernedReadSession {
+  /** Propose one declared command on one row. */
+  command(request: unknown): Promise<GovernedCommandReceipt>;
+}
+
 /** Why a request was refused: fixed codes, never the data. */
 export type GovernedRequestCode =
-  | "INVALID_REQUEST" | "FIELD_NOT_FILTERABLE" | "FIELD_NOT_SORTABLE" | "OPERATOR_NOT_ALLOWED" | "INVALID_CURSOR";
+  | "INVALID_REQUEST" | "FIELD_NOT_FILTERABLE" | "FIELD_NOT_SORTABLE" | "OPERATOR_NOT_ALLOWED" | "INVALID_CURSOR"
+  | "COMMAND_NOT_DECLARED";
 
 /** A refused request: nothing was read. */
 export class GovernedRequestError extends Error {
@@ -138,6 +170,45 @@ const plain = (value: unknown, keys: readonly string[], what: string): Record<st
   }
   return value as Record<string, unknown>;
 };
+
+/** The JavaScript type a value of `field` has. */
+const valueType = (field: GovernedField): "number" | "boolean" | "string" =>
+  field.type === "number" ? "number" : field.type === "boolean" ? "boolean" : "string";
+
+/** A row's revision: a nonnegative decimal string. */
+const REVISION = /^\d{1,20}$/;
+/** The longest row id a command may name. */
+const ID_MAX = 200;
+
+/**
+ * Validate a command request against `description`, before anything is read or proposed: only
+ * `command`, `id`, `values` and `expectedRevision`; a command the resource declares; one row id;
+ * exactly that command's fields, each a value of its field's type and, where the field has
+ * `options`, one of them; and a revision. Anything else, a second row, a URL or a `meta`, is
+ * refused. There is no generic write: a resource that declares no command takes none.
+ */
+export function parseGovernedCommand(value: unknown, description: GovernedDescription): GovernedCommandRequest {
+  const request = plain(value, ["command", "id", "values", "expectedRevision"], "command");
+  const command = description.commands.find(c => c.name === request.command);
+  if (!command) return refuse("COMMAND_NOT_DECLARED", "That command isn't one this resource offers.");
+  if (typeof request.id !== "string" || request.id.length === 0 || request.id.length > ID_MAX) {
+    refuse("INVALID_REQUEST", "A command names one row.");
+  }
+  const raw = plain(request.values, command.fields, "command's values");
+  const fields = new Map(description.fields.map(field => [field.name, field]));
+  const values: GovernedCommandRequest["values"] = {};
+  for (const name of command.fields) {
+    const field = fields.get(name);
+    const given = raw[name];
+    if (!field || typeof given !== valueType(field)) refuse("INVALID_REQUEST", "A command takes one value of each field's own type.");
+    if (field!.options && !field!.options.includes(given as string)) refuse("INVALID_REQUEST", "That value isn't one the field can take.");
+    values[name] = given as string | number | boolean;
+  }
+  if (typeof request.expectedRevision !== "string" || !REVISION.test(request.expectedRevision)) {
+    refuse("INVALID_REQUEST", "A command names the revision the row was read at.");
+  }
+  return { command: command.name, id: request.id as string, values, expectedRevision: request.expectedRevision as string };
+}
 
 /**
  * Validate a list request against `description`, before anything is read: only `filters`, `sort`,
@@ -175,7 +246,7 @@ export function parseGovernedListRequest(value: unknown, description: GovernedDe
       if (filter.op === "contains" && field!.type !== "text") {
         refuse("OPERATOR_NOT_ALLOWED", "Only a text field can be searched for a part of its value.");
       }
-      const expected = field!.type === "number" ? "number" : field!.type === "boolean" ? "boolean" : "string";
+      const expected = valueType(field!);
       const typed = filter.op === "contains"
         ? typeof filter.value === "string"
         : filter.value === null || typeof filter.value === expected;

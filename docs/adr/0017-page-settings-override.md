@@ -39,7 +39,7 @@ Proposed by dev.design on 2026-11-06 for FAC-95, for a person to accept.
 
 - ADR 0014's statement that containment carries nothing still holds: settings live on a page, and nothing reaches a node by nesting.
 - Notification delivery stays undefined. FAC-114 left destinations open; `baseUi.notifications` records the choice and its owner only.
-- An older reader that predates this sees no `settings` on a version 1 row, and a nested page with settings fails its parse there. That's the same fail-closed rollback story as any nested page in ADR 0014.
+- **A rollback stays readable.** An older reader that predates this refuses any page field it doesn't know. So a page's settings are stored beside the page, not in it: in the stored page record (`StoredCanvasPage.settings`) and in the published screen snapshot (`ConsoleScreenSnapshot.pageSettings`). An older reader still reads the page, and the overrides are inert there until this code returns.
 
 ## Alternatives considered
 

@@ -73,6 +73,8 @@ export type BindingProps = { accountId: string; workspace: string; queueId: stri
 /** What the recording approval queue was told, in order. */
 export type QueueLog = {
   observations: string[];
+  /** Each observation's description, parallel to `observations`. */
+  observationTexts: string[];
   /** Each observation's collaborator exclusions, parallel to `observations`. */
   excluded: string[][];
   actions: Array<{ id: number; title: string }>;
@@ -85,6 +87,7 @@ class TestApprovalQueue extends RpcTarget {
 
   async authorizeObservation(description: ObservationDescription): Promise<void> {
     this.log.observations.push(description.title);
+    this.log.observationTexts.push(description.description ?? "");
     this.log.excluded.push([...(description.excludeObservers ?? [])]);
   }
 
@@ -118,7 +121,7 @@ function messageOf(error: unknown): string {
 
 /** Plays the overseer for one account. */
 export class TestHooks extends DurableObject<Cloudflare.Env> {
-  #log: QueueLog = { observations: [], excluded: [], actions: [] };
+  #log: QueueLog = { observations: [], observationTexts: [], excluded: [], actions: [] };
 
   #gatekeeper(props: BindingProps) {
     const exports = this.ctx.exports as unknown as TestExports;
