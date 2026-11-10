@@ -5,7 +5,7 @@
 
 import { DurableObject, RpcStub, RpcTarget } from "cloudflare:workers";
 import type {
-  ActionApplyFailure, ActionDescription, GatekeeperUser, ObservationDescription,
+  ActionApplyFailure, ActionDescription, ActionReceipt, ActionReceiptStatus, GatekeeperUser, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   TicketsQueueGatekeeper, TicketsFakeProvider as BaseProvider,
@@ -78,6 +78,7 @@ export type QueueLog = {
   /** Each observation's collaborator exclusions, parallel to `observations`. */
   excluded: string[][];
   actions: Array<{ id: number; title: string }>;
+  statuses: Map<number, ActionReceiptStatus>;
 };
 
 class TestApprovalQueue extends RpcTarget {
@@ -91,8 +92,13 @@ class TestApprovalQueue extends RpcTarget {
     this.log.excluded.push([...(description.excludeObservers ?? [])]);
   }
 
-  async submitAction(id: number, description: ActionDescription): Promise<void> {
+  async submitAction(id: number, description: ActionDescription): Promise<ActionReceipt> {
     this.log.actions.push({ id, title: description.title });
+    this.log.statuses.set(id, { outcome: "waiting" });
+    return {
+      actionId: `test-action-${id}`,
+      status: async () => structuredClone(this.log.statuses.get(id) ?? { outcome: "unknown" }),
+    };
   }
 }
 
@@ -121,7 +127,7 @@ function messageOf(error: unknown): string {
 
 /** Plays the overseer for one account. */
 export class TestHooks extends DurableObject<Cloudflare.Env> {
-  #log: QueueLog = { observations: [], observationTexts: [], excluded: [], actions: [] };
+  #log: QueueLog = { observations: [], observationTexts: [], excluded: [], actions: [], statuses: new Map() };
 
   #gatekeeper(props: BindingProps) {
     const exports = this.ctx.exports as unknown as TestExports;
@@ -142,8 +148,13 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   async apply(props: BindingProps, actionId: number): Promise<string | null> {
     try {
       const result = await this.#gatekeeper(props).applyAction(actionId, new RpcStub(new NoGitCache()) as never);
+      this.#log.statuses.set(actionId, result && "failed" in result
+        ? { outcome: "failed", code: "PROVIDER_ERROR", reason: "The service refused this change." }
+        : { outcome: "succeeded" });
       return result && "failed" in result ? result.failed.message : null;
     } catch (error) {
+      this.#log.statuses.set(actionId, { outcome: "unknown", code: "PROVIDER_ERROR",
+        reason: "It may or may not have been applied. Check before making it again." });
       return messageOf(error);
     }
   }

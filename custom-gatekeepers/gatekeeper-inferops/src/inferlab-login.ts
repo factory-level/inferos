@@ -38,7 +38,7 @@ import {
 import { readTextCapped } from "@gadgets/gatekeeper-kit/response-body";
 import { createLogger } from "@gadgets/observability/logger";
 import {
-  stripTrailingSlashes, type ConnectHandoff, type GatekeeperConnectCallback, type GatekeeperUser,
+  stripTrailingSlashes, type ConnectHandoff, type GatekeeperConnectCallback, type GatekeeperSubject, type GatekeeperUser,
 } from "@gadgets/workshop-shared/gatekeeper";
 import {
   accessTokenExpiry, logoutInferLabSession, type InferOpsConnection, type InferOpsCredentials,
@@ -227,6 +227,11 @@ export function exchangeFromTokenResponse(body: string): InferLabExchange {
   };
 }
 
+/** The InferLab principal a flow signed in, as the Workshop keys accounts on it (ADR 0019). */
+export function subjectOf(origin: string, exchange: InferLabExchange): GatekeeperSubject {
+  return { issuer: origin, subject: exchange.identity.userId };
+}
+
 /**
  * The identity a sign-in may key the Workshop account on: only an email InferLab vouches for.
  * InferLab also issues sessions whose email nobody proved (invitations, impersonation), so a missing
@@ -329,10 +334,14 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
     switch (purpose.kind) {
       case "signin": {
         if (!callback) throw new Error("This sign-in attempt has no callback.");
-        // Only the email is kept: the session itself is ended, since signing in grants nothing.
-        const email = verifiedEmail(exchange);
+        // Only the principal and a vouched email are kept: the session itself is ended, since
+        // signing in grants nothing. The Workshop keys the account on the principal (ADR 0019), so an
+        // email InferLab doesn't vouch for (after an email change, say) is simply not passed on.
+        const email = exchange.emailVerified ? exchange.identity.email : undefined;
         await logoutInferLabSession(origin, exchange.grant.refreshToken, inferLabFetch(this.env));
-        return callback.complete(this.#account({ accountId: crypto.randomUUID(), email }));
+        return callback.complete(this.#account({
+          accountId: crypto.randomUUID(), ...(email ? { email } : {}), subject: subjectOf(origin, exchange),
+        }));
       }
       case "connect": {
         if (!callback) throw new Error("This connect attempt has no callback.");
@@ -344,6 +353,7 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
           return await callback.complete(this.#account({
             accountId, connected: true,
             email: exchange.emailVerified ? exchange.identity.email : undefined,
+            subject: subjectOf(origin, exchange),
           }));
         } catch (error) {
           // Reachable from no Workshop account, so the session is ended and the store wiped.
@@ -369,7 +379,8 @@ export class InferLabLogin extends DurableObject<Cloudflare.Env> {
     }
   }
 
-  #account(props: { accountId: string; email?: string; connected?: boolean }): Fetcher<GatekeeperUser> {
+  #account(props: { accountId: string; email?: string; connected?: boolean; subject?: GatekeeperSubject })
+      : Fetcher<GatekeeperUser> {
     return this.ctx.exports.InferOpsAccount({ props }) as unknown as Fetcher<GatekeeperUser>;
   }
 

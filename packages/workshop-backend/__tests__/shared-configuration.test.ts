@@ -49,10 +49,14 @@ async function open(opts: {
         get: () => ({
           whoami: async () => ({ id: "profile-id", name: "Test User" }),
           whoamiIfExists: async () => null,
+          // Finding a person by address asks whether the account it names is bound (ADR 0019).
+          isSubjectBound: async () => false,
           recordSharedGadgetOpen: async () => {},
           holdsSharedConfiguration: answerFor,
         }),
       },
+      // No one holds an address as their current, vouched one here.
+      userDirectory: { getByName: () => ({ accountForEmail: async () => null }) },
     },
   });
   return { overseer, asked, sharing };
@@ -275,6 +279,20 @@ describe("a build session in a shared workspace", () => {
     publisher.asked.length = 0;
     await expect(publisher.overseer.approveAction(1)).rejects.toThrow(REFUSED);
     expect(publisher.asked).toEqual(["publish"]);
+  });
+
+  // FAC-118: the decider is the same for both answers; rejecting sends nothing, but a person who may
+  // not approve a shared workspace's action may not reject it either.
+  it("refuses rejecting an action once build is gone, as it refuses approving it (FAC-118)", async () => {
+    let pending = { id: 1, type: "action", state: "pending", gatekeeperId: 7, caller: { from: "user" } };
+    let session = await shared({ build: false, publish: true }, {
+      actions: { get: () => pending },
+      gatekeepers: { get: () => ({ creationSpec: { type: "custom" } }) },
+    });
+    session.asked.length = 0;
+    await expect(session.overseer.rejectAction(1)).rejects.toThrow(REFUSED);
+    expect(session.asked).toEqual(["build"]);
+    expect(pending.state).toBe("pending");
   });
 
   it("refuses when InferOps can't answer", async () => {

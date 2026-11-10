@@ -1,6 +1,17 @@
 /** A ticket's version as a nonnegative decimal string. A write names the one it was proposed against. */
 export type Revision = string;
 
+/** Caller-bound receipt for the one approval action submitted by a governed command. */
+export interface GovernedActionReceipt {
+  actionId: string;
+  status(): Promise<{
+    outcome: "waiting" | "running" | "succeeded" | "failed" | "rejected" | "unknown";
+    code?: string;
+    reason?: string;
+    result?: unknown;
+  }>;
+}
+
 /** Where a ticket stands. `closed` is final for this connector: a closed ticket cannot be reopened here. */
 export type TicketStatus = "open" | "pending" | "closed";
 
@@ -56,7 +67,7 @@ export interface TicketsQueueSession {
    * INVALID_REQUEST; another queue's ticket with NOT_FOUND; a closed ticket or a no-op with
    * INVALID_STATE.
    */
-  command(request: GovernedCommandRequest): Promise<{ outcome: "proposed" }>;
+  command(request: GovernedCommandRequest): Promise<{ outcome: "proposed" } & GovernedActionReceipt>;
 }
 
 /** A field of a governed resource (FAC-9). */
