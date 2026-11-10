@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { Button, Select } from '@cloudflare/kumo'
+import { Button, InputArea, Select } from '@cloudflare/kumo'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import {
-  CANVAS_ACTION_EVENTS, CANVAS_WIDGET_ACTIONS, canvasRunEvent, parseCanvasRunEvent, type CanvasAttachment, type CanvasNode,
+  CANVAS_ACTION_EVENTS, CANVAS_MODEL_LIMITS, CANVAS_WIDGET_ACTIONS, canvasRunEvent, parseCanvasRunEvent, type CanvasAttachment, type CanvasNode,
   type CanvasPageOperation, type CanvasRunEvent,
 } from '@gadgets/workshop-shared/canvas-model'
 import type { CommitFileReader } from '../code/commitFileStore'
@@ -34,9 +34,11 @@ const describe = (attachment: CanvasAttachment, pageTitle: (id: string) => strin
  * operation for that target only. An attachment grants nothing; what it requests is checked at use.
  * Adding offers navigation on a widget's events: a board or Wiki widget's action events, or a
  * gadget widget's own events, the ones its `states.json` declares (FAC-94), and the run results of
- * the triggers its gadget binds (FAC-116; navigation only). Nothing else on the page hears a
- * widget's event unless an attachment wires it; publication refuses an event the published widget
- * doesn't declare, and a trigger its gadget doesn't bind.
+ * the triggers its gadget binds (FAC-116; navigation only). A gadget widget's own events may also put
+ * a prompt in the person's chat, as a draft only (FAC-98): it is never sent for them, and run
+ * results can't lead to one. Nothing else on the page hears a widget's event unless an attachment
+ * wires it; publication refuses an event the published widget doesn't declare, and a trigger its
+ * gadget doesn't bind.
  */
 export const CanvasAttachmentsEditor = ({ target, node, attachments, pages, busy, reader, hooks, gadgets, onEdit }: {
   /** The page or node ID whose attachments these are. */
@@ -57,6 +59,8 @@ export const CanvasAttachmentsEditor = ({ target, node, attachments, pages, busy
 }) => {
   const [event, setEvent] = useState('')
   const [page, setPage] = useState('')
+  const [promptEvent, setPromptEvent] = useState('')
+  const [promptText, setPromptText] = useState('')
   const pageTitle = (id: string) => pages.find(item => item.id === id)?.title ?? 'a page no longer in this workspace'
   const save = (next: CanvasAttachment[]) => onEdit([{ type: 'setAttachments', target, attachments: next }])
   const own = useGadgetWidgetEvents(reader, gadgets, node)
@@ -72,6 +76,8 @@ export const CanvasAttachmentsEditor = ({ target, node, attachments, pages, busy
   ]
   const eventLabel = (value: string) => events.find(item => item.value === value)?.label ?? value
   const offersEvents = events.length > 0
+  // Only a gadget widget's own declared events, never a run's result, may put a prompt in the chat.
+  const promptEvents = own?.status === 'ready' ? own.events : []
 
   return <div className="space-y-2">
     <p className="text-xs font-medium uppercase text-kumo-subtle">Attachments</p>
@@ -105,6 +111,23 @@ export const CanvasAttachmentsEditor = ({ target, node, attachments, pages, busy
         {pages.map(item => <Select.Option key={item.id} value={item.id}>{item.title}</Select.Option>)}
       </Select>
       <Button type="submit" disabled={busy || !event || !page}>Add attachment</Button>
+    </form>}
+    {promptEvents.length > 0 && <form aria-label="Add a draft prompt" className="space-y-2" onSubmit={async submit => {
+      submit.preventDefault()
+      const text = promptText.trim()
+      if (!promptEvent || !text) return
+      if (await save([...attachments, { id: crypto.randomUUID(), version: 1, on: promptEvent, effect: { kind: 'insert-prompt', text } }])) {
+        setPromptEvent(''); setPromptText('')
+      }
+    }}>
+      <Select label="When it happens" value={promptEvent} disabled={busy} onValueChange={value => setPromptEvent(String(value ?? ''))}
+        renderValue={value => value ? String(value) : 'Choose an event'}>
+        {promptEvents.map(name => <Select.Option key={name} value={name}>{name}</Select.Option>)}
+      </Select>
+      <InputArea label="Put this in the person’s chat as a draft" rows={2} maxLength={CANVAS_MODEL_LIMITS.promptText}
+        value={promptText} disabled={busy} onChange={change => setPromptText(change.target.value)} />
+      <p className="text-xs text-kumo-subtle">It is never sent for them: they read it, and send, edit or clear it themselves.</p>
+      <Button type="submit" disabled={busy || !promptEvent || !promptText.trim()}>Add draft prompt</Button>
     </form>}
   </div>
 }

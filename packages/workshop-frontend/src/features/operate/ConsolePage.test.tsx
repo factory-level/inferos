@@ -257,3 +257,31 @@ it('shows a restored board as opening, not as refused, until its workspace has r
   expect(alerts()).toBe(1)
   expect(container.textContent).toContain("This board can't be shown here")
 })
+
+// FAC-98 enforces FAC-95's chatPane.widgets: the page reports the shown screen's value, its own
+// override over the workspace's value the publication froze, read through the viewer's access.
+it("reports the shown screen's chatPane.widgets: the page's override, else the frozen workspace value", async () => {
+  const getConsolePage = vi.fn<(consoleId: string, screenId: string, source: string) => Promise<unknown>>()
+  consoleOpen.overseer = { stub: { ...CONSOLE_STUB, getConsolePage } }
+  const published = { ...SAVED, published: { revision: '0', publishedAt: '2026-10-06T00:00:00.000Z', content: SAVED,
+    settings: { 'chatPane.widgets': 'none' } } } as OperateConsole
+  const heard = vi.fn<(value: 'console' | 'none' | null) => void>()
+  const settle = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) }) }
+
+  getConsolePage.mockResolvedValue({ settings: {} })
+  render({ entry: { ...entry, console: published }, run: run({ viewId: 'board' }), onChatPaneWidgets: heard })
+  await settle()
+  expect(getConsolePage).toHaveBeenLastCalledWith('c1', 's1', 'published')
+  expect(heard).toHaveBeenLastCalledWith('none')
+
+  getConsolePage.mockResolvedValue({ settings: { 'chatPane.widgets': 'console' } })
+  render({ entry: { ...entry, console: published }, run: run({ viewId: 'board', revision: '5', screenId: 's1' }), onChatPaneWidgets: heard })
+  await settle()
+  expect(heard).toHaveBeenLastCalledWith('console')
+
+  // A page that can't be read says nothing: the Operate page then falls back on its own.
+  getConsolePage.mockRejectedValue(new Error('refused'))
+  render({ entry: { ...entry, console: published }, run: run({ viewId: 'overview', screenId: 's1', revision: '1' }), onChatPaneWidgets: heard })
+  await settle()
+  expect(heard).toHaveBeenLastCalledWith(null)
+})

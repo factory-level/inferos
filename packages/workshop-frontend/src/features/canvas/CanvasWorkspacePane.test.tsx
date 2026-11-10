@@ -414,6 +414,42 @@ it('says a gadget widget with no states declares no events, and offers none', as
   expect(button('Add attachment')).toBeUndefined()
 })
 
+// FAC-98: a gadget widget's own events may put a prompt in the person's chat, as a draft only.
+const typeDraft = async (text: string) => {
+  const area = inspector().querySelector<HTMLTextAreaElement>('textarea')!
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set?.call(area, text)
+    area.dispatchEvent(new Event('input', { bubbles: true }))
+  })
+}
+
+it("adds a draft prompt on a gadget widget's own event, with no way to send it, and describes it", async () => {
+  const { api, storage } = editable([gadgetView(7)])
+  api.editCanvasPage.mockImplementation(async () => ({ ...canvasPageFromDefinition(gadgetView(7)), revision: '1' }))
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-stateful'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  const form = inspector().querySelector('[aria-label="Add a draft prompt"]')!
+  expect(form.textContent).toContain('It is never sent for them')
+  expect(form.textContent).not.toMatch(/send it|submit/i)
+  await choose('When it happens', 'submit')
+  await typeDraft('  Summarise this intake  ')
+  await act(async () => { button('Add draft prompt')!.click() })
+  expect(api.editCanvasPage).toHaveBeenLastCalledWith('ops', '0', [{ type: 'setAttachments', target: 'g',
+    attachments: [{ id: expect.any(String), version: 1, on: 'submit', effect: { kind: 'insert-prompt', text: 'Summarise this intake' } }] }])
+})
+
+it('offers no draft prompt on run results alone, nor on a widget with no states', async () => {
+  hooks = async () => [hook(11, 7, 'Refunds')]
+  const { storage } = editable([gadgetView(7)])
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-plain'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  // Run results are offered for navigation, never for a prompt.
+  expect(button('Add attachment')).toBeDefined()
+  expect(inspector().querySelector('[aria-label="Add a draft prompt"]')).toBeNull()
+})
+
 it('reads the nested page only in edit mode, so viewing (as the use role does) never asks for it', async () => {
   const { api, storage } = editable()
   await render(storage)

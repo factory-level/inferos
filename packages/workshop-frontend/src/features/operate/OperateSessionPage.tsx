@@ -1,4 +1,6 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
+import { resolveWorkspaceSetting, type WorkspaceSettingValue } from '@gadgets/workshop-shared/workspace-settings'
+import { OperatePromptProvider } from './OperatePromptContext'
 import { Button, useKumoToastManager } from '@cloudflare/kumo'
 import { useNavigate, useSearch } from '@tanstack/react-router'
 import { PlusIcon, SlidersHorizontalIcon } from '@phosphor-icons/react'
@@ -54,6 +56,11 @@ export const OperateSessionPage = () => {
   const [hostBoardTarget, setHostBoardTarget] = useState<{ consoleId: string; source: ConsoleSource; revision: string; entryId: string } | null>(null)
   // The bound view open in a dialog, by the same rules as a host board.
   const [boundViewTarget, setBoundViewTarget] = useState<{ consoleId: string; source: ConsoleSource; revision: string; entryId: string } | null>(null)
+  // A draft a widget put in the person's chat (FAC-98), until the composer has it.
+  const [draft, setDraft] = useState<{ text: string; nonce: number } | null>(null)
+  const draftNonce = useRef(0)
+  // The shown screen's chatPane.widgets, as ConsolePage read it (null while unknown).
+  const [pageChatWidgets, setPageChatWidgets] = useState<WorkspaceSettingValue<'chatPane.widgets'> | null>(null)
   const consoleId = operate?.snapshot?.state.console?.consoleId
   const notifyRefused = (caught: unknown) => {
     console.error('Operate session change failed:', caught)
@@ -161,8 +168,19 @@ export const OperateSessionPage = () => {
     } catch (caught) { toasts.add({ title: refusalMessage(caught), variant: 'error' }) }
   }
   const edit = (item: ConsoleEntry) => void navigate({ to: '/inferops-canvas', search: { setup: item.console.id, workspace: item.workspace.id } })
+  // A widget's draft goes into the person's own composer, which is shown for it; nothing is sent.
+  const insertDraft = (text: string) => {
+    setDraft({ text, nonce: ++draftNonce.current })
+    if (hideChat && !configuring && !tools && !state.chatOpen) send({ type: 'setChatOpen', open: true })
+  }
+  // The chat pane offers the console's widgets only where chatPane.widgets is "console": the shown
+  // screen's resolved value, else (a flow, or while it is read) the workspace's value the
+  // publication froze, else the default. It grants nothing; it only hides the offer.
+  const chatWidgets = pageChatWidgets ?? resolveWorkspaceSetting('chatPane.widgets',
+    run?.source === 'published' ? entry?.console.published?.settings ?? {} : {}).value
 
-  return <ConsoleWorkspaceShell onOpenWidget={target => void openWidget(target)} onNavigate={() => setWidgetTarget(null)}>
+  return <OperatePromptProvider value={insertDraft}>
+  <ConsoleWorkspaceShell onOpenWidget={target => void openWidget(target)} onNavigate={() => setWidgetTarget(null)}>
     <div className="flex h-full min-h-0 flex-col bg-kumo-base">
     {!configuring && <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-3 px-5 py-3">
       <h1 className="min-w-0 flex-1 truncate text-sm font-medium text-kumo-default">{state.flow ? state.flow.title : tools ? 'Screens and flows' : (run ? centered ? 'Assistant' : viewTitle ?? 'Console' : state.focus ? titleOf(state.focus) : 'Consoles')}</h1>
@@ -202,7 +220,7 @@ export const OperateSessionPage = () => {
               console={{ open: run, entry, loading: screens.status === 'loading', sessionWorkspace }} />
           : run && visibleWidget?.presentation === 'page' && run.screenId === visibleWidget.screenId ? <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />
           : run ? <ConsolePage run={run} entry={entry} loading={screens.status === 'loading'} board={state.board}
-              sessionWorkspace={sessionWorkspace} onEvent={send} onPublish={setPublishing} />
+              sessionWorkspace={sessionWorkspace} onEvent={send} onPublish={setPublishing} onChatPaneWidgets={setPageChatWidgets} />
           : state.board
             ? sessionWorkspace?.id === state.board.workspaceId
               ? <div className="h-full p-5"><SessionBoard board={state.board} overseer={sessionWorkspace.stub} backLabel="consoles" onEvent={send} /></div>
@@ -231,6 +249,8 @@ export const OperateSessionPage = () => {
       </div>
       <OperateChatPanel workspace={sessionWorkspace} layout={hideChat ? 'hidden' : home ? 'home' : centered ? 'full' : 'side'}
         onClose={() => send({ type: 'setChatOpen', open: false })}
+        draft={draft} onDraftApplied={() => setDraft(null)}
+        offerWidgets={chatWidgets === 'console'}
         consoleActions={entry && run?.fullChat !== 'only' ? { entry, onOpenView: viewId => void openView(viewId), onOpenWidget: target => void openWidget(target), onOpenHostBoard: openHostBoard, onOpenBoundView: openBoundView } : undefined} />
     </div>
     {!configuring && !tools && !boundViewShown && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
@@ -245,4 +265,5 @@ export const OperateSessionPage = () => {
     {publishing && <ConsolePublishDialog entry={publishing} onClose={() => { setPublishing(null); setSavedEntry(null) }} />}
   </div>
   </ConsoleWorkspaceShell>
+  </OperatePromptProvider>
 }

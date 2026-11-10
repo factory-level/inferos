@@ -19,6 +19,8 @@ const testState = vi.hoisted(() => ({
   search: {} as { setup?: string; tools?: boolean; settings?: string; workspace?: string },
   navigate: vi.fn<(options: unknown) => void>(),
   hostBoards: false,
+  // What the mocked ConsolePage reports as the shown screen's chatPane.widgets (FAC-98).
+  chatWidgets: null as 'console' | 'none' | null,
 }))
 
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => testState.navigate, useSearch: () => testState.search }))
@@ -53,12 +55,24 @@ vi.mock('../../pages/inferops-canvas/InferOpsCanvasHome', async () => {
   return { InferOpsCanvasHome: () => <div data-testid="home"><WorkspaceFlows workspaceId="ws1" screens={screens} flows={flows} /></div> }
 })
 vi.mock('./ConsoleMosaic', () => ({ ConsoleMosaic: () => <div data-testid="mosaic" /> }))
-vi.mock('./ConsolePage', () => ({
-  ConsolePage: ({ entry, presentation }: { entry?: { console: { title: string } }; presentation: string }) =>
-    <div data-testid="console">{entry?.console.title}/{presentation}</div>,
-}))
-vi.mock('./OperateChatPanel', () => ({ OperateChatPanel: ({ layout, consoleActions }: { layout: string; consoleActions?: { onOpenHostBoard?: (entryId: string) => void } }) =>
-  <div data-testid="chat" data-layout={layout}><input aria-label="Chat draft" />
+vi.mock('./ConsolePage', async () => {
+  const { useEffect } = await import('react')
+  const { useInsertOperatePrompt } = await import('./OperatePromptContext')
+  return {
+    ConsolePage: ({ entry, presentation, onChatPaneWidgets }: { entry?: { console: { title: string } }; presentation: string;
+        onChatPaneWidgets?: (value: 'console' | 'none' | null) => void }) => {
+      // A widget on the page, which can put a draft in the chat (FAC-98).
+      const insert = useInsertOperatePrompt()
+      useEffect(() => { onChatPaneWidgets?.(testState.chatWidgets) }, [onChatPaneWidgets])
+      return <div data-testid="console">{entry?.console.title}/{presentation}
+        <button type="button" onClick={() => insert?.('Summarise this intake')}>Widget event</button></div>
+    },
+  }
+})
+vi.mock('./OperateChatPanel', () => ({ OperateChatPanel: ({ layout, consoleActions, offerWidgets, draft, onDraftApplied }: { layout: string;
+    consoleActions?: { onOpenHostBoard?: (entryId: string) => void }; offerWidgets?: boolean; draft?: { text: string } | null; onDraftApplied?: () => void }) =>
+  <div data-testid="chat" data-layout={layout} data-offer-widgets={String(offerWidgets)} data-draft={draft?.text ?? ''}><input aria-label="Chat draft" />
+    {draft && <button type="button" onClick={onDraftApplied}>Composer took the draft</button>}
     {consoleActions?.onOpenHostBoard && <button type="button" onClick={() => consoleActions.onOpenHostBoard!('hb1')}>Open Team board</button>}</div> }))
 vi.mock('./ConsoleHostBoard', () => ({
   ConsoleHostBoard: ({ entry, console: ref }: { entry: { id: string; label: string }; console: { consoleId: string; source: string; revision: string } }) =>
@@ -98,6 +112,7 @@ beforeEach(() => {
   testState.search = {}
   testState.navigate = vi.fn<(options: unknown) => void>()
   testState.hostBoards = false
+  testState.chatWidgets = null
 })
 
 afterEach(() => {
@@ -270,5 +285,40 @@ describe('host boards', () => {
     expect(dispatch).not.toHaveBeenCalled()
     render({ ...INITIAL_OPERATE_PAGE, presentation: 'canvas', chatOpen: true, console: { ...RUN, revision: '1' } })
     expect(container.querySelector('[data-testid="host-board"]')).toBeNull()
+  })
+})
+
+// FAC-98: a widget's wired prompt goes into the person's own chat as a draft, opening the chat for
+// it; nothing is sent. The chat pane offers the console's widgets only where chatPane.widgets says so.
+describe('a widget prompt and the chat pane', () => {
+  const RUN: OperatePageState = { ...OPEN, presentation: 'canvas', chatOpen: false, console: {
+    workspaceId: 'ws1', consoleId: 'c1', title: 'Operations lead', source: 'draft', revision: '0', fullChat: 'available', viewId: 'overview', screenId: 'board',
+  } }
+  const chat = () => container.querySelector('[data-testid="chat"]')!
+  const button = (name: string) => [...container.querySelectorAll('button')].find(item => item.textContent === name)!
+
+  it('puts the draft in the chat, opening it, and sends nothing; the composer taking it clears it', async () => {
+    render(RUN)
+    expect(chat().getAttribute('data-draft')).toBe('')
+    await act(async () => button('Widget event').click())
+    expect(chat().getAttribute('data-draft')).toBe('Summarise this intake')
+    // The only event is opening the person's own chat: no message, nothing dispatched as them.
+    expect(dispatch.mock.calls).toEqual([[{ type: 'setChatOpen', open: true }]])
+    await act(async () => button('Composer took the draft').click())
+    expect(chat().getAttribute('data-draft')).toBe('')
+  })
+
+  it.each([
+    ['none', 'false'],
+    ['console', 'true'],
+  ] as const)('with the shown screen resolving chatPane.widgets to %s, offers the widgets: %s', (value, offered) => {
+    testState.chatWidgets = value
+    render(RUN)
+    expect(chat().getAttribute('data-offer-widgets')).toBe(offered)
+  })
+
+  it('falls back to the default (console) while the screen has not said', () => {
+    render(RUN)
+    expect(chat().getAttribute('data-offer-widgets')).toBe('true')
   })
 })

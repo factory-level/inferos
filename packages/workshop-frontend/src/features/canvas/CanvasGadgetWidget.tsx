@@ -6,6 +6,7 @@ import GadgetUI from '../../GadgetUI'
 import { useHasBeenOnScreen } from './useHasBeenOnScreen'
 import { WidgetStateBar } from './WidgetStateBar'
 import { useOperateSession } from '../operate/OperateSessionContext'
+import { useInsertOperatePrompt } from '../operate/OperatePromptContext'
 
 /**
  * The published console revision a screen is shown from; its widgets open through it. With the
@@ -30,6 +31,7 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scroll
 }) => {
   const ref = useRef<HTMLElement>(null)
   const operate = useOperateSession()
+  const insertPrompt = useInsertOperatePrompt()
   const visible = useHasBeenOnScreen(ref, false, scrollRoot)
   const [client, setClient] = useState<{ id: WorkpieceId; stub: RpcStub<GadgetClient> } | null>(null)
   // A draft belongs to its conversation until accepted, so it is never shown on a shared canvas.
@@ -76,7 +78,7 @@ export const CanvasGadgetWidget = ({ widget, gadget, overseer, offeredBy, scroll
     {offeredWidget?.workspaceId !== undefined && operate?.session && gadgetId !== undefined &&
       <WidgetStateBar session={operate.session.stub}
         widgetRef={{ workspaceId: offeredWidget.workspaceId, consoleId: offeredWidget.consoleId, revision: offeredWidget.revision, gadgetId }}
-        onStateChange={setWidgetState} />}
+        onStateChange={setWidgetState} onPrompt={insertPrompt ?? undefined} />}
     {gadget === undefined ? <p className="p-4 text-sm text-kumo-subtle">This gadget is no longer in the workspace. Remove it from the layout or choose another gadget.</p>
       : gadgetId === undefined ? <p className="p-4 text-sm text-kumo-subtle">This gadget is still a draft in a conversation. Accept the conversation's changes to show it here.</p>
       : refused ? <p role="status" className="p-4 text-sm text-kumo-subtle">{refused}</p>
