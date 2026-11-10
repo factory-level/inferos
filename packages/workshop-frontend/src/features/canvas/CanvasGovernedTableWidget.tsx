@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Refine, useList, useUpdate, type RefineProps } from '@refinedev/core'
 import { QueryClient } from '@tanstack/react-query'
 import { Button, Select } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { GovernedSessionHandle, Overseer } from '@gadgets/workshop-shared/api'
+import { ACTION_OUTCOME_TEXT, type ActionOutcome } from '@gadgets/workshop-shared/action-outcome'
+import type { ActionReceipt } from '@gadgets/workshop-shared/gatekeeper'
 import type { CanvasGovernedTableWidget as Widget } from '@gadgets/workshop-shared/canvas'
 import type { GovernedCommand, GovernedDescription, GovernedWriteSession } from '@gadgets/workshop-shared/governed-data'
 import { governedDataProvider, type GovernedRecord } from './governedDataProvider'
@@ -137,7 +139,7 @@ const GovernedTable = ({ resource, session }: { resource: string; session: Gover
         <tbody>{rows.map(row => <tr key={row.id} className="border-t border-kumo-line">
           {fields.map(field => <td key={field.name} className="px-2 py-1"><bdi>{String(row.values[field.name] ?? '')}</bdi></td>)}
           {description.commands.length > 0 && <td className="px-2 py-1">
-            {description.commands.map(command => <CommandForm key={command.name} resource={resource} row={row} command={command} description={description} />)}
+            {description.commands.map(command => <CommandForm key={command.name} resource={resource} row={row} command={command} description={description} refresh={query.refetch} />)}
           </td>}
         </tr>)}</tbody>
       </table>
@@ -151,22 +153,79 @@ const GovernedTable = ({ resource, session }: { resource: string; session: Gover
 }
 
 /** One declared command on one row: its one field's allowed values, proposed for a decision. */
-const CommandForm = ({ resource, row, command, description }: { resource: string; row: GovernedRecord; command: GovernedCommand; description: GovernedDescription }) => {
+const RECEIPT_POLL_MS = 1_000
+type CommandState = { kind: 'receipt'; outcome: ActionOutcome; reason?: string } | { kind: 'status-error' } | { kind: 'stale' } | { kind: 'error'; message: string } | null
+
+const CommandForm = ({ resource, row, command, description, refresh }: { resource: string; row: GovernedRecord; command: GovernedCommand; description: GovernedDescription; refresh: () => Promise<unknown> }) => {
   const field = description.fields.find(item => item.name === command.fields[0])
   const [value, setValue] = useState('')
   const update = useUpdate()
-  const [said, setSaid] = useState<string | null>(null)
+  const [state, setState] = useState<CommandState>(null)
+  const [receipt, setReceipt] = useState<ActionReceipt | null>(null)
   const [pending, setPending] = useState(false)
+  const [attempt, setAttempt] = useState(0)
+  const mounted = useRef(true)
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+
+  const checkReceipt = async (current: ActionReceipt) => {
+    for (;;) {
+      let status
+      try { status = await current.status() }
+      catch {
+        if (mounted.current) setState({ kind: 'status-error' })
+        return
+      }
+      if (status.outcome === 'waiting' || status.outcome === 'running') {
+        if (mounted.current) setState({ kind: 'receipt', outcome: status.outcome, ...(status.reason ? { reason: status.reason } : {}) })
+        await new Promise(resolve => setTimeout(resolve, RECEIPT_POLL_MS))
+        if (!mounted.current) return
+        continue
+      }
+      if (mounted.current) setState({ kind: 'receipt', outcome: status.outcome, ...(status.reason ? { reason: status.reason } : {}) })
+      await refresh()
+      if (mounted.current && status.code === 'STALE_REVISION') {
+        setState({ kind: 'receipt', outcome: status.outcome, reason: `${status.reason ?? 'The row changed since it was read.'} The row was refreshed; review it before proposing again.` })
+      }
+      if (mounted.current) setPending(false)
+      return
+    }
+  }
+
+  useEffect(() => {
+    if (receipt) void checkReceipt(receipt)
+    // A new attempt only retries the receipt capability; it never resubmits the write.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [attempt])
+
   // Only a command with one field that has a fixed set of values is offered here.
   if (command.fields.length !== 1 || !field?.options || row.revision === undefined) return null
-  const propose = () => { setPending(true); update.mutate({ resource, id: row.id, mutationMode: 'pessimistic', successNotification: false, errorNotification: false,
-    values: { command: command.name, values: { [field.name]: value }, expectedRevision: row.revision } },
-    { onSuccess: () => setSaid('Proposed: waiting for a decision.'), onError: error => setSaid(messageOf(error)), onSettled: () => setPending(false) }) }
+  const propose = async () => {
+    if (!value || pending) return
+    setPending(true); setState({ kind: 'receipt', outcome: 'waiting' })
+    try {
+      const result = await update.mutateAsync({ resource, id: row.id, mutationMode: 'pessimistic', invalidates: [], successNotification: false, errorNotification: false,
+        values: { command: command.name, values: { [field.name]: value }, expectedRevision: row.revision } })
+      const submitted = (result.data as GovernedRecord).receipt
+      if (!submitted) throw new Error('The command response did not include its operation receipt.')
+      setReceipt(submitted)
+      await checkReceipt(submitted)
+    } catch (error) {
+      const message = messageOf(error)
+      await refresh()
+      if (/STALE_REVISION/.test(message)) setState({ kind: 'stale' })
+      else setState({ kind: 'error', message })
+      setPending(false)
+    }
+  }
   return <div className="flex flex-wrap items-end gap-2">
     <Select label={command.label} value={value} onValueChange={next => setValue(String(next ?? ''))} renderValue={next => next ? String(next) : `Choose ${field.label.toLowerCase()}`}>
       {field.options.filter(option => option !== row.values[field.name]).map(option => <Select.Option key={option} value={option}>{option}</Select.Option>)}
     </Select>
-    <Button size="sm" disabled={!value || pending} onClick={propose}>Propose</Button>
-    {said && <span role="status" className="text-xs text-kumo-subtle">{said}</span>}
+    <Button size="sm" disabled={!value || pending} onClick={() => void propose()}>Propose</Button>
+    {state?.kind === 'receipt' && <span role="status" className="text-xs text-kumo-subtle">{ACTION_OUTCOME_TEXT[state.outcome]}{state.reason ? `: ${state.reason}` : ''}</span>}
+    {state?.kind === 'status-error' && <span role="status" className="text-xs text-kumo-danger">Could not check this operation's status. It has not been resubmitted.</span>}
+    {state?.kind === 'status-error' && <Button size="sm" onClick={() => setAttempt(count => count + 1)}>Retry status</Button>}
+    {state?.kind === 'stale' && <span role="status" className="text-xs text-kumo-danger">This row changed since it was read. It has been refreshed; review it and try again.</span>}
+    {state?.kind === 'error' && <span role="status" className="text-xs text-kumo-danger">{state.message}</span>}
   </div>
 }

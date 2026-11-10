@@ -99,8 +99,101 @@ it('proposes a declared command for a decision, and says it is waiting, not done
   await settle()
   await act(async () => { button('Propose')!.click() }); await settle()
   expect(session.command).toHaveBeenCalledWith({ command: 'setStatus', id: 'T-1', values: { status: 'closed' }, expectedRevision: '1' })
-  expect(container.querySelector('[role="status"]')?.textContent).toBe('Proposed: waiting for a decision.')
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('Waiting for approval, not applied yet')
+  expect(button('Propose')?.disabled).toBe(true)
 })
+
+it.each([
+  ['succeeded', 'Applied'],
+  ['rejected', 'Rejected, not applied'],
+  ['failed', 'Failed, not applied'],
+  ['unknown', 'Outcome unknown: it may or may not have applied'],
+] as const)('renders the terminal %s receipt and rereads the canonical row', async (outcome, message) => {
+  const list = vi.fn<GovernedWriteSession['list']>(async () => ({ rows: [ticket(1)], nextCursor: null, total: 1, truncated: false }))
+  const { session } = queue([ticket(1)], {
+    list,
+    command: vi.fn<GovernedWriteSession['command']>(async () => ({ outcome: 'proposed', actionId: 'receipt-1', status: async () => ({ outcome }) })),
+  })
+  await render(async () => ({ gatekeeperId: 4, resource: 'tickets/queue' as const, session }))
+  await chooseClosed()
+  await act(async () => { button('Propose')!.click() }); await settle()
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(message)
+  expect(list).toHaveBeenCalledTimes(2)
+  expect(button('Propose')?.disabled).toBe(false)
+})
+
+it('keeps a waiting receipt pending, then refreshes after it resolves', async () => {
+  const status = vi.fn<() => Promise<{ outcome: 'waiting' | 'succeeded' }>>()
+    .mockResolvedValueOnce({ outcome: 'waiting' }).mockResolvedValueOnce({ outcome: 'succeeded' })
+  const list = vi.fn<GovernedWriteSession['list']>(async () => ({ rows: [ticket(1)], nextCursor: null, total: 1, truncated: false }))
+  const { session } = queue([ticket(1)], { list, command: vi.fn<GovernedWriteSession['command']>(async () => ({ outcome: 'proposed', actionId: 'receipt-1', status })) })
+  await render(async () => ({ gatekeeperId: 4, resource: 'tickets/queue' as const, session }))
+  await chooseClosed()
+  await act(async () => { button('Propose')!.click() }); await settle()
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('Waiting for approval, not applied yet')
+  expect(button('Propose')?.disabled).toBe(true)
+  expect(list).toHaveBeenCalledTimes(1)
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 1_050)) }); await settle()
+  expect(status).toHaveBeenCalledTimes(2)
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('Applied')
+  expect(list).toHaveBeenCalledTimes(2)
+  expect(button('Propose')?.disabled).toBe(false)
+})
+
+it('retries a disconnected receipt check without resubmitting the command', async () => {
+  const status = vi.fn<() => Promise<{ outcome: 'succeeded' }>>()
+    .mockRejectedValueOnce(new Error('connection lost')).mockResolvedValueOnce({ outcome: 'succeeded' })
+  const command = vi.fn<GovernedWriteSession['command']>(async () => ({ outcome: 'proposed', actionId: 'receipt-1', status }))
+  const { session } = queue([ticket(1)], { command })
+  await render(async () => ({ gatekeeperId: 4, resource: 'tickets/queue' as const, session }))
+  await chooseClosed()
+  await act(async () => { button('Propose')!.click() }); await settle()
+  expect(container.textContent).toContain("Could not check this operation's status. It has not been resubmitted.")
+  await act(async () => { button('Retry status')!.click() }); await settle()
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('Applied')
+  expect(command).toHaveBeenCalledTimes(1)
+})
+
+it('refreshes after a stale-revision refusal and asks the person to review the row again', async () => {
+  const list = vi.fn<GovernedWriteSession['list']>(async () => ({ rows: [ticket(1)], nextCursor: null, total: 1, truncated: false }))
+  const command = vi.fn<GovernedWriteSession['command']>(async () => { throw new Error('STALE_REVISION: changed') })
+  const { session } = queue([ticket(1)], { list, command })
+  await render(async () => ({ gatekeeperId: 4, resource: 'tickets/queue' as const, session }))
+  await chooseClosed()
+  await act(async () => { button('Propose')!.click() }); await settle()
+  expect(container.querySelector('[role="status"]')?.textContent).toContain('This row changed since it was read.')
+  expect(list).toHaveBeenCalledTimes(2)
+  expect(button('Propose')?.disabled).toBe(false)
+})
+
+it('preserves a stale-revision failure receipt and refreshes its row', async () => {
+  const list = vi.fn<GovernedWriteSession['list']>(async () => ({ rows: [ticket(1)], nextCursor: null, total: 1, truncated: false }))
+  const { session } = queue([ticket(1)], {
+    list,
+    command: vi.fn<GovernedWriteSession['command']>(async () => ({ outcome: 'proposed', actionId: 'receipt-1', status: async () => ({
+      outcome: 'failed', code: 'STALE_REVISION', reason: 'It changed since it was read. Read it again before changing it.',
+    }) })),
+  })
+  await render(async () => ({ gatekeeperId: 4, resource: 'tickets/queue' as const, session }))
+  await chooseClosed()
+  await act(async () => { button('Propose')!.click() }); await settle()
+  expect(container.querySelector('[role="status"]')?.textContent).toContain('Failed, not applied: It changed since it was read.')
+  expect(container.querySelector('[role="status"]')?.textContent).toContain('The row was refreshed; review it before proposing again.')
+  expect(list).toHaveBeenCalledTimes(2)
+})
+
+async function chooseClosed() {
+  const field = container.querySelector<HTMLElement>('[role="combobox"]')!
+  await act(async () => field.click()); await settle()
+  const option = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find(item => item.textContent === 'closed')!
+  if (!('PointerEvent' in window)) Object.defineProperty(window, 'PointerEvent', { value: class extends MouseEvent {} })
+  await act(async () => {
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+      option.dispatchEvent(new (type.startsWith('pointer') ? window.PointerEvent : MouseEvent)(type, { bubbles: true, cancelable: true }))
+    }
+  })
+  await settle()
+}
 
 it('says when no connection serves the reference', async () => {
   await render(async () => null)
