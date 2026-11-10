@@ -146,7 +146,7 @@ The fixtures in `src/canvas-model-fixtures/` are the executable statement of the
 
 The action events and declared actions in `CANVAS_WIDGET_ACTIONS` describe what the gatekeeper offers today. No widget emits those events. A gadget widget's attachment may instead listen for the widget's own declared event, and the only attachment effects that run are the `navigate` such an event leads to (FAC-94, `canvasWidgetEventsHeard` and `canvasPageEffects`; see [Wired widget events](operate-mode.md#wired-widget-events)) and an `insert-prompt`, which puts its text in the transitioning person's own chat as a draft they may send (FAC-98). The effect names no target and can't ask to be sent: a field naming a person, session, company or authority, or `submit`, is refused, and a run's result can't lead to one. It is stored beside the page (`splitStoredPage`), so a reader from before it still parses the page. An attachment on a gadget widget may also hear the run results of one of that gadget's triggers. Its event names the trigger inside the existing `on` field (`run-result-<outcome>-<hookId as 24 digits>`). That's longer than any widget event, and `run-result-` is reserved in `widget-state.ts`, so it never collides with one, and an earlier reader still reads the page without firing it (FAC-116; `canvasRunEvent`, `canvasRunEventsHeard` and `canvasRunEffects`).
 
-**Data bindings (FAC-92).** Board and Wiki widgets carry a typed `dataBinding` (`resource`, canonical `ref`, and binding `schemaVersion`) alongside their existing target reference. The parser normalizes older board and Wiki records into this declaration and rejects a resource kind that does not match its widget, a mismatched reference, unsupported binding fields or versions, and any binding on a gadget. The binding is a read selector only: it adds no gatekeeper capability, write operation, or `workflow:invoke` authority. Reads still resolve through the existing workspace/account connection lookup and BoardData/WikiData paths, which check the acting person's current grant when the resource is used; proposals and workflow execution continue through their independent authority checks. Custom object/table bindings are not supported because canvas has no existing read path for them.
+**Data bindings (FAC-92).** Board and Wiki widgets carry a typed `dataBinding` (`resource`, canonical `ref`, and binding `schemaVersion`) alongside their existing target reference. The parser normalizes older board and Wiki records into this declaration and rejects a resource kind that does not match its widget, a mismatched reference, unsupported binding fields or versions, and any binding on a gadget. The binding is a read selector only: it adds no gatekeeper capability, write operation, or `workflow:invoke` authority. Reads still resolve through the existing workspace/account connection lookup and BoardData/WikiData paths, which check the acting person's current grant when the resource is used; proposals and workflow execution continue through their independent authority checks. A governed table widget (`inferos.governed-table`, FAC-9) carries the same binding for an InferOps custom table (`object/table`) or a tickets queue (`tickets/queue`). Its resource is the one its reference names (`governedResourceOf`), and it's read only through the governed provider below. Every guarantee above holds for it: the binding is normalized, a mismatch is refused, and it grants nothing.
 
 ### A newer InferOS's widgets
 
@@ -631,7 +631,7 @@ A console's bound views (MVP-26, see [bound views](operate-mode.md#bound-views))
 
 The contract a source-agnostic Refine provider reads and writes through, on any connector (`packages/workshop-shared/src/governed-data.ts`). It's built against inferops ADR 0013 W3 to W5, which is **proposed**, and is the first of FAC-9's four changes: this contract, the InferOps connector, the tickets connector, then the host provider and its UI.
 
-- **Resources.** `object/table` (an InferOps custom table) and `tickets/queue` (the local synthetic tickets connector). `CanvasDataBinding` gains them, additively at schema version 1, with the widget that reads them, in the provider change.
+- **Resources.** `object/table` (an InferOps custom table) and `tickets/queue` (the local synthetic tickets connector). `CanvasDataBinding` gains them, additively at schema version 1, with the widget that reads them (`inferos.governed-table`; see "The host's governed provider" below).
 - **A governed session,** `GovernedReadSession`, is fixed to its connection, workspace and person where it was opened. It offers `describe()` (fields and declared commands), `list(request)` and `get(id)`, and the connector logs each read as an observation.
 - **Requests,** `parseGovernedListRequest`, are validated against the resource's own description before anything is read:
   - **Keys:** only `filters`, `sort`, `pageSize` and `cursor`. A URL, a method or a `meta` is refused (`INVALID_REQUEST`).
@@ -663,5 +663,27 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
   - **Who may call it:** build sessions; operate forwards it; a use collaborator is refused.
   - **Tests:** `gatekeeper-lookup.test.ts` and `workshop-use-role.test.ts`.
 - **It grants nothing:** a request can only narrow what the session already returns.
+
+**The host's governed provider (FAC-9).** It is a source-agnostic Refine `DataProvider` (`features/canvas/governedDataProvider.ts`, `@refinedev/core` 5.0.12 with `@tanstack/react-query` 5.105.3) over the session `openGovernedSession` opens, whatever connector serves it.
+- **Reads:**
+  - `getList` becomes a governed `list`: Refine's filters ("equals" and "contains" only), one sort key and a page size.
+  - A numbered page is reached by walking the cursors the earlier pages of the same request returned, remembered per request. Past the last page there's nothing, with no further read.
+  - `getOne` and `getMany` are `get`; a missing row says "This row is no longer here."
+- **Writes:** `update` takes only `{command, values, expectedRevision}`, is pessimistic, and is proposed for a decision (the answer is "proposed", never done).
+- **Refused outright:** `create`, `deleteOne`, every `*Many` write, `custom`, and any request option a caller adds. Refine's own query context (`queryKey`, `signal`) is allowed. `getApiUrl` is a constant.
+- **The widget** (`CanvasGovernedTableWidget`, on canvas views and console widget views) shows the resource's described fields, pages of 25 on the server, and a proposal form for a declared command with one field that has a fixed set of values (the tickets queue's status). It names each state:
+  - **opening** the resource;
+  - **not connected:** this workspace holds no connection for it;
+  - **no longer allowed:** a revocation code (`UNAUTHORIZED`, `FORBIDDEN`, or no such gatekeeper), which also discards everything it read;
+  - **a failed read**, in the server's words, with "Try again";
+  - **no rows.**
+- **Refine's telemetry is off** (`GOVERNED_REFINE_OPTIONS`), so the trusted host never reports to Refine's service.
+- **The cache** (`GovernedCacheScope`):
+  - **What scopes it:** each widget instance, connection and reference has its own query client, within the Overseer stub it was opened through, which is one person's in one workspace, as `BoardData` is scoped. Refine's query keys add the request (filters, sort, page).
+  - **When it's discarded:** on a revocation, and when the widget unmounts.
+  - **Not built:** discarding it when the connection is removed. That shows on the next read as no such gatekeeper, which then discards it.
+- **Adding one:** the section editor's "Table or queue reference" form adds one by its reference. Agents place one as `kind:"inferos.governed-table"`. The binding editor doesn't apply, since its binding follows its reference.
+- **Rollback:** an InferOS from before the governed table reads one as an inert placeholder and refuses to change its canvas (see [A newer InferOS's widgets](#a-newer-infeross-widgets), #411), so this lands only after that reader is deployed. Its own tolerant read keeps it: the placeholder check knows every kind in `CANVAS_WIDGET_KINDS`.
+- **Tests:** `governedDataProvider.test.ts`, `CanvasGovernedTableWidget.test.tsx` and `CanvasWorkspacePane.test.tsx` (frontend); `canvas-model.test.ts` (the kind and its binding).
 - **Tests:** `governed-data.test.ts`, `gatekeeper-inferops`'s `governed-table.test.ts` and `gatekeeper-tickets`'s `governed-queue.test.ts`.
 
