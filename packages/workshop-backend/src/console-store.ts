@@ -1,8 +1,9 @@
+import type { WorkspaceSettings } from "@gadgets/workshop-shared/workspace-settings";
 import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
 import { canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasWidgetEventsHeard, formatCanvasTarget, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
-import { nestedPage, readCanvasDefinition } from "./canvas-store";
+import { joinPageSettings, nestedPage, readCanvasDefinition, splitPageSettings } from "./canvas-store";
 import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleDraftProblem, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
@@ -380,7 +381,18 @@ export type ConsoleScreenSnapshot = {
    * taken before it was recorded: the page is then `screen` by conversion.
    */
   page?: CanvasPage;
+  /**
+   * That page's settings overrides (FAC-95), kept beside `page` rather than in it, so a reader
+   * from before page settings still reads the snapshot. Absent when the page overrides nothing.
+   */
+  pageSettings?: WorkspaceSettings;
 };
+
+// A frozen page as its snapshot stores it: the page without its settings, and the settings beside it.
+function frozenPageRecord(page: CanvasPage): Pick<ConsoleScreenSnapshot, "page" | "pageSettings"> {
+  const split = splitPageSettings(page);
+  return { page: split.page, ...(split.settings ? { pageSettings: split.settings } : {}) };
+}
 
 /** The storage key of one published console screen. Ids never contain "/". */
 export function consoleScreenKey(consoleId: string, screenId: string): string {
@@ -510,7 +522,7 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
     // published console sees, is that page's projection (FAC-83), never the layout it replaced.
     storage.consoleScreens.put({ consoleId: id, screenId,
       screen: withFrozenGadgets(page ? canvasDefinitionProjection(page) : row, frozenIds),
-      ...(page ? { page: withFrozenNodes(page, frozenIds) } : {}) });
+      ...(page ? frozenPageRecord(withFrozenNodes(page, frozenIds)) : {}) });
   }
   let publishedContent = { ...content, ...(content.widgets === undefined ? {} : { widgets }),
     ...(content.boundViews === undefined ? {} : { boundViews }) };
@@ -929,7 +941,8 @@ export class WorkspaceConsoleStore {
       return row ? nestedPage(this.storage, row) ?? canvasPageFromDefinition(row) : null;
     }
     let snapshot = this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId));
-    return snapshot ? snapshot.page ?? canvasPageFromDefinition(snapshot.screen) : null;
+    if (!snapshot) return null;
+    return snapshot.page ? joinPageSettings(snapshot.page, snapshot.pageSettings) : canvasPageFromDefinition(snapshot.screen);
   }
 
   /**

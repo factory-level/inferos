@@ -13,6 +13,9 @@ import {
   ActionApplyError, ActionJournal, applyActionOutcome, defineActions, type TaggedAction,
 } from "@gadgets/gatekeeper-kit/actions";
 import { createLogger } from "@gadgets/observability/logger";
+import {
+  GovernedRequestError, listGoverned, parseGovernedCommand, parseGovernedListRequest,
+} from "@gadgets/workshop-shared/governed-data";
 import type {
   AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper,
   GatekeeperConnectCallback, GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, GitCache,
@@ -20,7 +23,10 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import { errorCode, openClient, type TicketsClient, type ErrorCode } from "./client";
 import { TicketsFakeProvider } from "./fake-provider";
-import type { Revision, Ticket, TicketStatus, TicketsQueueSession } from "./types";
+import type {
+  GovernedCommandRequest, GovernedDescription, GovernedListResult, GovernedRow, Revision, Ticket, TicketStatus,
+  TicketsQueueSession,
+} from "./types";
 import TYPES_CODE from "./types.txt";
 
 export { TicketsFakeProvider };
@@ -76,6 +82,36 @@ function refusal(code: ErrorCode | null): string {
 
 /** Errors known to have left nothing behind at the provider, so a retry can never succeed. */
 const TERMINAL: ReadonlySet<ErrorCode> = new Set(["NOT_FOUND", "STALE_REVISION", "INVALID_REQUEST", "INVALID_STATE", "UNAUTHORIZED"]);
+
+/**
+ * A queue as a governed resource (FAC-9): a ticket's title and status, and its one declared
+ * command, the same status change `setStatus` proposes. Fixed, so a request is checked against it
+ * before anything is read.
+ */
+const QUEUE_DESCRIPTION: GovernedDescription = {
+  resource: "tickets/queue",
+  fields: [
+    { name: "title", label: "Title", type: "text", filterable: true, sortable: true },
+    { name: "status", label: "Status", type: "text", filterable: true, sortable: true, options: STATUSES },
+  ],
+  commands: [{ name: "setStatus", label: "Change a ticket's status", fields: ["status"] }],
+};
+
+/** A ticket as a governed row: its id, title and status, and its revision. */
+const governedRow = (ticket: Ticket): GovernedRow =>
+  ({ id: ticket.id, values: { title: ticket.title, status: ticket.status }, revision: ticket.revision });
+
+/** Run a governed-request check, its refusal becoming the session's own INVALID_REQUEST. */
+function governedRequest<T>(check: () => T): T {
+  try {
+    return check();
+  } catch (error) {
+    if (error instanceof GovernedRequestError) {
+      throw new Error(`INVALID_REQUEST: ${error.code === "INVALID_REQUEST" ? "" : `${error.code}: `}${error.message}`, { cause: error });
+    }
+    throw error;
+  }
+}
 
 /** No HTTP surface: there is no connect flow, and everything else is RPC. */
 export default {
@@ -393,6 +429,50 @@ class QueueSessionImpl extends RpcTarget implements TicketsQueueSession {
       description: `Read ticket ${ticket.id} of queue ${queueId}.`,
     });
     return ticket;
+  }
+
+  // The queue as a governed resource (FAC-9). The request parameters are `unknown`: every check is
+  // the governed contract's, before anything is read, so a refusal reads the same however it fails.
+
+  async describe(): Promise<GovernedDescription> {
+    const { client, queueId } = this.#host;
+    // Read so a disconnected account is refused here as everywhere else.
+    if (!(await this.#read(() => client.hasQueue(queueId)))) throw new Error(refusal("NOT_FOUND"));
+    await this.#queue.authorizeObservation({
+      title: `Describe Tickets queue ${queueId}`,
+      description: `Described the fields and commands of queue ${queueId}.`,
+    });
+    return QUEUE_DESCRIPTION;
+  }
+
+  async list(query?: unknown): Promise<GovernedListResult> {
+    const request = governedRequest(() => parseGovernedListRequest(query ?? {}, QUEUE_DESCRIPTION));
+    const { client, queueId } = this.#host;
+    const tickets = await this.#read(() => client.listTickets(queueId));
+    const result = governedRequest(() => listGoverned(tickets.map(governedRow), request)) as GovernedListResult;
+    await this.#queue.authorizeObservation({
+      title: `List Tickets queue ${queueId}`,
+      // Filter values are caller input: only how many there were is logged.
+      description: `Listed ${result.rows.length} of ${result.total} matching tickets` +
+        `${request.filters.length ? `, with ${request.filters.length} filter(s)` : ""}.`,
+    });
+    return result;
+  }
+
+  async get(id: string): Promise<GovernedRow | null> {
+    try {
+      return governedRow(await this.readTicket(id));
+    } catch (error) {
+      if (errorCode(error) === "NOT_FOUND") return null;
+      throw error;
+    }
+  }
+
+  async command(request: unknown): Promise<{ outcome: "proposed" }> {
+    const command: GovernedCommandRequest = governedRequest(() => parseGovernedCommand(request, QUEUE_DESCRIPTION));
+    // setStatus is the one declared command, so this proposes exactly what setStatus proposes.
+    await this.setStatus(command.id, command.values.status as TicketStatus, command.expectedRevision);
+    return { outcome: "proposed" };
   }
 
   async setStatus(ticketId: string, status: TicketStatus, expectedRevision: Revision): Promise<void> {
