@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { RUN_REQUESTER_REVOKED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
-import { WORKFLOW_BINDINGS_NEEDED } from "@gadgets/workshop-shared/workflow-definition";
+import { WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS } from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
 import { actionDescriptionDigest } from "../src/system-run.js";
 
@@ -618,13 +618,20 @@ describe("a failed run's recorded outcome (FAC-112)", () => {
 // nothing of it runs. Checked as a run is admitted, as it starts and before each write, over the
 // workspace's own registry, so a connection removed after it was set up stops the next run again.
 describe("a duplicate's connections, at admission, at run start and at a write (FAC-123)", () => {
-  /** The trigger's gadget as a duplicate's: BOARD must be a scheduler connection, bound or not. */
-  function asDuplicate(impl: any, bound: boolean) {
+  /**
+   * The trigger's gadget as Ada's duplicate's: BOARD must be a scheduler connection made from her own
+   * account, bound or not. `madeBy` says whose account the bound connection uses (FAC-123).
+   */
+  function asDuplicate(impl: any, bound: boolean, madeBy: string | null = "ada-user") {
     impl.storage.gadgets.put({
       type: "gadget", id: GADGET, title: "Refund copy", created: new Date(0), bindingName: "REFUND_COPY", commitId: commit(1),
       bindings: bound ? { BOARD: { target: CONNECTION } } : {},
       requiredBindings: [{ name: "BOARD", type: "gatekeeper", vendorId: "scheduler", typeUrlPattern: "scheduler://*" }],
+      requiredBindingsOwner: "ada-user",
     });
+    let connection = impl.storage.gatekeepers.get(CONNECTION);
+    let { connectedBy: _was, ...rest } = connection;
+    impl.storage.gatekeepers.put({ ...rest, ...(madeBy ? { connectedBy: { userId: madeBy, accountId: 1 } } : {}) });
   }
   const head = (id: number) => (id === GADGET ? commit(1) : undefined);
   /** Another run PERSON asks for, fired and queued. */
@@ -672,6 +679,34 @@ describe("a duplicate's connections, at admission, at run start and at a write (
       return another(impl);
     });
     expect((await settled(name, third)).execution).toMatchObject({ state: "failed", failure: "bindings-needed" });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("never runs on another person's connection, however it was bound, and runs on the owner's own", async () => {
+    let name = `dup-owner-${crypto.randomUUID()}`;
+    let theirs = await withImpl(name, async impl => {
+      let delivery = admitted(impl);
+      // Bound as a chat binds any connection of the workspace: an accepted edge to Ben's.
+      asDuplicate(impl, true, "ben-user");
+      expect(impl.bindingsNeeded(GADGET)).toEqual([expect.objectContaining({ name: "BOARD", unmet: "not-owners" })]);
+      await expect(invokeWorkflowTrigger(impl, "operator-user", PERSON, HOOK)).rejects.toThrow(WORKFLOW_BINDINGS_NOT_OWNERS);
+      impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+      return delivery.deliveryId;
+    });
+    expect((await settled(name, theirs)).execution).toMatchObject({ state: "failed", failure: "bindings-needed" });
+    expect(calls).toEqual([]);
+    // Unrecorded (an older connection): not filled either.
+    await withImpl(name, impl => {
+      asDuplicate(impl, true, null);
+      expect(impl.bindingsNeeded(GADGET)).toEqual([expect.objectContaining({ unmet: "unattributed" })]);
+    });
+    let own = await withImpl(name, impl => {
+      workerSeams(impl);
+      asDuplicate(impl, true, "ada-user");
+      expect(impl.bindingsNeeded(GADGET)).toEqual([]);
+      return another(impl);
+    });
+    expect((await settled(name, own)).execution).toMatchObject({ state: "finished" });
     expect(calls).toHaveLength(1);
   });
 
