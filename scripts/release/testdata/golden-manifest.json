@@ -532,6 +532,12 @@
             "InferOpsSystemCredentials"
           ],
           "tag": "v8"
+        },
+        {
+          "new_sqlite_classes": [
+            "InferOpsDotGatekeeper"
+          ],
+          "tag": "v9"
         }
       ],
       "modules": [
