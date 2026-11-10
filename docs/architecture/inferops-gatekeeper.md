@@ -11,6 +11,7 @@ covers:
   - packages/bundled-blueprints/blueprints/inferops-service-job-recent-activities
   - packages/bundled-blueprints/blueprints/inferops-service-dashboard
   - packages/bundled-blueprints/blueprints/inferops-members
+  - packages/bundled-blueprints/blueprints/inferops-dot
   - packages/bundled-blueprints/blueprints/inferops-workflow-policy
   - packages/gatekeeper-kit
   - packages/workshop-shared/src/gatekeeper.ts
@@ -804,7 +805,33 @@ FAC-133 (inferos [ADR 0013](../adr/0013-dot-runtime.md) decision 3). A seventh r
 - **Errors.** Every refusal is a fixed sentence: a conversation that isn't the person's (`NOT_FOUND`), a selection they can't open (`NOT_FOUND`), `FORBIDDEN`, a running turn (`CONFLICT`), the Dot unavailable (`UNAVAILABLE`), an expired proposal (`EXPIRED`) and a decided one (`CONFLICT`). A 401 is adjudicated by the account as for every call. Logs carry the operation name and status only.
 - **Observers.** Strategy A: `addObserver` always throws; a Dot is never shared. A use-role operator binds their own.
 - **Configurator.** `dot-ui.tsx`, organization and workspace. It changes no authority.
-- **Not here.** The Dot screen (FAC-133 PR C), a conversation list (no capability yet), conversation history beyond the newest 50 messages through `read({before})`, and a reconciling sweep of proposals stuck confirming (InferOps follow-up). The SSE fixtures are written in the tests to InferOps' encoder format, not generated from it.
+- **Display (PR C).** The bundled `inferops.dot` gadget is the Dot's screen, through the existing `inferos.gadget` canvas kind. There is no new kernel widget kind, interface or permission.
+  - **Its Durable Object** keeps one thing: the id of the conversation it is having. That's a reference, never a message (ADR 0013 decision 1). It reads the conversation back from InferOps whenever it is shown. A kept conversation that is gone, or isn't the person's, is forgotten; any other failure keeps it.
+  - **Its calls:**
+    - `open()`;
+    - `ask(prompt, progress)`, which starts a conversation on the first question and relays the answer as it comes through an `RpcTarget` the client hands it;
+    - `cancel()`;
+    - `startOver()`, which forgets the id; InferOps keeps the conversation.
+  - **What the client sees:** messages and each change's status only, never a receipt or a change's arguments. Every value is drawn as a text node. Its `ExportHandler` lists no formats. It keeps a print layout, as every bundled output format does: the transcript and its changes, without the composer, buttons or status line.
+  - **No second decision card.** A change is never decided in the gadget. It lists each one in words:
+    - waiting for your decision, pointing at *Needs your approval*, where every write is decided (FAC-119 U1's decision card covers Dot actions there);
+    - being made;
+    - made;
+    - declined;
+    - not made, with the receipt's reason;
+    - expired;
+    - uncertain: "may or may not have been made", never read as done or not done.
+  - **Each refusal has its own words:**
+    - no Dot connected;
+    - refused: your access, or a shared connection, which has no Dot;
+    - unavailable: the Dot can't run now, and a company with its own database lands here today;
+    - still answering;
+    - not found;
+    - turned off;
+    - an error.
+  - **Controls:** Ask, Stop and Start over. A refused question is taken back, and its text is kept to ask again.
+  - **Tests:** `blueprints/inferops-dot/__tests__` (`server.test.ts`, `dot.test.ts`, `client.test.ts`).
+- **Not here.** A conversation list (no capability yet), conversation history beyond the newest 50 messages through `read({before})`, and a reconciling sweep of proposals stuck confirming (InferOps follow-up). The SSE fixtures are written in the tests to InferOps' encoder format, not generated from it.
 - **Tests.** `__tests__/dot-relay.test.ts` (byte-level relay: order across split frames and heartbeats, CRLF, a tool call and proposal, the run's error, cut, malformed, oversized event, frame and run, silence, deadline; strict parsers) and `__tests__/dot.test.ts`. The latter drives the facet's own session, apply and reject over the real HTTP client against a scripted fake InferOps (`__tests__/worker.ts`, `dotBindingOver`). It covers the observation, text in order, the selection sent unchanged, proposals staged once with receipts and on reading, the run's error, a malformed event shown and the run stopped, a cut, refusals in fixed words, input checks, the keyed confirm and its bounded result, `EXPIRED`, a decided proposal settled to its real status, decline, a decline InferOps didn't answer kept pending, one refused because the change was made, one refused as expired, a decided record InferOps still shows waiting staged again, no collaborator admitted, and the status mapping.
 
 ### Host boards
