@@ -50,7 +50,9 @@ function queue(rows: GovernedRow[], overrides: Partial<GovernedSessionHandle['se
       return { rows: rows.slice(offset, offset + pageSize), nextCursor: offset + pageSize < rows.length ? String(offset + pageSize) : null, total: rows.length, truncated: false }
     }),
     get: async () => null,
-    command: vi.fn<GovernedWriteSession['command']>(async () => ({ outcome: 'proposed' as const })),
+    command: vi.fn<GovernedWriteSession['command']>(async () => ({
+      outcome: 'proposed' as const, actionId: 'test-action', status: async () => ({ outcome: 'waiting' as const }),
+    })),
     [Symbol.dispose]: vi.fn<() => void>(),
     ...overrides,
   }

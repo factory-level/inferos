@@ -15,7 +15,8 @@ covers:
   - scripts/scaffold-gatekeeper.test.ts
   - scripts/connection-template
   - custom-gatekeepers/gatekeeper-tickets
-updated: 2026-10-03
+  - packages/gatekeeper-kit/src/actions.ts
+updated: 2026-11-10
 ---
 
 # Connection packages and reviewed fork updates
