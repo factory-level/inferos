@@ -141,7 +141,6 @@ export const BACKEND: readonly string[] = [
   "observer-scope-restart.test.ts",
   "observer-verification-failure.test.ts",
   "pending-login.test.ts",
-  "account-subject.test.ts",
   "restricted-actions.test.ts",
   "spawned-agent-tools.test.ts",
   "user-commit-email.test.ts",
@@ -169,4 +168,13 @@ export const BACKEND_RESTART: readonly string[] = [
   "workflow-run-restart.test.ts",
   "workflow-run-results.test.ts",
   "worktrees.test.ts",
+];
+
+/**
+ * Backend files that drive a real gatekeeper sign-in through the login callback, which reads the
+ * admin config from `BLUEPRINTS`. They run in their own project, `backend-sign-in`, whose Miniflare
+ * alone has that namespace (empty, so signups are open), so no other file's runtime changes.
+ */
+export const BACKEND_SIGN_IN: readonly string[] = [
+  "account-subject.test.ts",
 ];

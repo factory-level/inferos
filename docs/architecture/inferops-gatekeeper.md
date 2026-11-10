@@ -855,8 +855,11 @@ holds. The Workshop (`account-subject.ts`, `auth/login-flow.ts`) keys the person
 - **Tests:** `account-subject.test.ts` (the email change, a second person on the old address, the
   binding rules, finding by address, the pass and its conflict, two first sign-ins at once, one
   acting on an answer from before another finished, a sign-in that stopped before binding, an
-  address with capitals) and the gatekeeper's
-  `inferlab-login.test.ts` and `account.test.ts`.
+  address with capitals, an address that names an account only later, and a pass whose claimed
+  account another subject took meanwhile) and the gatekeeper's
+  `inferlab-login.test.ts` and `account.test.ts`. `account-subject.test.ts` runs in its own vitest
+  project, `backend-sign-in`, whose Miniflare alone has the empty `BLUEPRINTS` namespace the real
+  sign-in reads its admin config from, so no other backend file runs with it.
 
 ### Sign-in proxy
 

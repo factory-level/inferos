@@ -267,6 +267,21 @@ describe("two first sign-ins for one subject at once (FAC-165 round 1)", () => {
   });
 });
 
+describe("an address that named no account at first (FAC-165, QA)", () => {
+  it("keeps the person in their own account when an email-keyed account for the address appears later", async () => {
+    const email = `later-${fresh()}@example.test`;
+    const subject = fresh();
+    // No account is named by the address yet, so the first sign-in claims it, can't bind it, and
+    // moves the subject to an account of its own.
+    expect(await signIn(subject, email)).toBe(subjectName(subject));
+    // Later an email-keyed account for that address appears.
+    await legacyAccount(email);
+    expect(await signIn(subject, email)).toBe(subjectName(subject));
+    expect(await env.TEST_USER.getByName(email).isSubjectBound()).toBe(false);
+    expect(await env.TEST_USER_DIRECTORY.getByName("").accountForSubject(subjectName(subject))).toBe(subjectName(subject));
+  });
+});
+
 describe("an address with capitals (FAC-165 round 1)", () => {
   it("binds the account it named, exactly as the provider gave it, and finds it by any case", async () => {
     const email = `Mixed-${fresh()}@Example.Test`;
@@ -342,6 +357,45 @@ describe("the one-off subject pass (acceptance 3)", () => {
     expect(await signIn(principal)).toBe(email);
     // No account was made for the subject itself.
     expect(await profileOf(subjectName(principal))).toBeNull();
+  });
+
+  it("moves a subject it claimed for an account another subject took meanwhile, so its person still signs in", async () => {
+    const vendorId = `inferops-pass-${fresh()}`;
+    const email = `pass-race-${fresh()}@example.test`;
+    const principal = fresh();
+    const legacy = await legacyAccount(email);
+    await legacy.authenticate((await legacy.loginOrCreateViaGatekeeper(email, true))!);
+    await runInDurableObject(legacy, async (instance: UserDurableObject) => {
+      const user = instance as Internals;
+      user.storage.nextAccountId.put(1);
+      user.storage.connectedAccounts.put({
+        id: 0, vendorId, description: { displayName: "InferOps" },
+        account: user.ctx.exports.FakeSubjectAccount({ props: { issuer: ISSUER, subject: principal, email } }),
+      });
+    });
+    // Between the pass reading the account's subject and binding it, another subject binds it.
+    const takenBy = subjectName(fresh());
+    const users = {
+      idFromName: (name: string) => env.TEST_USER.idFromName(name),
+      get(id: DurableObjectId) {
+        const user = env.TEST_USER.get(id);
+        return new Proxy(user, {
+          get(target, key) {
+            const stub = target as unknown as Record<string | symbol, (...a: unknown[]) => Promise<unknown>>;
+            if (key !== "bindSubject") return stub[key];
+            return async (subject: string) => {
+              if (id.equals(env.TEST_USER.idFromName(email))) await stub.bindSubject!(takenBy);
+              return stub.bindSubject!(subject);
+            };
+          },
+        });
+      },
+    } as unknown as DurableObjectNamespace<UserDurableObject>;
+    const pass = await bindAccountSubjects({ users, directory: env.TEST_USER_DIRECTORY }, vendorId);
+    expect(pass).toMatchObject({ bound: 0, conflicts: 1 });
+    expect(await env.TEST_USER_DIRECTORY.getByName("").accountForSubject(subjectName(principal))).toBe(subjectName(principal));
+    // The person's next sign-in reaches an account of their own, not the one another subject holds.
+    expect(await signIn(principal)).toBe(subjectName(principal));
   });
 
   it("leaves an account unbound when its subject already signs in to another account", async () => {

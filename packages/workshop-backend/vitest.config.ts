@@ -6,7 +6,7 @@ import { defineConfig } from 'vitest/config'
 import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
 import { COMPATIBILITY_DATE } from '@gadgets/scripts/worker-config'
 import capnwebValidate from 'capnweb-validate/vite'
-import { BACKEND, BACKEND_RESTART, UNIT_NODE, WORKERD_LIGHT } from './__tests__/test-projects.ts'
+import { BACKEND, BACKEND_RESTART, BACKEND_SIGN_IN, UNIT_NODE, WORKERD_LIGHT } from './__tests__/test-projects.ts'
 
 // Wrangler ships `*.txt` imports as Text modules (its default module rules; see
 // src/text-modules.d.ts), but this config drives the pool from inline miniflare settings, and
@@ -135,8 +135,12 @@ function backendWorkers(): number {
   return Number(value)
 }
 
-/** The `backend` projects' plugins: the production Worker, plus test-only entrypoints, in workerd. */
-const backendPlugins = () => [
+/**
+ * The `backend` projects' plugins: the production Worker, plus test-only entrypoints, in workerd.
+ * `blueprints` adds an empty `BLUEPRINTS` namespace, so the admin config reads its defaults
+ * (signups open), for the files that drive a real sign-in; the shared `backend` runtime has none.
+ */
+const backendPlugins = ({ blueprints = false }: { blueprints?: boolean } = {}) => [
   ...plugins(),
   cloudflareTest({
     // The production Worker plus test-only entrypoints (see __tests__/test-worker.ts).
@@ -156,9 +160,7 @@ const backendPlugins = () => [
       bindings: { PUBLIC_BASE_URL: 'https://workshop.example/' },
       // The overseer loads gadget code through this, so a test can run a real gadget facet.
       workerLoaders: { LOADER: {} },
-      // Empty, so the admin config reads its defaults (signups open): the gatekeeper login callback
-      // reads it when it signs a person in (account-subject.test.ts, FAC-165).
-      kvNamespaces: ['BLUEPRINTS'],
+      ...(blueprints ? { kvNamespaces: ['BLUEPRINTS'] } : {}),
       durableObjects: {
         TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
         TEST_AUTHORED_WIDGET_BUILD: { className: 'AuthoredWidgetBuildDurableObject', useSQLite: true },
@@ -178,8 +180,8 @@ const backendPlugins = () => [
 ]
 
 /**
- * Four projects, cheapest first; `__tests__/test-projects.ts` says which file runs where, and
- * `vitest run` runs all four (`--project <name>` picks one).
+ * Five projects, cheapest first; `__tests__/test-projects.ts` says which file runs where, and
+ * `vitest run` runs all five (`--project <name>` picks one).
  *
  * - `unit-node`: pure logic under Node. No workerd start, so a file costs milliseconds.
  * - `workerd-light`: needs workerd's runtime APIs but not the backend, so the pool's `main` is a
@@ -195,8 +197,10 @@ const backendPlugins = () => [
  * - `backend-restart`: the same Worker, for the few files that restart every Durable Object
  *   (`abortAllDurableObjects()`), which in `backend`'s shared runtime would restart other files'
  *   objects too. Each gets a Miniflare of its own, one file at a time, after `backend` has finished.
+ * - `backend-sign-in`: the same Worker with an empty `BLUEPRINTS` namespace, for the files that drive a
+ *   real gatekeeper sign-in (it reads the admin config there), so the shared runtime has none.
  *
- * The three workerd projects load `@gadgets/scripts/assert-workerd`, which fails the run unless the
+ * The four workerd projects load `@gadgets/scripts/assert-workerd`, which fails the run unless the
  * pool actually started, rather than trusting a green run to mean workerd.
  */
 export default defineConfig({
@@ -269,6 +273,21 @@ export default defineConfig({
           maxWorkers: 1,
           fileParallelism: false,
           sequence: { groupOrder: 2 },
+          unstubGlobals: true,
+          restoreMocks: true,
+          setupFiles: ['@gadgets/scripts/assert-workerd', './__tests__/workerd/backend-file-boundary.ts'],
+        },
+      },
+      {
+        ...shared,
+        plugins: backendPlugins({ blueprints: true }),
+        test: {
+          // Files that drive a real gatekeeper sign-in, which reads the admin config from
+          // BLUEPRINTS (FAC-165). Their own Miniflare, so no other file runs with that binding.
+          name: 'backend-sign-in',
+          include: tests(BACKEND_SIGN_IN),
+          maxWorkers: 1,
+          sequence: { groupOrder: 3 },
           unstubGlobals: true,
           restoreMocks: true,
           setupFiles: ['@gadgets/scripts/assert-workerd', './__tests__/workerd/backend-file-boundary.ts'],
