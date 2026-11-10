@@ -789,6 +789,7 @@ FAC-133 (inferos [ADR 0013](../adr/0013-dot-runtime.md) decision 3). A seventh r
   - any other failure (unreachable, a timeout, an answer it can't be sure of) records nothing and fails the rejection: the action stays pending, and the person is told the decline couldn't be confirmed and can decline it again.
 
   A read reconciles with InferOps: a proposal InferOps still shows waiting, but recorded here as decided, is staged again. Who decides: only the person whose Dot it is, since no collaborator is ever admitted. Not revertible.
+- **Workflow-run proposals (FAC-120).** The Dot's `inferos_workflow_invoke` (inferops#2627, off behind `chatbot.workflowInvoke.enabled` there) proposes running an InferOS workflow by its trigger reference (`workflow-trigger-ref.ts`: `inferops://<company>.<workspace>/inferos/workflow-trigger/<workspace>/<hook>?definition=…&revision=…`), which names a target and authorizes nothing. It is staged as its own kind, `inferops.dot-workflow-invoke`, with a card naming the trigger and revision, never auto-approvable. InferOps runs nothing for it: approving it calls the kernel's `ApprovedEffects.invokeWorkflow` (present only for the person's own approval; [Operate mode](operate-mode.md#approved-workflow-runs)), and only once the run started is the proposal confirmed in InferOps (`handed-off`), keyed by the proposal id, with the run's id on the receipt. A refused run is not applied, in its own FAC-119 kind, and the proposal is declined there. Without the effects (an automatic approval, an older kernel) nothing is asked: `policy`, "needs your own approval". A confirm InferOps doesn't answer after the run started is logged (`dot-confirm.workflow.confirm_unanswered`) and leaves the proposal to expire there; the run is recorded here and never started again by approving again.
 - **Receipts** (`dotProposalStatus`), in FAC-97's words from InferOps' own status, read when asked:
 
   | InferOps | Receipt |
@@ -796,6 +797,7 @@ FAC-133 (inferos [ADR 0013](../adr/0013-dot-runtime.md) decision 3). A seventh r
   | proposed | waiting |
   | confirming | running |
   | confirmed | succeeded, with the bounded summary below |
+  | handed-off | succeeded: an InferOS workflow-run proposal, confirmed only after the run started here (FAC-120) |
   | failed | failed, with the receipt code for InferOps' refusal |
   | declined | rejected |
   | expired | failed, `EXPIRED` |
