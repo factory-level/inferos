@@ -253,6 +253,28 @@
         "reason": "Not applicable: the kind proposes no writes, so there is nothing to approve, apply or retry. Its tests assert the mock and the HTTP client see no non-GET request."
       },
       {
+        "kind": "portal/members",
+        "cases": ["resource-scope", "observation", "sharing", "revocation"],
+        "reason": "Read-only and private-only: its session lists one bound workspace, observations exclude member identity, sharing is refused, and account revocation stops reads. There are no writes, revisions, or write retries to express in the shared suite.",
+        "coveredBy": ["__tests__/members.test.ts", "__tests__/members-http.test.ts", "__tests__/account.test.ts"]
+      },
+      {
+        "kind": "portal/members",
+        "cases": ["approval", "apply-once", "stale-revision", "server-error-retry", "lost-response-retry"],
+        "reason": "Not applicable: this read-only resource has no write path. Provider read failures return unavailable and are not retried as writes."
+      },
+      {
+        "kind": "project/workflow",
+        "cases": ["resource-scope", "observation", "sharing", "revocation"],
+        "reason": "Read-only and private-only: its session reads the bound project's policy projection, observes each read, refuses sharing, and stops after account revocation. There are no writes, revisions, or write retries to express in the shared suite.",
+        "coveredBy": ["__tests__/workflow-policy.test.ts", "__tests__/workflow-policy-http.test.ts", "__tests__/account.test.ts"]
+      },
+      {
+        "kind": "project/workflow",
+        "cases": ["approval", "apply-once", "stale-revision", "server-error-retry", "lost-response-retry"],
+        "reason": "Not applicable: this read-only resource has no write path. Provider read failures return unavailable and are not retried as writes."
+      },
+      {
         "kind": "account",
         "cases": ["resource-scope", "observation", "sharing", "approval", "apply-once"],
         "reason": "No shared-suite adapter yet: the shared cases assume a session that writes directly, and this kind's writes go through the board and Wiki sessions it opens. Its own suites cover opening and every refusal, per-target pending actions, routing of apply, reject and revert, the fingerprinted target, the workspace check at apply, and strategy C admission and exclusion.",
