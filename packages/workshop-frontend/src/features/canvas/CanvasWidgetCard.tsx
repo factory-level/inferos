@@ -19,8 +19,7 @@ export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, overse
   // A newer InferOS's widget is shown, never configured: its canvas can't be changed here.
   if (widget.kind === 'inferos.unsupported') return <div className={`min-w-0 ${widgetSpanClass(widget.size, section.columns)}`}><CanvasUnsupportedWidget widget={widget} /></div>
   const configure = (nextWidget: CanvasWidget) => void onEdit([{ type: 'configureWidget', widget: nextWidget }])
-  const noun = widget.kind === 'inferos.gadget' ? 'gadget' : widget.kind === 'inferops.wiki' ? 'Wiki'
-    : widget.kind === 'inferos.governed-table' ? 'table' : 'board'
+  const noun = widget.kind === 'inferos.gadget' ? 'gadget' : widget.kind === 'inferops.wiki' ? 'Wiki' : 'board'
   const label = widgetLabel(widget, gadgets)
   return <article className={`min-w-0 space-y-3 rounded-xl border border-kumo-line bg-kumo-base shadow-md p-4 ${widgetSpanClass(widget.size, section.columns)}`} aria-label={label}>
     {widget.kind === 'inferos.gadget'
@@ -28,9 +27,7 @@ export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, overse
       : widget.kind === 'inferops.wiki'
         ? <div><h4 className="font-medium text-kumo-default">InferMind Wiki</h4><p className="break-all text-sm text-kumo-subtle">{widget.targetRef}</p>
           <p className="text-sm text-kumo-subtle">Opens {widget.params.page === null ? 'its first page' : `the page ${widget.params.page}`}.</p></div>
-        : widget.kind === 'inferos.governed-table'
-          ? <div><h4 className="font-medium text-kumo-default">Table</h4><p className="break-all text-sm text-kumo-subtle">{widget.targetRef}</p></div>
-          : <CanvasBoardSummary widget={widget} />}
+        : <CanvasBoardSummary widget={widget} />}
     <div role="group" aria-label={`${noun[0]!.toUpperCase()}${noun.slice(1)} width`} className="flex flex-wrap gap-1">
       {(['normal', 'wide', 'full'] as const).map(size => <Button size="sm" key={size} disabled={busy}
         aria-pressed={widget.size === size} onClick={() => configure({ ...widget, size })}>{size}</Button>)}
@@ -46,7 +43,7 @@ export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, overse
       <Button size="sm" disabled={busy || index === 0} onClick={() => void onEdit([{ type: 'moveWidget', widgetId: widget.id, sectionId: section.id, index: index - 1 }])}>Move {noun} up</Button>
       <Button size="sm" disabled={busy} onClick={() => void onEdit([{ type: 'removeWidget', widgetId: widget.id }])}>Remove {noun}</Button>
     </div>
-    {(widget.kind === 'inferops.project-board' || widget.kind === 'inferops.wiki') && <CanvasDataBindingEditor widget={widget} overseer={overseer} busy={busy}
+    {widget.kind !== 'inferos.gadget' && <CanvasDataBindingEditor widget={widget} overseer={overseer} busy={busy}
       onSave={updated => configure(updated)} />}
   </article>
 }

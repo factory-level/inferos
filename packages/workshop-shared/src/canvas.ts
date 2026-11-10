@@ -1,37 +1,3 @@
-/** The resources a governed session serves (FAC-9): custom tables, and ticket queues. */
-export type GovernedResource = "object/table" | "tickets/queue";
-
-// A tenant or workspace slug InferOps could have issued (gatekeeper-inferops `isSlug`).
-const SLUG = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
-// A custom table's reference, exactly as gatekeeper-inferops `parseTableUrl` accepts it.
-const TABLE_REF = new RegExp(
-  `^inferops://${SLUG}\\.${SLUG}/object/table/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`);
-
-/** The longest tickets queue id a reference may name (FAC-9). */
-export const TICKETS_QUEUE_ID_MAX = 64;
-const QUEUE_REF = new RegExp(`^tickets://([a-z0-9-]+)/queue/([A-Za-z0-9_-]{1,${TICKETS_QUEUE_ID_MAX}})$`);
-
-/**
- * The workspace and queue a tickets queue reference, `tickets://<workspace>/queue/<id>`, names, or
- * null for anything else. The one grammar for it: the tickets connector binds by it, and the host's
- * governed reference (`governedResourceOf`) names a queue by it, so the two never disagree.
- */
-export function parseTicketsQueueRef(ref: string): { workspace: string; queueId: string } | null {
-  const match = QUEUE_REF.exec(ref);
-  return match ? { workspace: match[1]!, queueId: match[2]! } : null;
-}
-
-/**
- * The governed resource reference `ref` names (FAC-9): a custom table,
- * `inferops://<tenant>.<workspace>/object/table/<tableId>`, or a tickets queue,
- * `tickets://<workspace>/queue/<id>`, each exactly as its connector accepts it. Null for anything
- * else. It names a resource; it grants nothing.
- */
-export function governedResourceOf(ref: string): GovernedResource | null {
-  if (TABLE_REF.test(ref)) return "object/table";
-  return parseTicketsQueueRef(ref) ? "tickets/queue" : null;
-}
-
 /** Registered, renderer-owned project board. A target reference never grants resource access. */
 export interface CanvasProjectBoardWidget {
   /** Stable instance ID, unique across this definition. */
@@ -104,29 +70,6 @@ export interface CanvasWikiWidget {
 }
 
 /**
- * One governed resource's rows (FAC-9): an InferOps custom table or a tickets queue, read through
- * the host's governed provider over the connection that serves it. Like a board, the reference
- * identifies the resource and is resolved only through a separately granted connection; it grants
- * nothing. Writes are only the resource's declared commands, each proposed for a decision.
- */
-export interface CanvasGovernedTableWidget {
-  /** Stable instance ID, unique across this definition. */
-  id: string;
-  /** Registered governed-table kind. */
-  kind: "inferos.governed-table";
-  /** Widget parameter schema version. */
-  version: 1;
-  /** A governed resource reference (`governedResourceOf`): a custom table or a tickets queue. */
-  targetRef: string;
-  /** Typed read source, normalized from `targetRef` by `parseCanvasWidget`; it grants no authority. */
-  dataBinding?: CanvasDataBinding;
-  /** Curated column span; the renderer clamps it to the section's column count. */
-  size: "normal" | "wide" | "full";
-  /** No parameters are defined for v1; the parser rejects any key. */
-  params: {};
-}
-
-/**
  * A widget a newer InferOS stored that this one can't show (FAC-9 rollback safety): a kind it
  * doesn't know, or a known kind at a version it doesn't know. A tolerant read
  * (`parseCanvasDefinition(value, { tolerateNewer: true })`) shows one in its place, keeping its id
@@ -151,13 +94,13 @@ export interface CanvasUnsupportedWidget {
   storedKind: string;
 }
 
-/** Registered widget instance; unknown kinds and versions are rejected (a tolerant read shows a placeholder). */
-export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget | CanvasWikiWidget | CanvasGovernedTableWidget | CanvasUnsupportedWidget;
+/** Registered widget instance; unknown kinds and versions are rejected. */
+export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget | CanvasWikiWidget | CanvasUnsupportedWidget;
 
 /** A schema-versioned read reference to one supported InferOps resource. */
 export interface CanvasDataBinding {
-  /** Resource kind, which must match the consuming widget (a governed table's, its reference's). */
-  resource: "project/board" | "knowledge/wiki" | GovernedResource;
+  /** Resource kind, which must match the consuming widget. */
+  resource: "project/board" | "knowledge/wiki";
   /** Canonical URI; identifies the resource but does not authorize reading it. */
   ref: string;
   /** Version of the typed data-binding contract. */
@@ -168,7 +111,7 @@ export interface CanvasDataBinding {
 export type CanvasWidgetKind = CanvasWidget["kind"];
 
 /** Every registered widget kind, in display order. */
-export const CANVAS_WIDGET_KINDS: readonly CanvasWidgetKind[] = ["inferops.project-board", "inferos.gadget", "inferops.wiki", "inferos.governed-table"];
+export const CANVAS_WIDGET_KINDS: readonly CanvasWidgetKind[] = ["inferops.project-board", "inferos.gadget", "inferops.wiki"];
 
 /** Workspace-local gadget reference syntax accepted by `inferos.gadget` widgets. */
 export const CANVAS_GADGET_REF = /^gadget:(0|[1-9][0-9]{0,15})$/;
@@ -262,9 +205,8 @@ const revision = (value: unknown): string => typeof value === "string" && CANVAS
 const columns = (value: unknown): 1 | 2 | 3 => value === 1 || value === 2 || value === 3 ? value : invalid("columns");
 const position = (value: unknown, length: number): number => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= length ? value : invalid("position");
 
-// The kinds this InferOS can show, each at version 1: every kind it registers. Anything else is a
-// newer InferOS's.
-const KNOWN_KINDS: readonly unknown[] = CANVAS_WIDGET_KINDS;
+// The kinds this InferOS can show, each at version 1.
+const KNOWN_KINDS: readonly unknown[] = ["inferops.project-board", "inferos.gadget", "inferops.wiki"];
 
 /**
  * The placeholder a tolerant read shows for `raw`, a stored widget a newer InferOS wrote (an
@@ -313,13 +255,6 @@ function widget(value: unknown, options: CanvasReadOptions = {}): CanvasWidget {
     const params = record(w.params, ["page"], "widget parameters");
     if (params.page !== null && (typeof params.page !== "string" || !CANVAS_WIKI_PAGE.test(params.page))) return invalid("wiki page");
     return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, dataBinding, size: w.size, params: { page: params.page } };
-  }
-  if (w.kind === "inferos.governed-table") {
-    const resource = governedResourceOf(w.targetRef);
-    if (resource === null) return invalid("target reference");
-    const dataBinding = parseDataBinding(w.dataBinding, resource, w.targetRef);
-    record(w.params, [], "widget parameters");
-    return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, dataBinding, size: w.size, params: {} };
   }
   if (w.kind !== "inferops.project-board") return invalid("widget kind/version");
   if (!/^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/project\/board\/[A-Za-z0-9_-]+$/.test(w.targetRef)) return invalid("target reference");

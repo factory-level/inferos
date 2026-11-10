@@ -11,7 +11,6 @@ import { CanvasBoardWidget } from '../canvas/CanvasBoardWidget'
 import { CanvasGadgetWidget } from '../canvas/CanvasGadgetWidget'
 import { CanvasWikiWidget } from '../canvas/CanvasWikiWidget'
 import { CanvasUnsupportedWidget } from '../canvas/CanvasUnsupportedWidget'
-import { CanvasGovernedTableWidget } from '../canvas/CanvasGovernedTableWidget'
 import { useDecidedActionInvalidationInEveryScope } from '../canvas/useBoardData'
 import { gadgetIdOf } from '../canvas/canvasLayout'
 import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
@@ -60,7 +59,6 @@ export const ConsoleWidgetView = ({ workspaceId, source, revision, target, onClo
       // Wiki is operated read-only, as on session screens (no `editable`).
       : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget scrollRoot={scrollRoot} widget={widget} overseer={overseer.stub} />
       : widget.kind === 'inferos.unsupported' ? <CanvasUnsupportedWidget widget={widget} />
-      : widget.kind === 'inferos.governed-table' ? <CanvasGovernedTableWidget widget={widget} overseer={overseer.stub} />
       : <CanvasBoardWidget widget={widget} overseer={overseer.stub} presentation="full" />
   if (target.presentation === 'modal') return <Dialog.Root open onOpenChange={open => { if (!open) onClose() }}>
     <Dialog size="lg" className="flex max-h-[90dvh] !w-[min(1000px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl bg-kumo-base p-0">

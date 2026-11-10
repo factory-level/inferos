@@ -7,8 +7,7 @@ import { useBoardData } from './useBoardData'
 import { useWikiData } from './useWikiData'
 import { FORBIDDEN_READ_BINDING, INCOMPATIBLE_READ_BINDING, UNAVAILABLE_READ_BINDING } from './canvasReadFeedback'
 
-// A board's and a Wiki's binding is edited here; a governed table's follows its reference (FAC-9).
-type Resource = Extract<CanvasDataBinding['resource'], 'project/board' | 'knowledge/wiki'>
+type Resource = CanvasDataBinding['resource']
 const RESOURCE_FOR_WIDGET = {
   'inferops.project-board': 'project/board',
   'inferops.wiki': 'knowledge/wiki',
@@ -65,8 +64,7 @@ export const CanvasDataBindingEditor = ({ widget, overseer, busy, onSave }: {
   onSave: (widget: CanvasWidget) => void
 }) => {
   const expected = RESOURCE_FOR_WIDGET[widget.kind]
-  // A board's or Wiki's binding names its own resource; parseCanvasWidget refuses any other.
-  const [resource, setResource] = useState<Resource>((widget.dataBinding?.resource as Resource | undefined) ?? expected)
+  const [resource, setResource] = useState<Resource>(widget.dataBinding?.resource ?? expected)
   const [refValue, setRefValue] = useState(widget.dataBinding?.ref ?? widget.targetRef)
   const [candidate, setCandidate] = useState<{resource: Resource; ref: string} | null>(null)
   const [result, setResult] = useState<'checking' | 'allowed' | 'forbidden' | 'unavailable' | 'incompatible' | null>(null)

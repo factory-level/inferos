@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import { RUN_REQUESTER_REVOKED, type OverseerDurableObject } from "../src/overseer.js";
+import { ACTION_IN_PROGRESS, actionRecordToLog, RUN_DEFINITION_CHANGED, RUN_REQUESTER_REVOKED, type OverseerDurableObject } from "../src/overseer.js";
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 
 declare module "cloudflare:workers" {
@@ -65,6 +65,8 @@ async function inAssigned(name: string, fn: (impl: any, opened: Opened[], apply:
       return { facet: { applyAction: apply, rejectAction: vi.fn(async () => {}) }, close: () => { entry.closed = true; } };
     };
     impl.assignedActionProblem = () => null;
+    // The person who asked is a collaborator here who may use the workspace (FAC-118 re-checks it).
+    impl.authorizeCollaborator = async () => "use";
     impl.getGatekeeperFacet = () => { throw new Error("the connection's own facet was used"); };
     await fn(impl, opened, apply);
   });
@@ -382,4 +384,116 @@ describe("the person's InferOps authority changed during the last await (FAC-104
       });
     });
   }
+});
+
+describe("a run's write resumed under current authority (FAC-118)", () => {
+  it("is refused when the person who asked may no longer use the workspace, and says why while it waits", async () => {
+    await inAssigned("fac118-role", async (impl, opened, apply) => {
+      let record = await proposeAsRun(impl);
+      impl.authorizeCollaborator = async () => null;
+      expect(await refusalOf(() => impl.applyPendingAction(record, ADA, false))).toContain(RUN_REQUESTER_REVOKED);
+      expect(apply).not.toHaveBeenCalled();
+      expect(opened).toEqual([]);
+      let stored = impl.storage.actions.get(record.id);
+      expect(stored.state).toBe("pending");
+      // A reopened client reads the reason with the pending action.
+      expect(actionRecordToLog(stored)).toMatchObject({ state: "pending", blocked: { reason: expect.stringContaining(RUN_REQUESTER_REVOKED) } });
+      // Once the person may again, it can be decided, and the reason clears as it applies.
+      impl.authorizeCollaborator = async () => "use";
+      await impl.applyPendingAction(impl.storage.actions.get(record.id), ADA, false);
+      expect(apply).toHaveBeenCalledOnce();
+      expect(impl.storage.actions.get(record.id).blocked).toBeUndefined();
+    });
+  });
+
+  it("records why a re-check refused, whichever re-check it was, and still sends nothing", async () => {
+    await inAssigned("fac118-control", async (impl, _opened, apply) => {
+      let record = await proposeAsRun(impl);
+      impl.storage.workflowTriggerControls.put({ hookId: HOOK, label: "Run", invokers: ["someone-else"], configuredBy: ADA, configuredAt: new Date(0) });
+      await refusalOf(() => impl.applyPendingAction(record, ADA, false));
+      expect(apply).not.toHaveBeenCalled();
+      expect(impl.storage.actions.get(record.id).blocked?.reason).toContain(RUN_REQUESTER_REVOKED);
+    });
+  });
+
+  it("is refused when the workflow changed since the run proposed it: a fresh proposal is needed", async () => {
+    for (const [label, pin] of [["re-pinned", { hookId: HOOK, definitionId: "def", revision: 2 }], ["another definition", { hookId: HOOK, definitionId: "other", revision: 1 }]] as const) {
+      await inAssigned(`fac118-definition-${label.replace(/ /g, "-")}`, async (impl, opened, apply) => {
+        let record = await proposeAsRun(impl);
+        impl.storage.workflowTriggerPins.put(pin);
+        expect(await refusalOf(() => impl.applyPendingAction(record, ADA, false))).toContain(RUN_DEFINITION_CHANGED);
+        expect(apply).not.toHaveBeenCalled();
+        expect(opened).toEqual([]);
+        let stored = impl.storage.actions.get(record.id);
+        expect(stored.state).toBe("pending");
+        expect(stored.blocked?.reason).toBe(RUN_DEFINITION_CHANGED);
+      });
+    }
+  });
+
+  it("answers a second decision while the first apply is in flight as in progress, and sends once", async () => {
+    await inAssigned("fac118-in-flight", async (impl, _opened, apply) => {
+      let record = await proposeAsRun(impl);
+      let release!: () => void;
+      apply.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+      let first = impl.applyPendingAction(record, ADA, false);
+      await vi.waitFor(() => expect(apply).toHaveBeenCalledOnce());
+      expect(await refusalOf(() => impl.applyPendingAction(record, ADA, false))).toContain(ACTION_IN_PROGRESS);
+      release();
+      await first;
+      expect(apply).toHaveBeenCalledOnce();
+    });
+  });
+});
+
+describe("a run's write that nobody decides (FAC-118)", () => {
+  const WAIT = 7 * 24 * 60 * 60 * 1000;
+  const aged = (impl: any, record: any, ms: number) => {
+    let stored = impl.storage.actions.get(record.id);
+    impl.storage.actions.put({ ...stored, createdAt: new Date(Date.now() - ms) });
+  };
+
+  it("is rejected by the alarm once its 7-day wait ends, with nothing sent", async () => {
+    await inAssigned("fac118-expiry", async (impl, opened, apply) => {
+      let record = await proposeAsRun(impl);
+      expect(impl.nextRunWriteExpiry()).toBe(new Date(impl.storage.actions.get(record.id).createdAt).getTime() + WAIT);
+      // Not yet: a day short of the wait.
+      aged(impl, record, WAIT - 24 * 60 * 60 * 1000);
+      expect(await impl.expireRunWrites()).toEqual([]);
+      expect(impl.storage.actions.get(record.id).state).toBe("pending");
+      aged(impl, record, WAIT + 1);
+      expect(await impl.expireRunWrites()).toEqual([record.id]);
+      let stored = impl.storage.actions.get(record.id);
+      expect(stored).toMatchObject({ state: "rejected", expired: true });
+      expect(stored.resolvedBy).toBeUndefined();
+      expect(actionRecordToLog(stored)).toMatchObject({ state: "rejected", expired: true });
+      expect(apply).not.toHaveBeenCalled();
+      // Rejected on the run's own facet, which held it, and closed again.
+      expect(opened).toHaveLength(1);
+      expect(opened[0]?.closed).toBe(true);
+      // Expiring again finds nothing; an approval after it can't apply.
+      expect(await impl.expireRunWrites()).toEqual([]);
+      expect(await refusalOf(() => impl.applyPendingAction(stored, ADA, false))).toContain("not pending");
+      expect(apply).not.toHaveBeenCalled();
+      expect(impl.nextRunWriteExpiry()).toBeUndefined();
+    });
+  });
+
+  it("loses to a person's approval already under way: one decision wins, and it is theirs", async () => {
+    await inAssigned("fac118-expiry-race", async (impl, _opened, apply) => {
+      let record = await proposeAsRun(impl);
+      aged(impl, record, WAIT + 1);
+      let release!: () => void;
+      apply.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+      let approving = impl.applyPendingAction(impl.storage.actions.get(record.id), ADA, false);
+      await vi.waitFor(() => expect(apply).toHaveBeenCalledOnce());
+      expect(await impl.expireRunWrites()).toEqual([]);
+      release();
+      await approving;
+      let stored = impl.storage.actions.get(record.id);
+      expect(stored.state).toBe("approved");
+      expect(stored.expired).toBeUndefined();
+      expect(apply).toHaveBeenCalledOnce();
+    });
+  });
 });

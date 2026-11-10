@@ -59,7 +59,7 @@ import { consoleScreenMove, consoleScreens, consoleWidgetVersionId, type Console
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, ActionBlocked, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -234,6 +234,21 @@ export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
  */
 export const RUN_REQUESTER_REVOKED =
   "The person who asked for this workflow run can't run it now, so this step didn't happen.";
+
+/**
+ * The refusal at a run write's apply when the trigger's workflow definition changed since the run
+ * proposed it (FAC-118; inferops operate-policy: a changed policy revision needs fresh review, never a
+ * silent replay). The write stays pending; running the workflow again proposes it afresh.
+ */
+export const RUN_DEFINITION_CHANGED =
+  "This workflow changed since its run proposed this, so it can't be applied; run the workflow again to propose it afresh.";
+
+/** An approval of an action already rejected (FAC-118): the decision stands, nothing is applied. */
+export const ACTION_ALREADY_REJECTED = "This action was already rejected.";
+/** A rejection of an action already approved (FAC-118): it was applied, so it can't be rejected now. */
+export const ACTION_ALREADY_APPROVED = "This action was already approved.";
+/** A decision while an approved apply of the same action is in flight (FAC-118): it sends once. */
+export const ACTION_IN_PROGRESS = "This action is being applied; its outcome is recorded when it finishes.";
 
 /**
  * Re-checks, at a protected execution point of a run a person asked for (FAC-104: the run's start,
@@ -1251,6 +1266,10 @@ export type ActionRecord = {
   // Written, durably, before an apply is dispatched and cleared with its outcome, so an apply a
   // restart interrupted is recovered as an unknown outcome (see #recoverInterruptedApplies).
   applyStartedAt?: Date;
+  /** Why its last approved apply was refused at resume, before anything was sent (FAC-118). */
+  blocked?: ActionBlocked;
+  /** Rejected because nobody decided it within its run's wait (FAC-118); `resolvedBy` is then absent. */
+  expired?: true;
   /** One explicit AG-UI conversation, persisted with its existing action rather than a second queue. */
   aguiApproval?: ActionApprovalCorrelation;
   /** What the provider reported the apply produced (see ActionLogEntry.result); set only on approval. */
@@ -1575,7 +1594,7 @@ async function computeSessionAffinity(gadgetId: string, chatId: number): Promise
   return new Uint8Array(hash).toHex();
 }
 
-function actionRecordToLog(record: ActionRecord): ActionLogEntry {
+export function actionRecordToLog(record: ActionRecord): ActionLogEntry {
   // TODO: ActionRecord and ActionLogEntry are almost identical. The main difference is that
   // ActionRecord includes `action`, which should NOT be provided to the client. We could make
   // the two match more -- just `action` needs to be different.
@@ -1619,6 +1638,8 @@ function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         autoApproved: record.autoApproved,
         ...(record.lastAttempt ? {lastAttempt: record.lastAttempt} : {}),
         ...(record.state === "pending" && record.applyStartedAt ? {applying: true as const} : {}),
+        ...(record.state === "pending" && record.blocked ? {blocked: record.blocked} : {}),
+        ...(record.state === "rejected" && record.expired ? {expired: true as const} : {}),
         ...(record.state === "approved" && record.result ? {result: record.result} : {}),
       };
     case "bindHook":
@@ -2660,6 +2681,10 @@ class OverseerImpl implements AgentHooks {
     // A replay's staged copies still to withdraw (FAC-112), each at its next try.
     for (let entry of this.storage.replayWithdrawals.list()) times.push(entry.nextAttemptAt);
 
+    // A workflow run's write waiting past its wait is rejected (FAC-118).
+    let runWriteExpiry = this.nextRunWriteExpiry();
+    if (runWriteExpiry !== undefined) times.push(runWriteExpiry);
+
     // Owed widget index withdrawals, each until its alarm tries run out (see console-widget-index.ts).
     for (let owed of this.storage.widgetIndexOwed.list()) {
       if (owed.attempts < OWED_RETRY_CAP) times.push(owed.nextAttemptAt);
@@ -2694,6 +2719,7 @@ class OverseerImpl implements AgentHooks {
       this.toolLane.sweep();
       await this.#retryDueWidgetWithdrawals();
       await this.retryReplayWithdrawals();
+      await this.expireRunWrites();
       do {
         let results = await Promise.allSettled([
           this.waitForAllAgentsToComplete(),
@@ -6580,7 +6606,8 @@ class OverseerImpl implements AgentHooks {
   // and overwrite its outcome. The claim lives in memory; an apply also writes applyStartedAt
   // before dispatch, which survives a restart that drops the claim.
   async withActionClaim<T>(id: number, decide: () => Promise<T>): Promise<T> {
-    if (this.#claimedActions.has(id) || this.storage.actions.get(id)?.state !== "pending") {
+    if (this.#claimedActions.has(id)) throw new Error(ACTION_IN_PROGRESS);
+    if (this.storage.actions.get(id)?.state !== "pending") {
       throw new Error(`Action is not pending: ${id}`);
     }
     this.#claimedActions.add(id);
@@ -6592,6 +6619,120 @@ class OverseerImpl implements AgentHooks {
   }
 
   #claimedActions = new Set<number>();
+
+  /**
+   * Reject pending action `action` (an "action" record) as the one decision under way for it
+   * (`withActionClaim`): the gatekeeper is told, nothing is sent, and it is stored as rejected, by
+   * `resolvedBy`, or, with none, as expired (FAC-118, `expireRunWrites`).
+   */
+  async rejectPendingAction(action: ActionRecord & {type: "action"}, resolvedBy?: AiChatAuthorInfo): Promise<void> {
+    // The whole decision runs under the claim, through to the stored rejection, so no approval can
+    // start between the gatekeeper's answer and the record saying it was rejected.
+    await this.withActionClaim(action.id, async () => {
+      // An assigned run's action lives on that run's own facet, so it is rejected there (FAC-102
+      // follow-up A), whatever became of the assignment since: rejecting sends nothing.
+      let assigned = action.executedAs ? await this.openAssignedActionFacet(action) : undefined;
+      let gatekeeper = assigned?.facet ?? this.getGatekeeperFacet(action.gatekeeperId);
+      try {
+        await gatekeeper.rejectAction(action.action);
+      } finally {
+        assigned?.close();
+      }
+      // Re-read after the wait: the claim kept other decisions out, but the record is the truth.
+      let current = this.storage.actions.get(action.id);
+      if (current?.type === "action") Object.assign(action, current);
+      action.state = "rejected";
+      action.appliedAt = new Date();
+      if (resolvedBy) action.resolvedBy = resolvedBy;
+      else action.expired = true;
+      delete action.blocked;
+      // A rejected push's pending-push marks are removed in the same durable step as the state
+      // change (nothing was transmitted, so nothing became proven). No-op for pushless actions.
+      this.storage.transaction(() => {
+        this.gitCache.clearPushMarks(action.id);
+        this.storage.actions.put(action);
+      });
+    });
+  }
+
+  // A workflow run's proposed write waits at most this long for a decision (FAC-118; inferos
+  // ADR 0012 `maxWaitMs`), from when it was proposed. Then the alarm rejects it: nothing is sent.
+  static readonly RUN_WRITE_MAX_WAIT_MS = 7 * 24 * 60 * 60 * 1000;
+
+  #isRunWrite(record: ActionRecord): record is ActionRecord & {type: "action"} {
+    return record.type === "action" && record.state === "pending" &&
+        (record.executedAs !== undefined || record.workflowRun !== undefined);
+  }
+
+  /** When the next pending run write's wait ends, if any does (FAC-118). */
+  nextRunWriteExpiry(): number | undefined {
+    let next: number | undefined;
+    for (let record of this.storage.actions.byHistoryFilter.get("pending")) {
+      if (!this.#isRunWrite(record)) continue;
+      let at = new Date(record.createdAt).getTime() + OverseerImpl.RUN_WRITE_MAX_WAIT_MS;
+      if (next === undefined || at < next) next = at;
+    }
+    return next;
+  }
+
+  /**
+   * Rejects every pending run write whose wait has ended (FAC-118), through the same claim a
+   * person's decision takes, so the two never both win: a decision under way keeps it, and one
+   * taken first stands. Returns the ids it rejected.
+   */
+  async expireRunWrites(now = Date.now()): Promise<number[]> {
+    let expired: number[] = [];
+    for (let record of Array.from(this.storage.actions.byHistoryFilter.get("pending"))) {
+      if (!this.#isRunWrite(record)) continue;
+      if (new Date(record.createdAt).getTime() + OverseerImpl.RUN_WRITE_MAX_WAIT_MS > now) continue;
+      try {
+        await this.rejectPendingAction(record);
+        expired.push(record.id);
+        this.settleRunOfAction(record.id);
+      } catch (error) {
+        // A person's decision got there first (in flight, or already taken): theirs stands.
+        logger.info("run write not expired: already being decided", {
+          event: "workflow.run_write.expiry_skipped", actionId: record.id, error,
+        });
+      }
+    }
+    return expired;
+  }
+
+  // The person who asked for run `deliveryId` may still use this workspace (FAC-118): its owner, or a
+  // collaborator with at least `use`, as `#requesterStillMay` asks for a run's navigation. A run the
+  // trigger fired itself has no person to ask. Refuses with RUN_REQUESTER_REVOKED.
+  async #requesterMayUseWorkspace(deliveryId: number): Promise<void> {
+    let run = this.workflowDefinitionStore().deliveryRun(deliveryId)?.run;
+    if (run?.requester.kind !== "person") return;
+    let profileId = run.requester.profileId;
+    let userId = this.users.idFromName(profileId);
+    if (userId.toString() === this.ownerId) return;
+    if (!(await this.authorizeCollaborator(profileId, this.users.get(userId), { requireRole: "use" }))) {
+      throw new Error(RUN_REQUESTER_REVOKED);
+    }
+  }
+
+  // A run's write applies only on the workflow definition revision its run started on (FAC-118): the
+  // trigger's pin must still name that definition and revision. A trigger re-pinned (or unpinned)
+  // since refuses with RUN_DEFINITION_CHANGED, and the write waits for a fresh proposal.
+  #requireSameDefinition(hookId: number, deliveryId: number): void {
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    // No record of the run: `requireRunRequester` refuses it, in its own words.
+    if (!delivery) return;
+    let pin = this.workflowDefinitionStore().pinOf(hookId);
+    if (!pin || pin.definitionId !== delivery.definitionId || pin.revision !== delivery.revision) {
+      throw new Error(RUN_DEFINITION_CHANGED);
+    }
+  }
+
+  // Why a run's write waits (FAC-118): the refusal a re-check gave, on the still-pending action.
+  #recordBlocked(id: number, error: unknown): void {
+    let current = this.storage.actions.get(id);
+    if (current?.type !== "action" || current.state !== "pending") return;
+    current.blocked = { reason: error instanceof Error ? error.message : String(error), at: new Date() };
+    this.storage.actions.put(current);
+  }
 
   // An apply a restart interrupted after dispatch may have reached the provider, so it is recorded
   // as an unknown outcome, for the person to check before deciding again. Runs once, at startup,
@@ -6632,45 +6773,58 @@ class OverseerImpl implements AgentHooks {
     // saw it. Refused, with nothing sent and the action left pending, unless the assignment that
     // proposed it still holds; checked again once the session is open (FAC-102 follow-up A).
     let assigned: {facet: Fetcher<Gatekeeper<any>>; close(): void} | undefined;
-    if (record.executedAs) {
-      let problem = this.assignedActionProblem(record);
-      if (problem) throw new Error(problem);
-      // A queued write is a protected point too (FAC-104): the person who asked for the run must
-      // still be allowed to now, however long ago they asked. The assignment is checked again after.
-      let requester = await requireRunRequester(this, record.executedAs.hookId, record.executedAs.deliveryId);
-      logger.info("assigned workflow action applying", {
-        event: "workflow.assigned_action.applying", actionId: record.id, hookId: record.executedAs.hookId,
-        ...(record.executedAs.runId ? { runId: record.executedAs.runId } : {}),
-        initiator: record.executedAs.requestedBy ? `person:${record.executedAs.requestedBy}` : "trigger",
-        executor: `service_account:${record.gatekeeperId}`,
-      });
-      problem = this.assignedActionProblem(record);
-      if (problem) throw new Error(problem);
-      assigned = await this.openAssignedActionFacet(record);
-      problem = this.assignedActionProblem(record);
-      if (problem) {
-        assigned.close();
-        throw new Error(problem);
-      }
-      // The facet's open was the last await before the write (FAC-104): the person's InferOps grant
-      // and company are asked again now, then the assignment and their local authority are re-read
-      // synchronously, with no await before the write is sent. A refusal closes the facet and
-      // leaves the write pending.
-      try {
-        await requester.recheck();
+    // A run's write resumes under current authority (FAC-118): any re-check below that refuses is
+    // recorded on the action as why it waits, and nothing is sent.
+    try {
+      let runOf = record.executedAs ?? record.workflowRun;
+      if (runOf) this.#requireSameDefinition(runOf.hookId, runOf.deliveryId);
+      if (record.executedAs) {
+        let problem = this.assignedActionProblem(record);
+        if (problem) throw new Error(problem);
+        // A queued write is a protected point too (FAC-104): the person who asked for the run must
+        // still be allowed to now, however long ago they asked. The assignment is checked again after.
+        let requester = await requireRunRequester(this, record.executedAs.hookId, record.executedAs.deliveryId);
+        // Their role here too (FAC-118), before a session is opened for them; asked again after.
+        await this.#requesterMayUseWorkspace(record.executedAs.deliveryId);
+        logger.info("assigned workflow action applying", {
+          event: "workflow.assigned_action.applying", actionId: record.id, hookId: record.executedAs.hookId,
+          ...(record.executedAs.runId ? { runId: record.executedAs.runId } : {}),
+          initiator: record.executedAs.requestedBy ? `person:${record.executedAs.requestedBy}` : "trigger",
+          executor: `service_account:${record.gatekeeperId}`,
+        });
         problem = this.assignedActionProblem(record);
         if (problem) throw new Error(problem);
-        requester.revalidate();
-      } catch (error) {
-        assigned.close();
-        throw error;
+        assigned = await this.openAssignedActionFacet(record);
+        problem = this.assignedActionProblem(record);
+        if (problem) {
+          assigned.close();
+          throw new Error(problem);
+        }
+        // The facet's open was the last await before the write (FAC-104): the person's role here and
+        // their InferOps grant and company are asked again now, then the assignment and their local
+        // authority are re-read synchronously, with no await before the write is sent. A refusal
+        // closes the facet and leaves the write pending.
+        try {
+          await this.#requesterMayUseWorkspace(record.executedAs.deliveryId);
+          await requester.recheck();
+          problem = this.assignedActionProblem(record);
+          if (problem) throw new Error(problem);
+          requester.revalidate();
+        } catch (error) {
+          assigned.close();
+          throw error;
+        }
       }
-    }
-    // An unassigned requested run's write is a protected point too (FAC-104, FAC-112): the person
-    // who asked must still be allowed to now. Asked, then re-read synchronously before it is sent.
-    if (!record.executedAs && record.workflowRun) {
-      let requester = await requireRunRequester(this, record.workflowRun.hookId, record.workflowRun.deliveryId);
-      requester.revalidate();
+      // An unassigned requested run's write is a protected point too (FAC-104, FAC-112): the person
+      // who asked must still be allowed to now. Asked, then re-read synchronously before it is sent.
+      if (!record.executedAs && record.workflowRun) {
+        let requester = await requireRunRequester(this, record.workflowRun.hookId, record.workflowRun.deliveryId);
+        await this.#requesterMayUseWorkspace(record.workflowRun.deliveryId);
+        requester.revalidate();
+      }
+    } catch (error) {
+      if (record.executedAs || record.workflowRun) this.#recordBlocked(record.id, error);
+      throw error;
     }
     let gatekeeper = assigned?.facet ?? this.getGatekeeperFacet(record.gatekeeperId);
     // An artifact publisher publishes as the person approving (see publishApprovedArtifact); an
@@ -6689,8 +6843,12 @@ class OverseerImpl implements AgentHooks {
     let started = this.storage.actions.get(record.id);
     if (started?.type === "action") {
       started.applyStartedAt = new Date();
+      // Its re-checks passed: whatever blocked an earlier apply no longer does (FAC-118). Cleared on
+      // the caller's copy too, which the outcome is recorded from.
+      delete started.blocked;
       this.storage.actions.put(started);
     }
+    delete record.blocked;
     let result: void | {failed: ActionApplyFailure} | ActionApplied;
     try {
       result = await gatekeeper.applyAction(record.action,
@@ -15703,6 +15861,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async approveAction(id: number): Promise<void> { return this.#approveAction(id); }
 
+  // Who may decide an action, approving or rejecting it alike: the workspace's builder, and for an
+  // artifact publisher's action, whoever may publish (see publishApprovedArtifact).
+  async #requireDecider(action: ActionRecord & {type: "action"}): Promise<void> {
+    let publishes = this.impl.storage.gatekeepers.get(action.gatekeeperId)?.creationSpec?.type ===
+        "artifactPublisher";
+    await this.#requireSharedConfiguration(publishes ? "publish" : "build", "shared");
+  }
+
   async #approveAction(id: number, beforeApply?: () => void): Promise<void> {
     let action = this.impl.storage.actions.get(id);
     if (!action) {
@@ -15712,17 +15878,19 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (action.type === "bindHook") {
       throw new Error("Hooks should be enabled/disabled, not approved/rejected.");
     }
-    if (action.state !== "pending") {
-      throw new Error(`Action is not pending: ${id}`);
-    }
     if (action.type === "observation") {
       throw new Error("Observations can't have 'pending' state.");
     }
     // Applying an action acts for the workspace; approving an artifact publisher's publishes as
-    // the approver (see publishApprovedArtifact), so that takes publish.
-    let publishes = this.impl.storage.gatekeepers.get(action.gatekeeperId)?.creationSpec?.type ===
-        "artifactPublisher";
-    await this.#requireSharedConfiguration(publishes ? "publish" : "build", "shared");
+    // the approver (see publishApprovedArtifact), so that takes publish. Asked before anything is
+    // answered, so a decision already taken is reported only to someone who may decide it.
+    await this.#requireDecider(action);
+    // The same answer again answers as the first did (FAC-118); the other answer is refused.
+    if (action.state === "approved") return;
+    if (action.state === "rejected") throw new Error(ACTION_ALREADY_REJECTED);
+    if (action.state !== "pending") {
+      throw new Error(`Action is not pending: ${id}`);
+    }
 
     // Resolve the approver's identity before applying, so a failed profile fetch can't leave the
     // action applied in the world but still "pending" in storage.
@@ -15891,42 +16059,23 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       throw new Error(`No such action: ${id}`);
     }
 
-    if (action.state !== "pending") {
-      throw new Error(`Action is not pending: ${id}`);
-    }
-
     if (action.type !== "action") {
       throw new Error(`Can't reject an observation: ${id}`);
+    }
+    // The same decider as an approval (FAC-118): rejecting sends nothing, but a person who may not
+    // approve a shared workspace's action may not reject it either.
+    await this.#requireDecider(action);
+    // The same answer again answers as the first did (FAC-118); the other answer is refused.
+    if (action.state === "rejected") return;
+    if (action.state === "approved") throw new Error(ACTION_ALREADY_APPROVED);
+    if (action.state !== "pending") {
+      throw new Error(`Action is not pending: ${id}`);
     }
 
     // Resolve the rejecter's identity before notifying the gatekeeper, so a failed profile fetch
     // can't leave the action rejected with the gatekeeper but still "pending" in storage.
     let profile = await this.#getClientProfile();
-    // The whole decision runs under the claim, through to the stored rejection, so no approval can
-    // start between the gatekeeper's answer and the record saying it was rejected.
-    await this.impl.withActionClaim(id, async () => {
-      // An assigned run's action lives on that run's own facet, so it is rejected there (FAC-102
-      // follow-up A), whatever became of the assignment since: rejecting sends nothing.
-      let assigned = action.executedAs ? await this.impl.openAssignedActionFacet(action) : undefined;
-      let gatekeeper = assigned?.facet ?? this.impl.getGatekeeperFacet(action.gatekeeperId);
-      try {
-        await gatekeeper.rejectAction(action.action);
-      } finally {
-        assigned?.close();
-      }
-      // Re-read after the wait: the claim kept other decisions out, but the record is the truth.
-      let current = this.impl.storage.actions.get(id);
-      if (current?.type === "action") Object.assign(action, current);
-      action.state = "rejected";
-      action.appliedAt = new Date();
-      action.resolvedBy = profile;
-      // A rejected push's pending-push marks are removed in the same durable step as the state
-      // change (nothing was transmitted, so nothing became proven). No-op for pushless actions.
-      this.impl.storage.transaction(() => {
-        this.impl.gitCache.clearPushMarks(action.id);
-        this.impl.storage.actions.put(action);
-      });
-    });
+    await this.impl.rejectPendingAction(action, profile);
     this.impl.traceAgentActionApproval(action, "denied");
     // A requested run that proposed it is weighed again (FAC-114).
     this.impl.settleRunOfAction(id);

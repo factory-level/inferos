@@ -2504,6 +2504,19 @@ export type ActionState = "pending" | "approved" | "rejected" | "failed";
  * answer (see `ActionApplyFailure`). `notApplied` is known absent at the provider; `unknown` may
  * have happened there, so it is never presented as safely undone.
  */
+/**
+ * Why a pending action's approved apply was refused before anything was sent (FAC-118): a re-check
+ * at resume found that the authority it was proposed under no longer holds (the person who asked a
+ * run, their role or grant, the run's assignment or company). It stays pending, and can be decided
+ * again once that is fixed; the next apply that passes clears it.
+ */
+export type ActionBlocked = {
+  /** The refusal, in the words the re-check gave it. */
+  reason: string;
+  /** When it was refused. */
+  at: Date;
+};
+
 export type ActionAttempt = {
   /** What is known about the provider effect. */
   outcome: "notApplied" | "unknown";
@@ -2586,6 +2599,18 @@ export type ActionLogEntry = {
    * not as waiting for a decision (see `actionOutcome`). Absent otherwise.
    */
   applying?: true;
+
+  /**
+   * Set while the action is pending and its last approved apply was refused at resume, before
+   * anything was sent (FAC-118; see `ActionBlocked`). Absent otherwise.
+   */
+  blocked?: ActionBlocked;
+
+  /**
+   * Set on an action rejected because nobody decided it within its workflow run's wait (FAC-118:
+   * 7 days from when the run proposed it); `resolvedBy` is then absent and nothing was sent.
+   */
+  expired?: true;
 
   /**
    * What the provider reported the apply produced (`ActionResult`), such as a created issue's key
