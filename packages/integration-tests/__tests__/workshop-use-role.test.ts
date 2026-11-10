@@ -104,6 +104,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
     (ws: RpcStub<Overseer>) => unknown> = {
   previewAuthoredWidget: ws => ws.previewAuthoredWidget(1, 1),
   exportWorkspaceRecords: ws => ws.exportWorkspaceRecords(),
+  // A console draft is the builder's, and so is what would stop it publishing (FAC-96).
+  validateConsoleDraft: ws => ws.validateConsoleDraft("console"),
   // The workspace's settings are the builder's (FAC-95); operators get a publication's frozen copy.
   getWorkspaceConfiguration: ws => ws.getWorkspaceConfiguration(),
   setWorkspaceConfiguration: ws => ws.setWorkspaceConfiguration("0", { "baseUi.alerts": true }),
@@ -163,6 +165,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   getGatekeeperById: ws => ws.getGatekeeperById(1),
   getGatekeeperByResourceUrl: ws =>
     ws.getGatekeeperByResourceUrl("https://gadgets-test.example/things/use-denied"),
+  // A governed resource's session (FAC-9) is the builder's, as every connection is.
+  openGovernedSession: ws => ws.openGovernedSession("tickets://use-denied/queue/q1"),
   newGatekeeper: ws => ws.newGatekeeper(1, "https://gadgets-test.example/things/use-denied"),
   newAiModelGatekeeper: ws => ws.newAiModelGatekeeper("model"),
   newAgentSpawnerGatekeeper: ws =>

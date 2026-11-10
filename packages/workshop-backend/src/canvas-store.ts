@@ -83,7 +83,7 @@ export function joinStoredPage(page: unknown, settings: WorkspaceSettings | unde
 function withPrompts(page: Record<string, unknown>, prompts: readonly StoredPagePrompt[]): Record<string, unknown> {
   const restore = (owner: unknown, attachments: unknown) => {
     const list = Array.isArray(attachments) ? [...attachments] : [];
-    for (const prompt of prompts.filter(item => item.owner === owner).sort((a, b) => a.index - b.index)) {
+    for (const prompt of prompts.filter(item => item.owner === owner).toSorted((a, b) => a.index - b.index)) {
       list.splice(prompt.index, 0, prompt.attachment);
     }
     return list;
