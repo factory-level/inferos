@@ -95,6 +95,8 @@ function workerSeams(impl: any) {
     return { target, caller, workspace: this };
   });
   onPrototype(impl, "visibleBindings", () => [["BOARD", { target: CONNECTION }]]);
+  // The person who asked is a collaborator here (FAC-122's run right reads their role).
+  onPrototype(impl, "definitionRoles", async () => () => "use");
   onPrototype(impl, "getGadgetRecord", () => ({}));
 }
 

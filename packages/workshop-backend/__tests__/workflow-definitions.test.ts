@@ -340,7 +340,7 @@ describe("through the Overseer", () => {
       impl: {
         env: opts.answers ? GATED : {},
         isSharedConfiguration: async () => opts.shared ?? true,
-        workflowDefinitionStore: () => store,
+        workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const,
         getGadgetHead: (id: number) => (id === GADGET ? commit(1) : undefined),
         defaultGadgetId: GADGET,
         storage: Object.assign(storage, {

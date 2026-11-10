@@ -1,4 +1,4 @@
-import type { AiChatAuthorInfo, WorkpieceId } from "@gadgets/workshop-shared/api";
+import type { AiChatAuthorInfo, CollaboratorRole, WorkpieceId } from "@gadgets/workshop-shared/api";
 import {
   MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKFLOW_DELIVERIES, MAX_WORKFLOW_INVOCATIONS,
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, TRIGGER_RUNS_PER_INVOKER, TRIGGER_RUNS_PER_TRIGGER,
@@ -6,7 +6,8 @@ import {
   type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery,
   type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunFailure, type WorkflowRunResult,
   type WorkflowTriggerDefinitionRef, isLiveWorkflowDelivery,
-  type WorkflowRunRecord,
+  type WorkflowRunRecord, MAX_WORKFLOW_DEFINITION_SHARES, parseWorkflowDefinitionRights,
+  type WorkflowDefinitionRights, type WorkflowDefinitionShare,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 
@@ -17,6 +18,35 @@ export type StoredWorkflowDefinition = Omit<WorkflowDefinition, "revisions"> & {
 
 /** New trigger rows record their resolution mode; legacy rows without mode retain explicit pins. */
 export type StoredTriggerPin = { hookId: number; definitionId: string; revision: number; mode?: "pinned" | "follow-latest" };
+
+/** A definition shared with one account (FAC-122), keyed by `shareKey`. */
+export type StoredWorkflowDefinitionShare = WorkflowDefinitionShare & { key: string };
+
+/** The storage key of definition `definitionId`'s share with `profileId`. */
+export const shareKey = (definitionId: string, profileId: string) => JSON.stringify([definitionId, profileId]);
+
+/**
+ * Who, beyond its owner and the people it is shared with, may read and run a definition's published
+ * revision (FAC-122): one function, so the rule can be switched in one place. `role` is the
+ * viewer's in this workspace (null: none).
+ */
+export type WorkflowDefinitionAudience =
+  (stored: StoredWorkflowDefinition, role: CollaboratorRole | null) => { read: boolean; run: boolean };
+
+/**
+ * Today's rule, kept until the product decision on FAC-122's audience: a published definition is
+ * the whole workspace's to read and run (who may run a trigger is still its run control's).
+ */
+export const WORKSPACE_AUDIENCE: WorkflowDefinitionAudience = (stored, role) =>
+  ({ read: stored.published !== null && role !== null, run: role !== null });
+
+/** The rule under decision: a published definition is only its owner's and the people it's shared with. */
+export const SHARED_ONLY_AUDIENCE: WorkflowDefinitionAudience = () => ({ read: false, run: false });
+
+/** What a viewer may do with a definition, and whether that comes from a share by name. */
+type ViewerRights = WorkflowDefinitionRights & { shared: boolean };
+
+const NO_RIGHTS: ViewerRights = { read: false, run: false, edit: false, shared: false };
 
 /** A stored delivery, numbered so the oldest can be dropped. */
 export type StoredWorkflowDelivery = WorkflowDefinitionDelivery & { id: number };
@@ -53,8 +83,11 @@ export type StoredWorkflowInvocation = WorkflowInvocation & {
 /** Most admitted requests one trigger may have waiting for delivery. */
 const MAX_WAITING_INVOCATIONS = 20;
 
-/** Refused, without saying which check failed, to anyone a trigger's control doesn't admit. */
-const CANNOT_RUN = "You can't run this trigger.";
+/**
+ * Refused, without saying which check failed, to anyone a trigger's control doesn't admit, or who
+ * may not run the definition it is pinned to (FAC-122).
+ */
+export const CANNOT_RUN = "You can't run this trigger.";
 
 /** Refused, without saying whether the definition exists, to anyone it isn't visible to. */
 const NOT_FOUND = "Workflow definition not found.";
@@ -75,32 +108,128 @@ export class WorkspaceWorkflowDefinitionStore {
           "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
           "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired" |
-          "workflowRunQueue">) {}
+          "workflowRunQueue" | "workflowDefinitionShares">,
+      private audience: WorkflowDefinitionAudience = WORKSPACE_AUDIENCE) {}
 
-  /** The definitions `viewer` may see: their own in full, and others' published revision only. */
-  list(viewer: string): WorkflowDefinition[] {
+  /**
+   * The definitions `viewer` (whose role here is `role`) may see: their own in full, one shared
+   * with them to edit with every revision, and otherwise one they may read with its published
+   * revision only (FAC-122; `#rights`).
+   */
+  list(viewer: string, role: CollaboratorRole | null = "build"): WorkflowDefinition[] {
     let shown: WorkflowDefinition[] = [];
     for (let stored of this.storage.workflowDefinitions.list()) {
-      let view = viewOf(stored, viewer);
+      let view = this.#viewOf(stored, viewer, role);
       if (view) shown.push(view);
     }
     return shown;
   }
 
   /** One definition as `viewer` may see it, or null when it doesn't exist for them. */
-  get(viewer: string, id: string): WorkflowDefinition | null {
+  get(viewer: string, id: string, role: CollaboratorRole | null = "build"): WorkflowDefinition | null {
     let stored = this.storage.workflowDefinitions.get(id);
-    return stored ? viewOf(stored, viewer) : null;
+    return stored ? this.#viewOf(stored, viewer, role) : null;
+  }
+
+  /**
+   * What `viewer`, whose role in this workspace is `role`, may do with `stored` (FAC-122). The owner
+   * may do everything. Anyone else needs a role here (a share outlives a removed collaborator but
+   * grants them nothing) and gets the union of their share by name and the audience rule. `edit`
+   * needs the build role too, since saving reads the workflow gadget's code. Which revision a run
+   * executes is its trigger's pin's (`fire`), not the right's.
+   */
+  #rights(stored: StoredWorkflowDefinition, viewer: string, role: CollaboratorRole | null): ViewerRights {
+    if (stored.owner.id === viewer) return { read: true, run: true, edit: true, shared: false };
+    if (role === null) return NO_RIGHTS;
+    let given = this.storage.workflowDefinitionShares.get(shareKey(stored.id, viewer))?.rights;
+    let open = this.audience(stored, role);
+    let edit = given?.edit === true && role === "build";
+    let run = given?.run === true || open.run;
+    return { read: edit || run || given?.read === true || open.read, run, edit, shared: given !== undefined };
+  }
+
+  /** `stored` as `viewer` may see it: every revision to edit it, else its published one to read it. */
+  #viewOf(stored: StoredWorkflowDefinition, viewer: string, role: CollaboratorRole | null): WorkflowDefinition | null {
+    let rights = this.#rights(stored, viewer, role);
+    let access = { read: rights.read, run: rights.run, edit: rights.edit };
+    let marks = { access, ...(rights.shared ? { sharedWithMe: true } : {}) };
+    if (rights.edit) return { ...stored, revisions: [...stored.revisions], ...marks };
+    if (!rights.read || !stored.published) return null;
+    let revision = stored.revisions.find(r => r.revision === stored.published!.revision);
+    return revision ? { ...stored, revisions: [revision], ...marks } : null;
+  }
+
+  /**
+   * Refuses, in the words every run refusal uses, unless `profileId` (role `role` here) may run the
+   * definition trigger `hookId` is pinned to (FAC-122): checked at admission, at fire, and at each
+   * protected point of a run, so a revoked share or right stops the next one. A trigger with no
+   * pin is refused too. The trigger's run control is checked beside this, never instead of it.
+   */
+  requireRunRight(profileId: string, hookId: number, role: CollaboratorRole | null): void {
+    let pin = this.storage.workflowTriggerPins.get(hookId);
+    let stored = pin ? this.storage.workflowDefinitions.get(pin.definitionId) : undefined;
+    if (!stored || !this.#rights(stored, profileId, role).run) throw new Error(CANNOT_RUN);
+  }
+
+  /**
+   * Shares `caller`'s own definition `id` with the account `profileId` (role `recipientRole` in
+   * this workspace) with `rights`, or stops sharing it with null (FAC-122). Only the owner shares.
+   * The recipient must be a collaborator here, never the owner, and edit needs their build role. A
+   * share names the account (its profile id), never an email address.
+   */
+  share(caller: AiChatAuthorInfo, id: string, profileId: string, rights: unknown,
+        recipientRole: CollaboratorRole | null): WorkflowDefinitionShare[] {
+    return this.durableStorage.transactionSync(() => {
+      let stored = this.#owned(caller.id, id);
+      if (typeof profileId !== "string" || profileId.length === 0 || profileId.length > 256 || profileId.includes("@")) {
+        throw new Error("Share a workflow with a person's account, not an address.");
+      }
+      if (profileId === caller.id) throw new Error("You already own this workflow.");
+      let key = shareKey(id, profileId);
+      if (rights === null) {
+        this.storage.workflowDefinitionShares.delete(key);
+        return this.#sharesOf(id);
+      }
+      let parsed = parseWorkflowDefinitionRights(rights);
+      if (recipientRole === undefined || recipientRole === null) {
+        throw new Error("Share a workflow only with someone who can open this workspace.");
+      }
+      if (parsed.edit && recipientRole !== "build") {
+        throw new Error("Only someone who can build in this workspace can edit a workflow.");
+      }
+      let existing = this.storage.workflowDefinitionShares.get(key);
+      if (!existing && this.#sharesOf(id).length >= MAX_WORKFLOW_DEFINITION_SHARES) {
+        throw new Error(`A workflow is shared with at most ${MAX_WORKFLOW_DEFINITION_SHARES} people.`);
+      }
+      this.storage.workflowDefinitionShares.put({ key, definitionId: stored.id, profileId, rights: parsed,
+        sharedBy: caller, sharedAt: new Date() });
+      return this.#sharesOf(id);
+    });
+  }
+
+  /** Who `caller`'s own definition `id` is shared with by name, and how (FAC-122). The owner only. */
+  shares(caller: AiChatAuthorInfo, id: string): WorkflowDefinitionShare[] {
+    this.#owned(caller.id, id);
+    return this.#sharesOf(id);
+  }
+
+  #sharesOf(id: string): WorkflowDefinitionShare[] {
+    let shown: WorkflowDefinitionShare[] = [];
+    for (let { key: _, ...share } of this.storage.workflowDefinitionShares.list()) {
+      if (share.definitionId === id) shown.push(share);
+    }
+    return shown.toSorted((a, b) => a.profileId.localeCompare(b.profileId));
   }
 
   /**
    * Saves `input` as a new revision for `caller`: a new definition when `input.id` is absent, or
-   * the caller's own definition otherwise. The revision's source is the gadget's head commit now
-   * (`headOf`); a gadget with none, still pending or not a gadget, is refused. Saving the same
-   * commit again changes only the title. Publishes nothing.
+   * an existing one the caller owns or may edit (FAC-122; `role` is theirs here) otherwise, whose
+   * revision records them when they aren't the owner. The revision's source is the gadget's head
+   * commit now (`headOf`); a gadget with none, still pending or not a gadget, is refused. Saving the
+   * same commit again changes only the title. Publishes nothing.
    */
   save(caller: AiChatAuthorInfo, input: WorkflowDefinitionSave,
-       headOf: (gadgetId: WorkpieceId) => string | undefined): WorkflowDefinition {
+       headOf: (gadgetId: WorkpieceId) => string | undefined, role: CollaboratorRole | null = "build"): WorkflowDefinition {
     let title = parseWorkflowDefinitionTitle(input.title);
     let commitId = headOf(input.gadgetId);
     if (!commitId) throw new Error("A workflow definition is saved from a workflow gadget with committed code.");
@@ -119,7 +248,7 @@ export class WorkspaceWorkflowDefinitionStore {
         this.storage.workflowDefinitions.put(created);
         return created;
       }
-      let stored = this.#owned(caller.id, input.id);
+      let stored = this.#editable(caller.id, input.id, role);
       let latest = stored.revisions[stored.revisions.length - 1]!;
       let unchanged = latest.source.gadgetId === source.gadgetId && latest.source.commitId === commitId;
       if (!unchanged && stored.revisions.length >= MAX_WORKFLOW_DEFINITION_REVISIONS) {
@@ -129,20 +258,25 @@ export class WorkspaceWorkflowDefinitionStore {
         ...stored, title,
         revisions: unchanged
             ? stored.revisions
-            : [...stored.revisions, { revision: latest.revision + 1, source, savedAt: now }],
+            : [...stored.revisions, { revision: latest.revision + 1, source, savedAt: now,
+                ...(caller.id === stored.owner.id ? {} : { savedBy: caller }) }],
       };
       this.storage.workflowDefinitions.put(next);
-      return next;
+      return this.#viewOf(next, caller.id, role)!;
     });
   }
 
   /**
-   * Makes saved `revision` of `caller`'s own definition the published one. Triggers already pinned
-   * to another revision stay on it.
+   * Makes saved `revision` of definition `id` the published one. Its owner may; so may someone it
+   * is shared with to edit, only where `editorsMayPublish` (the deployment's shared configuration
+   * is in force here and the caller holds its publish authority, which the caller checked first;
+   * FAC-122). Triggers already pinned to another revision stay on it.
    */
-  publish(caller: AiChatAuthorInfo, id: string, revision: number): WorkflowDefinition {
+  publish(caller: AiChatAuthorInfo, id: string, revision: number,
+          { editorsMayPublish = false, role = "build" }: { editorsMayPublish?: boolean; role?: CollaboratorRole | null } = {})
+      : WorkflowDefinition {
     return this.durableStorage.transactionSync(() => {
-      let stored = this.#owned(caller.id, id);
+      let stored = editorsMayPublish ? this.#editable(caller.id, id, role) : this.#owned(caller.id, id);
       if (!stored.revisions.some(r => r.revision === revision)) throw new Error("No such revision.");
       let next = { ...stored, published: { revision, at: new Date(), by: caller } };
       this.storage.workflowDefinitions.put(next);
@@ -170,6 +304,8 @@ export class WorkspaceWorkflowDefinitionStore {
       let view = this.get(viewer, ref.definitionId);
       let revision = view?.revisions.find(r => r.revision === ref.revision);
       if (!view || !revision) throw new Error(NOT_FOUND);
+      // An editor sees unpublished revisions, but only the owner may run one (FAC-122).
+      if (view.owner.id !== viewer && view.published?.revision !== ref.revision) throw new Error(NOT_FOUND);
       if (hookGadgetId === null || revision.source.gadgetId !== hookGadgetId) {
         throw new Error("That revision is for another gadget than the one this trigger wakes.");
       }
@@ -199,7 +335,8 @@ export class WorkspaceWorkflowDefinitionStore {
   fire(hookId: number, hookGadgetId: WorkpieceId | null,
        headOf: (gadgetId: WorkpieceId) => string | undefined,
        ownerCanBuild: (profileId: string) => boolean,
-       invocationId?: string): (WorkflowDefinitionDelivery & { deliveryId: number }) | null {
+       invocationId?: string,
+       roleOf: (profileId: string) => CollaboratorRole | null = () => "build"): (WorkflowDefinitionDelivery & { deliveryId: number }) | null {
     // A delivery a person asked for names an invocation minted here for this trigger, not yet run;
     // anything else starts nothing.
     let invocation = invocationId === undefined ? undefined : this.storage.workflowInvocations.get(invocationId);
@@ -214,6 +351,15 @@ export class WorkspaceWorkflowDefinitionStore {
     if (!pin) {
       if (invocation) throw new Error(CANNOT_RUN);
       return null;
+    }
+    // The person who asked must still be allowed to run the definition (FAC-122), as at admission.
+    if (invocation) {
+      try {
+        this.requireRunRight(invocation.requestedBy, hookId, roleOf(invocation.requestedBy));
+      } catch (error) {
+        this.storage.workflowInvocations.delete(invocation.id);
+        throw error;
+      }
     }
     // Follow-latest accepts a newer publication; an explicit revision pin keeps its old behavior.
     if (invocation && (invocation.definitionId !== pin.definitionId ||
@@ -700,12 +846,11 @@ export class WorkspaceWorkflowDefinitionStore {
     if (!stored || stored.owner.id !== profileId) throw new Error(NOT_FOUND);
     return stored;
   }
-}
 
-/** `stored` as `viewer` may see it: all of it for its owner, the published revision for others. */
-function viewOf(stored: StoredWorkflowDefinition, viewer: string): WorkflowDefinition | null {
-  if (stored.owner.id === viewer) return { ...stored, revisions: [...stored.revisions] };
-  if (!stored.published) return null;
-  let revision = stored.revisions.find(r => r.revision === stored.published!.revision);
-  return revision ? { ...stored, revisions: [revision] } : null;
+  // The owner's, or one shared with `profileId` to edit (FAC-122); as not found otherwise.
+  #editable(profileId: string, id: string, role: CollaboratorRole | null): StoredWorkflowDefinition {
+    let stored = this.storage.workflowDefinitions.get(id);
+    if (!stored || !this.#rights(stored, profileId, role).edit) throw new Error(NOT_FOUND);
+    return stored;
+  }
 }

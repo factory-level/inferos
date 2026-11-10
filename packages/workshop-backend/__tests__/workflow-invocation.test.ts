@@ -111,7 +111,7 @@ describe("through the Overseer", () => {
         ...(opts.assignmentsEnabled ? { WORKFLOW_ASSIGNMENTS_ENABLED: "true" } : {}),
       },
       isSharedConfiguration: async () => true,
-      workflowDefinitionStore: () => store,
+      workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const,
       getGadgetHead: headOf,
       defaultGadgetId: GADGET,
       assertGatekeeperUsable: () => {},
@@ -433,7 +433,7 @@ describe("what an invoker sees, and what reaches the gatekeeper", () => {
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
     let impl = {
       env: {}, storage: { boundHooks: { get: () => hook } }, assertGatekeeperUsable: () => {},
-      workflowDefinitionStore: () => store, takenInvocations: new Map<string, boolean>(), getGadgetHead: headOf,
+      workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const, takenInvocations: new Map<string, boolean>(), getGadgetHead: headOf,
     };
     let direct = invokeWorkflowTrigger as unknown as (...args: unknown[]) => Promise<unknown>;
     await direct(impl, "viewer-id", OPERATOR, HOOK, { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" });
@@ -463,7 +463,7 @@ async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolea
     env: mayInvoke ? { SHARED_CONFIGURATION_GATEKEEPER: "inferops" } : {},
     takenInvocations: new Map<string, boolean>(),
     isSharedConfiguration: async () => true,
-    workflowDefinitionStore: () => store,
+    workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const,
     getGadgetHead: head,
     defaultGadgetId: GADGET,
     assertGatekeeperUsable: () => {},

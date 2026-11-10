@@ -86,6 +86,8 @@ function setUp(impl: any, options: Setup = {}) {
     get: (id: { name: string }) => { fetched.push(id.name); return user; },
   };
   impl.ownerId = `user:${PERSON}`;
+  // The person who asked is a collaborator here (FAC-122's run right reads their role).
+  onPrototype(impl, "definitionRoles", async () => () => "use");
   // As the console store reads them: this workspace publishes only console "intake".
   onPrototype(impl, "publishedConsoleForRun", (consoleId: string) => consoleId === "intake"
     ? { saved: CONSOLE, page: (screenId: string) => (screenId === "form" ? FORM : null) }

@@ -23,10 +23,10 @@ function makeOverseer(
       // in these fixtures.
       assertGatekeeperUsable: () => {},
       // The workflow-definition pin check (workflow-definition-store.ts): no pin unless a test
-      // supplies a store, and an owner-only workspace.
-      getSharingManager: async () => ({ getEffectiveRole: () => undefined }),
+      // supplies a store, and a workspace whose one collaborator is the operator who asks (FAC-122).
+      getSharingManager: async () => ({ getEffectiveRole: (profileId: string) => (profileId === "operator-profile" ? "use" : undefined) }),
       getOwnerProfileId: async () => "owner-profile",
-      workflowDefinitionStore: () => workflowDefinitions ?? { fire: () => null },
+      workflowDefinitionStore: () => workflowDefinitions ?? { fire: () => null }, definitionRoles: async () => () => "use" as const,
       getGadgetHead: () => gadgetHead,
       defaultGadgetId: 3,
       storage: {

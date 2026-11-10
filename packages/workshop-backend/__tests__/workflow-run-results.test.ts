@@ -60,6 +60,8 @@ function admitted(impl: any) {
     return { target, caller, workspace: this };
   });
   onPrototype(impl, "visibleBindings", () => [["BOARD", { target: CONNECTION }]]);
+  // The person who asked is a collaborator here (FAC-122's run right reads their role).
+  onPrototype(impl, "definitionRoles", async () => () => "use");
   onPrototype(impl, "getGadgetRecord", () => ({}));
   onPrototype(impl, "getGadgetHead", (id: number) => (id === GADGET ? commit(1) : undefined));
   impl.storage.gatekeepers.put({

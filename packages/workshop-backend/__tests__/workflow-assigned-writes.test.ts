@@ -45,6 +45,9 @@ async function inAssigned(name: string, fn: (impl: any, opened: Opened[], apply:
     // The run's admitted record (FAC-111): a person asked, through the trigger's control, and the
     // run acts as the assignment. Written as the store writes it, so the apply can re-check it.
     impl.storage.workflowTriggerPins.put({ hookId: HOOK, definitionId: "def", revision: 1 });
+    // The definition it is pinned to, published, which the person may run (FAC-122).
+    impl.storage.workflowDefinitions.put({ id: "def", title: "Def", owner: ADA, published: { revision: 1, at: new Date(0), by: ADA },
+      revisions: [{ revision: 1, source: { kind: "gadget", gadgetId: 1, commitId: "c".repeat(40) }, savedAt: new Date(0) }] });
     impl.storage.workflowTriggerControls.put({ hookId: HOOK, label: "Run", invokers: [PERSON], configuredBy: ADA, configuredAt: new Date(0) });
     // The assignment the run acts as, and the live hook: what the requester's re-check re-reads.
     impl.storage.workflowTriggerAssignments.put({ hookId: HOOK, gatekeeperId: CONNECTION, credentialRef: REF, assignedBy: ADA, assignedAt: new Date(0) });
@@ -65,6 +68,8 @@ async function inAssigned(name: string, fn: (impl: any, opened: Opened[], apply:
       return { facet: { applyAction: apply, rejectAction: vi.fn(async () => {}) }, close: () => { entry.closed = true; } };
     };
     impl.assignedActionProblem = () => null;
+    // The person who asked is a collaborator here (FAC-122's run right reads their role).
+    impl.definitionRoles = async () => () => "use";
     impl.getGatekeeperFacet = () => { throw new Error("the connection's own facet was used"); };
     await fn(impl, opened, apply);
   });
