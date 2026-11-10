@@ -29,7 +29,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import type { WorkspaceConfiguration, WorkspaceSettings } from "./workspace-settings.js";
 import type { ConfigurationTraceEntry } from "./configuration-trace.js";
-import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, ConsoleDraftProblem, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, ConsoleDraftProblem, ConsoleWidgetInstance, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
@@ -2972,6 +2972,15 @@ export interface Overseer extends RpcTarget {
    * otherwise, and for a widget published without a UI. Denied to the operate session.
    */
   getEmbeddedWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>>;
+  /**
+   * The instances of the published widget definition `blueprintId` version `version` (as InferOps'
+   * widget search names it) that this workspace's published consoles offer now, with a UI
+   * (FAC-13): each named as a Wiki embed names it, opened through `getEmbeddedWidget`, which checks
+   * the offer again. Never a draft, an unpublished console's widget or a tools-only one. Answered to
+   * whoever may read this workspace's published consoles (build or use access). Denied to the
+   * operate session.
+   */
+  listWidgetInstances(blueprintId: string, version: number): Promise<ConsoleWidgetInstance[]>;
   /**
    * Open an app a console places, as its published revision `revision` fenced it (FAC-89 part 2):
    * `gadgetId` is the live app, with its own storage and bindings, never a copy (see

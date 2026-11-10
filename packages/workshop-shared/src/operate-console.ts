@@ -239,6 +239,28 @@ export type EmbeddedConsoleWidget =
 export type EmbeddedConsoleWidgetUnavailable = "not-published" | "not-offered" | "no-ui";
 
 /**
+ * One instance of a published widget definition (FAC-13): a frozen install that a published
+ * console of the workspace offers now, with a UI, named as a Wiki embed names it (the console and
+ * the source gadget, which a republish keeps). It holds references and labels only; the instance
+ * is opened through `Overseer.getEmbeddedWidget`, which checks the offer again.
+ */
+export type ConsoleWidgetInstance = {
+  consoleId: string;
+  /** The console's published title. */
+  consoleTitle: string;
+  /** The console's current published revision. */
+  revision: string;
+  /** The registered gadget the frozen install was made from (`ConsoleWidgetFreeze.sourceGadgetId`). */
+  sourceGadgetId: WorkpieceId;
+  /** That revision's frozen install. */
+  gadgetId: WorkpieceId;
+  /** The entry's label, which operators see. */
+  label: string;
+  blueprintId: string;
+  version: number;
+};
+
+/**
  * One widget install of a workspace, as a builder choosing what a console registers sees it: its
  * stable version, what its current commit offers, and whether a console can offer it now. Frozen
  * installs and gadgets that aren't widget installs are never candidates.
