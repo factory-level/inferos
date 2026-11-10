@@ -12,7 +12,7 @@ import type {
 import { dotBindingOver } from "../src/inferops.js";
 import { openHttpInferOpsClient } from "../src/http-inferops.js";
 import {
-  InferOpsAccountGatekeeper, InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
+  InferOpsAccountGatekeeper, InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsDotGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper, InferOpsWorkflowPolicyGatekeeper,
   MockInferOps as BaseMockInferOps,
 } from "../src/inferops.js";
@@ -34,7 +34,7 @@ export * from "../src/inferops.js";
 // Vitest's ctx.exports analyzer does not follow `export *`, so the classes reached through
 // ctx.exports are named explicitly.
 export {
-  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsSystemCredentials, InferOpsAccountGatekeeper, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
+  GatekeeperVendor, InferLabLogin, InferOpsAccount, InferOpsSystemCredentials, InferOpsAccountGatekeeper, InferOpsDispatchGatekeeper, InferOpsDotGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsVerifier, InferOpsWikiGatekeeper,
   InferOpsWorkflowPolicyGatekeeper,
 } from "../src/inferops.js";
@@ -394,6 +394,7 @@ type TestExports = {
   TestWikiGatekeeper(options: { props: WikiProps }): DurableObjectClass<TestWikiGatekeeper>;
   InferOpsTableGatekeeper(options: { props: TableProps }): DurableObjectClass<InferOpsTableGatekeeper>;
   InferOpsMembersGatekeeper(options: { props: MembersProps }): DurableObjectClass<InferOpsMembersGatekeeper>;
+  InferOpsDotGatekeeper(options: { props: DotProps }): DurableObjectClass<InferOpsDotGatekeeper>;
   InferOpsWorkflowPolicyGatekeeper(options: { props: WorkflowPolicyProps }):
     DurableObjectClass<InferOpsWorkflowPolicyGatekeeper>;
 };
@@ -425,7 +426,12 @@ export type DotScript = {
   proposals: Record<string, unknown>[];
   /** How a confirm answers: the proposal confirmed with `outcome`, or a refusal. */
   confirm: { outcome: unknown } | { status: number; code: string; settlesAs?: string };
+  /** How a decline answers: declined (the default), or a refusal, settling the proposal as `settlesAs`. */
+  decline?: { status: number; code: string; settlesAs?: string };
 };
+
+/** A Dot binding's props, as the vendor mints them. */
+export type DotProps = { accountId: string; connected: boolean; host: string; workspaceId: string };
 
 /** One request the fake Dot took. */
 export type DotCall = { method: string; path: string; body: string | null; key: string | null };
@@ -476,6 +482,11 @@ class FakeDot {
       const proposal = this.script.proposals.find(p => p.id === decided[1]);
       if (!proposal) return refuse(404, "PROPOSAL_NOT_FOUND");
       if (decided[2] === "decline") {
+        const decline = this.script.decline;
+        if (decline) {
+          if (decline.settlesAs) Object.assign(proposal, { status: decline.settlesAs, decidedAt: "2026-11-10T12:01:00.000Z" });
+          return refuse(decline.status, decline.code);
+        }
         Object.assign(proposal, { status: "declined", decidedAt: "2026-11-10T12:01:00.000Z" });
         return Response.json({ proposal });
       }
@@ -1324,5 +1335,24 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
 
   async rejectDot(actionId: number): Promise<void> {
     await this.#dotBinding().rejectAction(actionId);
+  }
+
+  /** A Dot action's stored status and, once settled, its stored message; null when there is none. */
+  async dotAction(actionId: number): Promise<{ status: string; message: string | null } | null> {
+    const raw = this.ctx.storage.kv.get<{ status: string; attempts?: { failure?: { message?: string } } }>(`action:${actionId}`);
+    return raw ? { status: raw.status, message: raw.attempts?.failure?.message ?? null } : null;
+  }
+
+  /** Whether the real Dot facet admits a collaborator: the refusal's message, or null if admitted. */
+  async addDotObserver(props: DotProps): Promise<string | null> {
+    const exports = this.ctx.exports as unknown as TestExports;
+    const facet = this.ctx.facets.get<InferOpsDotGatekeeper>(`${props.accountId}/dot/${props.host}`,
+      () => ({ class: exports.InferOpsDotGatekeeper({ props }) }));
+    try {
+      await facet.addObserver("observer-1", new RpcStub(new TestVerifier(true)) as unknown as Fetcher<GatekeeperUserVerifier>);
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
   }
 }

@@ -289,12 +289,19 @@ export type WorkspaceMembersRead = {
 /** One custom table an account can open, as listed for the resource picker. */
 export type TableSummary = { id: string; label: string };
 
+/**
+ * Every status InferOps names for a Dot proposal, its derived `expired` and `unknown` included: the
+ * one list the parser accepts (`parseDotProposal`) and the receipt mapping switches over
+ * (`dotProposalStatus`), so a status InferOps adds is refused until both follow.
+ */
+export const DOT_PROPOSAL_STATUSES = ["proposed", "confirming", "confirmed", "declined", "failed", "expired", "unknown"] as const;
+
 /** A Dot proposal as InferOps reads it (`chatbot.proposal_list`), its status derived at read time. */
 export type DotProposalWire = {
   id: string;
   tool: string;
   input: Record<string, unknown>;
-  status: "proposed" | "confirming" | "confirmed" | "declined" | "failed" | "expired" | "unknown";
+  status: (typeof DOT_PROPOSAL_STATUSES)[number];
   /** The capability's answer once confirmed, or its refusal in InferOps' words once failed. */
   outcome: unknown;
   createdAt: string;

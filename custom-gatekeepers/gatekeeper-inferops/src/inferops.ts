@@ -4196,19 +4196,71 @@ async function applyDotAction(binding: DotBinding, actionId: number):
   });
 }
 
-/** Decline a pending Dot proposal in InferOps and keep it declined here (see `rejectAction`). */
+/** Why a decline couldn't be confirmed: InferOps may still be waiting for a decision. */
+export const DOT_DECLINE_UNCONFIRMED =
+  "Your decline couldn't be confirmed in InferOps: the change may still be waiting there. Decline it again.";
+/** Why a change InferOps already made can't be declined. */
+export const DOT_DECLINE_ALREADY_MADE =
+  "This change was already made in InferOps, so it can't be declined. Approve it to record that.";
+
+/**
+ * Decline a pending Dot proposal in InferOps. Only a confirmed outcome is recorded here:
+ *
+ * - InferOps declined it: kept, declined, so a later read never stages it again.
+ * - InferOps refused the decline as already decided, expired or gone: the proposal is read back
+ *   and its true status decides. Not made (declined, failed, expired, gone) is kept with that
+ *   truth; made (confirmed) refuses the rejection, so the person approves it and the record says
+ *   it was made.
+ * - Any other failure (InferOps unreachable, a timeout, an answer it can't be sure of): nothing is
+ *   recorded and the rejection fails, so the action stays pending and the person can decline it
+ *   again. Never shown as declined while InferOps may still be waiting.
+ */
 async function rejectDotAction(binding: DotBinding, actionId: number): Promise<void> {
   const record = binding.action(actionId);
   if (record?.status !== "pending" || !isDotAction(record)) return;
+  const settle = (message: string) =>
+    binding.putAction({ ...record, status: "failed", attempts: { failure: { outcome: "notApplied", message } } });
+  let refusal: unknown;
   try {
-    await binding.client.declineDotProposal(record.conversationId, record.proposalId);
+    const declined = await binding.client.declineDotProposal(record.conversationId, record.proposalId);
+    if (declined.status === "declined") return settle("Declined.");
+    refusal = new InferOpsError("CONFLICT", "InferOps answered the decline with another status.");
   } catch (error) {
-    logger.warn("dot proposal decline failed", {
-      event: "dot-confirm.decline.failed", host: binding.host, action: actionId, code: inferOpsErrorCode(error) ?? "UNKNOWN",
-    });
+    const code = inferOpsErrorCode(error);
+    if (writeStage(error) !== "refused" || (code !== "CONFLICT" && code !== "EXPIRED" && code !== "NOT_FOUND")) {
+      logger.warn("dot proposal decline unconfirmed", {
+        event: "dot-confirm.decline.unconfirmed", host: binding.host, action: actionId, code: code ?? "UNKNOWN",
+      });
+      throw new Error(DOT_DECLINE_UNCONFIRMED, { cause: error });
+    }
+    refusal = error;
   }
-  // Kept, declined, so the proposal is never staged again from a later read.
-  binding.putAction({ ...record, status: "failed", attempts: { failure: { outcome: "notApplied", message: "Declined." } } });
+  // A typed refusal: settle on what InferOps actually holds now.
+  let proposals: DotProposalWire[];
+  try {
+    proposals = await binding.client.listDotProposals(record.conversationId);
+  } catch (error) {
+    throw new Error(DOT_DECLINE_UNCONFIRMED, { cause: error });
+  }
+  const now = proposals.find(p => p.id === record.proposalId);
+  if (!now) {
+    if (inferOpsErrorCode(refusal) === "NOT_FOUND") return settle("InferOps no longer has this change; nothing was made.");
+    throw new Error(DOT_DECLINE_UNCONFIRMED, { cause: refusal });
+  }
+  switch (now.status) {
+    case "declined":
+      return settle("Declined.");
+    case "expired":
+      return settle("It expired before it was decided; nothing was made.");
+    case "failed":
+      return settle("InferOps refused it; nothing was made.");
+    case "confirmed":
+      throw new Error(DOT_DECLINE_ALREADY_MADE);
+    case "proposed":
+    case "confirming":
+    case "unknown":
+      throw new Error(DOT_DECLINE_UNCONFIRMED, { cause: refusal });
+  }
 }
 
 /**
@@ -4408,7 +4460,15 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
    * any status) or no longer proposed is left alone. The receipt is kept for this session.
    */
   async #stage(proposal: DotProposalWire): Promise<void> {
-    if (proposal.status !== "proposed" || this.binding.recordFor(proposal.id)) return;
+    if (proposal.status !== "proposed") return;
+    const existing = this.binding.recordFor(proposal.id);
+    // Reconciled with InferOps: a decision recorded here that InferOps doesn't show (it still waits
+    // for one) is not final, so the proposal is staged again for the person to decide.
+    if (existing && existing.status !== "pending" && existing.status !== "applied") {
+      this.binding.deleteAction(existing.actionId);
+    } else if (existing) {
+      return;
+    }
     const { actionId, joined } = await this.binding.stageOnce({
       kind: "dot-confirm", conversationId: this.conversationId, proposalId: proposal.id,
       tool: proposal.tool, input: proposal.input, expiresAt: proposal.expiresAt,

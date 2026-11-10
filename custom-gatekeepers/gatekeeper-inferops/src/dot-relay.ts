@@ -6,7 +6,7 @@
 // reason, which the session turns into a visible error. Also the strict parsers of the Dot's JSON
 // answers, so a field InferOps didn't send is never read as one it did.
 import { EventSchema } from "@ag-ui/core/schemas";
-import type { DotConversationWire, DotEvent, DotMessageWire, DotProposalWire, DotRunEnd } from "./inferops-client";
+import { DOT_PROPOSAL_STATUSES, type DotConversationWire, type DotEvent, type DotMessageWire, type DotProposalWire, type DotRunEnd } from "./inferops-client";
 
 /** The relay's bounds: InferOps aborts a run at 125 s and sends a heartbeat every 15 s. */
 export const DOT_RELAY_LIMITS = {
@@ -123,7 +123,7 @@ async function readWithin(
 export class DotMalformed extends Error {}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const PROPOSAL_STATUSES = new Set(["proposed", "confirming", "confirmed", "declined", "failed", "expired", "unknown"]);
+const PROPOSAL_STATUSES: ReadonlySet<string> = new Set(DOT_PROPOSAL_STATUSES);
 const MESSAGE_STATUSES = new Set(["running", "complete", "error", "interrupted"]);
 
 function obj(value: unknown, what: string): Record<string, unknown> {

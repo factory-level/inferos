@@ -223,6 +223,59 @@ describe("deciding a proposal", () => {
   });
 });
 
+describe("declining a proposal records only what InferOps confirmed (r2)", () => {
+  it("keeps a decline InferOps didn't answer pending, says so, and can decline it again", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [proposal()], decline: { status: 503, code: "UNAVAILABLE" } }));
+    expect(await failure(hooks.rejectDot(actionId))).toContain("Your decline couldn't be confirmed in InferOps");
+    expect(await hooks.dotAction(actionId)).toEqual({ status: "pending", message: null });
+    await hooks.dotScript(script({ proposals: [proposal()] }));
+    await hooks.rejectDot(actionId);
+    expect(await hooks.dotAction(actionId)).toEqual({ status: "failed", message: "Declined." });
+  });
+
+  it("refuses to decline a change InferOps already made, and approving it records it made", async () => {
+    const { hooks, actionId } = await staged(script({
+      proposals: [proposal()], decline: { status: 409, code: "PROPOSAL_DECIDED", settlesAs: "confirmed" },
+    }));
+    expect(await failure(hooks.rejectDot(actionId))).toContain("already made in InferOps");
+    expect((await hooks.dotAction(actionId))?.status).toBe("pending");
+    expect((await hooks.applyDot(actionId)).failure).toBeNull();
+    expect((await hooks.dotAction(actionId))?.status).toBe("applied");
+  });
+
+  it("records the true outcome of a decline InferOps refused as expired", async () => {
+    const { hooks, actionId } = await staged(script({
+      proposals: [proposal()], decline: { status: 409, code: "PROPOSAL_EXPIRED", settlesAs: "expired" },
+    }));
+    await hooks.rejectDot(actionId);
+    expect(await hooks.dotAction(actionId)).toEqual({
+      status: "failed", message: "It expired before it was decided; nothing was made.",
+    });
+  });
+
+  it("stages a proposal again when InferOps still waits on one recorded here as decided", async () => {
+    const { hooks, conversation, actionId } = await staged(script({
+      // A refusal that stands: the record settles as not applied.
+      proposals: [proposal()], confirm: { status: 400, code: "INVALID_REQUEST" },
+    }));
+    expect((await hooks.applyDot(actionId)).failure?.outcome).toBe("notApplied");
+    expect((await hooks.dotAction(actionId))?.status).toBe("failed");
+    // InferOps still shows it waiting for a decision, so it is decided here again.
+    await conversation.read();
+    expect((await hooks.log()).actions).toHaveLength(2);
+  });
+});
+
+describe("who may decide a Dot action (r1)", () => {
+  it("admits no collaborator, so only the person whose Dot it is can open, and decide, it", async () => {
+    const hooks = env.TEST_HOOKS.getByName(`dot-observer-${crypto.randomUUID()}`);
+    const refused = await hooks.addDotObserver({
+      accountId: `dot-${crypto.randomUUID()}`, connected: true, host: "acme.operations", workspaceId: "90000000-0000-4000-8000-000000000001",
+    });
+    expect(refused).toContain("A Dot is private to its person");
+  });
+});
+
 describe("a proposal's status, in FAC-97's words", () => {
   it("maps every InferOps status, and keeps InferOps' words out of a failure", () => {
     expect(dotProposalStatus(proposal())).toEqual({ outcome: "waiting" });
