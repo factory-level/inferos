@@ -1,6 +1,6 @@
 import {
   WIDGET_STATE_ERROR_CODES, WidgetStateError, WidgetStateMemory, parseOperateWidgetRef,
-  widgetStateKey, type OperateWidgetRef, type WidgetStateMachine, type WidgetStateSnapshot, type WidgetNavigation,
+  widgetStateKey, type OperateWidgetRef, type WidgetStateMachine, type WidgetStateSnapshot, type WidgetNavigation, type WidgetPrompt,
 } from "@gadgets/workshop-shared/widget-state";
 import { canvasPageEffects } from "@gadgets/workshop-shared/canvas-model";
 import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
@@ -1051,8 +1051,8 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     let snapshot = machine.persistence === "person"
       ? await this.user().transitionWidgetState(key, machine, event, expectedSeq)
       : (await this.#sessionWidgets()).transition(key, machine, event, expectedSeq);
-    let navigation = await this.#wiredNavigation(parseOperateWidgetRef(ref), event);
-    return navigation ? { ...snapshot, navigation } : snapshot;
+    let { navigation, prompt } = await this.#wiredEffects(parseOperateWidgetRef(ref), event);
+    return { ...snapshot, ...(navigation ? { navigation } : {}), ...(prompt ? { prompt } : {}) };
   }
 
   // FAC-94: where `event` on widget `ref` leads, if the published page the person is shown wires it
@@ -1061,14 +1061,16 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   // person's own access, from the console open on their page at the widget's revision. Nothing is
   // navigated for an unwired event, a widget the page doesn't place, a console not open at that
   // revision, a running flow (it moves by its own routes, FAC-87) or a page that can't be read; the
-  // widget's transition has already happened and stands. Only `navigate` runs: publication refuses
-  // a widget event that leads to a requested action (`publishedPages`), so none grants authority.
-  async #wiredNavigation(ref: OperateWidgetRef, event: string): Promise<WidgetNavigation | null> {
+  // widget's transition has already happened and stands. FAC-98: the first wired `insert-prompt`
+  // on that same page is returned as `prompt`, to this session alone and written nowhere, for the
+  // person's own chat to draft or send as them. Nothing else runs: publication refuses a widget
+  // event that leads to a requested action (`publishedPages`), so none grants authority.
+  async #wiredEffects(ref: OperateWidgetRef, event: string): Promise<{ navigation?: WidgetNavigation; prompt?: WidgetPrompt }> {
     let page = await this.user().getOperatePage();
     let run = page.state.console;
     if (!run || page.state.flow || run.source !== "published" || run.workspaceId !== ref.workspaceId ||
         run.consoleId !== ref.consoleId || run.revision !== ref.revision) {
-      return null;
+      return {};
     }
     let saved, shown;
     try {
@@ -1079,19 +1081,22 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
       shown = saved && saved.revision === run.revision && screenId !== null
         ? await workspace.getConsolePage(run.consoleId, screenId, "published") : null;
     } catch {
-      return null;
+      return {};
     }
-    if (!saved || !shown) return null;
-    let target = canvasPageEffects(shown, `gadget:${ref.gadgetId}`, event).find(effect => effect.kind === "navigate");
-    if (!target) return null;
+    if (!saved || !shown) return {};
+    let effects = canvasPageEffects(shown, `gadget:${ref.gadgetId}`, event);
+    let wired = effects.find(effect => effect.kind === "insert-prompt");
+    let prompt = wired ? { prompt: { text: wired.text, submit: wired.submit === true } } : {};
+    let target = effects.find(effect => effect.kind === "navigate");
+    if (!target) return prompt;
     let screenId = target.page;
     let move = consoleScreenMove(saved, run.viewId, screenId);
-    if (!move) return { screenId, outcome: "refused" };
+    if (!move) return { navigation: { screenId, outcome: "refused" }, ...prompt };
     try {
       await this.dispatch(move, page.seq);
-      return { screenId, outcome: "shown" };
+      return { navigation: { screenId, outcome: "shown" }, ...prompt };
     } catch {
-      return { screenId, outcome: "refused" };
+      return { navigation: { screenId, outcome: "refused" }, ...prompt };
     }
   }
 

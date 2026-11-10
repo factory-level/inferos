@@ -4,7 +4,7 @@
 // on a widget with no states, refuses the publication with nothing published. Over mock Durable
 // Object storage, with the real console store.
 import { describe, expect, it } from "vitest";
-import { canvasPageFromDefinition, canvasRunEvent, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import { canvasPageFromDefinition, canvasRunEvent, type CanvasEffect, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
 import type { ConsoleWidgetEntry, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import { parseWidgetStates } from "@gadgets/workshop-shared/widget-state";
 import { classifyGadgetFiles } from "@gadgets/workshop-shared/workspace-kind";
@@ -61,11 +61,11 @@ const BOARD = { nodeType: "widget", id: "eng", kind: "inferops.project-board", v
  * Screen "floor" as a nested page whose widget listens for `event`, navigating to "done", or with
  * `requesting`, asking the board beside it to create an issue.
  */
-function wire(storage: ReturnType<typeof setUp>["storage"], event: string, requesting = false) {
+function wire(storage: ReturnType<typeof setUp>["storage"], event: string, requesting = false, wired?: CanvasEffect) {
   let row = storage.canvases.get("floor")!;
   let page = canvasPageFromDefinition(row);
-  let effect = requesting ? { kind: "request-action" as const, target: "eng", action: "create-issue" }
-    : { kind: "navigate" as const, page: "done" };
+  let effect = wired ?? (requesting ? { kind: "request-action" as const, target: "eng", action: "create-issue" }
+    : { kind: "navigate" as const, page: "done" });
   let nested = { ...page, nodes: [
     ...page.nodes.map(node => node.nodeType === "object" ? { ...node, children: ["inner", ...(requesting ? ["eng"] : [])] }
       : { ...node, attachments: [{ id: "next", version: 1 as const, on: event, effect }] }),
@@ -172,5 +172,35 @@ describe("a run's result at publication (FAC-116)", () => {
     let { draft, run } = publish(t);
     expect(run).toThrow(`Screen floor can't be published: its widget w1's "run-succeeded" for trigger 11 leads to a requested action, which a run's result can't run.`);
     expect(t.storage.consoles.get(draft.id)!.published).toBeNull();
+  });
+});
+
+// FAC-98: a widget's own event may put a prompt in the person's chat, as a draft or sent as them; a
+// run's result can't put one there yet (only its navigation is delivered, FAC-116), so publication
+// refuses `insert-prompt` reached from a run's result, `submit` or not, publishing nothing.
+describe("a prompt inserted into the person's chat at publication (FAC-98)", () => {
+  it.for([
+    ["a draft", { kind: "insert-prompt", text: "Summarise this intake" }],
+    ["a submitted prompt", { kind: "insert-prompt", text: "File the intake", submit: true }],
+  ] as const)("publishes %s on a widget's declared event", ([, effect]) => {
+    let t = setUp("stateful");
+    wire(t.storage, "edit", false, effect);
+    let published = publish(t).run();
+    let widget = t.consoles.page(published.id, "floor", "published")!.nodes.find(node => node.nodeType === "widget")!;
+    expect(widget).toMatchObject({ attachments: [{ id: "next", on: "edit", effect }] });
+  });
+
+  it.for([
+    ["a draft", { kind: "insert-prompt", text: "Summarise the run" }],
+    ["a submitted prompt", { kind: "insert-prompt", text: "Retry the run", submit: true }],
+  ] as const)("refuses %s from a run's result, publishing nothing", ([, effect]) => {
+    let t = setUp("plain");
+    hook(t.storage, 11, 1);
+    wire(t.storage, canvasRunEvent("run-failed", 11), false, effect);
+    let { draft, run } = publish(t);
+    expect(run).toThrow(`Screen floor can't be published: its widget w1's "run-failed" for trigger 11 puts a prompt in the chat, which a run's result can't do yet.`);
+    expect(t.storage.consoles.get(draft.id)!.published).toBeNull();
+    expect(t.consoles.page(draft.id, "floor", "published")).toBeNull();
+    expect([...t.storage.gadgets.list()].map(gadget => gadget.id)).toEqual([1]);
   });
 });

@@ -9,6 +9,7 @@ const describe = (attachment: CanvasAttachment, pageTitle: (id: string) => strin
   const { effect } = attachment
   if (effect.kind === 'navigate') return `On ${attachment.on}, open ${pageTitle(effect.page)}`
   if (effect.kind === 'raise-event') return `On ${attachment.on}, raise ${effect.event} on ${effect.target}`
+  if (effect.kind === 'insert-prompt') return `On ${attachment.on}, ${effect.submit ? 'send' : 'put as a draft'} “${effect.text}” in the person’s chat`
   return `On ${attachment.on}, request ${effect.action} of ${effect.target}`
 }
 

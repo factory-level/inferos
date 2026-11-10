@@ -27,6 +27,8 @@ export const CANVAS_MODEL_LIMITS = {
   depth: 4,
   /** Pages in one workspace, the existing limit on saved canvases. */
   pages: 64,
+  /** Characters in a prompt an `insert-prompt` effect puts in the chat (FAC-98). */
+  promptText: 2000,
 } as const;
 
 /** Events a widget emits about its own actions. Accepted isn't completed, and only the widget can say either. */
@@ -110,8 +112,23 @@ export interface CanvasRequestActionEffect {
   action: string;
 }
 
+/**
+ * Put a prompt in the chat of the person whose event this is (FAC-98): as a draft they send
+ * themselves, the default, or sent as them with `submit`. It names no person, company, chat or
+ * model: it reaches only the session that raised the event, and a sent prompt is that person's own
+ * message, so the turn it starts runs under their own grants and approvals and grants nothing.
+ */
+export interface CanvasInsertPromptEffect {
+  /** Effect kind. */
+  kind: "insert-prompt";
+  /** The prompt, 1 to `CANVAS_MODEL_LIMITS.promptText` characters, trimmed. */
+  text: string;
+  /** Present, and only `true`, to send it as the person; absent, it is a draft. */
+  submit?: true;
+}
+
 /** What an attachment does. Unknown kinds are rejected. */
-export type CanvasEffect = CanvasRaiseEventEffect | CanvasNavigateEffect | CanvasRequestActionEffect;
+export type CanvasEffect = CanvasRaiseEventEffect | CanvasNavigateEffect | CanvasRequestActionEffect | CanvasInsertPromptEffect;
 
 /** Behavior attached to one node: when that node has this event, run this effect. */
 export interface CanvasAttachment {
@@ -261,6 +278,15 @@ function parseEffect(value: unknown, at: string): CanvasEffect {
     const e = fields(value, ["kind", "target", "action"], at);
     return { kind, target: parseId(e.target, at), action: parseEvent(e.action, at) };
   }
+  if (kind === "insert-prompt") {
+    // `submit` is the one optional field, and only `true`: a draft is the default (FAC-98).
+    const { submit, ...required } = value as Record<string, unknown>;
+    const e = fields(required, ["kind", "text"], at);
+    if (submit !== undefined && submit !== true) return reject("invalid-attachment", at);
+    const text = typeof e.text === "string" ? e.text.trim() : "";
+    if (text.length === 0 || text.length > CANVAS_MODEL_LIMITS.promptText) return reject("invalid-attachment", at);
+    return submit ? { kind, text, submit } : { kind, text };
+  }
   return reject("unknown-effect", at);
 }
 
@@ -382,7 +408,7 @@ function checkAttachments(page: CanvasPage, byId: ReadonlyMap<string, CanvasNode
       if (ids.has(attachment.id)) return reject("duplicate-id", attachment.id);
       ids.add(attachment.id);
       const effect = attachment.effect;
-      if (effect.kind === "navigate") continue;
+      if (effect.kind === "navigate" || effect.kind === "insert-prompt") continue;
       if (effect.target !== page.id && !byId.has(effect.target)) return reject("missing-reference", attachment.id);
       if (effect.kind === "raise-event") {
         if (actionEvents.includes(effect.event) || isRunEvent(effect.event)) return reject("reserved-event", attachment.id);
@@ -483,7 +509,7 @@ export function canvasRunEventsHeard(page: CanvasPage): CanvasRunEventHeard[] {
 }
 
 /** A page effect an event leads to: what the page runs, as opposed to a raised event it follows. */
-export type CanvasPageEffect = CanvasNavigateEffect | CanvasRequestActionEffect;
+export type CanvasPageEffect = CanvasNavigateEffect | CanvasRequestActionEffect | CanvasInsertPromptEffect;
 
 /**
  * The page effects that `event` on every widget of a parsed page placing `targetRef` leads to, in

@@ -34,16 +34,16 @@ const CONSOLE = {
 const OPEN: OperateEvent = { type: "openConsole", workspaceId: "console-ws", consoleId: "intake", title: "Intake",
   source: "published", revision: "3", fullChat: "off", viewId: "v-form" };
 
-/** Screen "form": widget 41 sends "submit" to `to`, and nothing on "reopen". */
-const formPage = (to: string) => parseCanvasPage({
+/** Screen "form": widget 41 sends "submit" to `to`, and nothing on "reopen", plus any `extra` attachments. */
+const formPage = (to: string, extra: unknown[] = []) => parseCanvasPage({
   schemaVersion: 2, id: "form", revision: "0", title: "Form", children: ["main"], attachments: [], nodes: [
     { nodeType: "object", id: "main", title: "Main", columns: 1, children: ["w41"], attachments: [] },
     { nodeType: "widget", id: "w41", kind: "inferos.gadget", version: 1, targetRef: "gadget:41", size: "normal", params: {},
-      attachments: [{ id: "next", version: 1, on: "submit", effect: { kind: "navigate", page: to } }] },
+      attachments: [{ id: "next", version: 1, on: "submit", effect: { kind: "navigate", page: to } }, ...extra] },
   ],
 });
 
-async function session(to = "done", setUp: OperateEvent[] = [OPEN, { type: "showScreen", screenId: "form" }]) {
+async function session(to = "done", setUp: OperateEvent[] = [OPEN, { type: "showScreen", screenId: "form" }], extra: unknown[] = []) {
   let { OperateSessionImpl } = await import("../src/server.js");
   let user = env.TEST_USER.getByName(crypto.randomUUID());
   for (let event of setUp) {
@@ -53,7 +53,7 @@ async function session(to = "done", setUp: OperateEvent[] = [OPEN, { type: "show
   let workspace = {
     getConsoleWidgetStates: async () => MACHINE,
     getConsole: async () => CONSOLE,
-    getConsolePage: async (_consoleId: string, screenId: string) => screenId === "form" ? formPage(to) : null,
+    getConsolePage: async (_consoleId: string, screenId: string) => screenId === "form" ? formPage(to, extra) : null,
     [Symbol.dispose]: () => {},
   };
   let impl = new OperateSessionImpl(() => user as never, async () => ({}) as never,
@@ -108,5 +108,48 @@ describe("a widget event wired to navigate (FAC-94)", () => {
     expect(await impl.transitionWidget(REF, "submit", 0))
       .toMatchObject({ state: "submitted", navigation: { screenId: "elsewhere", outcome: "refused" } });
     expect(await user.getOperatePage()).toEqual(page);
+  });
+});
+
+// FAC-98: a widget event wired to `insert-prompt` returns the prompt to the transitioning session
+// alone, for its own person's chat. Nothing is written to the operate page or its log, so no other
+// session or person receives it, and the prompt carries no target of its own.
+const prompt = (id: string, text: string, submit?: true) =>
+  ({ id, version: 1, on: "submit", effect: { kind: "insert-prompt", text, ...(submit ? { submit } : {}) } });
+
+describe("a widget event wired to insert a prompt (FAC-98)", () => {
+  it("returns a draft prompt to the transitioning session, writing nothing to the page or its log", async () => {
+    let { impl, user } = await session("elsewhere", undefined, [prompt("ask", "Summarise this intake")]);
+    let page = await user.getOperatePage();
+    let events = await user.listOperateEvents(0, 50);
+    let snapshot = await impl.transitionWidget(REF, "submit", 0);
+    expect(snapshot).toMatchObject({ state: "submitted", prompt: { text: "Summarise this intake", submit: false } });
+    expect(await user.getOperatePage()).toEqual(page);
+    expect(await user.listOperateEvents(0, 50)).toEqual(events);
+  });
+
+  it("says a submitted prompt is to be sent, beside the navigation the same event runs", async () => {
+    let { impl } = await session("done", undefined, [prompt("ask", "File the intake", true)]);
+    expect(await impl.transitionWidget(REF, "submit", 0)).toMatchObject({
+      navigation: { screenId: "done", outcome: "shown" }, prompt: { text: "File the intake", submit: true } });
+  });
+
+  it("returns only the first wired prompt", async () => {
+    let { impl } = await session("done", undefined, [prompt("one", "First"), prompt("two", "Second", true)]);
+    expect((await impl.transitionWidget(REF, "submit", 0)).prompt).toEqual({ text: "First", submit: false });
+  });
+
+  it("returns none for an unwired event, another revision, or a running flow", async () => {
+    let { impl } = await session("done", undefined, [prompt("ask", "Summarise")]);
+    let s = await impl.transitionWidget(REF, "submit", 0);
+    expect(await impl.transitionWidget(REF, "reopen", s.seq)).not.toHaveProperty("prompt");
+    for (let [ref, setUp] of [
+      [{ ...REF, revision: "2" }, undefined],
+      [REF, [OPEN, { type: "showScreen", screenId: "form" },
+        { type: "startFlow", workspaceId: "console-ws", flowId: "f", title: "F", steps: ["form"] }]],
+    ] as const) {
+      let other = await session("done", setUp as OperateEvent[] | undefined, [prompt("ask", "Summarise")]);
+      expect(await other.impl.transitionWidget(ref, "submit", 0)).not.toHaveProperty("prompt");
+    }
   });
 });

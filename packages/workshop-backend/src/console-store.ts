@@ -563,7 +563,8 @@ function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages"
       if (!widgetDeclaresEvent(storage, commits, gadgetId, heard.event)) {
         throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId} listens for "${heard.event}", which gadget ${gadgetId} doesn't declare.`);
       }
-      // Only navigation runs from a widget event, so none can reach a capability (FAC-94).
+      // Only navigation and a prompt in the person's own chat (FAC-98) run from a widget event, so
+      // none can reach a capability (FAC-94).
       if (canvasPageEffects(page!, heard.targetRef, heard.event).some(effect => effect.kind === "request-action")) {
         throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId}'s event "${heard.event}" leads to a requested action, which a widget event can't run.`);
       }
@@ -573,9 +574,14 @@ function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages"
       if (storage.boundHooks.get(heard.trigger)?.gadgetId !== gadgetId) {
         throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId} hears the runs of trigger ${heard.trigger}, which isn't a trigger of gadget ${gadgetId}.`);
       }
-      // Only navigation runs from a run's result, so none can reach a capability (FAC-116).
-      if (canvasRunEffects(page!, heard.trigger, heard.event).some(effect => effect.kind === "request-action")) {
+      // Only navigation runs from a run's result, so none can reach a capability (FAC-116), and none
+      // puts a prompt in the chat: a run's result delivers only its navigation (FAC-98).
+      let effects = canvasRunEffects(page!, heard.trigger, heard.event);
+      if (effects.some(effect => effect.kind === "request-action")) {
         throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId}'s "${heard.event}" for trigger ${heard.trigger} leads to a requested action, which a run's result can't run.`);
+      }
+      if (effects.some(effect => effect.kind === "insert-prompt")) {
+        throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId}'s "${heard.event}" for trigger ${heard.trigger} puts a prompt in the chat, which a run's result can't do yet.`);
       }
     }
     return [{ screenId, row, page }];
