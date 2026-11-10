@@ -14,7 +14,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { RUN_REQUESTER_REVOKED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
-import { WORKFLOW_BINDINGS_NEEDED } from "@gadgets/workshop-shared/workflow-definition";
+import { DEFAULT_WORKFLOW_RUN_LIMITS, TRIGGER_LIFECYCLE_REFUSED, WORKFLOW_BINDINGS_NEEDED } from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
 import { actionDescriptionDigest } from "../src/system-run.js";
 
@@ -690,6 +690,198 @@ describe("a duplicate's connections, at admission, at run start and at a write (
         .then(() => "applied", (e: Error) => e.message);
       expect(refused).toBe(WORKFLOW_BINDINGS_NEEDED);
       expect(impl.storage.actions.get(actionId)).toMatchObject({ state: "pending", blocked: { reason: WORKFLOW_BINDINGS_NEEDED } });
+    });
+  });
+});
+
+// FAC-117: a trigger's lifecycle (pause drains, retire only once drained), cancelling one run, and
+// the run limits (concurrency, time, bounded attempts with a backoff). Over a real Overseer.
+describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", () => {
+  const head = (id: number) => (id === GADGET ? commit(1) : undefined);
+  /** Another run PERSON asks for, fired and queued; its delivery id and invocation id. */
+  function another(impl: any) {
+    let store = impl.workflowDefinitionStore();
+    let invocation = store.beginInvocation(PERSON, HOOK, null);
+    let delivery = store.fire(HOOK, GADGET, head, () => "build" as const, invocation.id)!;
+    impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+    return { deliveryId: delivery.deliveryId, invocationId: invocation.id };
+  }
+  /** The first admitted run, queued; its delivery and invocation ids. */
+  function queuedFirst(impl: any) {
+    let delivery = admitted(impl);
+    impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+    return { deliveryId: delivery.deliveryId, invocationId: deliveryOf(impl, delivery.deliveryId).invocation.id };
+  }
+  /** The hook's controller, a stand-in the pause can disable. */
+  function withController(impl: any) {
+    let hook = impl.storage.boundHooks.get(HOOK);
+    impl.storage.boundHooks.put({ ...hook, controller: { disable: async () => {}, enable: async () => {} } });
+  }
+
+  it("pausing drains: no new start, the run admitted before it finishes, and then it is paused", async () => {
+    let name = `life-drain-${crypto.randomUUID()}`;
+    let id = await withImpl(name, async impl => {
+      let { deliveryId } = queuedFirst(impl);
+      withController(impl);
+      let lifecycle = await impl.pauseTrigger(HOOK, ADA);
+      expect(lifecycle).toMatchObject({ state: "draining", changedBy: ADA });
+      expect(impl.storage.boundHooks.get(HOOK).enabled).toBe(false);
+      await expect(invokeWorkflowTrigger(impl, "operator-user", PERSON, HOOK)).rejects.toThrow();
+      return deliveryId;
+    });
+    let done = await settled(name, id);
+    expect(done.execution).toMatchObject({ state: "finished" });
+    expect(calls).toHaveLength(1);
+    await withImpl(name, impl => expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "paused" }));
+  });
+
+  it("refuses a run admitted after the pause's recorded time, and its write, while earlier ones go on", async () => {
+    await withImpl(`life-narrow-${crypto.randomUUID()}`, async impl => {
+      let { deliveryId } = queuedFirst(impl);
+      withController(impl);
+      await impl.pauseTrigger(HOOK, ADA);
+      let lifecycle = impl.triggerLifecycleOf(HOOK);
+      let admittedAt = deliveryOf(impl, deliveryId).at.getTime();
+      // Recorded as paused just before this run was admitted: it may not go on.
+      impl.storage.workflowTriggerLifecycles.put({ ...lifecycle, pausedAt: new Date(admittedAt - 1) });
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId } };
+      impl.workflowDefinitionStore().startRun(deliveryId);
+      impl.gadgetRuns.begin(deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(deliveryId);
+      let actionId = await submitted(impl, caller);
+      impl.getGatekeeperFacet = () => { throw new Error("the write was sent"); };
+      let refused = await impl.applyPendingAction(impl.storage.actions.get(actionId), ADA, false)
+        .then(() => "applied", (e: Error) => e.message);
+      expect(refused).toBe(RUN_REQUESTER_REVOKED);
+      // Paused just after it instead: the same write is decidable (it reaches the connection).
+      impl.storage.workflowTriggerLifecycles.put({ ...lifecycle, pausedAt: new Date(admittedAt + 1) });
+      let decided = await impl.applyPendingAction(impl.storage.actions.get(actionId), ADA, false)
+        .then(() => "applied", (e: Error) => e.message);
+      expect(decided).not.toBe(RUN_REQUESTER_REVOKED);
+    });
+  });
+
+  it("retires only once drained, keeps the run's history, and a retired trigger never activates", async () => {
+    let name = `life-retire-${crypto.randomUUID()}`;
+    let id = await withImpl(name, async impl => {
+      let { deliveryId } = queuedFirst(impl);
+      withController(impl);
+      await impl.pauseTrigger(HOOK, ADA);
+      await expect(impl.retireTrigger(HOOK, ADA)).rejects.toThrow(TRIGGER_LIFECYCLE_REFUSED.retire);
+      return deliveryId;
+    });
+    await settled(name, id);
+    await withImpl(name, async impl => {
+      expect(await impl.retireTrigger(HOOK, ADA)).toMatchObject({ state: "retired" });
+      expect(impl.storage.boundHooks.get(HOOK)).toBeUndefined();
+      expect(deliveryOf(impl, id).execution.state).toBe("finished");
+    });
+  });
+
+  it("cancels a queued run for the person who asked or the owner, never anyone else, and nothing of it runs", async () => {
+    let name = `life-cancel-queued-${crypto.randomUUID()}`;
+    let id = await withImpl(name, async impl => {
+      let first = queuedFirst(impl);
+      let stranger = { type: "user" as const, id: "stranger-profile", name: "Stranger" };
+      await expect(impl.cancelWorkflowRun(first.invocationId, stranger, "build")).rejects.toThrow("No such run.");
+      await impl.cancelWorkflowRun(first.invocationId, { type: "user", id: PERSON, name: "Operator" }, "use");
+      expect(deliveryOf(impl, first.deliveryId).execution).toMatchObject({
+        state: "failed", failure: "cancelled", cancelled: { by: { id: PERSON } },
+      });
+      expect(deliveryOf(impl, first.deliveryId).result).toMatchObject({ outcome: "failed", reason: "cancelled" });
+      await expect(impl.cancelWorkflowRun(first.invocationId, ADA, "build")).rejects.toThrow("already ended");
+      let second = another(impl);
+      await impl.cancelWorkflowRun(second.invocationId, ADA, "build");
+      return second.deliveryId;
+    });
+    await runDurableObjectAlarm(env.TEST_OVERSEER.getByName(name));
+    expect(calls).toEqual([]);
+    await withImpl(name, impl => expect(deliveryOf(impl, id).execution.failure).toBe("cancelled"));
+  });
+
+  it("cancels a running run: its pending write is rejected as cancelled, never sent, and it fails as cancelled", async () => {
+    await withImpl(`life-cancel-running-${crypto.randomUUID()}`, async impl => {
+      let first = queuedFirst(impl);
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: first.deliveryId } };
+      impl.workflowDefinitionStore().startRun(first.deliveryId);
+      impl.gadgetRuns.begin(first.deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(first.deliveryId);
+      let actionId = await submitted(impl, caller);
+      impl.getGatekeeperFacet = () => ({ rejectAction: async () => {} });
+      await impl.cancelWorkflowRun(first.invocationId, ADA, "build");
+      expect(impl.storage.actions.get(actionId)).toMatchObject({ state: "rejected", rejectedBecause: "cancelled" });
+      expect(impl.gadgetRuns.has(first.deliveryId)).toBe(false);
+      impl.workflowDefinitionStore().endRun(first.deliveryId, "runtime-error");
+      expect(deliveryOf(impl, first.deliveryId).execution.failure).toBe("cancelled");
+    });
+  });
+
+  it("bounds re-execution after resets: past its attempts it fails, and inside its backoff it waits", async () => {
+    let name = `life-attempts-${crypto.randomUUID()}`;
+    let ids = await withImpl(name, impl => {
+      let first = queuedFirst(impl);
+      let second = another(impl);
+      let deliveries = impl.storage.workflowDeliveries;
+      let exhausted = deliveries.get(first.deliveryId);
+      deliveries.put({ ...exhausted, execution: { ...exhausted.execution, state: "running",
+        attempts: DEFAULT_WORKFLOW_RUN_LIMITS.attempts, startedAt: new Date(0) } });
+      let backing = deliveries.get(second.deliveryId);
+      deliveries.put({ ...backing, execution: { ...backing.execution, state: "running", attempts: 1, startedAt: new Date() } });
+      return [first.deliveryId, second.deliveryId];
+    });
+    await runDurableObjectAlarm(env.TEST_OVERSEER.getByName(name));
+    expect(calls).toEqual([]);
+    await withImpl(name, async impl => {
+      expect(deliveryOf(impl, ids[0]).execution).toMatchObject({ state: "failed", failure: "attempts-exhausted" });
+      expect(deliveryOf(impl, ids[1]).execution).toMatchObject({ state: "running", attempts: 1 });
+      let alarm = await impl.ctx.storage.getAlarm();
+      expect(alarm).toBeGreaterThan(Date.now() + 20_000);
+    });
+  });
+
+  it("runs one run of a trigger at a time; the next waits queued until it ends", async () => {
+    let name = `life-concurrency-${crypto.randomUUID()}`;
+    let release: () => void = () => {};
+    answer = () => new Promise(resolve => { release = () => resolve("done"); });
+    let second = await withImpl(name, async impl => {
+      queuedFirst(impl);
+      let next = another(impl);
+      void impl.runQueuedWorkflowRuns();
+      await vi.waitFor(() => expect(calls).toHaveLength(1));
+      expect(deliveryOf(impl, next.deliveryId).execution.state).toBe("queued");
+      return next.deliveryId;
+    });
+    release();
+    answer = async () => "done";
+    let done = await settled(name, second);
+    expect(done.execution.state).toBe("finished");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("stops a run past its time limit, as timed out", async () => {
+    let name = `life-timeout-${crypto.randomUUID()}`;
+    let id = await withImpl(name, impl => {
+      let first = queuedFirst(impl);
+      onPrototype(impl, "runLimits", () => ({ ...DEFAULT_WORKFLOW_RUN_LIMITS, runMinutes: 0.001 }));
+      answer = () => new Promise(() => {});
+      return first.deliveryId;
+    });
+    let done = await settled(name, id);
+    expect(done.execution).toMatchObject({ state: "failed", failure: "timed-out" });
+    expect(done.result).toMatchObject({ outcome: "failed", reason: "timed-out" });
+  });
+
+  it("pausing in one workspace changes nothing in another", async () => {
+    let other = `life-other-${crypto.randomUUID()}`;
+    await withImpl(other, impl => queuedFirst(impl));
+    await withImpl(`life-paused-${crypto.randomUUID()}`, async impl => {
+      queuedFirst(impl);
+      withController(impl);
+      await impl.pauseTrigger(HOOK, ADA);
+    });
+    await withImpl(other, impl => {
+      expect(impl.triggerLifecycleOf(HOOK)).toBeNull();
+      expect(impl.storage.boundHooks.get(HOOK).enabled).toBe(true);
     });
   });
 });
