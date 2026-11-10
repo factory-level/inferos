@@ -228,7 +228,9 @@ export class ScheduleDriver extends DurableObject {
   async listWorkspace(workspaceId: string): Promise<ScheduleSummary[]> {
     if (this.#requireMetadata().revoked) return [];
     return this.#listSchedules(workspaceSchedulePrefix(workspaceId))
-      .map(([, schedule]) => toScheduleSummary(schedule))
+      // This is the workspace's own schedule surface. The account-wide management projection
+      // below intentionally omits admission details because it includes rows from other workspaces.
+      .map(([, schedule]) => toScheduleSummary(schedule, true))
       .toSorted(compareScheduleSummaries);
   }
 
@@ -717,7 +719,7 @@ function timeZoneOf(state: EnabledSchedule): string {
   return state.spec.kind === "interval" ? "UTC" : state.spec.timeZone;
 }
 
-function toScheduleSummary(schedule: StoredSchedule): ScheduleSummary {
+function toScheduleSummary(schedule: StoredSchedule, includeOwnerRefusal = false): ScheduleSummary {
   const common = {
     scheduleId: schedule.state.scheduleId,
     title: schedule.title,
@@ -726,7 +728,8 @@ function toScheduleSummary(schedule: StoredSchedule): ScheduleSummary {
     occurrences: schedule.state.occurrences,
     ...(schedule.state.spec.kind !== "once" ? { missedRuns: schedule.state.missedRuns ?? "skip" } : {}),
     occurrenceCount: schedule.state.occurrences ? schedule.state.occurrenceCount ?? 0 : undefined,
-    ...(schedule.state.lastAdmissionRefusal ? { lastAdmissionRefusal: schedule.state.lastAdmissionRefusal } : {}),
+    ...(includeOwnerRefusal && schedule.state.lastAdmissionRefusal
+      ? { lastAdmissionRefusal: schedule.state.lastAdmissionRefusal } : {}),
   };
   const state = schedule.state;
   switch (state.status) {

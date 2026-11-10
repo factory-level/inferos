@@ -852,6 +852,10 @@ describe("ScheduleDriver", () => {
         }),
       }),
     ]));
+    const accountRows = (await driver.listAccount()).schedules;
+    const accountRow = accountRows.find(row => row.scheduleId === "capacity-limited");
+    expect(accountRow).toBeDefined();
+    expect(accountRow).not.toHaveProperty("lastAdmissionRefusal");
   });
 
   it("uses a pending run's scheduled time in workspace summaries", async () => {
