@@ -124,6 +124,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   publishWorkflowDefinition: ws => ws.publishWorkflowDefinition("definition", 1),
   shareWorkflowDefinition: ws => ws.shareWorkflowDefinition("definition", "someone", { read: true, run: false, edit: false }),
   listWorkflowDefinitionShares: ws => ws.listWorkflowDefinitionShares("definition"),
+  duplicateWorkflowDefinition: ws => ws.duplicateWorkflowDefinition({ sourceId: "definition", title: "Copy" }),
+  rebindWorkflowDefinition: ws => ws.rebindWorkflowDefinition("definition", {}),
   pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
@@ -136,6 +138,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   listConsoleWidgetCandidates: ws => ws.listConsoleWidgetCandidates(),
   // The widget index is read and written by a builder's own publication only (FAC-11).
   getConsoleWidgetIndex: ws => ws.getConsoleWidgetIndex("console"),
+  // Reconnecting a connection's account (FAC-119 K2) is a build act.
+  reconnectGatekeeper: ws => ws.reconnectGatekeeper(1),
   listConsoleWidgetIndexWorkspaces: ws => ws.listConsoleWidgetIndexWorkspaces(),
   setConsoleWidgetIndexTarget: ws => ws.setConsoleWidgetIndexTarget("console", null),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),

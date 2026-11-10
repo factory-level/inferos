@@ -14,12 +14,14 @@ import type {
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionRights, WorkflowDefinitionShare,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
-  WorkflowTriggerDefinitionRef,
+  WorkflowTriggerDefinitionRef, WorkflowDefinitionDuplicate, WorkflowRequiredBinding,
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
   maxWorkflowDeliveries, workflowRunHistoryRetentionMs,
+  WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS, WORKFLOW_BINDINGS_UNATTRIBUTED, parseWorkflowDefinitionTitle,
 } from "@gadgets/workshop-shared/workflow-definition";
+import { checkAssignments, requireBound, requirementsOf, unmetBindings } from "./workflow-duplicate.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
@@ -73,7 +75,8 @@ import { consoleScreenMove, consoleScreens, consoleWidgetVersionId, type Console
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, ActionBlocked, ActionRejectedBecause, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
+import { RUN_REQUESTER_REVOKED, RUN_DEFINITION_CHANGED, RUN_WRITE_EXPIRED } from '@gadgets/workshop-shared/action-outcome';
+import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionContext, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, ActionBlocked, ActionRejectedBecause, SHARED_CONFIGURATION_REFUSED, GATEKEEPER_RECONNECT_REFUSED, ConnectFlowStart } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -239,30 +242,13 @@ export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
   if (message === SYSTEM_RUN_ASSIGNMENT_CHANGED || message === WORKFLOW_ASSIGNMENTS_DISABLED ||
       message === TRIGGER_AUTO_RETIRED) return "assignment-changed";
   if (message === "Hook has been deleted or disabled.") return "trigger-gone";
+  if (message === WORKFLOW_BINDINGS_NEEDED || message === WORKFLOW_BINDINGS_NOT_OWNERS ||
+      message === WORKFLOW_BINDINGS_UNATTRIBUTED) return "bindings-needed";
   return "runtime-error";
 }
 
-/**
- * The refusal at a protected point of an assigned run (FAC-104) when the person who asked for it
- * may no longer: the work stops, and an approved write stays pending. Fixed words, naming no grant.
- */
-export const RUN_REQUESTER_REVOKED =
-  "The person who asked for this workflow run can't run it now, so this step didn't happen.";
-
-/**
- * The refusal at a run write's apply when the trigger's workflow definition changed since the run
- * proposed it (FAC-118; inferops operate-policy: a changed policy revision needs fresh review, never a
- * silent replay). The write stays pending; running the workflow again proposes it afresh.
- */
-export const RUN_DEFINITION_CHANGED =
-  "This workflow changed since its run proposed this, so it can't be applied; run the workflow again to propose it afresh.";
-
-/**
- * An approval of a run's write after its wait ended (FAC-118), even before the alarm got to it: the
- * write is rejected as expired, and nothing is sent.
- */
-export const RUN_WRITE_EXPIRED =
-  "Nobody decided this workflow run's write within 7 days, so it was rejected and nothing was changed.";
+// The run refusals moved to workshop-shared (FAC-119), so a decision can tell a known block apart.
+export { RUN_REQUESTER_REVOKED, RUN_DEFINITION_CHANGED, RUN_WRITE_EXPIRED };
 
 /** An approval of an action already rejected (FAC-118): the decision stands, nothing is applied. */
 export const ACTION_ALREADY_REJECTED = "This action was already rejected.";
@@ -732,6 +718,9 @@ function validateAgentSpawnerInstructions(instructions: unknown): void {
   }
 }
 
+/** Whose connected account a connection uses (FAC-119): their user id and that account's id. */
+type GatekeeperConnectedBy = {userId: string; accountId: number};
+
 // A gatekeeper (connection) workpiece. IDs are allocated from the shared workpiece counter (see
 // the `nextGatekeeperId` singleton), so they never collide with gadget IDs.
 type GatekeeperRecord = {
@@ -758,6 +747,15 @@ type GatekeeperRecord = {
   // selection request, from which account incarnation. Retries find their candidate by it, and a
   // losing candidate is removed only when it matches.
   hostBoardMint?: HostBoardMint;
+
+  // Set at creation on a connection made from a person's connected account (FAC-119): whose account
+  // it uses, so that person alone can reconnect it from a decision (reconnectGatekeeper). Records
+  // created before this was kept, and connections made otherwise, have none.
+  connectedBy?: GatekeeperConnectedBy;
+
+  // Set at creation on a model connection (FAC-123): the User whose configured model it uses, so a
+  // duplicated workflow's requirement is filled only by its owner's own model. Absent on older ones.
+  modelOf?: string;
 
   // OBSOLETE: Before we had support for multiple gadgets per workspace, the binding name and
   // blueprint annotation information lived on the GatekeeperRecord. These properties continue
@@ -861,6 +859,16 @@ export type GadgetRecord = {
    * edge. Expected to stay small, so it's a map on the record rather than a separate collection.
    */
   bindings: Record<string, BindingRecord>;
+
+  /**
+   * Present on a duplicated workflow's gadget (FAC-123): the connections it must have set up before
+   * any run of it starts, copied by name and kind from its source's bindings (never their targets).
+   * Kept for the gadget's life, so a connection removed later stops its runs again (`requireBound`).
+   */
+  requiredBindings?: WorkflowRequiredBinding[];
+
+  /** The User whose own connections alone fill `requiredBindings`: the duplicate's owner (FAC-123). */
+  requiredBindingsOwner?: string;
 
   /**
    * Present while the gadget is provisional: it was created within the given chat and follows
@@ -1645,7 +1653,35 @@ async function computeSessionAffinity(gadgetId: string, chatId: number): Promise
   return new Uint8Array(hash).toHex();
 }
 
-export function actionRecordToLog(record: ActionRecord): ActionLogEntry {
+/**
+ * Where an action came from, for the person deciding it (FAC-119; `ActionContext`), computed from
+ * the record alone: a workflow run's trigger and run (assigned or requested), with who asked and
+ * the trigger's run-control label from `labelOf`, or an agent's turn. Never the credential
+ * reference, the delivery, the write key or the chat. Undefined when the record says nothing more
+ * than its requester.
+ */
+export function actionContextOf(record: ActionRecord & {type: "action"},
+    labelOf?: (hookId: number) => string | undefined): ActionContext | undefined {
+  let run = record.executedAs
+    ? {hookId: record.executedAs.hookId, assigned: true, runId: record.executedAs.runId,
+       requestedBy: record.executedAs.requestedBy}
+    : record.workflowRun ? {hookId: record.workflowRun.hookId, assigned: false, runId: record.workflowRun.runId} : null;
+  if (run) {
+    let triggerLabel = labelOf?.(run.hookId);
+    return {kind: "workflow-run", hookId: run.hookId, assigned: run.assigned,
+      ...(run.runId ? {runId: run.runId} : {}),
+      ...(run.requestedBy !== undefined ? {requestedBy: run.requestedBy} : {}),
+      ...(triggerLabel ? {triggerLabel} : {})};
+  }
+  return (record.caller as GatekeeperCaller | undefined)?.from === "agent" ? {kind: "agent-turn"} : undefined;
+}
+
+/**
+ * The client's view of an action record. `labelOf` names a workflow trigger by its run-control
+ * label for an action's context (FAC-119); without it, the context carries none.
+ */
+export function actionRecordToLog(record: ActionRecord,
+    labelOf?: (hookId: number) => string | undefined): ActionLogEntry {
   // TODO: ActionRecord and ActionLogEntry are almost identical. The main difference is that
   // ActionRecord includes `action`, which should NOT be provided to the client. We could make
   // the two match more -- just `action` needs to be different.
@@ -1692,6 +1728,7 @@ export function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         ...(record.state === "pending" && record.blocked ? {blocked: record.blocked} : {}),
         ...(record.state === "rejected" && record.rejectedBecause ? {rejectedBecause: record.rejectedBecause} : {}),
         ...(record.state === "approved" && record.result ? {result: record.result} : {}),
+        ...((context => context ? {context} : {})(actionContextOf(record, labelOf))),
       };
     case "bindHook":
       return {
@@ -1716,7 +1753,12 @@ export function actionRecordToLog(record: ActionRecord): ActionLogEntry {
 
 // An account and resource resolved through the admin-policy chokepoint (UserDurableObject's
 // getGatekeeperClassFor), ready to become a workspace connection.
-type ResolvedConnection = Awaited<ReturnType<UserDurableObject["getGatekeeperClassFor"]>>;
+type ResolvedConnection = Awaited<ReturnType<UserDurableObject["getGatekeeperClassFor"]>> & {accountId: number};
+
+// A connection checked for one of a duplicate's requirements (FAC-123), ready to be made.
+type PreparedConnection =
+  | { kind: "gatekeeper"; connection: ResolvedConnection; resourceUrl: string }
+  | { kind: "aiModel"; modelId: string };
 
 // Reflect a hook toggle (or deletion, which also severs the hookId reference) onto the hook's
 // bindHook action record, stamping the state-change time the byLastChanged index keys on.
@@ -6925,6 +6967,8 @@ class OverseerImpl implements AgentHooks {
     try {
       let runOf = record.executedAs ?? record.workflowRun;
       if (runOf) this.#requireSameDefinition(runOf.hookId, runOf.deliveryId);
+      // A duplicate's write waits while a connection it needs isn't set up (FAC-123).
+      if (runOf) this.requireHookBound(runOf.hookId);
       if (record.executedAs) {
         let problem = this.assignedActionProblem(record);
         if (problem) throw new Error(problem);
@@ -6960,6 +7004,7 @@ class OverseerImpl implements AgentHooks {
           // After the last await, with none before the write: the definition the run started on is
           // still the trigger's (FAC-118), so a re-pin during the re-checks is seen.
           this.#requireSameDefinition(record.executedAs.hookId, record.executedAs.deliveryId);
+          this.requireHookBound(record.executedAs.hookId);
         } catch (error) {
           assigned.close();
           throw error;
@@ -6973,6 +7018,7 @@ class OverseerImpl implements AgentHooks {
         requester.revalidate();
         // After the last await, with none before the write (FAC-118), as for an assigned run.
         this.#requireSameDefinition(record.workflowRun.hookId, record.workflowRun.deliveryId);
+        this.requireHookBound(record.workflowRun.hookId);
       }
     } catch (error) {
       if (record.executedAs || record.workflowRun) {
@@ -7148,7 +7194,7 @@ class OverseerImpl implements AgentHooks {
   async addGatekeeper(
       cls: GatekeeperClass, creationSpec: GatekeeperCreationSpec, actorUserId: string,
       joinAs?: SessionKind, mock = false, hostBoardMint?: HostBoardMint,
-      agentSpawnerCreatorUserId?: string)
+      agentSpawnerCreatorUserId?: string, connectedBy?: GatekeeperConnectedBy)
       : Promise<GatekeeperClient<any>> {
     let id = this.allocateWorkpieceId();
     let gatekeeperRecord: GatekeeperRecord = {
@@ -7158,6 +7204,7 @@ class OverseerImpl implements AgentHooks {
       ...(agentSpawnerCreatorUserId ? {agentSpawnerCreatorUserId} : {}),
       ...(mock ? {mock: true} : {}),
       ...(hostBoardMint ? {hostBoardMint} : {}),
+      ...(connectedBy ? {connectedBy} : {}),
     };
 
     // The record is published only once, below, after describe() resolves -- the facet takes the
@@ -7369,6 +7416,7 @@ class OverseerImpl implements AgentHooks {
     let requester = await requireRunRequester(this, hookId, delivery.deliveryId);
     // Once right after the answer, and again inside the run after its last await (below).
     requester.revalidate();
+    this.requireHookBound(hookId);
     let recorded = this.workflowDefinitionStore().deliveryRun(delivery.deliveryId);
     let run = recorded?.run;
     if (run) {
@@ -7422,6 +7470,8 @@ class OverseerImpl implements AgentHooks {
     let error: unknown;
     let returned: unknown;
     try {
+      // As it starts, whatever started it (FAC-123): a duplicate's connections must be set up now.
+      this.requireHookBound(hookId);
       this.startWorkflowRunProposals(deliveryId);
       if (delivery.executedAs) {
         returned = await this.runAssignedDelivery(hookId,
@@ -10219,7 +10269,7 @@ class OverseerImpl implements AgentHooks {
         await this.addGatekeeper(
             cls,
             {type: "ambient", vendorId: account.vendorId, accountId: account.accountId},
-            ownerId);
+            ownerId, undefined, false, undefined, undefined, {userId: ownerId, accountId: account.accountId});
       } catch (err) {
         this.logger.error("failed to provision ambient capsule", {
           event: "ambient.capsule.provision.failed",
@@ -12738,7 +12788,34 @@ class OverseerImpl implements AgentHooks {
         if (this.toolLane) this.#updateAlarm();
         else this.#alarmOwed = true;
       },
-    }, this.definitionAudience);
+    }, this.definitionAudience, gadgetId => this.bindingsNeeded(gadgetId));
+  }
+
+  #specOf = (target: WorkpieceId) => this.storage.gatekeepers.get(target)?.creationSpec;
+  // Whose account or model connection `target` uses (FAC-123), when recorded.
+  #madeByOf = (target: WorkpieceId) => {
+    let record = this.storage.gatekeepers.get(target);
+    return record?.connectedBy?.userId ?? record?.modelOf;
+  };
+
+  // The connections gadget `gadgetId` still needs set up (FAC-123): none unless it is a duplicate's.
+  bindingsNeeded(gadgetId: WorkpieceId): WorkflowRequiredBinding[] {
+    let gadget = this.storage.gadgets.get(gadgetId);
+    return gadget?.type === "gadget" ? unmetBindings(gadget, this.#specOf, this.#madeByOf) : [];
+  }
+
+  /**
+   * Refuses while the gadget bound hook `hookId` wakes needs a connection set up (FAC-123), in the
+   * words that say why: `WORKFLOW_BINDINGS_NEEDED` (not set up), `WORKFLOW_BINDINGS_NOT_OWNERS` (set
+   * up from another person's connection) or `WORKFLOW_BINDINGS_UNATTRIBUTED` (from one that doesn't
+   * record whose it is). At admission, at firing, as a run starts and before each of its writes.
+   * Synchronous, so a protected point can call it after its last await.
+   */
+  requireHookBound(hookId: number): void {
+    let hook = this.storage.boundHooks.get(hookId);
+    let gadgetId = hook ? hook.gadgetId ?? this.defaultGadgetId : undefined;
+    let gadget = gadgetId === undefined ? undefined : this.storage.gadgets.get(gadgetId);
+    requireBound(gadget?.type === "gadget" ? gadget : undefined, this.#specOf, this.#madeByOf);
   }
 
   /**
@@ -13882,6 +13959,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // have landed while it was in flight, and issuing from the captured record would hand out a
     // firing on a dead hook (the enableHookRecord/disableHook idiom).
     record = requireLiveHook(this.impl, hookId);
+    // A duplicate fires only once its connections are set up (FAC-123), scheduled or asked for.
+    this.impl.requireHookBound(hookId);
 
     // A trigger pinned to a workflow definition revision fires only that revision's code, and the
     // firing is recorded with it (workflow-definition-store.ts); it never falls back to another.
@@ -14709,6 +14788,124 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async listWorkflowDefinitionShares(id: string): Promise<WorkflowDefinitionShare[]> {
     return this.impl.workflowDefinitionStore().shares(await this.#getClientProfile(), id);
   }
+  // Duplicating a definition (FAC-123) is building, gated as saving is. The copy is the caller's own:
+  // a new gadget at the source revision's commit, with none of the source's connections; each of
+  // those becomes a requirement, filled only by a connection the caller makes from their own
+  // account or model, checked here before anything is created.
+  async duplicateWorkflowDefinition(input: WorkflowDefinitionDuplicate): Promise<WorkflowDefinition> {
+    await this.#requireSharedConfiguration("build", "shared");
+    if (typeof input !== "object" || input === null) throw new TypeError("Say which workflow to duplicate.");
+    let profile = await this.#getClientProfile();
+    let store = this.impl.workflowDefinitionStore();
+    let title = parseWorkflowDefinitionTitle(input.title);
+    let chosen = store.duplicateSource(profile.id, input.sourceId, input.revision, "build");
+    let sourceGadget = this.impl.getGadgetRecord(chosen.revision.source.gadgetId);
+    let required = requirementsOf(this.impl.visibleBindings(sourceGadget),
+        target => this.impl.storage.gatekeepers.get(target)?.creationSpec);
+    let prepared = await this.#prepareConnections(checkAssignments(required, input.bindings));
+    let taken = (name: string) => this.impl.storage.gadgets.byBindingName.get(name) !== undefined;
+    let created = store.duplicate(profile, chosen, { title, retain: input.retain }, "build", commitId => {
+      let gadget = this.impl.createGadget(title, fallbackBindingName(`${sourceGadget.bindingName}_COPY`, taken),
+          undefined, sourceGadget.output, commitId);
+      if (required.length > 0) {
+        gadget.requiredBindings = required;
+        // Only the duplicator's own connections fill them, by any route (FAC-123).
+        gadget.requiredBindingsOwner = this.clientUserId;
+        this.impl.storage.gadgets.put(gadget);
+      }
+      return gadget.id;
+    });
+    await this.#bindPrepared(created.revisions[0]!.source.gadgetId, prepared);
+    return store.get(profile.id, created.id, "build") ?? created;
+  }
+  // Setting up a duplicate's connections is its owner's (FAC-123), a build act. Every connection is
+  // checked before any is made; one already set up is replaced.
+  async rebindWorkflowDefinition(id: string, bindings: Record<string, BlueprintBindingAssignment>)
+      : Promise<WorkflowDefinition> {
+    await this.#requireSharedConfiguration("build", "shared");
+    let profile = await this.#getClientProfile();
+    let store = this.impl.workflowDefinitionStore();
+    let gadgetId = store.ownedGadget(profile.id, id);
+    let gadget = this.impl.getGadgetRecord(gadgetId);
+    let required = gadget.requiredBindings ?? [];
+    // A duplicate made before its owner was recorded (#438 r1): `ownedGadget` has just proved the
+    // caller owns the definition, so their own connections are the ones that fill it from now on.
+    if (required.length > 0 && gadget.requiredBindingsOwner === undefined) {
+      gadget.requiredBindingsOwner = this.clientUserId;
+      this.impl.storage.gadgets.put(gadget);
+    }
+    if (required.length === 0) throw new Error("This workflow has no connections to set up.");
+    let checked = checkAssignments(required, bindings);
+    if (checked.size === 0) throw new TypeError("Choose a connection to set up.");
+    let prepared = await this.#prepareConnections(checked);
+    // Re-read after the awaits: the definition may have expired or changed hands meanwhile.
+    if (store.ownedGadget(profile.id, id) !== gadgetId) throw new Error("This workflow changed. Try again.");
+    await this.#bindPrepared(gadgetId, prepared, { replace: true });
+    return store.get(profile.id, id, "build")!;
+  }
+
+  // Checks each connection offered for a duplicate's requirements (FAC-123) without creating
+  // anything: an account is resolved through the caller's own User (the install chokepoint) and
+  // must be of the vendor and resource type required; for the deployment's InferOps connection the
+  // caller's own workflow:invoke must hold in that resource's company; a model must be one of the
+  // caller's that a binding may use.
+  async #prepareConnections(checked: ReturnType<typeof checkAssignments>)
+      : Promise<Map<string, PreparedConnection>> {
+    let prepared = new Map<string, PreparedConnection>();
+    let invokeVendor = getSharedConfigurationGatekeeper(this.impl.env);
+    for (let [name, { requirement, assignment }] of checked) {
+      if (assignment.type === "gatekeeper" && requirement.type === "gatekeeper") {
+        let connection = await this.#resolveConnection(assignment.accountId, assignment.resourceUrl);
+        if (connection.vendorId.toLowerCase() !== requirement.vendorId || connection.typeUrlPattern !== requirement.typeUrlPattern) {
+          throw new Error(`The connection "${name}" needs the same kind of resource as the workflow it was copied from.`);
+        }
+        if (invokeVendor !== null && invokeVendor.toLowerCase() === requirement.vendorId) {
+          let answer = await this.#clientUser.workflowInvokeAnswer(assignment.resourceUrl);
+          if (answer?.holds !== true || typeof answer.company !== "string" || answer.company === "") {
+            throw new Error(WORKFLOW_INVOKE_REFUSED);
+          }
+        }
+        prepared.set(name, { kind: "gatekeeper", connection, resourceUrl: assignment.resourceUrl });
+      } else if (assignment.type === "aiModel") {
+        let chatMeta = await retryOnDoReset(() => this.#clientUser.getChatContext(assignment.modelId), this.impl.logger);
+        if (!chatMeta.aiModel) throw new Error(`The connection "${name}" needs one of your models.`);
+        let refusal = modelBindingRefusal(this.impl.env, chatMeta.aiModel);
+        if (refusal) throw new Error(refusal);
+        prepared.set(name, { kind: "aiModel", modelId: assignment.modelId });
+      }
+    }
+    return prepared;
+  }
+
+  // Makes and binds the prepared connections into duplicate gadget `gadgetId` (FAC-123). A failure
+  // part-way unbinds what this call bound (one it replaced stays removed), so its requirements are
+  // unmet and its runs refused until it is set up; it never runs on a half-made set.
+  async #bindPrepared(gadgetId: WorkpieceId, prepared: Map<string, PreparedConnection>,
+                      { replace = false }: { replace?: boolean } = {}): Promise<void> {
+    // A chat's provisional edge isn't this call's to replace: refused before anything is made.
+    for (let name of prepared.keys()) {
+      if (this.impl.getGadgetRecord(gadgetId).bindings[name]?.pending) {
+        throw new Error(`A chat is changing the connection "${name}" now. Accept or revert its changes first.`);
+      }
+    }
+    let bound: string[] = [];
+    try {
+      for (let [name, item] of prepared) {
+        let client = item.kind === "gatekeeper"
+          ? await this.#addConnection(item.connection, item.resourceUrl)
+          : await this.newAiModelGatekeeper(item.modelId);
+        let target = await client.getId();
+        if (replace && this.impl.getGadgetRecord(gadgetId).bindings[name]) this.impl.unbindWorkpiece(gadgetId, name);
+        this.impl.bindWorkpiece(gadgetId, name, target);
+        bound.push(name);
+      }
+    } catch (error) {
+      for (let name of bound) {
+        try { this.impl.unbindWorkpiece(gadgetId, name); } catch { /* already gone */ }
+      }
+      throw error;
+    }
+  }
   async pinTriggerDefinition(hookId: number, ref: WorkflowTriggerDefinitionRef | null): Promise<void> {
     await this.#requireSharedConfiguration("build", "shared");
     let profile = await this.#getClientProfile();
@@ -14934,6 +15131,32 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async listWidgetInstances(blueprintId: string, version: number): Promise<ConsoleWidgetInstance[]> {
     return listWidgetInstances(this.#consoleStore(), blueprintId, version);
   }
+  // FAC-119: only the person whose account a connection uses reconnects it, through their own User
+  // DO, which holds only their accounts; the account id never leaves the server.
+  async reconnectGatekeeper(gatekeeperId: WorkpieceId): Promise<ConnectFlowStart> {
+    // The reason is the log's alone, in its event name; the caller hears the one refusal.
+    let refuse = (reason: "unknown" | "no-account" | "not-owner" | "account-removed"): never => {
+      logger.warn("connection reconnect refused", { event: `gatekeeper.reconnect.refused.${reason}`, gatekeeperId });
+      throw new Error(GATEKEEPER_RECONNECT_REFUSED);
+    };
+    let record = this.impl.storage.gatekeepers.get(gatekeeperId);
+    let spec = record?.creationSpec;
+    // An ambient connection is always the workspace owner's own account (ensureAmbientCapsules), so
+    // one recorded before `connectedBy` was kept is still known.
+    let by = record?.connectedBy ??
+      (record?.hostBoardMint ? {userId: record.hostBoardMint.by, accountId: record.hostBoardMint.accountId} : undefined) ??
+      (spec?.type === "ambient" && this.impl.ownerId ? {userId: this.impl.ownerId, accountId: spec.accountId} : undefined);
+    if (!record) return refuse("unknown");
+    if (!by) return refuse("no-account");
+    if (by.userId !== this.clientUserId) return refuse("not-owner");
+    try {
+      return await this.#clientUser.reconnectAccount(by.accountId);
+    } catch (err) {
+      // The account was removed since: there is nothing of theirs to reconnect.
+      if (err instanceof Error && err.message.endsWith("No such account.")) return refuse("account-removed");
+      throw err;
+    }
+  }
   // Build access opens the app's mainline, as getGadget does; only the placement is checked, so a
   // builder previewing a published console after changing the app still sees what they built.
   async getConsoleApp(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
@@ -15106,6 +15329,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.#leavePresence = joinSessionPresence(
         this.impl, this.clientProfileId, "build", () => this.#getClientProfile());
     this.#leaveOutputsFanout = this.impl.joinOutputsFanout(this.clientUserId);
+  }
+
+  // A workflow trigger's run-control label, for an action's context (FAC-119).
+  #triggerLabel(hookId: number): string | undefined {
+    return this.impl.workflowDefinitionStore().controlLabel(hookId);
   }
 
   // We create a new stub for every call so that we don't have to worry about detecting when a
@@ -15751,11 +15979,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // Resolve a connected account and resource through the admin-policy chokepoint without creating
   // anything, so a caller can check the vendor before any connection exists (bindArtifactRevision).
   async #resolveConnection(accountId: number, resourceUrl: string): Promise<ResolvedConnection> {
-    return this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl);
+    return {...await this.#clientUser.getGatekeeperClassFor(accountId, resourceUrl), accountId};
   }
 
   // Create the workspace connection for a resolved account and resource (newGatekeeper's second half).
-  async #addConnection({class: cls, vendorId, typeUrlPattern, mock}: ResolvedConnection,
+  async #addConnection({class: cls, vendorId, typeUrlPattern, mock, accountId}: ResolvedConnection,
       resourceUrl: string): Promise<GatekeeperClient<any>> {
     let creationSpec: GatekeeperCreationSpec = {
       type: "gatekeeper",
@@ -15763,8 +15991,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       resourceUrl,
       typeUrlPattern,
     };
+    // Whose account it uses (FAC-119), so that person alone can reconnect it (reconnectGatekeeper).
     let result = await this.impl.addGatekeeper(
-        cls, creationSpec, this.clientUserId, this.#mintedCapabilityKind(), mock);
+        cls, creationSpec, this.clientUserId, this.#mintedCapabilityKind(), mock, undefined, undefined,
+        {userId: this.clientUserId, accountId});
     await this.recordConnectionCreated(result, "gatekeeper", vendorId);
     return result;
   }
@@ -15795,6 +16025,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let result = await this.impl.addGatekeeper(
         this.impl.ctx.exports.LanguageModelGatekeeper({props}), creationSpec,
         this.clientUserId, this.#mintedCapabilityKind(), isMockModel(chatMeta.aiModel!.config));
+    // Whose model it uses (FAC-123): a duplicate's model requirement is filled only by its owner's.
+    let modelConnection = this.impl.storage.gatekeepers.get(await result.getId());
+    if (modelConnection) {
+      modelConnection.modelOf = this.clientUserId;
+      this.impl.storage.gatekeepers.put(modelConnection);
+    }
     await this.recordConnectionCreated(result, "ai_model");
     return result;
   }
@@ -15999,7 +16235,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let more = page.length > ACTION_HISTORY_PAGE_DEFAULT_LIMIT;
     if (more) page.pop();
     return {
-      entries: page.map(actionRecordToLog),
+      entries: page.map(record => actionRecordToLog(record, (hookId: number) => this.#triggerLabel(hookId))),
       nextBeforeId: more ? page.at(-1)!.id : undefined,
     };
   }
@@ -16621,13 +16857,14 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     // Ended with every other stream by a retirement (FAC-88; OverseerImpl.trackStream).
     let stream = this.impl.trackStream(() => unsubscribe());
     subscriber.onRpcBroken(_ => unsubscribe());
+    const labelOf = (hookId: number) => this.#triggerLabel(hookId);
 
     let dbSubscriber = {
       add(record: ActionRecord) {
-        subscriber.entry(actionRecordToLog(record)).catch(unsubscribe);
+        subscriber.entry(actionRecordToLog(record, labelOf)).catch(unsubscribe);
       },
       update(_oldRecord: ActionRecord, newRecord: ActionRecord): void {
-        subscriber.entry(actionRecordToLog(newRecord)).catch(unsubscribe);
+        subscriber.entry(actionRecordToLog(newRecord, labelOf)).catch(unsubscribe);
       },
       remove(_record: ActionRecord): void {
         // Required by typed-storage's Subscriber interface; actions are append-only today.
@@ -16666,7 +16903,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
             if (disposed) throw new Error("Action subscriber failed during replay");
             let page = [...actions.byLastChanged.list(
                 {...from, end, limit: ACTION_REPLAY_PAGE_SIZE})];
-            await Promise.all(page.map(record => subscriber.entry(actionRecordToLog(record))));
+            await Promise.all(page.map(record => subscriber.entry(actionRecordToLog(record, labelOf))));
             if (page.length < ACTION_REPLAY_PAGE_SIZE) break;
             from = {startAfter: actionLastChangedKey(page.at(-1)!)};
           }
@@ -17478,6 +17715,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async shareWorkflowDefinition(_id: string, _profileId: string, _rights: WorkflowDefinitionRights | null)
       : Promise<WorkflowDefinitionShare[]> { this.#deny(); }
   async listWorkflowDefinitionShares(_id: string): Promise<WorkflowDefinitionShare[]> { this.#deny(); }
+  async duplicateWorkflowDefinition(_input: WorkflowDefinitionDuplicate): Promise<WorkflowDefinition> { this.#deny(); }
+  async rebindWorkflowDefinition(_id: string, _bindings: Record<string, BlueprintBindingAssignment>)
+      : Promise<WorkflowDefinition> { this.#deny(); }
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
@@ -17793,6 +18033,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async listWidgetInstances(blueprintId: string, version: number): Promise<ConsoleWidgetInstance[]> {
     return listWidgetInstances(this.#consoleStore(), blueprintId, version);
   }
+  async reconnectGatekeeper(_gatekeeperId: WorkpieceId): Promise<ConnectFlowStart> { this.#deny(); }
 
   // --- Denied methods (build-only) ---
 
@@ -18152,6 +18393,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async shareWorkflowDefinition(_id: string, _profileId: string, _rights: WorkflowDefinitionRights | null)
       : Promise<WorkflowDefinitionShare[]> { this.#deny(); }
   async listWorkflowDefinitionShares(_id: string): Promise<WorkflowDefinitionShare[]> { this.#deny(); }
+  async duplicateWorkflowDefinition(_input: WorkflowDefinitionDuplicate): Promise<WorkflowDefinition> { this.#deny(); }
+  async rebindWorkflowDefinition(_id: string, _bindings: Record<string, BlueprintBindingAssignment>)
+      : Promise<WorkflowDefinition> { this.#deny(); }
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
@@ -18197,6 +18441,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   async listWidgetInstances(_blueprintId: string, _version: number)
       : Promise<ConsoleWidgetInstance[]> { this.#deny(); }
+  async reconnectGatekeeper(gatekeeperId: WorkpieceId): Promise<ConnectFlowStart> {
+    this.#live(); return this.owner.reconnectGatekeeper(gatekeeperId);
+  }
   async getConsoleApp(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   // The widget index is written by a builder's own publication only (FAC-11).
@@ -19001,7 +19248,7 @@ async function forgetProvisioned(
 export async function invokeWorkflowTrigger(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
         "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations" | "getGadgetHead" |
-        "definitionRoles">,
+        "definitionRoles" | "requireHookBound">,
     userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
@@ -19012,6 +19259,8 @@ export async function invokeWorkflowTrigger(
   let company = await requireWorkflowInvoke(impl, userId, hookId);
   // Re-read after the await: the input gate was open, so the hook may have been disabled meanwhile.
   let record = requireLiveHook(impl as OverseerImpl, hookId);
+  // A duplicate's connections must be set up before anything is admitted (FAC-123).
+  impl.requireHookBound(hookId);
   let store = impl.workflowDefinitionStore();
   // Assignments off (FAC-102): a trigger assigned before is refused here, before anything is minted.
   if (!workflowAssignmentsEnabled(impl.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
@@ -19123,6 +19372,7 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
     // uncaught, too).
     async apply(_target, _thisArg, args: unknown[]) {
       let record = requireLiveHook(impl, hookId);
+      impl.requireHookBound(hookId);
       return Reflect.apply(record.callback as any, undefined, args);
     },
     get(_target, prop) {
@@ -19132,6 +19382,7 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
       if (typeof prop === "symbol" || prop === "then") return undefined;
       return async (...args: unknown[]) => {
         let record = requireLiveHook(impl, hookId);
+        impl.requireHookBound(hookId);
         return Reflect.apply((record.callback as any)[prop], record.callback, args);
       };
     },

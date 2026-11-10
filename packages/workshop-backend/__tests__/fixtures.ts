@@ -92,6 +92,8 @@ export async function openFakeOverseer(
       },
       isSharedConfiguration: async () => false,
       assertGatekeeperUsable: () => {},
+      // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
+      requireHookBound: () => {},
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},
       joinSession: () => () => {},

@@ -9,12 +9,14 @@ vi.mock('@cloudflare/kumo', async (importOriginal) => {
   const toasts = { add: vi.fn<(options: unknown) => void>() }
   return { ...actual, useKumoToastManager: () => toasts }
 })
+// The signed-in person, null unless a test says who: a run they asked for says so (FAC-119).
+const viewer = vi.hoisted(() => ({ currentUser: null as { id: string; name: string } | null }))
 vi.mock('./AuthContext', () => {
-  const context = {
-    authenticatedApi: { listGatekeeperVendors: async () => [], getAvatar: async () => null },
-    currentUser: null,
+  const api = { listGatekeeperVendors: async () => [], getAvatar: async () => null }
+  return {
+    useAuthenticatedApi: () => ({ authenticatedApi: api, currentUser: viewer.currentUser }),
+    useOptionalAuthenticatedApi: () => null,
   }
-  return { useAuthenticatedApi: () => context, useOptionalAuthenticatedApi: () => null }
 })
 vi.mock('./useAlwaysApproveTag', () => ({
   useAlwaysApproveTag: () => ({ alwaysApproveTag: vi.fn<() => Promise<void>>(), isTagAutoApproved: () => false }),
@@ -104,6 +106,20 @@ describe('Activity review request after an unsuccessful attempt', () => {
     await server.resolvePendingQuery({ entries: [entry(1, { lastAttempt })] })
     flushFrames()
   }
+
+  it('says a run the viewer asked for is theirs, here as in Needs your approval (FAC-119)', async () => {
+    viewer.currentUser = { id: 'viewer-profile', name: 'Vi' }
+    const server = makeOverseer()
+    await view.render(<Activity overseer={server.overseer} restricted={false} view="review" onViewChange={() => {}} />)
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [entry(1, {
+      context: { kind: 'workflow-run', hookId: 7, assigned: false, requestedBy: 'viewer-profile', triggerLabel: 'Refund' },
+    } as never)] })
+    flushFrames()
+    expect(document.body.textContent).toContain('From a run of the workflow trigger “Refund”, which you asked for')
+    expect(document.body.textContent).not.toContain('another person asked for')
+    viewer.currentUser = null
+  })
 
   it('shows an unknown outcome that cannot be repeated, and offers only Deny', async () => {
     await renderAttempted({ outcome: 'unknown', message: 'Lost after sending.', retryable: false, at: new Date(1700000200000) })

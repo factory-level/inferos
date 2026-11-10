@@ -100,6 +100,7 @@ export const WORKERD_LIGHT: readonly string[] = [
   "commit-reads.test.ts",
   "do-retry.test.ts",
   "gatekeeper-lookup.test.ts",
+  "action-context-reconnect.test.ts",
   "overseer-hooks.test.ts",
   "sharing.test.ts",
   "shared-configuration.test.ts",
@@ -108,6 +109,7 @@ export const WORKERD_LIGHT: readonly string[] = [
   "workflow-dynamic-definitions.test.ts",
   "workflow-invocation.test.ts",
   "workflow-definition-shares.test.ts",
+  "workflow-definition-duplicates.test.ts",
   "workflow-system-run.test.ts",
   "user-directory.test.ts",
 ];

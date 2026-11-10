@@ -115,3 +115,29 @@ export const ACTION_RECEIPT_REASON: Record<ActionReceiptCode, string> = {
 
 /** The fixed sentence for an attempt whose effect isn't known, whatever its code. */
 export const ACTION_RECEIPT_UNKNOWN_REASON = "It may or may not have been applied. Check before making it again.";
+
+// Why an approved write an assigned workflow run proposed may not apply now (FAC-104, FAC-118): the
+// kernel's own fixed words, recorded as a pending action's `blocked.reason` or thrown at an apply.
+// Here so a decision can tell a known reason from any other (FAC-119).
+
+/**
+ * The refusal at a protected point of an assigned run (FAC-104) when the person who asked for it
+ * may no longer: the work stops, and an approved write stays pending. Fixed words, naming no grant.
+ */
+export const RUN_REQUESTER_REVOKED =
+  "The person who asked for this workflow run can't run it now, so this step didn't happen.";
+
+/**
+ * The refusal at a run write's apply when the trigger's workflow definition changed since the run
+ * proposed it (FAC-118; inferops operate-policy: a changed policy revision needs fresh review, never a
+ * silent replay). The write stays pending; running the workflow again proposes it afresh.
+ */
+export const RUN_DEFINITION_CHANGED =
+  "This workflow changed since its run proposed this, so it can't be applied; run the workflow again to propose it afresh.";
+
+/**
+ * An approval of a run's write after its wait ended (FAC-118), even before the alarm got to it: the
+ * write is rejected as expired, and nothing is sent.
+ */
+export const RUN_WRITE_EXPIRED =
+  "Nobody decided this workflow run's write within 7 days, so it was rejected and nothing was changed.";
