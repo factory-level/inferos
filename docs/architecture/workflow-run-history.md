@@ -34,6 +34,12 @@ its run record, in which case a repeated occurrence remains deduplicated without
 There is no per-run delete, archive, or ownership transfer. Removing a collaborator does not remove
 workspace history.
 
+The first index build on an upgraded workspace scans its legacy deliveries once. Before this change,
+admission retained at most 1,000 deliveries per workspace, so that migration scan is bounded by the
+former cap. The first admission and first alarm sweep both initialize the index; later admissions
+and alarm passes use the index directly. This bound assumes no other writer or import added legacy
+rows beyond that former cap.
+
 Each delivery retains its definition owner's profile id. Build-authorized workspace editors and
 that owner can list history by definition id even after a temporary definition is swept. Other
 people receive the same not-found response as an unknown definition. Definition expiry does not
@@ -53,7 +59,7 @@ as security-reviewed.
 
 ## Data and Control Flow
 
-Admission initializes the retention index if needed, removes at most 100 due eligible records, then
+Admission initializes the retention index if needed, removes at most 200 due eligible records, then
 refuses admission if the workspace remains at its cap. Settling an eligible delivery updates its
 ordered expiry pointer. Alarm sweeps use the same bounded index. History reads first pass the
 workspace shared-configuration authorization check, then return a definition's deliveries to its

@@ -522,6 +522,32 @@ describe("triggers and runs", () => {
     expect(() => store.deliveries(BEN.id, saved.id, null)).toThrow("Workflow definition not found.");
   });
 
+  it("builds the legacy history index from the former 1,000-delivery cap on first admission", () => {
+    let { store, storage, headOf } = workspace({ max: 10_000 });
+    let saved = store.save(ADA, { title: "Legacy", gadgetId: GADGET }, headOf, "build");
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    let template = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+
+    // Simulate the bounded pre-FAC-125 history in a workspace upgrading for the first time.
+    fillRetainedDeliveries(storage, template, 1_000);
+    storage.workflowDeliveryCount.put(null);
+    for (let pointer of storage.workflowDeliveryExpiries.list()) {
+      storage.workflowDeliveryExpiries.delete(pointer.key);
+    }
+
+    let admitted = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    expect(admitted.run).toBeDefined();
+    expect(storage.workflowDeliveryCount.get()).toEqual({ count: 1_001, indexed: true });
+
+    let indexedLegacyDelivery = storage.workflowDeliveries.get(0)!;
+    delete indexedLegacyDelivery.historyOwnerProfileId;
+    storage.workflowDeliveries.put(indexedLegacyDelivery);
+    store.fire(11, GADGET, headOf, everyoneBuilds);
+    expect(storage.workflowDeliveries.get(0)).not.toHaveProperty("historyOwnerProfileId");
+    expect(storage.workflowDeliveryCount.get()).toEqual({ count: 1_002, indexed: true });
+  });
+
   it("refuses follow-latest when the gadget head is newer than the published commit", () => {
     let { store, heads, headOf } = workspace();
     let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
