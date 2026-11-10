@@ -3455,7 +3455,8 @@ function ChatInterface({
                   </div>
                 )}
                 {incomplete && <IncompleteDescriptionNotice id={incompleteId} className="mt-2" />}
-                <ActionDecision entry={log} showOutcome={false} className="mt-2 text-[12.5px] leading-[18px]" />
+                <ActionDecision entry={log} showOutcome={false} viewerProfileId={currentUser?.id}
+                  onReconnect={log.gatekeeperId !== undefined ? () => overseer.reconnectGatekeeper(log.gatekeeperId!) : undefined} className="mt-2 text-[12.5px] leading-[18px]" />
               </div>
               <div className="ml-3 flex flex-shrink-0 items-center gap-1 self-center">
                 {actionControls}
@@ -3523,7 +3524,8 @@ function ChatInterface({
               </div>
             )}
             {incomplete && <IncompleteDescriptionNotice id={incompleteId} />}
-            <ActionDecision entry={log} showOutcome={false} />
+            <ActionDecision entry={log} showOutcome={false} viewerProfileId={currentUser?.id}
+              onReconnect={log.gatekeeperId !== undefined ? () => overseer.reconnectGatekeeper(log.gatekeeperId!) : undefined} />
             {resourceMeta}
           </div>
         )}
