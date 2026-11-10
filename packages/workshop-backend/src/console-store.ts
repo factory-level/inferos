@@ -2,7 +2,10 @@ import type { WorkspaceSettings } from "@gadgets/workshop-shared/workspace-setti
 import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
-import { canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasWidgetEventsHeard, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import {
+  canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasRunEffects, canvasRunEventsHeard,
+  canvasWidgetEventsHeard, type CanvasPage,
+} from "@gadgets/workshop-shared/canvas-model";
 import { joinPageSettings, nestedPage, readCanvasDefinition, splitPageSettings } from "./canvas-store";
 import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
@@ -13,7 +16,7 @@ import { readWorkspaceConfiguration } from "./workspace-configuration";
 import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
 import type { GadgetRecord, OverseerStorage } from "./overseer";
 
-type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "canvasPages" | "consoleScreens" | "gadgets" | "flows" | "workspaceConfiguration">;
+type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "canvasPages" | "consoleScreens" | "gadgets" | "flows" | "workspaceConfiguration" | "boundHooks">;
 
 /**
  * How publication creates and removes frozen installs (see `ConsoleWidgetEntry`). Both are called
@@ -524,13 +527,14 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
 // widget's own event only when that gadget's current commit, one of `commits`, declares it in its
 // states (FAC-94), so a wired event the frozen widget can never raise isn't published, and only if
 // that event leads to no requested action, since a widget event runs only navigation; otherwise
-// nothing is published.
+// nothing is published. Likewise an attachment hearing a trigger's run results (FAC-116) must name a
+// trigger bound on its widget's own gadget, and the result may lead only to navigation.
 // With `checkWidgets` (the publish path only), each screen's widgets must also still parse
 // (FAC-99): a widget's typed read binding (FAC-92)
 // must be valid, match its widget and name its widget's own reference, and that reference must be
 // well formed. Storage written outside the editor, or before those rules, is refused here, before
 // anything is copied, rather than released to operators.
-function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages" | "gadgets">, content: OperateConsoleContent,
+function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages" | "gadgets" | "boundHooks">, content: OperateConsoleContent,
     checkWidgets: boolean, commits?: SourceCommits) {
   let shown = new Set(consoleScreens(content));
   return consoleScreens(content).flatMap(screenId => {
@@ -562,6 +566,16 @@ function publishedPages(storage: Pick<ConsoleStorage, "canvases" | "canvasPages"
       // Only navigation runs from a widget event, so none can reach a capability (FAC-94).
       if (canvasPageEffects(page!, heard.targetRef, heard.event).some(effect => effect.kind === "request-action")) {
         throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId}'s event "${heard.event}" leads to a requested action, which a widget event can't run.`);
+      }
+    }
+    for (let heard of page ? canvasRunEventsHeard(page) : []) {
+      let gadgetId = Number(CANVAS_GADGET_REF.exec(heard.targetRef)![1]);
+      if (storage.boundHooks.get(heard.trigger)?.gadgetId !== gadgetId) {
+        throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId} hears the runs of trigger ${heard.trigger}, which isn't a trigger of gadget ${gadgetId}.`);
+      }
+      // Only navigation runs from a run's result, so none can reach a capability (FAC-116).
+      if (canvasRunEffects(page!, heard.trigger, heard.event).some(effect => effect.kind === "request-action")) {
+        throw new Error(`Screen ${screenId} can't be published: its widget ${heard.nodeId}'s "${heard.event}" for trigger ${heard.trigger} leads to a requested action, which a run's result can't run.`);
       }
     }
     return [{ screenId, row, page }];
