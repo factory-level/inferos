@@ -15,7 +15,7 @@ import {
   createFauxCore, fauxAssistantMessage, fauxText, fauxToolCall, getCurrentTools, type Context,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
-import { OPERATE_SESSION_ERROR_CODES, type AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
+import { OPERATE_SESSION_ERROR_CODES, getOperateSessionErrorCode, type AiChatAuthorInfo } from "@gadgets/workshop-shared/api";
 import {
   AGENT_VIEW_LIMITS, AGENT_WIDGET_UNAVAILABLE, parseAgentConsoleWidgetRef, parseAgentPlacementProposal,
   type AgentViewOverlay,
@@ -413,7 +413,8 @@ describe("the operate session asking, as its owner", () => {
       s.owner.page = { ...s.owner.page!, source: "draft" };
       expect(await refusal(s.impl.operatePage({ type: "openView", viewId: "w" }))).toMatch(/No published console is open/);
       for (let type of ["openConsole", "startFlow", "navigateFlow", "backFlow", "handoverReceived", "companyChanged"]) {
-        expect(await refusal(s.impl.operatePage({ type }))).toMatch(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+        let thrown = await s.impl.operatePage({ type }).then(() => null, (error: unknown) => error);
+        expect(getOperateSessionErrorCode(thrown)).toBe(OPERATE_SESSION_ERROR_CODES.invalidEvent);
       }
       expect(s.owner.dispatched).toHaveLength(1);
     }));
