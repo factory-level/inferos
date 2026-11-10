@@ -1,7 +1,10 @@
-import { attemptNotice, canApproveAgain } from '../../actionAttempt'
+import { canApproveAgain } from '../../actionAttempt'
+import { ACTION_OUTCOME_TEXT, type ActionOutcome } from '@gadgets/workshop-shared/action-outcome'
+import { REJECTED_BECAUSE_TEXT, REQUESTED_BY_TEXT, UNCERTAIN_REJECTION_TEXT, decisionOf } from '../../actionDecision'
+import { ActionDecision } from '../../components/ActionDecision'
 import { useEffect, useId, useState } from 'react'
 import type { RpcStub } from 'capnweb'
-import { actionChangeTime, type ActionLogEntry, type ActionRequester, type Overseer } from '@gadgets/workshop-shared/api'
+import { actionChangeTime, type ActionLogEntry, type Overseer } from '@gadgets/workshop-shared/api'
 import type {
   OperateApprovalOutcome,
   OperateApprovalRef,
@@ -36,27 +39,33 @@ type DecisionNotice = ApprovalDecisionResult & {
   uncertainty?: string
 }
 
-const REQUESTER_LABELS: Record<ActionRequester, string> = {
-  agent: 'Requested by the agent',
-  person: 'Requested by a person',
-  gadget: 'Requested by a gadget',
-  hook: 'Requested by a hook',
-}
 
 const approvalKey = ({ workspaceId, actionId }: OperateApprovalRef) => `${workspaceId}/${actionId}`
 
 const sameApproval = (a: OperateApprovalRef | null, b: OperateApprovalRef) =>
   a !== null && a.workspaceId === b.workspaceId && a.actionId === b.actionId
 
-const outcomeText = (title: string, outcome: OperateApprovalOutcome, error?: string) =>
-  outcome === 'applied' ? `“${title}” was approved and applied.`
-    : outcome === 'rejected' ? `“${title}” was rejected.${error ? ` ${error}` : ''}`
-      : `“${title}” was approved, but applying it failed${error ? `: ${error}` : '.'}`
+// A decision's outcome in FAC-97's words (FAC-119), under the action's title.
+const OUTCOME_OF: Record<OperateApprovalOutcome, ActionOutcome> = { applied: 'succeeded', rejected: 'rejected', failed: 'failed' }
+// A rejection after an attempt that may have reached the service is unknown, not rejected:
+// rejecting it here undid nothing there.
+const outcomeText = (title: string, outcome: OperateApprovalOutcome, reason?: string, uncertain = false) =>
+  `“${title}”: ${ACTION_OUTCOME_TEXT[uncertain ? 'unknown' : OUTCOME_OF[outcome]]}.${reason ? ` ${reason}` : ''}`
 
-// An earlier unsuccessful apply, shown on the pending item so a reload doesn't hide it.
-const attemptLine = (action: ActionLogEntry) => {
-  const attempt = attemptNotice(action)
-  return attempt && <span className={`mt-0.5 block text-[11.5px] leading-4 ${attempt.tone === 'warning' ? 'text-kumo-warning' : 'text-kumo-danger'}`}>{attempt.text}</span>
+// Why a logged decision ended as it did, in the decision card's words: a failed apply's kind and
+// receipt reason, never the provider's own text, and a rejection's own reason.
+const reasonOf = (entry: ActionLogEntry): string | undefined => {
+  if (entry.type !== 'action') return undefined
+  const failure = decisionOf(entry).failure
+  if (entry.state === 'failed') return failure ? `${failure.text} ${failure.reason}` : undefined
+  if (entry.state === 'rejected') {
+    if (entry.lastAttempt?.outcome === 'unknown') {
+      // The outcome already says it may or may not have applied; this says why, and what is closed.
+      return `${decisionOf(entry).failure!.text} ${UNCERTAIN_REJECTION_TEXT}`
+    }
+    return entry.rejectedBecause ? REJECTED_BECAUSE_TEXT[entry.rejectedBecause] : undefined
+  }
+  return undefined
 }
 
 const sameOutcome = (a: OperatePageState['lastApprovalOutcome'], b: OperatePageState['lastApprovalOutcome']) =>
@@ -172,7 +181,7 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
       if (result.outcome !== null) await report({ type: 'approvalResolved', approval, outcome: result.outcome })
       // A rejection keeps the attempt it followed, so its uncertainty is known from the pending entry.
       const uncertainty = result.outcome === 'rejected' && action.type === 'action' && action.lastAttempt?.outcome === 'unknown'
-        ? attemptNotice({ ...action, state: 'rejected' })?.text : undefined
+        ? reasonOf({ ...action, state: 'rejected' }) : undefined
       setNotice({ ...result, approval, title: action.description.title, uncertainty, before })
     } finally {
       setProcessing(previous => {
@@ -202,10 +211,8 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
   // What the log entry kept beyond the decision, for its outcome here, reported elsewhere or
   // restored: a failed apply's reason, or, for a rejection after an attempt whose outcome is unknown,
   // that it may still have applied and local approval is closed.
-  const loggedReason = logged && logged.type === 'action'
-    ? logged.state === 'failed' ? logged.lastAttempt?.message
-      : logged.state === 'rejected' && logged.lastAttempt?.outcome === 'unknown' ? attemptNotice(logged)?.text : undefined
-    : undefined
+  const loggedReason = logged ? reasonOf(logged) : undefined
+  const loggedUncertain = logged?.type === 'action' && logged.lastAttempt?.outcome === 'unknown'
 
   // This tab's own decision carries its message while it is the latest: the page still reports what
   // it did when the decision began, or reports this decision itself. Any other outcome reported
@@ -216,12 +223,13 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
   const shown: { text: string; outcome: OperateApprovalOutcome | null } | null = own
     ? {
         text: own.outcome === null ? `“${own.title}” was not resolved: ${own.error}`
-          : outcomeText(own.title, own.outcome, own.outcome === 'rejected' ? own.uncertainty ?? loggedReason : own.error),
+          : outcomeText(own.title, own.outcome, own.outcome === 'rejected' ? own.uncertainty ?? loggedReason : loggedReason ?? own.error,
+              own.outcome === 'rejected' && (own.uncertainty !== undefined || loggedUncertain)),
         outcome: own.outcome,
       }
     // Reported elsewhere: under the action's own title once read (its id only if it cannot be).
     : fresh && logged !== undefined
-      ? { text: outcomeText(loggedTitle ?? `Action ${lastOutcome.actionId}`, lastOutcome.outcome, loggedReason), outcome: lastOutcome.outcome }
+      ? { text: outcomeText(loggedTitle ?? `Action ${lastOutcome.actionId}`, lastOutcome.outcome, loggedReason, lastOutcome.outcome === 'rejected' && loggedUncertain), outcome: lastOutcome.outcome }
       : null
   const statusText = shown?.text ?? ''
   const statusTone = shown?.outcome === 'applied' ? 'text-kumo-default'
@@ -230,7 +238,7 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
   // failed action that is still pending (a retryable or unknown attempt) is listed instead.
   const earlier = !own && !fresh && lastOutcome !== null && loggedTitle !== null &&
     decidedAt !== null && now - decidedAt < RECENT_ACTIVITY_MS
-    ? `${outcomeText(loggedTitle, lastOutcome.outcome, loggedReason)} · ${formatRelativeTime(new Date(decidedAt))}`
+    ? `${outcomeText(loggedTitle, lastOutcome.outcome, loggedReason, lastOutcome.outcome === 'rejected' && loggedUncertain)} · ${formatRelativeTime(new Date(decidedAt))}`
     : ''
 
   if (pending.length === 0 && !statusText && !earlier && !failedToLoad) return null
@@ -257,7 +265,7 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
             const busy = processing.has(key)
             const meta = [
               action.resourceTitle,
-              action.requestedBy && REQUESTER_LABELS[action.requestedBy],
+              action.requestedBy && REQUESTED_BY_TEXT[action.requestedBy],
               bothSources && `in ${source.label}`,
               formatRelativeTime(action.createdAt),
             ].filter(Boolean).join(' · ')
@@ -269,13 +277,14 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
                     className="min-w-0 flex-1 cursor-pointer rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">
                     <span className="block truncate text-[13px] font-medium leading-[18px] text-kumo-default">{action.description.title}</span>
                     <span className="mt-0.5 block truncate text-[11.5px] leading-4 text-kumo-inactive">{meta}</span>
-                    {attemptLine(action)}
                   </button>
                   <div className="flex flex-shrink-0 items-center gap-0.5">
                     <ResolveButton tone="deny" disabled={busy} onClick={() => void decide(item, 'reject')} describedBy={isReviewing ? detailsId : undefined} />
                     <ResolveButton tone="approve" disabled={busy || !canApproveAgain(action)} onClick={() => void decide(item, 'approve')} describedBy={isReviewing ? detailsId : undefined} />
                   </div>
                 </div>
+                {/* An earlier attempt, a block or a rejection's reason, shown so a reload doesn't hide it. */}
+                {action.type === 'action' && <ActionDecision entry={action} className="mt-0.5" />}
                 {(isReviewing || source.restricted) && (
                   <div id={detailsId} className="mt-1.5">
                     <p className="m-0 whitespace-pre-wrap text-[12.5px] leading-[18px] text-kumo-subtle">{action.description.description}</p>

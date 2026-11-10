@@ -1,4 +1,5 @@
 import { actionOutcome } from '@gadgets/workshop-shared/action-outcome'
+import { ActionResultList } from './components/ActionReceipt'
 import { attemptNotice, canApproveAgain } from './actionAttempt'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Switch, useKumoToastManager } from '@cloudflare/kumo'
@@ -806,13 +807,7 @@ function HistoryRow({
               {notice.text}
             </p>
           )}
-          {record.type === 'action' && record.result && (
-            <dl aria-label="What the provider reported" className="m-0 mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-kumo-subtle">
-              {Object.entries(record.result).map(([key, value]) => (
-                <div key={key} className="flex gap-1"><dt className="text-kumo-inactive">{key}:</dt><dd className="m-0 break-all">{String(value)}</dd></div>
-              ))}
-            </dl>
-          )}
+          {record.type === 'action' && record.result && <ActionResultList result={record.result} className="mt-2" />}
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px] text-kumo-inactive">
             <span>{formatFullDate(at)}</span>
             <span className="text-kumo-subtle">{record.resourceTitle}</span>
