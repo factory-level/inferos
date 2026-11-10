@@ -655,6 +655,8 @@ function ReviewRequest({
   onReconnect?: () => Promise<ConnectFlowStart>
   onAlwaysApprove?: () => void
 }) {
+  // So a run the viewer asked for says so (FAC-119), here as on every decision surface.
+  const { currentUser } = useAuthenticatedApi()
   const resourceUrl = safeExternalUrl(record.resourceUrl)
   const fields = entryFields(record)
   // The notices and the request follow the controls in DOM order, so while restricted the
@@ -719,7 +721,7 @@ function ReviewRequest({
         </div>
       </div>
 
-      {record.type === 'action' && <ActionDecision entry={record} showOutcome={false} onReconnect={onReconnect} className="mt-1.5 max-w-2xl text-[12px]" />}
+      {record.type === 'action' && <ActionDecision entry={record} showOutcome={false} viewerProfileId={currentUser?.id} onReconnect={onReconnect} className="mt-1.5 max-w-2xl text-[12px]" />}
 
       {restricted && <RestrictedApprovalNotice id={noticeId} className="mt-2 max-w-2xl" />}
 
@@ -757,6 +759,8 @@ function HistoryRow({
   togglingHook: boolean
   onToggleHook: (hookId: number, enabled: boolean) => void
 }) {
+  // So a run the viewer asked for says so (FAC-119), here as on every decision surface.
+  const { currentUser } = useAuthenticatedApi()
   const resourceUrl = safeExternalUrl(record.resourceUrl)
   const resolvedBy = record.type === 'action' ? record.resolvedBy : undefined
   const autoApproved = record.type === 'action' && record.autoApproved === true
@@ -802,7 +806,7 @@ function HistoryRow({
           )}
           <ActionFields fields={entryFields(record)} className="mt-2 max-w-2xl" />
           {/* The same decision words as every approval surface (FAC-119), the provider's result included. */}
-          {record.type === 'action' && <ActionDecision entry={record} showOutcome={false} className="mt-2 max-w-2xl text-[12.5px] leading-[18px]" />}
+          {record.type === 'action' && <ActionDecision entry={record} showOutcome={false} viewerProfileId={currentUser?.id} className="mt-2 max-w-2xl text-[12.5px] leading-[18px]" />}
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px] text-kumo-inactive">
             <span>{formatFullDate(at)}</span>
             <span className="text-kumo-subtle">{record.resourceTitle}</span>
