@@ -10,7 +10,7 @@ import {
   WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, recoverWidgetState, widgetEventsFrom,
   type WidgetStateMachine, type WidgetStateSnapshot,
 } from '@gadgets/workshop-shared/widget-state';
-import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
+import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -465,6 +465,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // (FAC-86, widget-state.ts), keyed by widgetStateKey(). Apart from the operate page: nothing
       // here is read or written by dispatchOperateEvent(), nor this by it.
       widgetStates: collection<StoredWidgetState>()({ primaryKey: "key" }),
+      // The requested runs whose result moved this person's page (FAC-116, applyRunNavigation), by
+      // invocation and attachment, so a run moves it at most once. Kept across a company change.
+      runNavigations: collection<{ key: string; at: number }>()({ primaryKey: "key" }),
       // Operate session workspaces a company change retired (FAC-88, #resetPresentationState):
       // kept, never listed or opened again, for offboarding and retention to find; `revoked` once
       // the workspace itself has revoked what was held on it (#revokeRetiredWorkspaces).
@@ -548,6 +551,11 @@ type RetiredOperateWorkspace = { id: string; retiredAt: number; revoked: boolean
 
 /** One person's stored state of one console widget (see UserDurableObject.readWidgetState). */
 type StoredWidgetState = { key: string; state: string; seq: number; at: number };
+
+/** Most applied run navigations one person keeps (FAC-116); the oldest is dropped past it. */
+const MAX_RUN_NAVIGATIONS = 256;
+/** How long a run navigation that found no open page waits for that session to reconnect (FAC-116). */
+const RUN_NAVIGATION_PENDING_MS = 60_000;
 
 /** Most console widget states one person keeps; the least recently changed is dropped past it. */
 const MAX_STORED_WIDGET_STATES = 256;
@@ -1632,6 +1640,79 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     return { seq: record.seq, state };
   }
 
+  /**
+   * Moves this person's open page as a requested run's settled result asks (FAC-116), after its
+   * workspace checked the run, the person and the page. Applied only to a page that's open (a live
+   * subscribeOperateSession()), still at `pageSeq`, showing that published console and revision
+   * with no flow running, and only once per invocation and attachment; recorded with the actor
+   * `workflow-run`. A page that isn't open keeps the request only in memory, for
+   * `RUN_NAVIGATION_PENDING_MS`, and a reconnect of the same session in that time applies it once
+   * its workspace re-checks the requester, under the same checks; once this object restarts, or the
+   * page moved, it never applies.
+   */
+  async applyRunNavigation(request: RunNavigationRequest): Promise<RunNavigationOutcome> {
+    await this.#enterPresentationCompany();
+    return this.#applyRunNavigation(request, true);
+  }
+
+  // The run navigations waiting for their page to reconnect, by marker key (see applyRunNavigation).
+  #pendingRunNavigations = new Map<string, { request: RunNavigationRequest; at: number }>();
+
+  #applyPendingRunNavigations(): void {
+    let now = Date.now();
+    for (let [key, { request, at }] of this.#pendingRunNavigations) {
+      this.#pendingRunNavigations.delete(key);
+      if (now - at < RUN_NAVIGATION_PENDING_MS) void this.#recheckRunNavigation(request);
+    }
+  }
+
+  // A waiting move applies only once the run's workspace re-checks it, now: the requester still
+  // may run the trigger and still holds a role there (OverseerImpl.recheckRunNavigation). Then the
+  // same checks as a live one, against the page as it is after that answer.
+  async #recheckRunNavigation(request: RunNavigationRequest): Promise<void> {
+    try {
+      let overseers = this.ctx.exports.OverseerDurableObject;
+      let workspace = overseers.get(overseers.idFromString(request.workspaceId));
+      if (await workspace.recheckRunNavigation(request.profileId, request.invocationId)) this.#applyRunNavigation(request, false);
+    } catch (error) {
+      logger.warn("a run's waiting navigation could not be re-checked", { event: "operate.run_navigation.recheck_failed", error });
+    }
+  }
+
+  // Checks and applies one run navigation in one synchronous step (see applyRunNavigation).
+  #applyRunNavigation(request: RunNavigationRequest, keep: boolean): RunNavigationOutcome {
+    let key = `${request.invocationId}\n${request.attachmentId}`;
+    if (this.storage.runNavigations.get(key)) return "already";
+    if (request.move.type !== "showScreen" && request.move.type !== "openView") return "refused";
+    if (this.#operateSubscribers.size === 0) {
+      if (keep) {
+        this.#pendingRunNavigations.set(key, { request, at: Date.now() });
+        // Bounded: a person rarely has more than a few runs settling while their page is closed.
+        while (this.#pendingRunNavigations.size > 16) this.#pendingRunNavigations.delete(this.#pendingRunNavigations.keys().next().value!);
+      }
+      return "not-open";
+    }
+    let page = this.#operatePage();
+    let run = page.state.console;
+    if (page.seq !== request.pageSeq || page.state.flow || run?.source !== "published" ||
+        run.workspaceId !== request.workspaceId || run.consoleId !== request.consoleId || run.revision !== request.revision) {
+      return "refused";
+    }
+    try {
+      this.#appendOperateEvent(request.move, request.pageSeq, "workflow-run");
+    } catch {
+      return "refused";
+    }
+    this.storage.runNavigations.put({ key, at: Date.now() });
+    let applied = [...this.storage.runNavigations.list()];
+    if (applied.length > MAX_RUN_NAVIGATIONS) {
+      for (let old of applied.toSorted((a, b) => a.at - b.at).slice(0, applied.length - MAX_RUN_NAVIGATIONS)) {
+        this.storage.runNavigations.delete(old.key);
+      }
+    }
+    return "shown";
+  }
+
   // The live subscribeOperateSession() subscribers, which noticeConsoleRevision() also reaches.
   #operateSubscribers = new Set<{ update(update: OperateSessionUpdate): void }>();
 
@@ -1680,6 +1761,8 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     subscriber(this.#operatePage()).catch(unsubscribe);
     page.subscribe(pageSubscriber);
     this.#operateSubscribers.add(pageSubscriber);
+    // A run's navigation that found the page closed moments ago applies now, if nothing moved it.
+    this.#applyPendingRunNavigations();
 
     return new RpcStub<{}>({
       [Symbol.dispose]() {
