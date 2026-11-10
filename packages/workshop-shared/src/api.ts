@@ -2853,7 +2853,10 @@ export interface Overseer extends RpcTarget {
    * Save the workflow gadget's current code as a new revision of the caller's own definition, or of
    * a new one. Publishes nothing. Build only; in a shared workspace it also takes the deployment's
    * `build` authority. At most `MAX_WORKSPACE_WORKFLOW_DEFINITIONS` per workspace and
-   * `MAX_WORKFLOW_DEFINITION_REVISIONS` revisions each.
+   * `MAX_WORKFLOW_DEFINITION_REVISIONS` revisions each. With `retain: false` a new definition is
+   * dynamic (FAC-124): it carries `expiresAt` and stops being available for new use then, unless
+   * saved again first (which retains it) or a trigger is pinned to it; at or after its expiry a save
+   * is refused (`WORKFLOW_DEFINITION_EXPIRED`).
    */
   saveWorkflowDefinition(input: WorkflowDefinitionSave): Promise<WorkflowDefinition>;
   /**

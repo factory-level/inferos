@@ -12,7 +12,7 @@ import type {
   WorkflowTriggerDefinitionRef,
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
-  REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS,
+  REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
@@ -2455,6 +2455,9 @@ class OverseerImpl implements AgentHooks {
 
   // True while alarm() runs (see runAlarmTasks); #updateAlarm defers to its end.
   #inAlarmHandler = false;
+  // A change to what expires (FAC-124) reported while the constructor runs, before the alarm's
+  // inputs (the tool lane) exist: the constructor sets the alarm once they do.
+  #alarmOwed = false;
 
   // Drains of pending agent calls currently in flight, by chat (see drainPendingAgentCalls).
   #pendingCallDrains = new Map<number, Promise<void>>();
@@ -2693,6 +2696,10 @@ class OverseerImpl implements AgentHooks {
       times.push(nextDeliveredRecord.deliveredAt + AGENT_RESPONSE_DELIVERED_RETENTION_MS);
     }
 
+    // The next dynamic workflow definition to expire (FAC-124), so it is swept on time.
+    let nextExpiry = this.workflowDefinitionStore().nextExpiry();
+    if (nextExpiry !== undefined) times.push(nextExpiry);
+
     // A replay's staged copies still to withdraw (FAC-112), each at its next try.
     for (let entry of this.storage.replayWithdrawals.list()) times.push(entry.nextAttemptAt);
 
@@ -2731,6 +2738,7 @@ class OverseerImpl implements AgentHooks {
   async runAlarmTasks(): Promise<void> {
     this.#inAlarmHandler = true;
     try {
+      this.#sweepTemporary();
       this.toolLane.sweep();
       await this.#retryDueWidgetWithdrawals();
       await this.retryReplayWithdrawals();
@@ -2749,7 +2757,24 @@ class OverseerImpl implements AgentHooks {
     } finally {
       this.#inAlarmHandler = false;
       this.#agentKeepAliveTime = undefined;
+      // Runs that ended above may have been all that kept an expired definition.
+      this.#sweepTemporary();
       this.#updateAlarm();
+    }
+  }
+
+  /**
+   * Removes expired temporary configuration (FAC-124): today, dynamic workflow definitions past
+   * their TTL that no trigger or live run keeps (`WorkspaceWorkflowDefinitionStore.sweepExpired`).
+   * FAC-137's temporary canvases join here, under the same rule: expiry ends future availability and
+   * never deletes records or stops work. A failure is logged and retried at the next alarm.
+   */
+  #sweepTemporary(): void {
+    try {
+      let swept = this.workflowDefinitionStore().sweepExpired();
+      if (swept > 0) this.logger.info("swept expired workflow definitions", { event: "workflow.definitions.expired", definitionCount: swept });
+    } catch (error) {
+      this.logger.error("temporary sweep failed", { event: "workflow.definitions.expire.failed", error });
     }
   }
 
@@ -2904,6 +2929,11 @@ class OverseerImpl implements AgentHooks {
     });
     // No call is live in a new instance, so every pending tool facet is abandoned.
     this.toolLane.sweep();
+    // A definition change reported above (#recoverInterruptedApplies settles runs) is woken for now.
+    if (this.#alarmOwed) {
+      this.#alarmOwed = false;
+      this.#updateAlarm();
+    }
     this.defaultGadgetId = this.storage.defaultGadgetId.get();
 
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
@@ -12641,7 +12671,17 @@ class OverseerImpl implements AgentHooks {
   }
 
   workflowDefinitionStore(): WorkspaceWorkflowDefinitionStore {
-    return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage);
+    // A dynamic definition lasts the deployment's TTL (FAC-124), read only when one is created.
+    return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage, {
+      now: () => Date.now(),
+      dynamicTtlMs: () => dynamicDefinitionTtlMs(this.env.WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS),
+      // Wake for the next expiry whenever what expires changes (#416 round 1); during construction,
+      // once the alarm's inputs exist.
+      onChange: () => {
+        if (this.toolLane) this.#updateAlarm();
+        else this.#alarmOwed = true;
+      },
+    });
   }
 
   /** See the module-level `requireSharedConfiguration`. */
