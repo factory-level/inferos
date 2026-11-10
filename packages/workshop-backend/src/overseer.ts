@@ -6767,8 +6767,12 @@ class OverseerImpl implements AgentHooks {
     let delivery = this.storage.workflowDeliveries.get(deliveryId);
     // No record of the run: `requireRunRequester` refuses it, in its own words.
     if (!delivery) return;
+    // A follow-latest trigger (FAC-108) resolves to the definition's latest publication: a newer
+    // one, or none at all (unpublished), is a change. A pinned trigger compares its pin.
     let pin = this.workflowDefinitionStore().pinOf(hookId);
-    if (!pin || pin.definitionId !== delivery.definitionId || pin.revision !== delivery.revision) {
+    let unpublished = pin?.mode === "follow-latest" &&
+      !this.storage.workflowDefinitions.get(pin.definitionId)?.published;
+    if (!pin || unpublished || pin.definitionId !== delivery.definitionId || pin.revision !== delivery.revision) {
       throw new Error(RUN_DEFINITION_CHANGED);
     }
   }

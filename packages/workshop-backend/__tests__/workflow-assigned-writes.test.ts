@@ -77,6 +77,10 @@ async function proposeAsRun(impl: any) {
   return Array.from(impl.storage.actions.list()).find((a: any) => a.type === "action") as any;
 }
 
+/** The trigger's definition as the store keeps it, published at `published` (or not at all). */
+const definition = (published: number | null) =>
+  ({ id: "def", published: published === null ? null : { revision: published, at: new Date(0), by: ADA } });
+
 async function refusalOf(run: () => Promise<unknown>) {
   let refused: unknown;
   try { await run(); } catch (error) { refused = error; }
@@ -430,6 +434,24 @@ describe("a run's write resumed under current authority (FAC-118)", () => {
         expect(stored.blocked).toBeUndefined();
         expect(opened).toHaveLength(1);
         expect(opened[0]?.closed).toBe(true);
+      });
+    }
+  });
+
+  it("follows a follow-latest trigger's latest publication: unchanged applies, a newer one or none rejects", async () => {
+    for (const [label, published, applies] of [["same", 1, true], ["republished", 2, false], ["unpublished", null, false]] as const) {
+      await inAssigned(`fac118-follow-latest-${label}`, async (impl, _opened, apply) => {
+        impl.storage.workflowTriggerPins.put({ hookId: HOOK, definitionId: "def", revision: 1, mode: "follow-latest" });
+        impl.storage.workflowDefinitions.put(definition(published));
+        let record = await proposeAsRun(impl);
+        if (applies) {
+          await impl.applyPendingAction(record, ADA, false);
+          expect(apply).toHaveBeenCalledOnce();
+          return;
+        }
+        expect(await refusalOf(() => impl.applyPendingAction(record, ADA, false))).toContain(RUN_DEFINITION_CHANGED);
+        expect(apply).not.toHaveBeenCalled();
+        expect(impl.storage.actions.get(record.id)).toMatchObject({ state: "rejected", rejectedBecause: "definition-changed" });
       });
     }
   });
