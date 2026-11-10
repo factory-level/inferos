@@ -886,6 +886,11 @@ export class WorkspaceWorkflowDefinitionStore {
     });
   }
 
+  /** Trigger `hookId`'s run-control label, or undefined without one (FAC-119: an action's context). */
+  controlLabel(hookId: number): string | undefined {
+    return this.storage.workflowTriggerControls.get(hookId)?.label || undefined;
+  }
+
   /**
    * The controls of pinned triggers: every one for a builder (`viewer` null), or only those listing
    * `viewer`, each showing `viewer` as its only invoker.
