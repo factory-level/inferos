@@ -70,6 +70,12 @@ section.proposals .detail { color: var(--muted); }
   .content { padding: 8px; }
   .composer { padding: 8px; }
 }
+@media print {
+  html, body, .app { height: auto; background: #fff; color: #000; }
+  .bar .btn, .status, .composer, .notice button, .steps { display: none; }
+  .content { overflow: visible; }
+  .message, section.proposals li { break-inside: avoid; }
+}
 `;
 
 /** An element whose children are nodes or plain text; strings always become text nodes. */

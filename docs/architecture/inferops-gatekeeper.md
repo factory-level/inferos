@@ -802,7 +802,7 @@ FAC-133 (inferos [ADR 0013](../adr/0013-dot-runtime.md) decision 3). A seventh r
     - `ask(prompt, progress)`, which starts a conversation on the first question and relays the answer as it comes through an `RpcTarget` the client hands it;
     - `cancel()`;
     - `startOver()`, which forgets the id; InferOps keeps the conversation.
-  - **What the client sees:** messages and each change's status only, never a receipt or a change's arguments. Every value is drawn as a text node. Its `ExportHandler` lists no formats.
+  - **What the client sees:** messages and each change's status only, never a receipt or a change's arguments. Every value is drawn as a text node. Its `ExportHandler` lists no formats. It keeps a print layout, as every bundled output format does: the transcript and its changes, without the composer, buttons or status line.
   - **No second decision card.** A change is never decided in the gadget. It lists each one in words:
     - waiting for your decision, pointing at *Needs your approval*, where every write is decided (FAC-119 U1's decision card covers Dot actions there);
     - being made;
