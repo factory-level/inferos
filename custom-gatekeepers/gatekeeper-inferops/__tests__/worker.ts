@@ -6,7 +6,7 @@
 import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
-  ActionApplied, ActionApplyFailure, ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  ActionApplied, ActionApplyFailure, ActionFailureKind, ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { dotBindingOver } from "../src/inferops.js";
@@ -1326,9 +1326,22 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     return this.#dotBinding().startSession(new RpcStub(new TestDotQueue(this.#log)) as never);
   }
 
-  /** Apply a Dot action: its failure, or its result once applied. */
-  async applyDot(actionId: number): Promise<{ failure: ActionApplyFailure | null; result: ActionResult | null }> {
-    const outcome = await this.#dotBinding().applyAction(actionId);
+  /** The references the kernel's approved effects were asked to run (FAC-120), in order. */
+  #effectsAsked: string[] = [];
+
+  async dotEffectsAsked(): Promise<string[]> {
+    return this.#effectsAsked;
+  }
+
+  /**
+   * Apply a Dot action: its failure, or its result once applied. With `run`, as a person's
+   * approval: the kernel's approved effects answer each run with it (FAC-120); without, as an
+   * automatic approval or an older kernel, there are none.
+   */
+  async applyDot(actionId: number, run?: { status: "started"; runId: string } | { status: "refused"; kind: ActionFailureKind; reason: string })
+      : Promise<{ failure: ActionApplyFailure | null; result: ActionResult | null }> {
+    const effects = run ? { invokeWorkflow: async (reference: string) => { this.#effectsAsked.push(reference); return run; } } : undefined;
+    const outcome = await this.#dotBinding().applyAction(actionId, effects);
     if (outcome && "failed" in outcome) return { failure: outcome.failed, result: null };
     return { failure: null, result: outcome && "applied" in outcome ? outcome.applied.result ?? null : null };
   }
