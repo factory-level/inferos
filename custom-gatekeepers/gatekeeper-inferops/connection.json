@@ -222,8 +222,8 @@
       {
         "kind": "project/dispatch",
         "cases": ["resource-scope", "observation", "approval", "apply-once", "stale-revision", "lost-response-retry"],
-        "reason": "No shared-suite adapter yet: dispatch needs the coding-workbench switch and repository allowlist set per test. Its own suite covers these cases.",
-        "coveredBy": ["__tests__/dispatch.test.ts"]
+        "reason": "No shared-suite adapter yet: dispatch needs the coding-workbench switch and repository allowlist set per test. Its own suite covers these cases; account.test.ts also verifies that a stored connection from another deployment company is refused before dispatch project lookup.",
+        "coveredBy": ["__tests__/dispatch.test.ts", "__tests__/account.test.ts"]
       },
       {
         "kind": "knowledge/wiki",
@@ -255,7 +255,7 @@
       {
         "kind": "portal/members",
         "cases": ["resource-scope", "observation", "sharing", "revocation"],
-        "reason": "Read-only and private-only: its session lists one bound workspace, observations exclude member identity, sharing is refused, and account revocation stops reads. There are no writes, revisions, or write retries to express in the shared suite.",
+        "reason": "Read-only and private-only: its session lists one bound workspace, observations exclude member identity, sharing is refused, and account revocation stops reads. account.test.ts also verifies that a stored connection from another deployment company is refused before the members probe. There are no writes, revisions, or write retries to express in the shared suite.",
         "coveredBy": ["__tests__/members.test.ts", "__tests__/members-http.test.ts", "__tests__/account.test.ts"]
       },
       {
