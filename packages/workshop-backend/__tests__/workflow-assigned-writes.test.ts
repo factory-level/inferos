@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
-import { ACTION_IN_PROGRESS, actionRecordToLog, RUN_DEFINITION_CHANGED, RUN_REQUESTER_REVOKED, type OverseerDurableObject } from "../src/overseer.js";
+import { ACTION_IN_PROGRESS, actionRecordToLog, RUN_DEFINITION_CHANGED, RUN_REQUESTER_REVOKED, RUN_WRITE_EXPIRED, type OverseerDurableObject } from "../src/overseer.js";
 import type { ActionDescription } from "@gadgets/workshop-shared/gatekeeper";
 
 declare module "cloudflare:workers" {
@@ -416,19 +416,39 @@ describe("a run's write resumed under current authority (FAC-118)", () => {
     });
   });
 
-  it("is refused when the workflow changed since the run proposed it: a fresh proposal is needed", async () => {
+  it("is rejected when the workflow changed since the run proposed it, with nothing sent: a fresh proposal is needed", async () => {
     for (const [label, pin] of [["re-pinned", { hookId: HOOK, definitionId: "def", revision: 2 }], ["another definition", { hookId: HOOK, definitionId: "other", revision: 1 }]] as const) {
       await inAssigned(`fac118-definition-${label.replace(/ /g, "-")}`, async (impl, opened, apply) => {
         let record = await proposeAsRun(impl);
         impl.storage.workflowTriggerPins.put(pin);
         expect(await refusalOf(() => impl.applyPendingAction(record, ADA, false))).toContain(RUN_DEFINITION_CHANGED);
         expect(apply).not.toHaveBeenCalled();
-        expect(opened).toEqual([]);
         let stored = impl.storage.actions.get(record.id);
-        expect(stored.state).toBe("pending");
-        expect(stored.blocked?.reason).toBe(RUN_DEFINITION_CHANGED);
+        // Can't be fixed, so it isn't left blocked: the workspace rejects it, telling the run's facet.
+        expect(stored).toMatchObject({ state: "rejected", rejectedBecause: "definition-changed" });
+        expect(stored.resolvedBy).toBeUndefined();
+        expect(stored.blocked).toBeUndefined();
+        expect(opened).toHaveLength(1);
+        expect(opened[0]?.closed).toBe(true);
       });
     }
+  });
+
+  it("sees a re-pin made while a re-check was suspended, and sends nothing", async () => {
+    await inAssigned("fac118-definition-late", async (impl, _opened, apply) => {
+      let record = await proposeAsRun(impl);
+      let asked = 0;
+      // The role is asked twice: before the run's facet opens, and again after (the last awaits).
+      // The trigger is re-pinned while the second answer is pending.
+      impl.authorizeCollaborator = async () => {
+        if (++asked === 2) impl.storage.workflowTriggerPins.put({ hookId: HOOK, definitionId: "def", revision: 2 });
+        return "use";
+      };
+      expect(await refusalOf(() => impl.applyPendingAction(record, ADA, false))).toContain(RUN_DEFINITION_CHANGED);
+      expect(asked).toBe(2);
+      expect(apply).not.toHaveBeenCalled();
+      expect(impl.storage.actions.get(record.id)).toMatchObject({ state: "rejected", rejectedBecause: "definition-changed" });
+    });
   });
 
   it("answers a second decision while the first apply is in flight as in progress, and sends once", async () => {
@@ -464,9 +484,9 @@ describe("a run's write that nobody decides (FAC-118)", () => {
       aged(impl, record, WAIT + 1);
       expect(await impl.expireRunWrites()).toEqual([record.id]);
       let stored = impl.storage.actions.get(record.id);
-      expect(stored).toMatchObject({ state: "rejected", expired: true });
+      expect(stored).toMatchObject({ state: "rejected", rejectedBecause: "expired" });
       expect(stored.resolvedBy).toBeUndefined();
-      expect(actionRecordToLog(stored)).toMatchObject({ state: "rejected", expired: true });
+      expect(actionRecordToLog(stored)).toMatchObject({ state: "rejected", rejectedBecause: "expired" });
       expect(apply).not.toHaveBeenCalled();
       // Rejected on the run's own facet, which held it, and closed again.
       expect(opened).toHaveLength(1);
@@ -479,21 +499,56 @@ describe("a run's write that nobody decides (FAC-118)", () => {
     });
   });
 
+  it("is expired by an approval that comes after its wait, before the alarm has run", async () => {
+    await inAssigned("fac118-expiry-late-approval", async (impl, _opened, apply) => {
+      let record = await proposeAsRun(impl);
+      aged(impl, record, WAIT + 1);
+      expect(await refusalOf(() => impl.applyPendingAction(impl.storage.actions.get(record.id), ADA, false))).toContain(RUN_WRITE_EXPIRED);
+      expect(apply).not.toHaveBeenCalled();
+      expect(impl.storage.actions.get(record.id)).toMatchObject({ state: "rejected", rejectedBecause: "expired" });
+    });
+  });
+
   it("loses to a person's approval already under way: one decision wins, and it is theirs", async () => {
     await inAssigned("fac118-expiry-race", async (impl, _opened, apply) => {
       let record = await proposeAsRun(impl);
-      aged(impl, record, WAIT + 1);
+      // Approved a second before its wait ends; the wait ends while the apply is in flight.
+      aged(impl, record, WAIT - 1000);
       let release!: () => void;
       apply.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
       let approving = impl.applyPendingAction(impl.storage.actions.get(record.id), ADA, false);
       await vi.waitFor(() => expect(apply).toHaveBeenCalledOnce());
-      expect(await impl.expireRunWrites()).toEqual([]);
+      expect(await impl.expireRunWrites(Date.now() + 2000)).toEqual([]);
       release();
       await approving;
       let stored = impl.storage.actions.get(record.id);
       expect(stored.state).toBe("approved");
-      expect(stored.expired).toBeUndefined();
+      expect(stored.rejectedBecause).toBeUndefined();
       expect(apply).toHaveBeenCalledOnce();
+    });
+  });
+
+  it("backs off an expiry that fails, so the alarm doesn't spin while the gatekeeper is down", async () => {
+    await inAssigned("fac118-expiry-backoff", async (impl, _opened, apply) => {
+      let record = await proposeAsRun(impl);
+      aged(impl, record, WAIT + 1);
+      // The run's facet can't be opened: the rejection fails.
+      impl.openAssignedActionFacet = async () => { throw new Error("gatekeeper down"); };
+      let now = Date.now();
+      expect(await impl.expireRunWrites(now)).toEqual([]);
+      expect(impl.storage.actions.get(record.id).state).toBe("pending");
+      // Not tried again before a minute, nor re-armed sooner.
+      expect(impl.nextRunWriteExpiry(now)).toBe(now + 60_000);
+      expect(await impl.expireRunWrites(now + 30_000)).toEqual([]);
+      expect(impl.nextRunWriteExpiry(now)).toBe(now + 60_000);
+      // Each failure doubles the wait: then two minutes.
+      expect(await impl.expireRunWrites(now + 60_000)).toEqual([]);
+      expect(impl.nextRunWriteExpiry(now)).toBe(now + 60_000 + 120_000);
+      // Once it can be, it is rejected, and the backoff is forgotten.
+      impl.openAssignedActionFacet = async () => ({ facet: { applyAction: apply, rejectAction: vi.fn(async () => {}) }, close: () => {} });
+      expect(await impl.expireRunWrites(now + 180_000)).toEqual([record.id]);
+      expect(impl.nextRunWriteExpiry(now)).toBeUndefined();
+      expect(apply).not.toHaveBeenCalled();
     });
   });
 });

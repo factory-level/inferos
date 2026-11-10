@@ -2500,16 +2500,14 @@ export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
 export type ActionState = "pending" | "approved" | "rejected" | "failed";
 
 /**
- * An action's most recent unsuccessful apply, as the overseer recorded it from the gatekeeper's
- * answer (see `ActionApplyFailure`). `notApplied` is known absent at the provider; `unknown` may
- * have happened there, so it is never presented as safely undone.
- */
-/**
  * Why a pending action's approved apply was refused before anything was sent (FAC-118): a re-check
  * at resume found that the authority it was proposed under no longer holds (the person who asked a
  * run, their role or grant, the run's assignment or company). It stays pending, and can be decided
  * again once that is fixed; the next apply that passes clears it.
  */
+/** Why the workspace rejected an action itself (FAC-118; see `ActionLogEntry.rejectedBecause`). */
+export type ActionRejectedBecause = "expired" | "definition-changed";
+
 export type ActionBlocked = {
   /** The refusal, in the words the re-check gave it. */
   reason: string;
@@ -2517,6 +2515,11 @@ export type ActionBlocked = {
   at: Date;
 };
 
+/**
+ * An action's most recent unsuccessful apply, as the overseer recorded it from the gatekeeper's
+ * answer (see `ActionApplyFailure`). `notApplied` is known absent at the provider; `unknown` may
+ * have happened there, so it is never presented as safely undone.
+ */
 export type ActionAttempt = {
   /** What is known about the provider effect. */
   outcome: "notApplied" | "unknown";
@@ -2607,10 +2610,12 @@ export type ActionLogEntry = {
   blocked?: ActionBlocked;
 
   /**
-   * Set on an action rejected because nobody decided it within its workflow run's wait (FAC-118:
-   * 7 days from when the run proposed it); `resolvedBy` is then absent and nothing was sent.
+   * Set on an action the workspace rejected itself, with no person deciding (FAC-118); `resolvedBy`
+   * is then absent and nothing was sent. `expired`: nobody decided it within its workflow run's wait
+   * (7 days from when the run proposed it). `definition-changed`: approved after the run's workflow
+   * definition changed, which can't be fixed, so a fresh proposal is needed (run it again).
    */
-  expired?: true;
+  rejectedBecause?: ActionRejectedBecause;
 
   /**
    * What the provider reported the apply produced (`ActionResult`), such as a created issue's key

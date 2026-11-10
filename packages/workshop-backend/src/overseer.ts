@@ -59,7 +59,7 @@ import { consoleScreenMove, consoleScreens, consoleWidgetVersionId, type Console
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, ActionBlocked, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, ActionBlocked, ActionRejectedBecause, SHARED_CONFIGURATION_REFUSED } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -242,6 +242,13 @@ export const RUN_REQUESTER_REVOKED =
  */
 export const RUN_DEFINITION_CHANGED =
   "This workflow changed since its run proposed this, so it can't be applied; run the workflow again to propose it afresh.";
+
+/**
+ * An approval of a run's write after its wait ended (FAC-118), even before the alarm got to it: the
+ * write is rejected as expired, and nothing is sent.
+ */
+export const RUN_WRITE_EXPIRED =
+  "Nobody decided this workflow run's write within 7 days, so it was rejected and nothing was changed.";
 
 /** An approval of an action already rejected (FAC-118): the decision stands, nothing is applied. */
 export const ACTION_ALREADY_REJECTED = "This action was already rejected.";
@@ -1268,8 +1275,8 @@ export type ActionRecord = {
   applyStartedAt?: Date;
   /** Why its last approved apply was refused at resume, before anything was sent (FAC-118). */
   blocked?: ActionBlocked;
-  /** Rejected because nobody decided it within its run's wait (FAC-118); `resolvedBy` is then absent. */
-  expired?: true;
+  /** Rejected by the workspace itself, with no person deciding (FAC-118); `resolvedBy` is then absent. */
+  rejectedBecause?: ActionRejectedBecause;
   /** One explicit AG-UI conversation, persisted with its existing action rather than a second queue. */
   aguiApproval?: ActionApprovalCorrelation;
   /** What the provider reported the apply produced (see ActionLogEntry.result); set only on approval. */
@@ -1639,7 +1646,7 @@ export function actionRecordToLog(record: ActionRecord): ActionLogEntry {
         ...(record.lastAttempt ? {lastAttempt: record.lastAttempt} : {}),
         ...(record.state === "pending" && record.applyStartedAt ? {applying: true as const} : {}),
         ...(record.state === "pending" && record.blocked ? {blocked: record.blocked} : {}),
-        ...(record.state === "rejected" && record.expired ? {expired: true as const} : {}),
+        ...(record.state === "rejected" && record.rejectedBecause ? {rejectedBecause: record.rejectedBecause} : {}),
         ...(record.state === "approved" && record.result ? {result: record.result} : {}),
       };
     case "bindHook":
@@ -6628,30 +6635,34 @@ class OverseerImpl implements AgentHooks {
   async rejectPendingAction(action: ActionRecord & {type: "action"}, resolvedBy?: AiChatAuthorInfo): Promise<void> {
     // The whole decision runs under the claim, through to the stored rejection, so no approval can
     // start between the gatekeeper's answer and the record saying it was rejected.
-    await this.withActionClaim(action.id, async () => {
-      // An assigned run's action lives on that run's own facet, so it is rejected there (FAC-102
-      // follow-up A), whatever became of the assignment since: rejecting sends nothing.
-      let assigned = action.executedAs ? await this.openAssignedActionFacet(action) : undefined;
-      let gatekeeper = assigned?.facet ?? this.getGatekeeperFacet(action.gatekeeperId);
-      try {
-        await gatekeeper.rejectAction(action.action);
-      } finally {
-        assigned?.close();
-      }
-      // Re-read after the wait: the claim kept other decisions out, but the record is the truth.
-      let current = this.storage.actions.get(action.id);
-      if (current?.type === "action") Object.assign(action, current);
-      action.state = "rejected";
-      action.appliedAt = new Date();
-      if (resolvedBy) action.resolvedBy = resolvedBy;
-      else action.expired = true;
-      delete action.blocked;
-      // A rejected push's pending-push marks are removed in the same durable step as the state
-      // change (nothing was transmitted, so nothing became proven). No-op for pushless actions.
-      this.storage.transaction(() => {
-        this.gitCache.clearPushMarks(action.id);
-        this.storage.actions.put(action);
-      });
+    await this.withActionClaim(action.id, () => this.#rejectClaimed(action, resolvedBy ?? "expired"));
+  }
+
+  // The body of a rejection, for a caller holding the action's claim: the gatekeeper is told, nothing
+  // is sent, and it is stored as rejected by `by` (a person), or by the workspace itself for a reason.
+  async #rejectClaimed(action: ActionRecord & {type: "action"}, by: AiChatAuthorInfo | ActionRejectedBecause): Promise<void> {
+    // An assigned run's action lives on that run's own facet, so it is rejected there (FAC-102
+    // follow-up A), whatever became of the assignment since: rejecting sends nothing.
+    let assigned = action.executedAs ? await this.openAssignedActionFacet(action) : undefined;
+    let gatekeeper = assigned?.facet ?? this.getGatekeeperFacet(action.gatekeeperId);
+    try {
+      await gatekeeper.rejectAction(action.action);
+    } finally {
+      assigned?.close();
+    }
+    // Re-read after the wait: the claim kept other decisions out, but the record is the truth.
+    let current = this.storage.actions.get(action.id);
+    if (current?.type === "action") Object.assign(action, current);
+    action.state = "rejected";
+    action.appliedAt = new Date();
+    if (typeof by === "string") action.rejectedBecause = by;
+    else action.resolvedBy = by;
+    delete action.blocked;
+    // A rejected push's pending-push marks are removed in the same durable step as the state
+    // change (nothing was transmitted, so nothing became proven). No-op for pushless actions.
+    this.storage.transaction(() => {
+      this.gitCache.clearPushMarks(action.id);
+      this.storage.actions.put(action);
     });
   }
 
@@ -6664,12 +6675,25 @@ class OverseerImpl implements AgentHooks {
         (record.executedAs !== undefined || record.workflowRun !== undefined);
   }
 
-  /** When the next pending run write's wait ends, if any does (FAC-118). */
-  nextRunWriteExpiry(): number | undefined {
+  // An expiry that failed (the gatekeeper down, its facet unopenable) is tried again after this,
+  // doubling each time up to the cap, so the alarm never spins on it. Kept in memory: a restart
+  // tries once more, then backs off again.
+  static readonly RUN_WRITE_EXPIRY_RETRY_MS = 60 * 1000;
+  static readonly RUN_WRITE_EXPIRY_RETRY_CAP_MS = 60 * 60 * 1000;
+  #expiryRetries = new Map<number, {at: number; delayMs: number}>();
+
+  /**
+   * When the alarm should next try a pending run write's expiry (FAC-118): when its wait ends, or,
+   * for one that failed, its next try; one being decided now is looked at again a minute later.
+   */
+  nextRunWriteExpiry(now = Date.now()): number | undefined {
     let next: number | undefined;
     for (let record of this.storage.actions.byHistoryFilter.get("pending")) {
       if (!this.#isRunWrite(record)) continue;
       let at = new Date(record.createdAt).getTime() + OverseerImpl.RUN_WRITE_MAX_WAIT_MS;
+      let retry = this.#expiryRetries.get(record.id);
+      if (retry) at = Math.max(at, retry.at);
+      if (this.#claimedActions.has(record.id)) at = Math.max(at, now + OverseerImpl.RUN_WRITE_EXPIRY_RETRY_MS);
       if (next === undefined || at < next) next = at;
     }
     return next;
@@ -6685,14 +6709,33 @@ class OverseerImpl implements AgentHooks {
     for (let record of Array.from(this.storage.actions.byHistoryFilter.get("pending"))) {
       if (!this.#isRunWrite(record)) continue;
       if (new Date(record.createdAt).getTime() + OverseerImpl.RUN_WRITE_MAX_WAIT_MS > now) continue;
+      let retry = this.#expiryRetries.get(record.id);
+      if (retry && retry.at > now) continue;
+      // A person's decision under way keeps it: theirs stands, and it is looked at again later.
+      if (this.#claimedActions.has(record.id)) {
+        logger.info("run write expiry deferred: being decided", {
+          event: "workflow.run_write.expiry_deferred", actionId: record.id,
+        });
+        continue;
+      }
       try {
         await this.rejectPendingAction(record);
+        this.#expiryRetries.delete(record.id);
         expired.push(record.id);
         this.settleRunOfAction(record.id);
       } catch (error) {
-        // A person's decision got there first (in flight, or already taken): theirs stands.
-        logger.info("run write not expired: already being decided", {
-          event: "workflow.run_write.expiry_skipped", actionId: record.id, error,
+        if (error instanceof Error && error.message === ACTION_IN_PROGRESS) {
+          logger.info("run write expiry deferred: being decided", {
+            event: "workflow.run_write.expiry_deferred", actionId: record.id,
+          });
+          continue;
+        }
+        let delayMs = retry
+          ? Math.min(retry.delayMs * 2, OverseerImpl.RUN_WRITE_EXPIRY_RETRY_CAP_MS)
+          : OverseerImpl.RUN_WRITE_EXPIRY_RETRY_MS;
+        this.#expiryRetries.set(record.id, { at: now + delayMs, delayMs });
+        logger.warn(`run write expiry failed; tried again in ${Math.round(delayMs / 1000)}s`, {
+          event: "workflow.run_write.expiry_failed", actionId: record.id, error,
         });
       }
     }
@@ -6763,6 +6806,14 @@ class OverseerImpl implements AgentHooks {
     // recorded: the person checks the provider and rejects it.
     // A replay's copy of a write already proposed (FAC-112) is the same write again: never applied.
     if (record.replayDuplicateOf !== undefined) throw new Error(REPLAY_DUPLICATE_REFUSED);
+    // A run's write past its wait is expired here, as the claim is taken, whether or not the alarm
+    // has run yet (FAC-118); a decision already under way when the wait ended is not affected.
+    let pendingNow = this.storage.actions.get(record.id);
+    if (pendingNow?.type === "action" && this.#isRunWrite(pendingNow) &&
+        new Date(pendingNow.createdAt).getTime() + OverseerImpl.RUN_WRITE_MAX_WAIT_MS <= Date.now()) {
+      await this.#rejectClaimed(pendingNow, "expired");
+      throw new Error(RUN_WRITE_EXPIRED);
+    }
     let stored = this.storage.actions.get(record.id);
     let last = stored?.type === "action" ? stored.lastAttempt : undefined;
     if (last && last.retryable !== true) {
@@ -6810,6 +6861,9 @@ class OverseerImpl implements AgentHooks {
           problem = this.assignedActionProblem(record);
           if (problem) throw new Error(problem);
           requester.revalidate();
+          // After the last await, with none before the write: the definition the run started on is
+          // still the trigger's (FAC-118), so a re-pin during the re-checks is seen.
+          this.#requireSameDefinition(record.executedAs.hookId, record.executedAs.deliveryId);
         } catch (error) {
           assigned.close();
           throw error;
@@ -6821,9 +6875,22 @@ class OverseerImpl implements AgentHooks {
         let requester = await requireRunRequester(this, record.workflowRun.hookId, record.workflowRun.deliveryId);
         await this.#requesterMayUseWorkspace(record.workflowRun.deliveryId);
         requester.revalidate();
+        // After the last await, with none before the write (FAC-118), as for an assigned run.
+        this.#requireSameDefinition(record.workflowRun.hookId, record.workflowRun.deliveryId);
       }
     } catch (error) {
-      if (record.executedAs || record.workflowRun) this.#recordBlocked(record.id, error);
+      if (record.executedAs || record.workflowRun) {
+        // A changed definition can't be fixed, so the write is rejected now, under this claim, and
+        // a fresh proposal is needed; any other refusal can be, so it waits, blocked, with why.
+        if (error instanceof Error && error.message === RUN_DEFINITION_CHANGED) {
+          let current = this.storage.actions.get(record.id);
+          if (current?.type === "action" && current.state === "pending") {
+            await this.#rejectClaimed(current, "definition-changed");
+          }
+        } else {
+          this.#recordBlocked(record.id, error);
+        }
+      }
       throw error;
     }
     let gatekeeper = assigned?.facet ?? this.getGatekeeperFacet(record.gatekeeperId);
