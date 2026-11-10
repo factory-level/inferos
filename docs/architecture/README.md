@@ -26,6 +26,7 @@ Create documents from [`_template.md`](_template.md).
 | [Native agent deployments](agent-deployments.md) | `packages/workshop-shared/src/agent-deployment.ts` | Accepted contract only (types, lifecycle table, grant carry-forward); `AGENT_DEPLOYMENTS` still reported unsupported |
 | [Persistent stage deploys](stage-deploy.md) | `scripts/stage`, `scripts/preview/staging-config.ts` | `pnpm stage:deploy dev\|prod`: real prefixed Workers on custom domains behind Access, signed in with InferLab; no CI job yet |
 | [Software factory sandboxes and local CI](factory.md) | `scripts/local/factory.ts`, `scripts/local/access-emulator.ts`, `.agents/skills/factory-sandboxes` | `pnpm local factory up dev\|infra\|verify\|stage-probe` and `scripts/ci/pipeline.ts --target=local` (verify, security, build, local deploy, bindings, DAST, perf) with evidence under `.factory/runs/` |
+| [Workflow run history](workflow-run-history.md) | `packages/workshop-backend/src/workflow-definition-store.ts`, `packages/workshop-backend/src/overseer.ts`, `packages/workshop-backend/src/env.d.ts`, `packages/workshop-shared/src/workflow-definition.ts` | Bounded retention for terminal workflow deliveries, owner/editor reads after definition expiry, and admission refusal at the configured per-workspace cap. |
 
 ## Designs with no implementation yet
 

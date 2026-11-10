@@ -6,8 +6,10 @@ import {
   type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery,
   type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunFailure, type WorkflowRunResult,
   type WorkflowTriggerDefinitionRef, isLiveWorkflowDelivery, WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME,
-  type WorkflowRunRecord, MAX_WORKFLOW_DEFINITION_SHARES, parseWorkflowDefinitionRights,
+  MAX_WORKFLOW_DEFINITION_SHARES, parseWorkflowDefinitionRights,
   type WorkflowDefinitionRights, type WorkflowDefinitionShare,
+  type WorkflowRunRecord, WORKFLOW_RUN_HISTORY_CAP_REFUSAL, WORKFLOW_RUN_HISTORY_RETENTION_MS,
+  WORKFLOW_RUN_HISTORY_SWEEP_BATCH,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 import type { HookOccurrence } from "@gadgets/workshop-shared/gatekeeper";
@@ -49,8 +51,10 @@ type ViewerRights = WorkflowDefinitionRights & { shared: boolean };
 
 const NO_RIGHTS: ViewerRights = { read: false, run: false, edit: false, shared: false };
 
-/** A stored delivery, numbered so the oldest can be dropped. */
-export type StoredWorkflowDelivery = WorkflowDefinitionDelivery & { id: number };
+/** A stored delivery with its history owner retained after its definition is swept. */
+export type StoredWorkflowDelivery = WorkflowDefinitionDelivery & { id: number; historyOwnerProfileId?: string };
+/** Ordered expiry pointer, so routine cleanup reads only the bounded due prefix. */
+export type StoredWorkflowDeliveryExpiry = { key: string; deliveryId: number };
 
 /** Dedupe tombstones survive delivery-history eviction for the configured occurrence window. */
 export type StoredWorkflowOccurrence = { key: string; hookId: number; deliveryId: number; expiresAt: number };
@@ -77,7 +81,13 @@ export type QueuedWorkflowRun = { deliveryId: number; hookId: number; method: st
  * or removed, a trigger forgotten, a run ended or settled), so the Overseer reschedules its alarm
  * for `nextExpiry`.
  */
-export type DefinitionRetention = { now: () => number; dynamicTtlMs: () => number; onChange?: () => void };
+export type DefinitionRetention = {
+  now: () => number;
+  dynamicTtlMs: () => number;
+  runHistoryTtlMs?: () => number;
+  maxWorkflowDeliveries?: () => number;
+  onChange?: () => void;
+};
 
 const DEFAULT_RETENTION: DefinitionRetention = { now: () => Date.now(), dynamicTtlMs: () => dynamicDefinitionTtlMs(undefined) };
 
@@ -127,8 +137,9 @@ const NOT_FOUND = "Workflow definition not found.";
  */
 export class WorkspaceWorkflowDefinitionStore {
   constructor(private durableStorage: DurableObjectStorage,
-      private storage: Pick<OverseerStorage,
-          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "workflowOccurrences" |
+  private storage: Pick<OverseerStorage,
+          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "workflowDeliveryExpiries" |
+          "workflowDeliveryCount" | "workflowOccurrences" |
           "workflowOccurrenceExpiries" | "workflowOccurrenceCounts" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
           "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired" |
@@ -197,6 +208,11 @@ export class WorkspaceWorkflowDefinitionStore {
       if (at === undefined || pinned.has(stored.id) || (at <= now && live.has(stored.id))) continue;
       if (next === undefined || at < next) next = at;
     }
+    let history = Array.from(this.storage.workflowDeliveryExpiries.list({ limit: 1 }))[0];
+    if (history) {
+      let expiry = Number(history.key.slice(0, 16));
+      if (Number.isFinite(expiry) && (next === undefined || expiry < next)) next = expiry;
+    }
     return next;
   }
 
@@ -204,11 +220,92 @@ export class WorkspaceWorkflowDefinitionStore {
     this.retention.onChange?.();
   }
 
-  /**
-   * The definitions `viewer` (whose role here is `role`) may see, among those available (FAC-124):
-   * their own in full, one shared with them to edit with every revision, and otherwise one they may
-   * read with its published revision only (FAC-122; `#rights`).
-   */
+  #historyExpiry(delivery: StoredWorkflowDelivery): number | undefined {
+    let outcome = delivery.result?.outcome;
+    let settledAt = delivery.result?.settledAt?.getTime();
+    if ((outcome !== "succeeded" && outcome !== "failed") || !Number.isFinite(settledAt)) return undefined;
+    return settledAt! + (this.retention.runHistoryTtlMs?.() ?? WORKFLOW_RUN_HISTORY_RETENTION_MS);
+  }
+
+  #historyExpiryKey(expiresAt: number, deliveryId: number): string {
+    return `${String(expiresAt).padStart(16, "0")}:${String(deliveryId).padStart(16, "0")}`;
+  }
+
+  #ensureHistoryIndex(): number {
+    let indexed = this.storage.workflowDeliveryCount.get();
+    if (indexed?.indexed) return indexed.count;
+    let count = 0;
+    for (let delivery of this.storage.workflowDeliveries.list()) {
+      count++;
+      let definition = this.storage.workflowDefinitions.get(delivery.definitionId);
+      if (!delivery.historyOwnerProfileId && definition) {
+        delivery = { ...delivery, historyOwnerProfileId: definition.owner.id };
+        this.storage.workflowDeliveries.put(delivery);
+      }
+      let expiresAt = this.#historyExpiry(delivery);
+      if (expiresAt !== undefined) {
+        this.storage.workflowDeliveryExpiries.put({ key: this.#historyExpiryKey(expiresAt, delivery.id), deliveryId: delivery.id });
+      }
+    }
+    this.storage.workflowDeliveryCount.put({ count, indexed: true });
+    return count;
+  }
+
+  #putDelivery(delivery: StoredWorkflowDelivery): void {
+    let previous = this.storage.workflowDeliveries.get(delivery.id);
+    if (previous) {
+      let oldExpiry = this.#historyExpiry(previous);
+      if (oldExpiry !== undefined) this.storage.workflowDeliveryExpiries.delete(this.#historyExpiryKey(oldExpiry, delivery.id));
+    }
+    this.storage.workflowDeliveries.put(delivery);
+    let expiresAt = this.#historyExpiry(delivery);
+    if (expiresAt !== undefined) {
+      this.storage.workflowDeliveryExpiries.put({ key: this.#historyExpiryKey(expiresAt, delivery.id), deliveryId: delivery.id });
+    }
+  }
+
+  #deleteDelivery(deliveryId: number): boolean {
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    if (!delivery) return false;
+    let expiry = this.#historyExpiry(delivery);
+    if (expiry !== undefined) this.storage.workflowDeliveryExpiries.delete(this.#historyExpiryKey(expiry, deliveryId));
+    this.storage.workflowDeliveries.delete(deliveryId);
+    let indexed = this.storage.workflowDeliveryCount.get();
+    if (indexed?.indexed) this.storage.workflowDeliveryCount.put({ ...indexed, count: Math.max(0, indexed.count - 1) });
+    return true;
+  }
+
+  /** Bounded run-history expiry sweep; occurrence tombstones remain independent. */
+  sweepExpiredRunHistory(now = this.retention.now()): number {
+    return this.durableStorage.transactionSync(() => {
+      this.#ensureHistoryIndex();
+      return this.#sweepRunHistoryAt(now);
+    });
+  }
+
+  #sweepRunHistoryAt(now: number): number {
+    let end = `${String(now + 1).padStart(16, "0")}:`;
+    let removed = 0;
+    for (let pointer of this.storage.workflowDeliveryExpiries.list({ end, limit: WORKFLOW_RUN_HISTORY_SWEEP_BATCH })) {
+      let delivery = this.storage.workflowDeliveries.get(pointer.deliveryId);
+      if (!delivery) {
+        this.storage.workflowDeliveryExpiries.delete(pointer.key);
+        continue;
+      }
+      let expectedExpiry = this.#historyExpiry(delivery);
+      if (expectedExpiry === undefined || this.#historyExpiryKey(expectedExpiry, delivery.id) !== pointer.key) {
+        this.storage.workflowDeliveryExpiries.delete(pointer.key);
+        if (expectedExpiry !== undefined) {
+          this.storage.workflowDeliveryExpiries.put({ key: this.#historyExpiryKey(expectedExpiry, delivery.id), deliveryId: delivery.id });
+        }
+        continue;
+      }
+      if (expectedExpiry <= now && this.#deleteDelivery(delivery.id)) removed++;
+    }
+    return removed;
+  }
+
+  /** The definitions `viewer` may see under their current workspace role. */
   list(viewer: string, role: CollaboratorRole | null): WorkflowDefinition[] {
     let now = this.retention.now();
     let pinned = this.#pinnedIds();
@@ -548,7 +645,7 @@ export class WorkspaceWorkflowDefinitionStore {
         // admission. queueRun is idempotent once execution is recorded.
         let existing = this.storage.workflowDeliveries.get(seenOccurrence.deliveryId);
         if (existing) {
-          let { id: _, ...shown } = existing;
+          let { id: _, historyOwnerProfileId: __, ...shown } = existing;
           return { ...shown, deliveryId: existing.id };
         }
         return { alreadyDelivered: true as const };
@@ -560,15 +657,11 @@ export class WorkspaceWorkflowDefinitionStore {
         error.name = WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME;
         throw error;
       }
-      let deliveries = Array.from(this.storage.workflowDeliveries.list()).toSorted((a, b) => a.id - b.id);
-      if (deliveries.length >= MAX_WORKFLOW_DELIVERIES) {
-        let isLive = (candidate: StoredWorkflowDelivery) => isLiveWorkflowDelivery(candidate, now);
-        let terminal = deliveries.find(candidate => !isLive(candidate));
-        if (!terminal) {
-          let needsReconciliation = deliveries.filter(isLive).length;
-          throw new Error(`Too many workflow runs are in progress; ${needsReconciliation} are waiting for reconciliation.`);
-        }
-        this.storage.workflowDeliveries.delete(terminal.id);
+      this.#ensureHistoryIndex();
+      this.#sweepRunHistoryAt(now);
+      let maxDeliveries = this.retention.maxWorkflowDeliveries?.() ?? MAX_WORKFLOW_DELIVERIES;
+      if ((this.storage.workflowDeliveryCount.get()?.count ?? 0) >= maxDeliveries) {
+        throw new Error(WORKFLOW_RUN_HISTORY_CAP_REFUSAL);
       }
       let id = this.storage.nextWorkflowDeliveryId.get();
       this.storage.nextWorkflowDeliveryId.put(id + 1);
@@ -579,6 +672,7 @@ export class WorkspaceWorkflowDefinitionStore {
       let runId = crypto.randomUUID();
       let delivery: StoredWorkflowDelivery = {
         id, hookId, definitionId: pin.definitionId, revision: revision.revision,
+        historyOwnerProfileId: stored.owner.id,
         commitId: revision.source.commitId, at: new Date(),
         ...(invocation ? { invocation: { id: invocation.id, requestedBy: invocation.requestedBy } } : {}),
         ...(assignment ? { executedAs: { credentialRef: assignment.credentialRef } } : {}),
@@ -593,7 +687,9 @@ export class WorkspaceWorkflowDefinitionStore {
         },
       };
       if (invocation) this.storage.workflowInvocations.delete(invocation.id);
-      this.storage.workflowDeliveries.put(delivery);
+      this.#putDelivery(delivery);
+      let count = this.storage.workflowDeliveryCount.get();
+      this.storage.workflowDeliveryCount.put({ count: (count?.count ?? 0) + 1, indexed: true });
       let expiresAt = now + WORKFLOW_OCCURRENCE_TTL_MS;
       this.storage.workflowOccurrences.put({
         key: storedKey, hookId, deliveryId: id, expiresAt,
@@ -602,7 +698,7 @@ export class WorkspaceWorkflowDefinitionStore {
         key: `${String(expiresAt).padStart(16, "0")}:${storedKey}`, occurrenceKey: storedKey, hookId,
       });
       this.storage.workflowOccurrenceCounts.put({ hookId, count: occurrenceCount + 1 });
-      let { id: _, ...shown } = delivery;
+      let { id: _, historyOwnerProfileId: __, ...shown } = delivery;
       return { ...shown, deliveryId: id };
     });
   }
@@ -937,7 +1033,7 @@ export class WorkspaceWorkflowDefinitionStore {
     }
     this.durableStorage.transactionSync(() => {
       this.storage.workflowRunQueue.put({ deliveryId, hookId, method, args });
-      this.storage.workflowDeliveries.put({ ...delivery, execution: { state: "queued", attempts: 0, queuedAt: new Date() } });
+      this.#putDelivery({ ...delivery, execution: { state: "queued", attempts: 0, queuedAt: new Date() } });
     });
   }
 
@@ -953,17 +1049,19 @@ export class WorkspaceWorkflowDefinitionStore {
    * writes name it, so the ones it repeats are matched to those it made (`OverseerImpl.submitActionNow`).
    */
   startRun(deliveryId: number): StoredWorkflowDelivery | null {
-    let delivery = this.storage.workflowDeliveries.get(deliveryId);
-    if (!delivery?.execution) {
-      this.storage.workflowRunQueue.delete(deliveryId);
-      return null;
-    }
-    let started: StoredWorkflowDelivery = {
-      ...delivery,
-      execution: { ...delivery.execution, state: "running", attempts: delivery.execution.attempts + 1, startedAt: new Date() },
-    };
-    this.storage.workflowDeliveries.put(started);
-    return started;
+    return this.durableStorage.transactionSync(() => {
+      let delivery = this.storage.workflowDeliveries.get(deliveryId);
+      if (!delivery?.execution) {
+        this.storage.workflowRunQueue.delete(deliveryId);
+        return null;
+      }
+      let started: StoredWorkflowDelivery = {
+        ...delivery,
+        execution: { ...delivery.execution, state: "running", attempts: delivery.execution.attempts + 1, startedAt: new Date() },
+      };
+      this.#putDelivery(started);
+      return started;
+    });
   }
 
   /** Record queued run `deliveryId` ended (FAC-112), failed for `failure` when given, and unqueue it. */
@@ -972,7 +1070,7 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowRunQueue.delete(deliveryId);
       let delivery = this.storage.workflowDeliveries.get(deliveryId);
       if (!delivery?.execution) return;
-      this.storage.workflowDeliveries.put({
+      this.#putDelivery({
         ...delivery,
         execution: {
           ...delivery.execution, state: failure === undefined ? "finished" : "failed", endedAt: new Date(),
@@ -1008,30 +1106,35 @@ export class WorkspaceWorkflowDefinitionStore {
    * `state` undefined, that it has nowhere there to go (run history only).
    */
   setCanvasDelivery(deliveryId: number, state: "pending" | "delivered" | "undelivered" | undefined): void {
-    let delivery = this.storage.workflowDeliveries.get(deliveryId);
-    if (!delivery) return;
-    let { canvas: _, ...rest } = delivery.delivery ?? {};
-    this.storage.workflowDeliveries.put({ ...delivery, delivery: { ...rest, ...(state === undefined ? {} : { canvas: state }) } });
+    this.durableStorage.transactionSync(() => {
+      let delivery = this.storage.workflowDeliveries.get(deliveryId);
+      if (!delivery) return;
+      let { canvas: _, ...rest } = delivery.delivery ?? {};
+      this.#putDelivery({ ...delivery, delivery: { ...rest, ...(state === undefined ? {} : { canvas: state }) } });
+    });
   }
 
   /** Record delivery `deliveryId`'s result (FAC-114), with run history delivered; unchanged if it's the same. */
   recordResult(deliveryId: number, result: Omit<WorkflowRunResult, "settledAt">): void {
-    let delivery = this.storage.workflowDeliveries.get(deliveryId);
-    if (!delivery) return;
-    let same = delivery.result && delivery.result.outcome === result.outcome && delivery.result.reason === result.reason &&
-        JSON.stringify(delivery.result.report) === JSON.stringify(result.report);
-    if (same && delivery.delivery?.history === "delivered") return;
-    this.storage.workflowDeliveries.put({
-      ...delivery,
-      result: {
-        outcome: result.outcome,
-        ...(result.reason ? { reason: result.reason } : {}),
-        ...(result.report !== undefined ? { report: result.report } : {}),
-        settledAt: same ? delivery.result!.settledAt : new Date(),
-      },
-      delivery: { ...delivery.delivery, history: "delivered" },
+    let changed = this.durableStorage.transactionSync(() => {
+      let delivery = this.storage.workflowDeliveries.get(deliveryId);
+      if (!delivery) return false;
+      let same = delivery.result && delivery.result.outcome === result.outcome && delivery.result.reason === result.reason &&
+          JSON.stringify(delivery.result.report) === JSON.stringify(result.report);
+      if (same && delivery.delivery?.history === "delivered") return false;
+      this.#putDelivery({
+        ...delivery,
+        result: {
+          outcome: result.outcome,
+          ...(result.reason ? { reason: result.reason } : {}),
+          ...(result.report !== undefined ? { report: result.report } : {}),
+          settledAt: same ? delivery.result!.settledAt : new Date(),
+        },
+        delivery: { ...delivery.delivery, history: "delivered" },
+      });
+      return true;
     });
-    this.#changed();
+    if (changed) this.#changed();
   }
 
   /**
@@ -1045,9 +1148,13 @@ export class WorkspaceWorkflowDefinitionStore {
    */
   deliveries(viewer: string, definitionId: string, role: CollaboratorRole | null): WorkflowDefinitionDelivery[] {
     let stored = this.storage.workflowDefinitions.get(definitionId);
-    if (!stored || !this.#rights(stored, viewer, role).edit) throw new Error(NOT_FOUND);
+    let matches = Array.from(this.storage.workflowDeliveries.list()).filter(delivery => delivery.definitionId === definitionId);
+    let owner = stored?.owner.id ?? matches.find(delivery => delivery.historyOwnerProfileId)?.historyOwnerProfileId;
+    if (stored ? !this.#rights(stored, viewer, role).edit : (!owner || (owner !== viewer && role !== "build"))) {
+      throw new Error(NOT_FOUND);
+    }
     let shown: WorkflowDefinitionDelivery[] = [];
-    for (let { id: _, ...delivery } of this.storage.workflowDeliveries.list()) {
+    for (let { id: _, historyOwnerProfileId: __, ...delivery } of matches) {
       if (delivery.definitionId === definitionId) shown.push(delivery);
     }
     return shown;

@@ -18,6 +18,7 @@ import type {
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
+  maxWorkflowDeliveries, workflowRunHistoryRetentionMs,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
@@ -30,6 +31,7 @@ import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
   type StoredWorkflowDefinitionShare, type WorkflowDefinitionAudience, WORKSPACE_AUDIENCE,
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
+  type StoredWorkflowDeliveryExpiry,
   type StoredWorkflowOccurrence,
   type StoredWorkflowOccurrenceExpiry,
   type StoredWorkflowOccurrenceCount,
@@ -1865,6 +1867,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       // The next workflow-definition delivery number (see workflow-definition-store.ts).
       nextWorkflowDeliveryId: 0,
+      // Run-history cap/count migration state, maintained with workflowDeliveries.
+      workflowDeliveryCount: singleton<{ count: number; indexed: boolean } | null>(null),
       // The next on-request run record number (see workflow-definition-store.ts).
       nextWorkflowInvocationLogId: 0,
       nextChatId: 0,
@@ -1912,6 +1916,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       workflowDefinitionShares: collection<StoredWorkflowDefinitionShare>()({ primaryKey: "key" }),
       workflowTriggerPins: collection<StoredTriggerPin>()({ primaryKey: "hookId" }),
       workflowDeliveries: collection<StoredWorkflowDelivery>()({ primaryKey: "id" }),
+      // Ordered retention pointers; routine history cleanup reads only a bounded due prefix.
+      workflowDeliveryExpiries: collection<StoredWorkflowDeliveryExpiry>()({ primaryKey: "key" }),
       // Seven-day idempotency tombstones for server-verified trigger occurrences (FAC-113).
       workflowOccurrences: collection<StoredWorkflowOccurrence>()({ primaryKey: "key" }),
       // Ordered expiry pointers and per-trigger counts keep admission bounded (FAC-113).
@@ -2814,7 +2820,9 @@ class OverseerImpl implements AgentHooks {
    */
   #sweepTemporary(): void {
     try {
-      let swept = this.workflowDefinitionStore().sweepExpired();
+      let store = this.workflowDefinitionStore();
+      let swept = store.sweepExpired();
+      store.sweepExpiredRunHistory();
       if (swept > 0) this.logger.info("swept expired workflow definitions", { event: "workflow.definitions.expired", definitionCount: swept });
     } catch (error) {
       this.logger.error("temporary sweep failed", { event: "workflow.definitions.expire.failed", error });
@@ -12720,6 +12728,8 @@ class OverseerImpl implements AgentHooks {
     return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage, {
       now: () => Date.now(),
       dynamicTtlMs: () => dynamicDefinitionTtlMs(this.env.WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS),
+      runHistoryTtlMs: () => workflowRunHistoryRetentionMs(this.env.WORKFLOW_RUN_HISTORY_RETENTION_DAYS),
+      maxWorkflowDeliveries: () => maxWorkflowDeliveries(this.env.WORKFLOW_MAX_RUN_HISTORY),
       // Wake for the next expiry whenever what expires changes (#416 round 1); during construction,
       // once the alarm's inputs exist.
       onChange: () => {

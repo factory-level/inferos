@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   isLiveWorkflowDelivery, MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKFLOW_DELIVERIES,
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, WORKFLOW_RUN_START_WINDOW_MS,
+  maxWorkflowDeliveries, workflowRunHistoryRetentionMs,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { WorkflowDefinitionDelivery } from "@gadgets/workshop-shared/workflow-definition";
 import { makeOverseerStorage } from "../src/overseer.js";
@@ -21,11 +22,33 @@ const GADGET = 3;
 const OTHER_GADGET = 4;
 const commit = (n: number) => n.toString(16).padStart(40, "0");
 
+describe("workflow run-history settings", () => {
+  it("uses the proposed defaults and accepts bounded whole-number overrides", () => {
+    expect(workflowRunHistoryRetentionMs(undefined)).toBe(90 * 24 * 60 * 60_000);
+    expect(workflowRunHistoryRetentionMs("3650")).toBe(3650 * 24 * 60 * 60_000);
+    expect(maxWorkflowDeliveries(undefined)).toBe(10_000);
+    expect(maxWorkflowDeliveries("1000")).toBe(1000);
+  });
+
+  it("rejects malformed or out-of-range values", () => {
+    for (let value of ["", "1.5", "0", "3651", " 90"]) {
+      expect(() => workflowRunHistoryRetentionMs(value)).toThrow("WORKFLOW_RUN_HISTORY_RETENTION_DAYS");
+    }
+    for (let value of ["", "1000.5", "999", "100001", " 10000"]) {
+      expect(() => maxWorkflowDeliveries(value)).toThrow("WORKFLOW_MAX_RUN_HISTORY");
+    }
+  });
+});
+
 /** One workspace: its store, and the gadget heads its code is at. */
-function workspace() {
+function workspace(options: { max?: number; ttlMs?: number; now?: () => number } = {}) {
   let durable = makeMockStorage();
   let storage = makeOverseerStorage(durable);
-  let store = new WorkspaceWorkflowDefinitionStore(durable, storage);
+  let store = new WorkspaceWorkflowDefinitionStore(durable, storage, {
+    now: options.now ?? (() => Date.now()), dynamicTtlMs: () => 24 * 60 * 60_000,
+    maxWorkflowDeliveries: () => options.max ?? MAX_WORKFLOW_DELIVERIES,
+    runHistoryTtlMs: () => options.ttlMs ?? 90 * 24 * 60 * 60_000,
+  });
   let heads = new Map<number, string>([[GADGET, commit(1)], [OTHER_GADGET, commit(100)]]);
   let headOf = (id: number) => heads.get(id);
   return { store, storage, heads, headOf };
@@ -34,12 +57,13 @@ function workspace() {
 const everyoneBuilds = () => "build" as const;
 
 /** Fill the retained-delivery cap with copies of one valid delivery, without exercising fire in a loop. */
-function fillRetainedDeliveries(storage: ReturnType<typeof makeOverseerStorage>, template: WorkflowDefinitionDelivery) {
-  for (let id = 0; id < MAX_WORKFLOW_DELIVERIES; id++) {
+function fillRetainedDeliveries(storage: ReturnType<typeof makeOverseerStorage>, template: WorkflowDefinitionDelivery, count = MAX_WORKFLOW_DELIVERIES) {
+  for (let id = 0; id < count; id++) {
     if (storage.workflowDeliveries.get(id)) continue;
     storage.workflowDeliveries.put({ ...template, id });
   }
-  storage.nextWorkflowDeliveryId.put(MAX_WORKFLOW_DELIVERIES);
+  storage.workflowDeliveryCount.put({ count, indexed: true });
+  storage.nextWorkflowDeliveryId.put(count);
 }
 
 describe("workflow delivery retention", () => {
@@ -170,10 +194,14 @@ describe("triggers and runs", () => {
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
 
     const slot = 1_800_000_000_000;
-    expect(store.fire(11, GADGET, headOf, everyoneBuilds, undefined,
-      { kind: "schedule", scheduledTime: slot })).toMatchObject({ deliveryId: 0, hookId: 11 });
-    expect(store.fire(11, GADGET, headOf, everyoneBuilds, undefined,
-      { kind: "schedule", scheduledTime: slot })).toMatchObject({ deliveryId: 0, hookId: 11 });
+    let admitted = store.fire(11, GADGET, headOf, everyoneBuilds, undefined,
+      { kind: "schedule", scheduledTime: slot })!;
+    let retried = store.fire(11, GADGET, headOf, everyoneBuilds, undefined,
+      { kind: "schedule", scheduledTime: slot })!;
+    expect(admitted).toMatchObject({ deliveryId: 0, hookId: 11 });
+    expect(retried).toMatchObject({ deliveryId: 0, hookId: 11 });
+    expect(admitted).not.toHaveProperty("historyOwnerProfileId");
+    expect(retried).not.toHaveProperty("historyOwnerProfileId");
     expect(store.fire(11, GADGET, headOf, everyoneBuilds, undefined,
       { kind: "schedule", scheduledTime: slot + 60_000 })).toMatchObject({ deliveryId: 1 });
     expect(Array.from(storage.workflowDeliveries.list(), d => d.hookId)).toEqual([11, 11]);
@@ -340,48 +368,77 @@ describe("triggers and runs", () => {
     expect(store.queuedRuns()).toContainEqual({ deliveryId: first.deliveryId, hookId: 11, method: "run", args: [] });
   });
 
-  it("refuses admission when every retained delivery is uncertain and reports the reconciliation count", () => {
-    let { store, storage, headOf } = workspace();
+
+  it("refuses at the cap without evicting uncertain or in-window terminal history", () => {
+    let { store, storage, headOf } = workspace({ max: 3 });
     let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
+
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
     store.recordResult(first.deliveryId, { outcome: "uncertain", reason: "lost-after-write" });
-    fillRetainedDeliveries(storage, { ...first, result: { outcome: "uncertain", reason: "lost-after-write" } });
+    fillRetainedDeliveries(storage, { ...first, result: { outcome: "uncertain", reason: "lost-after-write" } }, 3);
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds))
-      .toThrow(`Too many workflow runs are in progress; ${MAX_WORKFLOW_DELIVERIES} are waiting for reconciliation.`);
-    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(MAX_WORKFLOW_DELIVERIES);
+
+      .toThrow("Wait for older completed runs to expire");
+    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(3);
+    expect(store.run(first.run!.runId)).not.toBeNull();
   });
 
-  it("evicts a not-started run after its start window", () => {
-    let { store, storage, headOf } = workspace();
+  it("does not treat a not-started or uncertain record as expired history", () => {
+    let { store, storage, headOf } = workspace({ max: 3, ttlMs: 1 });
     let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
+
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
     let template = store.fire(11, GADGET, headOf, everyoneBuilds)!;
-    fillRetainedDeliveries(storage, template);
+    fillRetainedDeliveries(storage, template, 3);
     let firstStored = storage.workflowDeliveries.get(first.deliveryId)!;
     storage.workflowDeliveries.put({
       ...firstStored, at: new Date(Date.now() - WORKFLOW_RUN_START_WINDOW_MS - 1),
     });
-    store.fire(11, GADGET, headOf, everyoneBuilds);
-    expect(store.run(first.run!.runId)).toBeNull();
-    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(MAX_WORKFLOW_DELIVERIES);
+
+    expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("Wait for older completed runs to expire");
+    expect(store.run(first.run!.runId)).not.toBeNull();
+    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(3);
   });
 
-  it("evicts the oldest terminal delivery before admitting another run", () => {
-    let { store, storage, headOf } = workspace();
+  it("expires reconciled terminal history before admitting at the cap", () => {
+    let now = Date.now();
+    let { store, storage, headOf } = workspace({ max: 3, ttlMs: 1, now: () => now });
     let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
+
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
     let template = store.fire(11, GADGET, headOf, everyoneBuilds)!;
-    fillRetainedDeliveries(storage, template);
+    fillRetainedDeliveries(storage, template, 3);
     store.recordResult(first.deliveryId, { outcome: "failed", reason: "runtime-error" });
+    now = Date.now() + 10_000;
     store.fire(11, GADGET, headOf, everyoneBuilds);
-    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(MAX_WORKFLOW_DELIVERIES);
+
+    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(3);
     expect(store.deliveries(ADA.id, saved.id, "build").some(delivery => delivery.result?.outcome === "failed")).toBe(false);
+
+  });
+
+  it("keeps an owner's run history listable after its temporary definition is swept", () => {
+    let now = Date.now();
+    let { store, headOf } = workspace({ now: () => now });
+    let saved = store.save(ADA, { title: "Temporary", gadgetId: GADGET, retain: false }, headOf, "build");
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    let run = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    store.recordResult(run.deliveryId, { outcome: "succeeded" });
+    store.pinTrigger(ADA.id, 11, GADGET, null);
+    now += 25 * 60 * 60_000;
+
+    expect(store.sweepExpired()).toBe(1);
+    expect(store.get(ADA.id, saved.id)).toBeNull();
+    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(1);
+    expect(store.deliveries(ADA.id, saved.id, "build")[0]).not.toHaveProperty("historyOwnerProfileId");
+    expect(() => store.deliveries(BEN.id, saved.id, null)).toThrow("Workflow definition not found.");
   });
 
   it("refuses follow-latest when the gadget head is newer than the published commit", () => {
