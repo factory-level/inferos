@@ -53,6 +53,8 @@ async function withImpl<T>(name: string, fn: (impl: any) => Promise<T> | T): Pro
 /** A live trigger pinned at revision 1, a control listing PERSON, and one run PERSON asked for, fired. */
 function admitted(impl: any) {
   onPrototype(impl, "workflowRunModules", async () => ({ "server.js": "// pinned" }));
+  // PERSON may use this workspace: a run's write re-checks that before it applies (FAC-118).
+  onPrototype(impl, "authorizeCollaborator", async () => "use");
   onPrototype(impl, "loadWorkflowRunWorker", (code: { env: Record<string, any> }) => ({
     getEntrypoint: () => ({ onSchedule: () => workflowRun(code.env.BOARD.workspace, code.env.BOARD.caller) }),
   }));

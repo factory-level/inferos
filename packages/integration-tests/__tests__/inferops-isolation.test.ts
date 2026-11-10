@@ -385,8 +385,8 @@ describe("writes wait for approval and apply once", () => {
       stateId: IN_PROGRESS.id, revision: String(Number(issue.revision) + 1),
     });
 
-    // Approving again is refused by the Workshop and writes nothing.
-    expect(await failure(ws.approveAction(action.id))).toContain("not pending");
+    // Approving again answers as the first approval did and writes nothing (FAC-118).
+    await ws.approveAction(action.id);
     expect(fake.writeRequests().length).toBe(writesBefore + 1);
   });
 
@@ -618,7 +618,8 @@ describe("coding dispatch", () => {
     expect(posts.map(r => r.path)).toEqual([`/project/issues/${issue.id}/dispatch`]);
     expect(posts[0]!.idempotencyKey).toMatch(/^[0-9a-f-]{36}:\d+$/);
     expect(fake.accessTokensOf(dana.person)).toContain(posts[0]!.token);
-    expect(await failure(ws.approveAction(action.id))).toContain("not pending");
+    // Approving again answers as the first did and dispatches nothing more (FAC-118).
+    await ws.approveAction(action.id);
     expect(fake.runsOf(issue.identifier)).toHaveLength(1);
     expect((await session.listRuns()).map(r => [r.id, r.status])).toEqual([[run!.id, "queued"]]);
 
