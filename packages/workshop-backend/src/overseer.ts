@@ -9,6 +9,7 @@ import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
+  WorkflowTriggerDefinitionRef,
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS,
@@ -7523,9 +7524,21 @@ class OverseerImpl implements AgentHooks {
    * else, and for a request that made no run. A run admitted and never queued within
    * `WORKFLOW_RUN_START_WINDOW_MS` reads `uncertain` (`not-started`); before that, `queued`.
    */
-  getRequestedRun(profileId: string, invocationId: string): RequestedRun | null {
+  async getRequestedRun(profileId: string, invocationId: string): Promise<RequestedRun | null> {
     let delivery = this.workflowDefinitionStore().deliveryOfInvocation(invocationId);
     if (!delivery?.run || delivery.invocation?.requestedBy !== profileId) return null;
+    // A company-scoped deployment must prove a known, equal scope on both the current caller and
+    // the stored run. Without that deployment capability, ownership is the scope (checked above).
+    if (getSharedConfigurationGatekeeper(this.env)) {
+      let company: string | null;
+      try {
+        company = await requireWorkflowInvoke(this,
+            this.users.idFromName(profileId).toString(), delivery.hookId);
+      } catch {
+        return null;
+      }
+      if (!company || !delivery.run.company || company !== delivery.run.company) return null;
+    }
     let outcome: WorkflowRunOutcome;
     let reason: RequestedRun["reason"];
     if (delivery.result) {
@@ -7551,9 +7564,11 @@ class OverseerImpl implements AgentHooks {
    * The runs `profileId` asked trigger `hookId` for (FAC-116): the newest `REQUESTED_RUNS_MAX`,
    * newest first, each exactly as `getRequestedRun` reads it for them. Nobody else's.
    */
-  listRequestedRuns(profileId: string, hookId: number): RequestedRun[] {
-    return this.workflowDefinitionStore().requestedDeliveries(profileId, hookId, REQUESTED_RUNS_MAX)
-      .flatMap(delivery => this.getRequestedRun(profileId, delivery.invocation!.id) ?? []);
+  async listRequestedRuns(profileId: string, hookId: number): Promise<RequestedRun[]> {
+    let runs = await Promise.all(this.workflowDefinitionStore()
+      .requestedDeliveries(profileId, hookId, REQUESTED_RUNS_MAX)
+      .map(delivery => this.getRequestedRun(profileId, delivery.invocation!.id)));
+    return runs.filter((run): run is RequestedRun => run !== null);
   }
 
   // What identifies the write run `runId` (delivery `deliveryId`) proposes now (FAC-112): the
@@ -14522,7 +14537,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let profile = await this.#getClientProfile();
     return this.impl.workflowDefinitionStore().publish(profile, id, revision);
   }
-  async pinTriggerDefinition(hookId: number, ref: WorkflowDefinitionRef | null): Promise<void> {
+  async pinTriggerDefinition(hookId: number, ref: WorkflowTriggerDefinitionRef | null): Promise<void> {
     await this.#requireSharedConfiguration("build", "shared");
     let profile = await this.#getClientProfile();
     let hook = this.impl.storage.boundHooks.get(hookId);
@@ -14532,7 +14547,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     this.impl.workflowDefinitionStore().pinTrigger(profile.id, hookId,
         hook.gadgetId ?? this.impl.defaultGadgetId ?? null, ref);
   }
-  async getTriggerDefinition(hookId: number): Promise<WorkflowDefinitionRef | null> {
+  async getTriggerDefinition(hookId: number): Promise<WorkflowTriggerDefinitionRef | null> {
     return this.impl.workflowDefinitionStore().pinOf(hookId);
   }
   async listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]> {
@@ -17217,7 +17232,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async saveWorkflowDefinition(_input: WorkflowDefinitionSave): Promise<WorkflowDefinition> { this.#deny(); }
   async publishWorkflowDefinition(_id: string, _revision: number): Promise<WorkflowDefinition> { this.#deny(); }
-  async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
+  async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   // An operator listed on a trigger's control may ask it to run, and sees only those controls; it
@@ -17884,7 +17899,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async listWorkflowDefinitions(): Promise<WorkflowDefinition[]> { this.#deny(); }
   async saveWorkflowDefinition(_input: WorkflowDefinitionSave): Promise<WorkflowDefinition> { this.#deny(); }
   async publishWorkflowDefinition(_id: string, _revision: number): Promise<WorkflowDefinition> { this.#deny(); }
-  async pinTriggerDefinition(_hookId: number, _ref: WorkflowDefinitionRef | null): Promise<void> { this.#deny(); }
+  async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }

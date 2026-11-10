@@ -123,15 +123,15 @@ describe("a requested run's result, read by the person who asked (FAC-114)", () 
     let name = `run-result-waiting-${crypto.randomUUID()}`;
     workflowRun = async (workspace, caller) => { await write(workspace, caller); return { summary: "proposed" }; };
     let { invocationId } = await ranOnce(name);
-    let actionId = await withImpl(name, impl => {
-      let read = impl.getRequestedRun(PERSON, invocationId);
+    let actionId = await withImpl(name, async impl => {
+      let read = await impl.getRequestedRun(PERSON, invocationId);
       expect(read).toMatchObject({ outcome: "waiting", actions: [{ outcome: "waiting" }] });
       return read.actions[0].actionId;
     });
     await withImpl(name, async impl => {
       impl.getGatekeeperFacet = () => ({ applyAction: async () => ({ applied: { result: {} } }) });
       await impl.applyPendingAction(impl.storage.actions.get(actionId), ADA, false);
-      expect(impl.getRequestedRun(PERSON, invocationId)).toMatchObject({
+      expect(await impl.getRequestedRun(PERSON, invocationId)).toMatchObject({
         outcome: "succeeded", actions: [{ actionId, outcome: "succeeded" }],
       });
     });
@@ -169,25 +169,25 @@ describe("a requested run's result, read by the person who asked (FAC-114)", () 
 
   it("reads uncertain when it was admitted but never started within the start window", async () => {
     let name = `run-result-notstarted-${crypto.randomUUID()}`;
-    let read = await withImpl(name, impl => {
+    let read = await withImpl(name, async impl => {
       let made = admitted(impl);
       // The gatekeeper took the request and never called back: it's admitted, not queued.
       let stored = impl.storage.workflowDeliveries.get(made.delivery.deliveryId);
       impl.storage.workflowDeliveries.put({ ...stored, at: new Date(Date.now() - 60 * 60 * 1000) });
-      return impl.getRequestedRun(PERSON, made.invocationId);
+      return await impl.getRequestedRun(PERSON, made.invocationId);
     });
     expect(read).toMatchObject({ outcome: "uncertain", reason: "not-started" });
   });
 
   it("is one run however often its delivery repeats: a repeated delivery of the request is refused", async () => {
     let name = `run-result-dup-${crypto.randomUUID()}`;
-    await withImpl(name, impl => {
+    await withImpl(name, async impl => {
       let made = admitted(impl);
       let store = impl.workflowDefinitionStore();
       expect(() => store.fire(HOOK, GADGET, () => commit(1), () => true, made.invocationId))
         .toThrow("That run request is unknown or already ran.");
       expect([...impl.storage.workflowDeliveries.list()]).toHaveLength(1);
-      expect(impl.getRequestedRun(PERSON, made.invocationId)).toMatchObject({ outcome: "queued" });
+      expect(await impl.getRequestedRun(PERSON, made.invocationId)).toMatchObject({ outcome: "queued" });
     });
   });
 });
