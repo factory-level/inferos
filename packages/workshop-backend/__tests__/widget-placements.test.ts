@@ -54,6 +54,13 @@ describe("a placement's shape", () => {
     expect(parseWidgetPlacementInput({ ref: BOARD, layout: at(8, 2) })).toEqual({ ref: BOARD, layout: at(8, 2), filters: {} });
   });
 
+  it("refuses a filter named like an object's own property, rather than dropping it without a word", () => {
+    for (let name of ["__proto__", "constructor", "prototype"]) {
+      expect(() => parseWidgetPlacementInput({ ref: BOARD, layout: at(0, 0), filters: JSON.parse(`{"${name}": "x"}`) }))
+        .toThrow("A filter's name isn't valid.");
+    }
+  });
+
   it("refuses a layout off the grid, a reference that isn't one, and filters that aren't plain text", () => {
     const bad: unknown[] = [
       { ref: COUNTER, layout: at(10, 0, 4) },
@@ -164,6 +171,20 @@ describe("one person in two companies", () => {
 
     company.now = "tenant-a";
     expect((await user.listWidgetPlacements()).placements).toEqual([]);
+  });
+
+  it("refuses a write at a revision read in company 1 with an empty canvas, and stores nothing in company 2", async () => {
+    let company = { now: "tenant-a" };
+    let user = await person(company);
+    let inA = await user.listWidgetPlacements();
+    expect(inA.placements).toEqual([]);
+
+    company.now = "tenant-b";
+    expect(await refusal(user.saveWidgetPlacement({ ref: BOARD, layout: at(0, 0), filters: { status: "open" } }, inA.revision)))
+      .toContain(WIDGET_PLACEMENT_ERROR_CODES.conflict);
+    let inB = await user.listWidgetPlacements();
+    expect(inB.placements).toEqual([]);
+    expect(inB.revision).toBeGreaterThan(inA.revision);
   });
 });
 

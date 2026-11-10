@@ -104,6 +104,8 @@ export class WidgetPlacementError extends Error {
 const ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const KIND = /^[a-z0-9-]{1,64}\/[a-z0-9-]{1,64}$/;
 const FILTER_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+/** Names an object already has on its prototype: refused, so a filter never vanishes silently. */
+const RESERVED_FILTER_NAMES = new Set(["__proto__", "constructor", "prototype"]);
 const TARGET = /^inferops:\/\/[\x21-\x7e]{1,500}$/;
 
 function invalid(message: string): never {
@@ -159,7 +161,7 @@ export function parseWidgetPlacementFilters(filters: unknown): Record<string, st
   if (entries.length > WIDGET_PLACEMENT_LIMITS.filters) invalid(`A placement has at most ${WIDGET_PLACEMENT_LIMITS.filters} filters.`);
   let parsed: Record<string, string> = {};
   for (let [name, value] of entries) {
-    if (!FILTER_NAME.test(name)) invalid("A filter's name isn't valid.");
+    if (!FILTER_NAME.test(name) || RESERVED_FILTER_NAMES.has(name)) invalid("A filter's name isn't valid.");
     if (typeof value !== "string" || value.length > WIDGET_PLACEMENT_LIMITS.filterValue) {
       invalid(`A filter's value is text of at most ${WIDGET_PLACEMENT_LIMITS.filterValue} characters.`);
     }

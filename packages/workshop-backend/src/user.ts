@@ -1531,11 +1531,12 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     // The keys first, so nothing is deleted while the listing is still being read.
     let widgetKeys = Array.from(this.storage.widgetStates.list(), widget => widget.key);
     for (let key of widgetKeys) this.storage.widgetStates.delete(key);
-    // The former company's placements too (FAC-13); the revision rises, so a client holding them
-    // is refused as a conflict and reads the (empty) placements again.
+    // The former company's placements too (FAC-13). The revision rises on every reset, even with
+    // none placed, so any revision read in the former company, an empty canvas's included, is
+    // refused as a conflict and the client reads this company's placements again.
     let placementIds = Array.from(this.storage.widgetPlacements.list(), placement => placement.placementId);
     for (let placementId of placementIds) this.storage.widgetPlacements.delete(placementId);
-    if (placementIds.length > 0) this.storage.widgetPlacementsRevision.put(this.storage.widgetPlacementsRevision.get() + 1);
+    this.storage.widgetPlacementsRevision.put(this.storage.widgetPlacementsRevision.get() + 1);
     let record: OperateEventRecord = {
       seq: this.storage.operatePage.get().seq + 1, event: { type: "companyChanged" }, actor: "person", at: new Date(),
     };
