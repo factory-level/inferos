@@ -7,7 +7,7 @@
  * A reference identifies a target and an attachment grants nothing; both are checked at use, under
  * the acting person's or run's own authority.
  */
-import { CANVAS_ID, CANVAS_REVISION, parseCanvasDefinition, parseCanvasWidget, type CanvasDataBinding, type CanvasDefinition, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
+import { CANVAS_ID, CANVAS_REVISION, newerWidgetPlaceholder, parseCanvasDefinition, parseCanvasWidget, type CanvasDataBinding, type CanvasDefinition, type CanvasReadOptions, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
 import { parseWorkspaceSettings, type WorkspaceSettings } from "./workspace-settings";
 
 /** The schema version this module reads. `CanvasDefinition`, with sections, is version 1. */
@@ -80,6 +80,8 @@ export const CANVAS_WIDGET_ACTIONS: Readonly<Record<CanvasWidgetKind, readonly s
   "inferops.project-board": ["transition-issue", "create-issue", "update-issue"],
   "inferops.wiki": ["update-document", "update-section"],
   "inferos.gadget": [],
+  // A newer InferOS's widget, shown as a placeholder (FAC-9): nothing may be asked of it.
+  "inferos.unsupported": [],
 };
 
 /** Raise a named event on one node, which hears it only through its own attachments. */
@@ -279,11 +281,14 @@ function parseAttachments(value: unknown, at: string): CanvasAttachment[] {
   });
 }
 
-function parseNode(value: unknown, index: number): CanvasNode {
+function parseNode(value: unknown, index: number, options: CanvasReadOptions = {}): CanvasNode {
   const position = `nodes[${index}]`;
   if (!value || typeof value !== "object" || Array.isArray(value)) return reject("invalid-shape", position);
   const raw = value as Record<string, unknown>;
   const id = parseId(raw.id, position);
+  // A newer InferOS's widget, read tolerantly: in its place, a placeholder that hears nothing.
+  const placeholder = options.tolerateNewer && raw.nodeType === "widget" ? newerWidgetPlaceholder(raw) : null;
+  if (placeholder) return { ...placeholder, nodeType: "widget", attachments: [] };
   if (raw.nodeType === "object") {
     const o = fields(value, ["nodeType", "id", "title", "columns", "children", "attachments"], id);
     if (o.columns !== 1 && o.columns !== 2 && o.columns !== 3) return reject("invalid-shape", id);
@@ -292,7 +297,9 @@ function parseNode(value: unknown, index: number): CanvasNode {
   if (raw.nodeType !== "widget") return reject("unknown-node-type", id);
   if (Object.hasOwn(raw, "children")) return reject("invalid-nesting", id);
   const w = fields(value, ["nodeType", "id", "kind", "version", "targetRef", "size", "params", "attachments",
-    ...(Object.hasOwn(raw, "dataBinding") ? ["dataBinding"] : [])], id);
+    ...(Object.hasOwn(raw, "dataBinding") ? ["dataBinding"] : []),
+    // A placeholder read from a newer InferOS's widget names the kind it stands for (FAC-9).
+    ...(raw.kind === "inferos.unsupported" ? ["storedKind"] : [])], id);
   if (Object.hasOwn(w, "dataBinding")) validateDataBinding(w.dataBinding, w.kind, w.targetRef, id);
   if (w.params && typeof w.params === "object") {
     for (const key of Object.keys(w.params)) {
@@ -302,7 +309,8 @@ function parseNode(value: unknown, index: number): CanvasNode {
   let widget: CanvasWidget;
   try {
     widget = parseCanvasWidget({ id, kind: w.kind, version: w.version, targetRef: w.targetRef, size: w.size, params: w.params,
-      ...(Object.hasOwn(w, "dataBinding") ? { dataBinding: w.dataBinding } : {}) });
+      ...(Object.hasOwn(w, "dataBinding") ? { dataBinding: w.dataBinding } : {}),
+      ...(Object.hasOwn(w, "storedKind") ? { storedKind: w.storedKind } : {}) });
   } catch {
     return reject("invalid-widget", id);
   }
@@ -545,7 +553,7 @@ const parsePageSettings = (value: unknown, at: string): WorkspaceSettings => {
  * Validate and detach one page. Throws `CanvasModelError`. This takes no viewer and performs no I/O:
  * accepting a page says its shape is sound, and says nothing about who may see a target it names.
  */
-export function parseCanvasPage(value: unknown): CanvasPage {
+export function parseCanvasPage(value: unknown, options: CanvasReadOptions = {}): CanvasPage {
   if (!value || typeof value !== "object" || Array.isArray(value)) return reject("invalid-shape", "page");
   const raw = value as Record<string, unknown>;
   if (raw.schemaVersion !== CANVAS_MODEL_SCHEMA_VERSION) return reject("unknown-version", "page");
@@ -557,7 +565,12 @@ export function parseCanvasPage(value: unknown): CanvasPage {
   if (typeof p.revision !== "string" || !CANVAS_REVISION.test(p.revision)) return reject("invalid-shape", id);
   if (!Array.isArray(p.nodes)) return reject("invalid-shape", id);
   if (p.nodes.length > CANVAS_MODEL_LIMITS.nodes) return reject("limit-exceeded", id);
-  const nodes = p.nodes.map(parseNode);
+  const parsed = p.nodes.map((node, index) => parseNode(node, index, options));
+  // Nothing may ask a placeholder for an action, so a tolerant read drops what does.
+  const placeholders = new Set(parsed.flatMap(node => node.nodeType === "widget" && node.kind === "inferos.unsupported" ? [node.id] : []));
+  const drop = (attachments: CanvasAttachment[]) => placeholders.size === 0 ? attachments
+    : attachments.filter(item => item.effect.kind !== "request-action" || !placeholders.has(item.effect.target));
+  const nodes = parsed.map(node => placeholders.size === 0 ? node : { ...node, attachments: drop(node.attachments) });
   const byId = new Map<string, CanvasNode>();
   for (const node of nodes) {
     if (node.id === id || byId.has(node.id)) return reject("duplicate-id", node.id);
@@ -566,7 +579,7 @@ export function parseCanvasPage(value: unknown): CanvasPage {
   if (nodes.filter(node => node.nodeType === "widget").length > CANVAS_MODEL_LIMITS.widgets) return reject("limit-exceeded", id);
   const page: CanvasPage = {
     schemaVersion: CANVAS_MODEL_SCHEMA_VERSION, id, revision: p.revision, title: parseTitle(p.title, id),
-    children: idList(p.children, id), attachments: parseAttachments(p.attachments, id), nodes,
+    children: idList(p.children, id), attachments: drop(parseAttachments(p.attachments, id)), nodes,
     ...(Object.keys(settings).length === 0 ? {} : { settings }),
   };
   checkContainment(page, byId);
@@ -582,7 +595,7 @@ export function parseCanvasPage(value: unknown): CanvasPage {
 export function parseCanvasWorkspacePages(value: unknown): CanvasPage[] {
   if (!Array.isArray(value)) return reject("invalid-shape", "pages");
   if (value.length > CANVAS_MODEL_LIMITS.pages) return reject("limit-exceeded", "pages");
-  const pages = value.map(parseCanvasPage);
+  const pages = value.map(page => parseCanvasPage(page));
   const ids = new Set<string>();
   for (const page of pages) {
     if (ids.has(page.id)) return reject("duplicate-id", page.id);
@@ -601,8 +614,8 @@ export function parseCanvasWorkspacePages(value: unknown): CanvasPage[] {
  * concurrently gives the same IDs and one result. It keeps the revision, because conversion isn't
  * an edit, and throws without changing anything if the definition isn't valid.
  */
-export function canvasPageFromDefinition(definition: unknown): CanvasPage {
-  const { id, revision, title, sections } = parseCanvasDefinition(definition);
+export function canvasPageFromDefinition(definition: unknown, options: CanvasReadOptions = {}): CanvasPage {
+  const { id, revision, title, sections } = parseCanvasDefinition(definition, options);
   return parseCanvasPage({
     schemaVersion: CANVAS_MODEL_SCHEMA_VERSION, id, revision, title, attachments: [],
     children: sections.map(section => section.id),
