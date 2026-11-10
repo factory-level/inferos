@@ -16,6 +16,7 @@ covers:
   - packages/gatekeeper-kit
   - packages/workshop-shared/src/gatekeeper.ts
   - packages/workshop-backend/src/user.ts
+  - packages/workshop-frontend/src/features/auth/AccountSubjectPassCard.tsx
   - packages/workshop-backend/src/account-subject.ts
   - packages/workshop-backend/src/user-directory.ts
   - packages/workshop-backend/__tests__/account-subject.test.ts
@@ -262,6 +263,29 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `unavailable`. Only the Workshop's build-role `publishConsole` and `deleteConsole` call them (see
   [Operate mode](operate-mode.md#widget-index)), directly rather than as approved actions: the
   divergence below.
+- **Widget search by intent (FAC-13).** `InferOpsAccount.searchWidgets(query, k)` asks InferOps'
+  `widget.search` (`GET /knowledge/widget-search?query&k`, `knowledge:read`) through
+  `InferOpsClient.searchWidgets`, with the connected person's own token, in each of their
+  workspaces (as the sign-in recorded them), and merges the answers (`mergeWidgetSearches`): each
+  built-in kind and each definition (`<sourceId>@<sourceVersion>`) once, at its best score, best
+  first, at most `k` of each. It returns definitions only (`WidgetSearchAnswer`): no instance,
+  record or live data.
+  - **Nothing asked** is said, never shown as "no widgets": an account without a connected person of
+    `INFEROPS_COMPANY` answers `{status: "unavailable", reason: "reconnect"}`, and a person with no
+    InferOps workspace `no-workspace`.
+  - **Denied** only for InferOps' own missing-permission refusal (`Missing permission:
+    knowledge:read`, read from its error envelope; `WIDGET_SEARCH_DENIED`): that workspace was asked
+    and adds nothing, counted in `denied`. Any other 403 (a product refusal, a workspace the person
+    no longer holds) is a workspace not searched.
+  - **Partial outages** are counted in `unsearched`, beside what the other workspaces found. If
+    every workspace failed so, the last failure is thrown. A 404 (an InferOps without
+    `widget.search`) or an outage is `UNAVAILABLE` in `WIDGET_SEARCH_UNAVAILABLE`'s words; an
+    answer that doesn't parse, or holds more than `k` of either, is refused as malformed. The demo's
+    mock has no index and throws.
+  - Scores from workspaces ranked differently (one `semantic`, one `keyword`) are merged on one
+    scale, and the answer reads `semantic`. A deployment has one embedder, so this only orders.
+  - `__tests__/http-inferops.test.ts` ("widget search by intent (FAC-13)") covers the request, its
+    parsing, and which 403 reads as denied.
 - **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses
   `inferops://<tenant>.<workspace>/project/board/<KEY>` (exactly two lowercase slug labels, no
   port; anything else is not a board URL), resolves the workspace, checks the project exists there
@@ -911,6 +935,14 @@ holds. The Workshop (`account-subject.ts`, `auth/login-flow.ts`) keys the person
   own InferOps connection vouches its address, unless the directory already sends that subject to
   another account (a conflict, left unbound, so nothing is stranded). It creates no account, and a
   second run binds nothing new. Accounts the directory doesn't list yet bind at their next sign-in.
+- **Running the pass.** A deployment admin runs it from the Admin page's Access tab
+  (`AccountSubjectPassCard`, over the same `AdminApi.bindAccountSubjects()`; nothing else calls
+  it). Binding can't be undone there, so it takes a second, explicit step: *Bind accounts…* says
+  what binding does, and only *Bind accounts* runs it; *Cancel* runs nothing. While it runs the
+  button is disabled. It then shows the pass's counts only (checked, bound, already bound, and how
+  many were left unbound), never an account, with its own words for nothing to bind and for no
+  account holding a vouching connection. A failure shows the server's message and the pass can be
+  run again. Tests: `AccountSubjectPassCard.test.tsx`.
 - **Admins** (`ADMINS`) are still matched by account name: a bound account keeps its address as its
   name; a new person's account name is its subject form.
 - **Tests:** `account-subject.test.ts` (the email change, a second person on the old address, the

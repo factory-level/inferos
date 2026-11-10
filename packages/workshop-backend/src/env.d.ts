@@ -110,6 +110,9 @@ declare global {
       // not to be set on any deployment until the fail-closed follow-up merges. Off, removing and
       // retiring still work. See workflowAssignmentsEnabled in overseer.ts.
       WORKFLOW_ASSIGNMENTS_ENABLED?: string;
+      // How long a dynamic, unsaved workflow definition lasts, in whole hours from 1 to 720 (FAC-124).
+      // Unset is the proposed default, 24 (workflow-definition.ts `dynamicDefinitionTtlMs`).
+      WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS?: string;
 
       // Gatekeeper vendor id (e.g. "inferops") that decides who may edit and publish shared
       // configuration: a workspace with collaborators or share links. Unset = Build is decided by
