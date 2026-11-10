@@ -3,7 +3,7 @@
 // writes nothing, so a valid draft survives reopening unchanged. Over mock Durable Object storage,
 // with the real console store; who may validate is workshop-use-role.test.ts's.
 import { describe, expect, it } from "vitest";
-import { canvasPageFromDefinition, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import { canvasPageFromDefinition, canvasRunEvent, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
 import type { ConsoleWidgetEntry, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import { parseWidgetStates } from "@gadgets/workshop-shared/widget-state";
 import { classifyGadgetFiles } from "@gadgets/workshop-shared/workspace-kind";
@@ -153,6 +153,21 @@ describe("a draft page that doesn't parse", () => {
     ]);
     expect(problems[0]!.message).toContain("reference-cycle");
     expect(problems[0]!.repair).toContain("loop");
+    expect(() => t.consoles.publish(draft.id, draft.revision, capture, read(capture.commitIds))).toThrow(problems[0]!.message);
+  });
+});
+
+// FAC-116 merged into FAC-96: a widget hearing a trigger's runs is checked by the same shared check.
+describe("a widget hearing a trigger's runs", () => {
+  it("is listed when the trigger isn't its gadget's, with its target and repair, and publication refuses with it", () => {
+    let t = setUp();
+    wire(t.storage, [{ id: "ran", version: 1, on: canvasRunEvent("run-failed", 11), effect: { kind: "navigate", page: "done" } }]);
+    let draft = t.consoles.create(content(), read(t.consoles.sourceCommitIds(content())));
+    let capture = t.consoles.capture(draft.id, draft.revision);
+    let problems = t.consoles.draftProblems(draft.id, draft.revision, read(capture.commitIds));
+    expect(problems.map(problem => [problem.code, problem.target])).toEqual([["run-trigger-mismatch", "page:floor/attachment:ran"]]);
+    expect(problems[0]!.message).toBe("Screen floor can't be published: its widget w1 hears the runs of trigger 11, which isn't a trigger of gadget 1.");
+    expect(problems[0]!.repair).toBe("Point the attachment at a trigger of this widget's gadget, or remove the attachment.");
     expect(() => t.consoles.publish(draft.id, draft.revision, capture, read(capture.commitIds))).toThrow(problems[0]!.message);
   });
 });
