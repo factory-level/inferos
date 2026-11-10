@@ -4,6 +4,8 @@
 // FAC-124: a dynamic, unsaved definition says it is temporary and when it expires, and offers its
 // owner a save that keeps it (the same save, which retains it). A retained one says nothing of
 // expiry. Nothing here creates a temporary definition: the Dot and agents do.
+// FAC-122: an owner shares a saved definition; one shared with this person says so and what it
+// lets them do, from the server's own answer, and an editor saves new revisions.
 import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -34,6 +36,11 @@ vi.mock('@cloudflare/kumo', () => ({
   useKumoToastManager: () => ({ add: toast }),
 }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ currentUser: { id: 'ada', name: 'Ada' } }) }))
+// The share dialog has its own tests (ShareWorkflowDialog.test.tsx); here, only that it opens.
+vi.mock('./ShareWorkflowDialog', async (importActual) => ({
+  ...(await importActual<typeof import('./ShareWorkflowDialog')>()),
+  ShareWorkflowDialog: ({ definition }: { definition: WorkflowDefinition }) => <dialog open>Sharing {definition.title}</dialog>,
+}))
 
 const ADA = { type: 'user' as const, id: 'ada', name: 'Ada' }
 const revision = { revision: 1, source: { kind: 'gadget' as const, gadgetId: 3, commitId: 'a'.repeat(40) }, savedAt: new Date(0) }
@@ -102,4 +109,44 @@ it('shows any other refusal in the server\'s own words', async () => {
     gadgets={GADGETS} definitions={[kept]} onChanged={vi.fn<() => void>()} />))
   await act(async () => buttonIn(rowOf('Kept'), 'Save new revision')!.click())
   expect(toast.mock.calls[0]![0].title).toBe('A workflow definition is saved from a workflow gadget with committed code.')
+})
+
+const BEN = { type: 'user' as const, id: 'ben', name: 'Ben' }
+const published = { revision: 1, at: new Date(0), by: BEN }
+const revision2 = { ...revision, revision: 2 }
+
+it('offers its owner to share a saved definition, never a temporary one', async () => {
+  await act(async () => root.render(<WorkflowDefinitionsSection overseer={{} as unknown as RpcStub<Overseer>}
+    gadgets={GADGETS} definitions={[temporary, kept]} onChanged={vi.fn<() => void>()} />))
+  expect(buttonIn(rowOf('One-off'), 'Share')).toBeUndefined()
+  await act(async () => buttonIn(rowOf('Kept'), 'Share')!.click())
+  expect(container.querySelector('dialog')?.textContent).toBe('Sharing Kept')
+})
+
+it('says a definition is shared with this person, and lets them do only what the server says', async () => {
+  const readOnly: WorkflowDefinition = { id: 'r', title: 'Read me', owner: BEN, revisions: [revision], published,
+    access: { read: true, run: true, edit: false }, sharedWithMe: true }
+  const editable: WorkflowDefinition = { id: 'e', title: 'Edit me', owner: BEN, revisions: [revision, revision2], published,
+    access: { read: true, run: true, edit: true }, sharedWithMe: true }
+  // Seen through the workspace, not a share: no "shared with you", whatever it allows.
+  const workspaceWide: WorkflowDefinition = { id: 'w', title: 'Everyone', owner: BEN, revisions: [revision], published,
+    access: { read: true, run: false, edit: false } }
+  const saveWorkflowDefinition = vi.fn<Overseer['saveWorkflowDefinition']>(async () => editable)
+  await act(async () => root.render(<WorkflowDefinitionsSection
+    overseer={{ saveWorkflowDefinition } as unknown as RpcStub<Overseer>}
+    gadgets={GADGETS} definitions={[readOnly, editable, workspaceWide]} onChanged={vi.fn<() => void>()} />))
+
+  expect(rowOf('Read me').textContent).toContain('Shared with you · you can run, read')
+  expect(rowOf('Read me').querySelectorAll('button')).toHaveLength(0)
+  expect(rowOf('Everyone').textContent).not.toContain('Shared with you')
+  expect(rowOf('Everyone').querySelectorAll('button')).toHaveLength(0)
+
+  const row = rowOf('Edit me')
+  expect(row.textContent).toContain('Shared with you · you can edit, run, read')
+  // Only its owner shares it.
+  expect(buttonIn(row, 'Share')).toBeUndefined()
+  await act(async () => buttonIn(row, 'Save new revision')!.click())
+  expect(saveWorkflowDefinition).toHaveBeenCalledWith({ id: 'e', title: 'Edit me', gadgetId: 3 })
+  // Its owner publishes it: an editor's publish is refused outside shared configuration.
+  expect(buttonIn(row, 'Publish revision 2')).toBeUndefined()
 })

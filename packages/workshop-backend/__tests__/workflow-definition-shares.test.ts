@@ -191,6 +191,30 @@ describe("trigger configuration and run history (#427 round 1)", () => {
     await expect(overseer.listWorkflowDeliveries(id)).rejects.toThrow("Workflow definition not found.");
   });
 
+  it("refuses both share RPCs through an operate session, though its owner opened it, touching no share", async () => {
+    let { store, storage, id } = workspace();
+    store.share(ADA, id, BEN.id, READ, "build");
+    let share = vi.spyOn(store, "share");
+    let shares = vi.spyOn(store, "shares");
+    let overseer = await openFakeOverseer({}, { role: "build", impl: {
+      env: {}, isSharedConfiguration: async () => false,
+      workflowDefinitionStore: () => store, definitionRoles: async () => () => "build" as const,
+      storage: Object.assign(storage, {
+        containsRestrictedData: { get: () => false }, title: { get: () => "Test Workspace" },
+        operateSession: { get: () => true },
+      }),
+      // The owner's recorded operate session is this workspace, so it opens as one.
+      users: { idFromString: (value: string) => value, get: () => ({ whoami: async () => ADA, recordSharedGadgetOpen: async () => {},
+        operateSessionWorkspaceId: async () => "workspace-id" }) },
+    } });
+    await expect(overseer.shareWorkflowDefinition(id, CARA.id, RUN)).rejects.toThrow("an operate session cannot change the workspace's software");
+    await expect(overseer.shareWorkflowDefinition(id, BEN.id, null)).rejects.toThrow("an operate session cannot change the workspace's software");
+    await expect(overseer.listWorkflowDefinitionShares(id)).rejects.toThrow("an operate session cannot change the workspace's software");
+    expect(share).not.toHaveBeenCalled();
+    expect(shares).not.toHaveBeenCalled();
+    expect(store.shares(ADA, id).map(s => [s.profileId, s.rights])).toEqual([[BEN.id, READ]]);
+  });
+
   it("shows run history to the owner and editors only: a reader and a runner get none, their own runs included", () => {
     let { store, id, headOf, setHead } = workspace();
     setHead(1);
