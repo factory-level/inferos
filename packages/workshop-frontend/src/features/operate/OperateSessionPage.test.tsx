@@ -288,14 +288,15 @@ describe('host boards', () => {
   })
 })
 
+const chat = () => container.querySelector('[data-testid="chat"]')!
+const button = (name: string) => [...container.querySelectorAll('button')].find(item => item.textContent === name)!
+
 // FAC-98: a widget's wired prompt goes into the person's own chat as a draft, opening the chat for
 // it; nothing is sent. The chat pane offers the console's widgets only where chatPane.widgets says so.
 describe('a widget prompt and the chat pane', () => {
   const RUN: OperatePageState = { ...OPEN, presentation: 'canvas', chatOpen: false, console: {
     workspaceId: 'ws1', consoleId: 'c1', title: 'Operations lead', source: 'draft', revision: '0', fullChat: 'available', viewId: 'overview', screenId: 'board',
   } }
-  const chat = () => container.querySelector('[data-testid="chat"]')!
-  const button = (name: string) => [...container.querySelectorAll('button')].find(item => item.textContent === name)!
 
   it('puts the draft in the chat, opening it, and sends nothing; the composer taking it clears it', async () => {
     render(RUN)
