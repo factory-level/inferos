@@ -26,6 +26,8 @@ import {
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
   type QueuedWorkflowRun,
 } from "./workflow-definition-store";
+import { collaboratorAccountName } from "./account-subject";
+import type { UserDirectoryDurableObject } from "./user-directory";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
@@ -2392,6 +2394,8 @@ class OverseerImpl implements AgentHooks {
   ownerProfileId?: string;
 
   users: DurableObjectNamespace<UserDurableObject>;
+  /** The deployment-wide directory, which finds a person by address (ADR 0019). */
+  userDirectory: DurableObjectNamespace<UserDirectoryDurableObject>;
 
   // The workspace's git object store, holding all gadgets' committed code (see git-store.ts).
   // One instance per DO so isomorphic-git's parse cache is shared.
@@ -2879,6 +2883,7 @@ class OverseerImpl implements AgentHooks {
       pull: (gatekeeperId, oids, hints) => this.#pullGitObjects(gatekeeperId, oids, hints),
     });
     this.users = this.ctx.exports.UserDurableObject;
+    this.userDirectory = this.ctx.exports.UserDirectoryDurableObject;
     this.ownerId = this.storage.ownerId.get();
 
     // Run any pending storage migration before anything else can touch storage. This must happen
@@ -17028,8 +17033,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async addCollaborator(username: string, role: CollaboratorRole, note?: string)
       : Promise<CollaboratorInfo | null> {
     await this.#requireSharedConfiguration("publish", "always");
-    // Look up the user DO to check if the account exists.
-    let userDoId = this.impl.users.idFromName(username);
+    // Look up the user DO to check if the account exists. An address finds its current, vouched
+    // owner, never a bound account by its old name (ADR 0019 decision 6).
+    let accountName = await collaboratorAccountName(
+      { users: this.impl.users, directory: this.impl.userDirectory }, username);
+    if (accountName === null) return null;
+    let userDoId = this.impl.users.idFromName(accountName);
     let userDo = this.impl.users.get(userDoId);
     let profile = await userDo.whoamiIfExists();
     if (!profile) {

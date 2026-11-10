@@ -1544,6 +1544,18 @@ export interface DeploymentProfile {
   displayDensity?: DisplayDensity;
 }
 
+/** What one subject pass (`AdminApi.bindAccountSubjects`, ADR 0019) did. */
+export type AccountSubjectPass = {
+  /** Email-keyed accounts looked at. */
+  checked: number;
+  /** Accounts this pass bound to their subject. */
+  bound: number;
+  /** Accounts already bound to the subject their connection names, left as they were. */
+  alreadyBound: number;
+  /** Accounts whose subject the directory sends to another account, or that another subject holds; left unbound. */
+  conflicts: number;
+};
+
 /**
  * Capability for managing deployment-wide admin settings, obtained via
  * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
@@ -1571,6 +1583,13 @@ export interface AdminApi {
 
   /** Enable or disable new account signups. Existing users can still log in while signups are closed. */
   setSignupsEnabled(enabled: boolean): Promise<void>;
+
+  /**
+   * The one-off subject pass (ADR 0019, FAC-165): binds each email-keyed account that holds an
+   * InferOps connection vouching its own address to the InferOps principal behind it, so an email
+   * change later keeps the account. Creates no account; running it again binds nothing new.
+   */
+  bindAccountSubjects(): Promise<AccountSubjectPass>;
 
   /**
    * Enable or disable user directory search. The directory itself is maintained

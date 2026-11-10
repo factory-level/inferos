@@ -107,7 +107,7 @@ import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gate
 import { createLogger } from "@gadgets/observability/logger";
 import type {
   AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
-  GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
+  GatekeeperConnectOptions, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
   WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace,
 } from "@gadgets/workshop-shared/gatekeeper";
@@ -265,6 +265,12 @@ export default {
  */
 type AccountProps = {
   accountId: string; email?: string; connected?: boolean;
+  /**
+   * The InferLab principal behind a sign-in or connect (ADR 0019, FAC-165): the configured auth
+   * origin as issuer, and InferLab's `user.id`. Absent on auto-provisioned accounts, and on accounts
+   * connected before it was recorded, whose stored identity answers instead.
+   */
+  subject?: GatekeeperSubject;
   /**
    * Set only on a configured system workflow's binding (FAC-102, `getSystemGatekeeperClass`): the
    * Workshop's assignment reference whose stored service-account key the binding acts as. Such a
@@ -749,6 +755,8 @@ export class GatekeeperVendor extends WorkerEntrypoint<Cloudflare.Env> {
       // demo account is provided automatically.
       autoProvisionsAccount: !identity,
       providesAuth: identity,
+      // Sign-in keys the Workshop account on the InferLab principal, not the email (ADR 0019).
+      providesSubject: identity,
     };
   }
 
@@ -1207,6 +1215,19 @@ export class InferOpsAccount extends WorkerEntrypoint<Cloudflare.Env, AccountPro
   /** The InferLab-verified email of a sign-in or connected account; null without one. */
   async getAuthenticatedEmail(): Promise<string | null> {
     return this.ctx.props.email ?? null;
+  }
+
+  /**
+   * The InferLab principal behind this account (ADR 0019): the one its sign-in or connect recorded,
+   * else, for an account connected before that, the `userId` its stored identity holds, issued by
+   * the configured auth origin. Null for an account with no person behind it (auto-provisioned).
+   */
+  async getAuthenticatedSubject(): Promise<GatekeeperSubject | null> {
+    if (this.ctx.props.subject) return this.ctx.props.subject;
+    if (!this.ctx.props.connected) return null;
+    const issuer = inferLabAuthOrigin(this.env);
+    const identity = await this.#credentials().identity();
+    return issuer && identity?.userId ? { issuer, subject: identity.userId } : null;
   }
 
   /**

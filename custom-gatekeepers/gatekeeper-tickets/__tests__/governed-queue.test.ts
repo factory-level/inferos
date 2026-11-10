@@ -80,14 +80,23 @@ describe("a Tickets queue as a governed resource (FAC-9)", () => {
     expect((await hooks.log()).observations).toEqual(["Read Tickets ticket T-2"]);
   });
 
-  it("proposes its declared command for approval, applied only once approved", async () => {
+  it("returns the user receipt; user commands and agent actions share the same approval journal", async () => {
     const { props, hooks, session } = open();
-    expect(await session.command({ command: "setStatus", id: "T-1", values: { status: "closed" }, expectedRevision: "1" }))
-      .toEqual({ outcome: "proposed" });
-    const [action] = (await hooks.log()).actions;
+    const receipt = await session.command({ command: "setStatus", id: "T-1", values: { status: "closed" }, expectedRevision: "1" });
+    expect(receipt.outcome).toBe("proposed");
+    expect(receipt.actionId).toMatch(/^test-action-/);
+    expect(await receipt.status()).toEqual({ outcome: "waiting" });
+    const agentSession = await hooks.startSession(props);
+    await agentSession.setStatus("T-2", "closed", "1");
+    const actions = (await hooks.log()).actions;
+    expect(actions).toHaveLength(2);
+    const [action, agentAction] = actions;
+    expect(receipt.actionId).toBe(`test-action-${action!.id}`);
     expect(action?.title).toBe("Set ticket T-1 to closed");
+    expect(agentAction?.title).toBe("Set ticket T-2 to closed");
     expect(await session.get("T-1")).toMatchObject({ values: { status: "open" }, revision: "1" });
     expect(await hooks.apply(props, action!.id)).toBeNull();
+    expect(await receipt.status()).toEqual({ outcome: "succeeded" });
     expect(await session.get("T-1")).toMatchObject({ values: { status: "closed" }, revision: "2" });
   });
 

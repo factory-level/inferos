@@ -644,6 +644,19 @@ describe("connecting", () => {
     expect(await hooks().authenticatedEmail(account)).toBeNull();
     expect(await hooks().describeAccount(account)).toMatchObject({ uniqueName: "ada@example.com" });
   });
+
+  // ADR 0019 (FAC-165): the Workshop keys a person's account on the InferLab principal. An account
+  // connected before it was recorded names the principal its stored identity holds, so the one-off
+  // subject pass can bind it; an auto-provisioned one names none.
+  it("names the principal behind it, even when connected before the principal was recorded", async () => {
+    await withExports(async exports => {
+      expect(await exports.GatekeeperVendor({}).describe()).toMatchObject({ providesSubject: true });
+    });
+    const account = await connect("subject");
+    expect(account).not.toHaveProperty("subject");
+    expect(await hooks().authenticatedSubject(account)).toEqual({ issuer: "http://localhost:8080", subject: "u1" });
+    expect(await hooks().authenticatedSubject({ accountId: crypto.randomUUID() })).toBeNull();
+  });
 });
 
 describe("requests as the person", () => {
