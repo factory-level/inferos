@@ -14,11 +14,12 @@ import type {
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionRights, WorkflowDefinitionShare,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
-  WorkflowTriggerDefinitionRef, WorkflowDefinitionDuplicate, WorkflowRequiredBinding,
+  WorkflowTriggerDefinitionRef, WorkflowDefinitionDuplicate, WorkflowRequiredBinding, TriggerLifecycle,
+  WorkflowRunLimits,
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
-  WORKFLOW_BINDINGS_NEEDED, parseWorkflowDefinitionTitle,
+  WORKFLOW_BINDINGS_NEEDED, parseWorkflowDefinitionTitle, TRIGGER_LIFECYCLE_REFUSED, workflowRunLimits,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { checkAssignments, requireBound, requirementsOf, unmetBindings } from "./workflow-duplicate.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
@@ -165,6 +166,9 @@ const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
 
 /** The refusal when the invoker's own InferOps grant doesn't include `workflow:invoke` (FAC-102). */
+/** What a run past the deployment's time per run is ended with (FAC-117). */
+export const WORKFLOW_RUN_TIMED_OUT = "This run took longer than its time limit, so it was stopped.";
+
 export const WORKFLOW_INVOKE_REFUSED =
   "You don't have permission to run workflows here. Ask an Admin for it.";
 
@@ -240,6 +244,7 @@ export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
       message === TRIGGER_AUTO_RETIRED) return "assignment-changed";
   if (message === "Hook has been deleted or disabled.") return "trigger-gone";
   if (message === WORKFLOW_BINDINGS_NEEDED) return "bindings-needed";
+  if (message === WORKFLOW_RUN_TIMED_OUT) return "timed-out";
   return "runtime-error";
 }
 
@@ -326,7 +331,8 @@ export async function requireRunRequester(
     let sameExecutor = executor.kind === "service_account"
       ? assignment?.credentialRef === executor.credentialRef && assignment.gatekeeperId === executor.gatekeeperId
       : assignment === null;
-    if (!sameExecutor || impl.storage.boundHooks.get(hookId)?.enabled !== true ||
+    // A paused trigger's run admitted before the pause may still finish (FAC-117), nothing else.
+    if (!sameExecutor || !hookContinuesRun(impl, hookId, deliveryId) ||
         !store.controls(profileId).some(control => control.hookId === hookId)) {
       throw new Error(RUN_REQUESTER_REVOKED);
     }
@@ -1927,6 +1933,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       workflowDefinitionShares: collection<StoredWorkflowDefinitionShare>()({ primaryKey: "key" }),
       workflowTriggerPins: collection<StoredTriggerPin>()({ primaryKey: "hookId" }),
       workflowDeliveries: collection<StoredWorkflowDelivery>()({ primaryKey: "id" }),
+      // Each trigger's lifecycle once it was paused, activated again or retired (FAC-117), by hook
+      // id; no record is an active trigger. A retired one's record outlives its hook.
+      workflowTriggerLifecycles: collection<TriggerLifecycle>()({ primaryKey: "hookId" }),
       // Seven-day idempotency tombstones for server-verified trigger occurrences (FAC-113).
       workflowOccurrences: collection<StoredWorkflowOccurrence>()({ primaryKey: "key" }),
       // Ordered expiry pointers and per-trigger counts keep admission bounded (FAC-113).
@@ -2484,6 +2493,8 @@ class OverseerImpl implements AgentHooks {
   // for, and what keeps a run from starting twice here. A reset empties it, so the next alarm runs
   // each queued run again from its start.
   #runningWorkflowRuns = new Map<number, Promise<void>>();
+  // Which trigger each run executing here is of, for the concurrency limits (FAC-117).
+  #runningWorkflowRunHooks = new Map<number, number>();
 
   // For each requested run's current attempt (FAC-112), by delivery id: how many writes of each
   // description digest it has proposed, which numbers its next identical one. Emptied as an
@@ -2727,12 +2738,22 @@ class OverseerImpl implements AgentHooks {
     let hasAgentWork = this.#runningAgents.size > 0 || this.#runningWorkflowRuns.size > 0 ||
         Array.from(this.storage.pendingAgentCalls.list({ limit: 1 })).length > 0;
 
-    // A queued workflow run not running here yet (FAC-112) is started as soon as possible.
-    for (let queued of this.storage.workflowRunQueue.list()) {
-      if (!this.#runningWorkflowRuns.has(queued.deliveryId)) {
-        times.push(Date.now());
-        break;
+    // A queued workflow run not running here yet (FAC-112) is started as soon as possible, or once
+    // its backoff after an interrupted attempt has passed (FAC-117).
+    let limits: WorkflowRunLimits | undefined;
+    try {
+      limits = this.runLimits();
+    } catch {
+      // Misconfigured: runQueuedWorkflowRuns starts nothing and logs why; nothing to wake for here.
+    }
+    if (limits) {
+      let due: number | undefined;
+      for (let queued of this.storage.workflowRunQueue.list()) {
+        if (this.#runningWorkflowRuns.has(queued.deliveryId)) continue;
+        let at = this.#queuedRunDue(queued.deliveryId, limits);
+        if (due === undefined || at < due) due = at;
       }
+      if (due !== undefined) times.push(due);
     }
     if (!hasAgentWork) {
       this.#agentKeepAliveTime = undefined;
@@ -7345,8 +7366,8 @@ class OverseerImpl implements AgentHooks {
     return {
       systemRuns: this.systemRuns,
       assignmentOf: hookId => this.workflowDefinitionStore().assignmentOf(hookId),
-      liveHookGadget: hookId => {
-        let gadgetId = requireLiveHook(this, hookId).gadgetId ?? this.defaultGadgetId;
+      liveHookGadget: (hookId, deliveryId) => {
+        let gadgetId = requireContinuingHook(this, hookId, deliveryId).gadgetId ?? this.defaultGadgetId;
         if (gadgetId === undefined) throw new Error("This trigger wakes no gadget.");
         return gadgetId;
       },
@@ -7410,12 +7431,53 @@ class OverseerImpl implements AgentHooks {
    * the alarm's next pass.
    */
   async runQueuedWorkflowRuns(): Promise<void> {
-    for (let queued of this.workflowDefinitionStore().queuedRuns()) {
+    let limits: WorkflowRunLimits;
+    try {
+      limits = this.runLimits();
+    } catch (error) {
+      // A misconfigured limit starts nothing, rather than run under a limit nobody chose.
+      logger.error("workflow run limits misconfigured", { event: "workflow.run.limits.invalid", error });
+      return;
+    }
+    let store = this.workflowDefinitionStore();
+    let now = Date.now();
+    for (let queued of store.queuedRuns()) {
       if (this.#runningWorkflowRuns.has(queued.deliveryId)) continue;
+      let execution = store.delivery(queued.deliveryId)?.execution;
+      // Interrupted by a reset (FAC-117): bounded, with a backoff before each further attempt.
+      if (execution && execution.attempts >= limits.attempts) {
+        store.endRun(queued.deliveryId, "attempts-exhausted");
+        this.#settleRun(queued.deliveryId);
+        let exhausted = { hookId: queued.hookId, deliveryId: queued.deliveryId, attempts: execution.attempts };
+        logger.warn("workflow run attempts exhausted", { event: "workflow.run.attempts_exhausted", ...exhausted });
+        continue;
+      }
+      let due = this.#queuedRunDue(queued.deliveryId, limits);
+      if (due > now) continue;
+      // Concurrency (FAC-117): per trigger and per workspace; the rest wait queued for a later pass.
+      let running = [...this.#runningWorkflowRunHooks.values()];
+      if (running.length >= limits.perWorkspace ||
+          running.filter(hookId => hookId === queued.hookId).length >= limits.perTrigger) continue;
+      this.#runningWorkflowRunHooks.set(queued.deliveryId, queued.hookId);
       this.#runningWorkflowRuns.set(queued.deliveryId,
-          this.#executeWorkflowRun(queued).finally(() => this.#runningWorkflowRuns.delete(queued.deliveryId)));
+          this.#executeWorkflowRun(queued, limits).finally(() => {
+            this.#runningWorkflowRuns.delete(queued.deliveryId);
+            this.#runningWorkflowRunHooks.delete(queued.deliveryId);
+          }));
     }
     await Promise.all(this.#runningWorkflowRuns.values());
+    for (let lifecycle of Array.from(this.storage.workflowTriggerLifecycles.list())) {
+      if (lifecycle.state === "draining") this.settleDrain(lifecycle.hookId);
+    }
+  }
+
+  // When queued run `deliveryId` may start (FAC-117): now, unless an earlier attempt of it was
+  // interrupted, which waits backoff·2^(attempts−1) from that attempt's start.
+  #queuedRunDue(deliveryId: number, limits: WorkflowRunLimits): number {
+    let execution = this.workflowDefinitionStore().delivery(deliveryId)?.execution;
+    if (!execution || execution.attempts < 1) return Date.now();
+    let from = (execution.startedAt ?? execution.queuedAt).getTime();
+    return from + limits.backoffSeconds * 1000 * 2 ** (execution.attempts - 1);
   }
 
   // Runs one queued workflow run (FAC-112) from its delivery alone: the run record's executor
@@ -7424,31 +7486,50 @@ class OverseerImpl implements AgentHooks {
   // (runAssignedDelivery), any other over the gadget's own connections (runGadgetBindingsDelivery).
   // The outcome is recorded either way; a reset meanwhile leaves the run queued, to run again from
   // its start, and the writes it already proposed are matched rather than repeated (submitActionNow).
-  async #executeWorkflowRun(queued: QueuedWorkflowRun): Promise<void> {
+  async #executeWorkflowRun(queued: QueuedWorkflowRun, limits: WorkflowRunLimits): Promise<void> {
     let store = this.workflowDefinitionStore();
     let delivery = store.startRun(queued.deliveryId);
     if (!delivery) return;
     let { hookId, deliveryId, method, args } = queued;
+    // Cancelled while interrupted (FAC-117): it ends, and nothing of it runs again.
+    if (delivery.execution?.cancelled) {
+      store.endRun(deliveryId, "cancelled");
+      this.#settleRun(deliveryId);
+      return;
+    }
     let error: unknown;
     let returned: unknown;
+    // The run's time limit (FAC-117): past it, its sessions end, so its next guarded call fails and
+    // nothing more it proposes is recorded, and it fails as timed out.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        this.gadgetRuns.end(deliveryId);
+        this.systemRuns.end(deliveryId);
+        reject(new Error(WORKFLOW_RUN_TIMED_OUT));
+      }, limits.runMinutes * 60_000);
+    });
     try {
       // As it starts, whatever started it (FAC-123): a duplicate's connections must be set up now.
       this.requireHookBound(hookId);
       this.startWorkflowRunProposals(deliveryId);
       if (delivery.executedAs) {
-        returned = await this.runAssignedDelivery(hookId,
-            { deliveryId, commitId: delivery.commitId, credentialRef: delivery.executedAs.credentialRef }, method, args);
+        returned = await Promise.race([this.runAssignedDelivery(hookId,
+            { deliveryId, commitId: delivery.commitId, credentialRef: delivery.executedAs.credentialRef }, method, args),
+          timedOut]);
       } else {
         // The manager's (a): from the pinned commit, in a run-scoped worker over the gadget's own
         // connections, naming the run, never the gadget's live hook code.
         let requester = await requireRunRequester(this, hookId, deliveryId);
         requester.revalidate();
-        returned = await runGadgetBindingsDelivery(this.#systemRunHost(), hookId,
-            { deliveryId, commitId: delivery.commitId }, method, args, requester);
+        returned = await Promise.race([runGadgetBindingsDelivery(this.#systemRunHost(), hookId,
+            { deliveryId, commitId: delivery.commitId }, method, args, requester), timedOut]);
       }
     } catch (thrown) {
       error = thrown ?? new Error("The run failed.");
     } finally {
+      clearTimeout(timer);
+      timedOut.catch(() => {});
       this.#workflowRunProposals.delete(deliveryId);
     }
     // Only a fixed category is stored and shown: what the run threw can carry data only its
@@ -7490,9 +7571,12 @@ class OverseerImpl implements AgentHooks {
     let outcomes = this.#runWrites(delivery.run.runId).map(record => this.#runWriteOutcome(record));
     let kept = report === undefined ? delivery.result?.report : report;
     let result: Omit<WorkflowRunResult, "settledAt">;
+    // A cancelled run whose every write was rejected or failed unapplied made no write (FAC-117).
+    let cancelledUnwritten = execution.failure === "cancelled" &&
+      outcomes.every(outcome => outcome === "rejected" || outcome === "failed");
     if (execution.state === "failed") {
-      result = outcomes.length > 0
-        ? { outcome: "uncertain", reason: "lost-after-write" }
+      result = outcomes.length > 0 && !cancelledUnwritten
+        ? { outcome: "uncertain", reason: outcomes.includes("unknown") ? "action-unknown" : "lost-after-write" }
         : { outcome: "failed", ...(execution.failure ? { reason: execution.failure } : {}) };
     } else if (outcomes.includes("unknown")) {
       result = { outcome: "uncertain", reason: "action-unknown" };
@@ -7503,6 +7587,8 @@ class OverseerImpl implements AgentHooks {
     }
     store.recordResult(deliveryId, { ...result, ...(kept !== undefined ? { report: kept } : {}) });
     this.deliverRunToCanvas(deliveryId);
+    // The last of a draining trigger's runs settling pauses it (FAC-117).
+    this.settleDrain(delivery.hookId);
   }
 
   // Whether the person who asked for run `deliveryId` still may now (FAC-116): `requireRunRequester`
@@ -12768,6 +12854,118 @@ class OverseerImpl implements AgentHooks {
     let gadget = gadgetId === undefined ? undefined : this.storage.gadgets.get(gadgetId);
     requireBound(gadget?.type === "gadget" ? gadget : undefined, target => this.storage.gatekeepers.get(target)?.creationSpec);
   }
+  /** The deployment's run limits (FAC-117): PROPOSED defaults, each overridable by its setting. */
+  runLimits(): WorkflowRunLimits {
+    return workflowRunLimits(this.env as unknown as Record<string, string | undefined>);
+  }
+
+  /** Trigger `hookId`'s recorded lifecycle (FAC-117), or null: an active trigger has none. */
+  triggerLifecycleOf(hookId: number): TriggerLifecycle | null {
+    return this.storage.workflowTriggerLifecycles.get(hookId) ?? null;
+  }
+
+  /**
+   * Pause trigger `hookId` as `by` (FAC-117): it drains. The pause is recorded first, with its time,
+   * so a firing admitted while the hook's own disable is in flight is still refused as admitted
+   * after it; then the hook is disabled and its waiting requests are dropped. Runs admitted before
+   * the pause finish (or are cancelled one by one), their pending writes still decidable; the last
+   * one ending makes it `paused`. Pausing a draining or paused trigger changes nothing.
+   */
+  async pauseTrigger(hookId: number, by: AiChatAuthorInfo): Promise<TriggerLifecycle> {
+    let record = this.storage.boundHooks.get(hookId);
+    if (!record) throw new Error("Invalid hook ID.");
+    let existing = this.triggerLifecycleOf(hookId);
+    if (existing && existing.state !== "active") return existing;
+    let now = new Date();
+    let draining: TriggerLifecycle = { hookId, state: "draining", pausedAt: now, changedBy: by, changedAt: now };
+    this.storage.workflowTriggerLifecycles.put(draining);
+    this.workflowDefinitionStore().dropWaitingInvocations(hookId);
+    if (record.enabled) {
+      await record.controller.disable();
+      // Re-read after the await: a delete meanwhile already reached the goal state (no hook).
+      let current = this.storage.boundHooks.get(hookId);
+      if (current?.enabled) {
+        current.enabled = false;
+        this.storage.boundHooks.put(current);
+        stampBindHookAction(this.storage, current.actionId, false);
+      }
+    }
+    this.settleDrain(hookId);
+    return this.triggerLifecycleOf(hookId) ?? draining;
+  }
+
+  /**
+   * Trigger `hookId` drained (FAC-117): once it is draining and none of its runs is live work any
+   * more (`isLiveWorkflowDelivery`), it is `paused`. Called whenever a run ends or settles.
+   */
+  settleDrain(hookId: number): void {
+    let lifecycle = this.triggerLifecycleOf(hookId);
+    if (lifecycle?.state !== "draining") return;
+    if (this.workflowDefinitionStore().liveDeliveriesOf(hookId).length > 0) return;
+    this.storage.workflowTriggerLifecycles.put({ ...lifecycle, state: "paused", changedAt: new Date() });
+  }
+
+  /** Refuses a new firing of trigger `hookId` while it is draining, paused or retired (FAC-117). */
+  requireTriggerStarts(hookId: number): void {
+    let state = this.storage.workflowTriggerLifecycles.get(hookId)?.state;
+    if (state === "draining" || state === "paused" || state === "retired") throw new Error(TRIGGER_LIFECYCLE_REFUSED.paused);
+  }
+
+  /**
+   * Retire trigger `hookId` as `by` (FAC-117): only once paused (drained). Deletes it as
+   * `deleteHook` does (its pin, control, assignment and waiting requests go) and records it retired;
+   * its runs and their history are kept.
+   */
+  async retireTrigger(hookId: number, by: AiChatAuthorInfo): Promise<TriggerLifecycle> {
+    this.settleDrain(hookId);
+    let lifecycle = this.triggerLifecycleOf(hookId);
+    if (lifecycle?.state === "retired") return lifecycle;
+    if (!this.storage.boundHooks.get(hookId)) throw new Error("Invalid hook ID.");
+    if (lifecycle?.state !== "paused") throw new Error(TRIGGER_LIFECYCLE_REFUSED.retire);
+    await this.deleteHook(hookId);
+    let retired: TriggerLifecycle = { ...lifecycle, state: "retired", changedBy: by, changedAt: new Date() };
+    this.storage.workflowTriggerLifecycles.put(retired);
+    return retired;
+  }
+
+  /**
+   * Cancel the run person's request `invocationId` made, as `caller` (FAC-117): the person who asked,
+   * or the definition's owner or someone it is shared with to edit (`role` is theirs here). Anyone
+   * else is told it doesn't exist. A queued run ends now; a running one has its sessions ended, so
+   * its next guarded call fails; either way every pending write it proposed is rejected, never
+   * applied, and its result says it was cancelled, or uncertain when a write may have landed.
+   */
+  async cancelWorkflowRun(invocationId: string, caller: AiChatAuthorInfo, role: CollaboratorRole | null): Promise<void> {
+    let store = this.workflowDefinitionStore();
+    let delivery = typeof invocationId === "string" ? store.deliveryOfInvocation(invocationId) : null;
+    let allowed = delivery !== null &&
+      (delivery.invocation?.requestedBy === caller.id || store.mayEdit(caller.id, delivery.definitionId, role));
+    if (!delivery || !allowed) throw new Error("No such run.");
+    if (store.cancelRun(delivery.id, caller) === "stopping") {
+      this.gadgetRuns.end(delivery.id);
+      this.systemRuns.end(delivery.id);
+    }
+    let runId = delivery.run?.runId;
+    for (let record of runId ? this.#runWrites(runId) : []) {
+      if (record.state !== "pending" || record.applyStartedAt !== undefined) continue;
+      try {
+        await this.withActionClaim(record.id, async () => {
+          let current = this.storage.actions.get(record.id);
+          if (current?.type === "action" && current.state === "pending" && current.applyStartedAt === undefined) {
+            await this.#rejectClaimed(current, "cancelled");
+          }
+        });
+      } catch (error) {
+        // Claimed by a decision under way: that decision stands, and the result says so.
+        logger.warn("cancelled run's write not rejected", { event: "workflow.run.cancel.write_kept", actionId: record.id, error });
+      }
+    }
+    let cancelled = { hookId: delivery.hookId, deliveryId: delivery.id, ...(runId ? { runId } : {}) };
+    logger.info("workflow run cancelled", { event: "workflow.run.cancelled", ...cancelled });
+    this.#settleRun(delivery.id);
+    this.#updateAlarm();
+  }
+
 
   /**
    * Who may read and run a published definition beyond its owner and the people it is shared with
@@ -13912,6 +14110,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     record = requireLiveHook(this.impl, hookId);
     // A duplicate fires only once its connections are set up (FAC-123), scheduled or asked for.
     this.impl.requireHookBound(hookId);
+    // A draining, paused or retired trigger starts nothing new (FAC-117).
+    this.impl.requireTriggerStarts(hookId);
 
     // A trigger pinned to a workflow definition revision fires only that revision's code, and the
     // firing is recorded with it (workflow-definition-store.ts); it never falls back to another.
@@ -16433,6 +16633,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     await this.#requireSharedConfiguration("build", "shared");
     let record = this.impl.storage.boundHooks.get(id);
     if (!record) throw new Error("Invalid hook ID.");
+    // Enabling is activating (FAC-117): a retired trigger never comes back.
+    if (this.impl.triggerLifecycleOf(id)?.state === "retired") throw new Error(TRIGGER_LIFECYCLE_REFUSED.activate);
 
     if (!record.enabled) {
       let props: GatekeeperHookLoopbackProps = {
@@ -16456,25 +16658,37 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
       // Flip the record and handle the "use"-scope widening an enabled hook can cause.
       this.impl.enableHookRecord(record);
     }
+    // Active again: no lifecycle record (FAC-117). Runs admitted while it drained go on as before.
+    this.impl.storage.workflowTriggerLifecycles.delete(id);
   }
 
+  // Disabling a hook is pausing its trigger (FAC-117): it drains (OverseerImpl.pauseTrigger).
   async disableHook(id: number): Promise<void> {
+    await this.pauseTrigger(id);
+  }
+
+  // A trigger's lifecycle (FAC-117), gated as the hook toggles are: building, plus the deployment's
+  // `build` authority in a shared workspace.
+  async pauseTrigger(hookId: number): Promise<TriggerLifecycle> {
     await this.#requireSharedConfiguration("build", "shared");
-    let record = this.impl.storage.boundHooks.get(id);
-    if (!record) throw new Error("Invalid hook ID.");
-
-    if (record.enabled) {
-      await record.controller.disable();
-
-      // Re-read after the await: a deleteHook/removeGatekeeper landing while disable() was in
-      // flight already reached the goal state (no hook), and putting the captured record back
-      // would resurrect it as a zombie -- deleting the record must stay the authoritative kill.
-      let current = this.impl.storage.boundHooks.get(id);
-      if (!current) return;
-      current.enabled = false;
-      this.impl.storage.boundHooks.put(current);
-      stampBindHookAction(this.impl.storage, current.actionId, false);
-    }
+    return this.impl.pauseTrigger(hookId, await this.#getClientProfile());
+  }
+  async activateTrigger(hookId: number): Promise<TriggerLifecycle | null> {
+    await this.enableHook(hookId);
+    return this.impl.triggerLifecycleOf(hookId);
+  }
+  async retireTrigger(hookId: number): Promise<TriggerLifecycle> {
+    await this.#requireSharedConfiguration("build", "shared");
+    return this.impl.retireTrigger(hookId, await this.#getClientProfile());
+  }
+  async listTriggerLifecycles(): Promise<TriggerLifecycle[]> {
+    return Array.from(this.impl.storage.workflowTriggerLifecycles.list());
+  }
+  // The person who asked, or the definition's owner or an editor (FAC-117).
+  async cancelWorkflowRun(invocationId: string): Promise<void> {
+    let profile = await this.#getClientProfile();
+    let roleOf = await this.impl.definitionRoles();
+    return this.impl.cancelWorkflowRun(invocationId, profile, roleOf(profile.id));
   }
 
   async deleteHook(id: number): Promise<void> {
@@ -17632,6 +17846,15 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async listTriggerControls(): Promise<TriggerControl[]> {
     return this.impl.workflowDefinitionStore().controls(this.clientProfileId);
   }
+  // A collaborator who uses the workspace cancels a run they asked for, nothing else (FAC-117).
+  async cancelWorkflowRun(invocationId: string): Promise<void> {
+    let profile = await retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger);
+    return this.impl.cancelWorkflowRun(invocationId, profile, "use");
+  }
+  async pauseTrigger(_hookId: number): Promise<TriggerLifecycle> { this.#deny(); }
+  async activateTrigger(_hookId: number): Promise<TriggerLifecycle | null> { this.#deny(); }
+  async retireTrigger(_hookId: number): Promise<TriggerLifecycle> { this.#deny(); }
+  async listTriggerLifecycles(): Promise<TriggerLifecycle[]> { this.#deny(); }
   async invokeTrigger(hookId: number): Promise<WorkflowInvocation> {
     return this.impl.invokeTrigger(this.clientUserId, this.clientProfileId, hookId);
   }
@@ -18305,6 +18528,11 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }
   async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> { this.#deny(); }
+  async cancelWorkflowRun(_invocationId: string): Promise<void> { this.#deny(); }
+  async pauseTrigger(_hookId: number): Promise<TriggerLifecycle> { this.#deny(); }
+  async activateTrigger(_hookId: number): Promise<TriggerLifecycle | null> { this.#deny(); }
+  async retireTrigger(_hookId: number): Promise<TriggerLifecycle> { this.#deny(); }
+  async listTriggerLifecycles(): Promise<TriggerLifecycle[]> { this.#deny(); }
   async invokeTrigger(_hookId: number): Promise<WorkflowInvocation> { this.#deny(); }
   async getRequestedRun(_invocationId: string): Promise<RequestedRun | null> { this.#deny(); }
   async listRequestedRuns(_hookId: number): Promise<RequestedRun[]> { this.#deny(); }
@@ -19146,7 +19374,7 @@ async function forgetProvisioned(
 export async function invokeWorkflowTrigger(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
         "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations" | "getGadgetHead" |
-        "definitionRoles" | "requireHookBound">,
+        "definitionRoles" | "requireHookBound" | "requireTriggerStarts">,
     userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
@@ -19159,6 +19387,8 @@ export async function invokeWorkflowTrigger(
   let record = requireLiveHook(impl as OverseerImpl, hookId);
   // A duplicate's connections must be set up before anything is admitted (FAC-123).
   impl.requireHookBound(hookId);
+  // Nor while the trigger is draining, paused or retired (FAC-117).
+  impl.requireTriggerStarts(hookId);
   let store = impl.workflowDefinitionStore();
   // Assignments off (FAC-102): a trigger assigned before is refused here, before anything is minted.
   if (!workflowAssignmentsEnabled(impl.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
@@ -19211,6 +19441,31 @@ export async function invokeWorkflowTrigger(
     impl.takenInvocations.delete(invocation.id);
   }
   return invocation;
+}
+
+/**
+ * Whether run `deliveryId` of trigger `hookId` may go on (FAC-117): its hook is enabled, or the
+ * trigger is draining and the run was admitted before the pause's recorded time. A run admitted
+ * after it, a paused, retired or deleted trigger, and a run with no record are refused. New firings
+ * never get this exception: they go through `requireLiveHook`.
+ */
+function hookContinuesRun(impl: Pick<OverseerImpl, "storage" | "workflowDefinitionStore">,
+                          hookId: number, deliveryId: number): boolean {
+  let hook = impl.storage.boundHooks.get(hookId);
+  if (!hook) return false;
+  if (hook.enabled) return true;
+  let lifecycle = impl.storage.workflowTriggerLifecycles.get(hookId);
+  let admitted = impl.workflowDefinitionStore().admittedAt(deliveryId);
+  return lifecycle?.state === "draining" && lifecycle.pausedAt !== undefined && admitted !== undefined &&
+    admitted.getTime() < lifecycle.pausedAt.getTime();
+}
+
+/** `requireLiveHook` for a run already admitted (FAC-117): a draining trigger's earlier runs go on. */
+function requireContinuingHook(impl: OverseerImpl, hookId: number, deliveryId: number): BoundHookRecord {
+  if (!hookContinuesRun(impl, hookId, deliveryId)) throw new Error("Hook has been deleted or disabled.");
+  let record = impl.storage.boundHooks.get(hookId)!;
+  impl.assertGatekeeperUsable(record.gatekeeperId);
+  return record;
 }
 
 function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {

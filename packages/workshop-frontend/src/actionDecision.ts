@@ -37,6 +37,7 @@ export const UNCERTAIN_REJECTION_TEXT =
 export const REJECTED_BECAUSE_TEXT: Record<NonNullable<ActionEntry['rejectedBecause']>, string> = {
   expired: "It expired before it was decided, so it was rejected. Ask for it again if it's still wanted.",
   'definition-changed': 'The workflow it came from changed before it was decided, so it was rejected.',
+  cancelled: 'The run that proposed it was cancelled before it was decided, so it was rejected.',
 }
 
 /** Who asked for an action, from what reaches the page today (`requestedBy`). */
