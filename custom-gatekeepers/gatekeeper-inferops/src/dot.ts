@@ -76,7 +76,7 @@ export function summarizeDotOutcome(outcome: unknown): Record<string, string | n
 
 /**
  * A proposal's status in FAC-97's words, from InferOps' own status (derived at read time there):
- * proposed is waiting, confirming is running, confirmed succeeded, failed failed (with the receipt
+ * proposed is waiting, confirming is running, confirmed and handed-off succeeded, failed failed (with the receipt
  * code for InferOps' refusal), declined rejected, expired failed `EXPIRED`, and a confirming one
  * past its bound unknown. A failure's reason is the receipt's fixed sentence, never InferOps' words.
  */
@@ -87,6 +87,11 @@ export function dotProposalStatus(proposal: DotProposalWire): WriteStatus {
     case "confirming":
       return { outcome: "running" };
     case "confirmed":
+      return { outcome: "succeeded", result: summarizeDotOutcome(proposal.outcome) };
+    // FAC-120: an InferOS workflow-run proposal, confirmed in InferOps only once InferOS admitted
+    // the run as the person who approved it here. The hand-off is the write; the run's own
+    // outcome is InferOS's (its run record and receipt), never this proposal's.
+    case "handed-off":
       return { outcome: "succeeded", result: summarizeDotOutcome(proposal.outcome) };
     case "declined":
       return { outcome: "rejected" };

@@ -288,6 +288,9 @@ describe("a proposal's status, in FAC-97's words", () => {
     expect(JSON.stringify(failed)).not.toContain("Ada");
     expect(dotProposalStatus(proposal({ status: "confirmed", outcome: { issue: { identifier: "ENG-7" } } })))
       .toEqual({ outcome: "succeeded", result: { "issue.identifier": "ENG-7" } });
+    // FAC-120: the hand-off to InferOS is the write that succeeded; the run is InferOS's to report.
+    expect(dotProposalStatus(proposal({ status: "handed-off", outcome: { handedOff: true, proposalId: "p-1" } })))
+      .toMatchObject({ outcome: "succeeded" });
   });
 
   it("summarizes an answer to identifying scalars only, bounded", () => {
