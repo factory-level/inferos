@@ -121,6 +121,7 @@ export const WORKERD_LIGHT: readonly string[] = [
  */
 export const BACKEND: readonly string[] = [
   "agent-spawner-config.test.ts",
+  "approved-workflow-run.test.ts",
   "operate-flow-start.test.ts",
   "widget-state.test.ts",
   "widget-event-navigation.test.ts",

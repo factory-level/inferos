@@ -12986,7 +12986,8 @@ class OverseerImpl implements AgentHooks {
         : pin.revision;
     if (current !== revision) return refuse("policy", WORKFLOW_REVISION_CHANGED);
     try {
-      let invocation = await invokeWorkflowTrigger(this, caller.userId, caller.profileId, hookId);
+      // The person's own on-request path (invokeTrigger -> invokeWorkflowTrigger), unchanged.
+      let invocation = await this.invokeTrigger(caller.userId, caller.profileId, hookId);
       return {status: "started", runId: invocation.id};
     } catch (error) {
       let message = error instanceof Error ? error.message : String(error);
