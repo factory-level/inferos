@@ -12,7 +12,8 @@ function setup() {
   putAction(storage, 1);
   const record = storage.actions.get(1)!;
   if (record.type !== "action") throw new Error("fixture");
-  record.aguiApproval = approvalCorrelation("owner-id", input, proposal);
+  // A correlation stored before FAC-119 carries its own ten-minute deadline, which is still honored.
+  record.aguiApproval = {...approvalCorrelation("owner-id", input, proposal), expiresAt: Date.now() + 10 * 60_000};
   storage.actions.put(record);
   const apply = vi.fn();
   const impl = {getGatekeeperFacet: () => ({getApprovalProposal: async () => proposal}), applyPendingAction: apply};
@@ -39,7 +40,8 @@ describe("durable approval fencing", () => {
           clock.mockReturnValue(f.record.aguiApproval!.expiresAt + 1);
           return proposal;
         }})}});
-      await expect(client.operateApproval(f.answer)).rejects.toThrow("refused");
+      // Not pending any more, by its own deadline: never applied, and said so by its code.
+      await expect(client.operateApproval(f.answer)).rejects.toThrow("APPROVAL_NOT_PENDING: Approval expired");
       expect(f.apply).not.toHaveBeenCalled();
     } finally {clock.mockRestore();}
   });
@@ -59,7 +61,7 @@ describe("durable approval fencing", () => {
     const f = setup();
     const client = await openFakeOverseer(f.storage, {impl: {...f.impl,
       getGatekeeperFacet: () => ({getApprovalProposal: async () => ({...proposal, fingerprint: "changed"})})}});
-    await expect(client.operateApproval(f.answer)).rejects.toThrow("refused");
+    await expect(client.operateApproval(f.answer)).rejects.toThrow("APPROVAL_CONFLICT");
     expect(f.apply).not.toHaveBeenCalled();
   });
   it("one person/thread cannot select a second queued action", async () => {

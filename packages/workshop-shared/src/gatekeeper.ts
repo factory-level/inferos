@@ -1,5 +1,5 @@
 import type { ActionOutcome, ActionReceiptCode, ActionResult } from "./action-outcome";
-import type { ApprovalEdit, ApprovalProposal } from "./operate-approval";
+import type { ApprovalEdit, BoardTransitionProposal } from "./operate-approval";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
 // installation of the Gadgets Workshop may have access to different adapters, typically based on
@@ -1053,7 +1053,33 @@ export type ActionApplyFailure = {
   message: string;
   /** The provider's error code, when it gave one. */
   code?: string;
+  /**
+   * What kind of reason it was (FAC-119), so a person is told the right thing to do: never read
+   * from the message's words. Absent from a gatekeeper that doesn't say: read as `unavailable`.
+   */
+  kind?: ActionFailureKind;
 };
+
+/**
+ * Why an apply did not succeed, by what a person can do about it (FAC-119):
+ * - `policy`: the provider's own policy refused it (for InferOps, its workflow policy);
+ * - `permission`: the person, or the account it acts as, lacks a permission there;
+ * - `sign-in`: the account's sign-in expired or was revoked: reconnecting it can fix it;
+ * - `conflict`: the target changed since it was proposed (a stale revision, a concurrent change);
+ * - `invalid`: the provider found the request itself malformed or no longer valid;
+ * - `unavailable`: anything else, a provider or network failure included, and any reason a
+ *   gatekeeper gave no kind for.
+ */
+export type ActionFailureKind = "policy" | "permission" | "sign-in" | "conflict" | "invalid" | "unavailable";
+
+/** Every `ActionFailureKind`, for checking one a gatekeeper reports. */
+export const ACTION_FAILURE_KINDS: readonly ActionFailureKind[] =
+  ["policy", "permission", "sign-in", "conflict", "invalid", "unavailable"];
+
+/** `kind` if it is an `ActionFailureKind`, else `unavailable`: an old record or an unknown answer. */
+export function actionFailureKind(kind: unknown): ActionFailureKind {
+  return ACTION_FAILURE_KINDS.includes(kind as ActionFailureKind) ? kind as ActionFailureKind : "unavailable";
+}
 
 /**
  * Interface exposed by a Gatekeeper instance implementing a specific resource binding on a
@@ -1063,12 +1089,16 @@ export type ActionApplyFailure = {
  * interface is exposed to the Overseer, not directly to the Gadget.
  */
 export interface Gatekeeper<Session> extends DurableObject {
-  /** Kernel-only bounded projection of a supported explicit proposal; never exposed to sessions. */
-  getApprovalProposal?(action: number): Promise<ApprovalProposal>;
+  /**
+   * Kernel-only bounded projection of a supported explicit proposal; never exposed to sessions.
+   * Null for an action the gatekeeper projects nothing of its own for (FAC-119): the kernel then
+   * derives the proposal from the action's journal record, and it can't be edited.
+   */
+  getApprovalProposal?(action: number): Promise<BoardTransitionProposal | null>;
 
   /** Validate and durably replace a proposal without applying it; identical edits recover it. */
   editApprovalProposal?(action: number, args: ApprovalEdit): Promise<{
-    action: number; description: ActionDescription; proposal: ApprovalProposal;
+    action: number; description: ActionDescription; proposal: BoardTransitionProposal;
   }>;
 
   /**

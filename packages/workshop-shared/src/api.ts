@@ -45,7 +45,7 @@ import type {
   ArtifactRevision,
 } from "./agent-artifact.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace, WidgetSearchAnswer } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace, WidgetSearchAnswer, ActionFailureKind } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
@@ -2564,6 +2564,12 @@ export type ActionAttempt = {
   message: string;
   /** The provider's error code, when it gave one. */
   code?: string;
+  /**
+   * What kind of reason it was (FAC-119; `ActionFailureKind`), as the gatekeeper reported it. Absent
+   * on an attempt recorded before kinds were kept, a thrown error and a recovered interrupted apply:
+   * read those with `actionFailureKind`, which gives `unavailable`.
+   */
+  kind?: ActionFailureKind;
   /**
    * Whether approving again may succeed and is safe, as the gatekeeper's structured answer said
    * (`ActionApplyFailure.retryable`). A thrown error and a recovered interrupted apply are recorded

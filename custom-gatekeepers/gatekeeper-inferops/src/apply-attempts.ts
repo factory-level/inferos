@@ -18,7 +18,7 @@
 // InferOps they are reconcile-only, and every later apply returns the stored unknown without
 // sending anything.
 
-import type { ActionApplyFailure } from "@gadgets/workshop-shared/gatekeeper";
+import type { ActionApplyFailure, ActionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
 import { InferOpsError, type InferOpsErrorCode, type WriteStage } from "./inferops-client";
 
 /** Codes whose refusal can pass: reconnecting, InferOps turned back on, or InferOps answering. */
@@ -55,6 +55,22 @@ export type AttemptFailure = {
  * A check made by the gatekeeper before sending refused the apply, with its own reason. Nothing
  * was sent.
  */
+/**
+ * What kind of reason an InferOps failure was (FAC-119), from its code and the policy flag only,
+ * never its words: a workflow-policy refusal and a missing permission are both FORBIDDEN, and only
+ * the flag (`isPolicyRefusal`, InferOps' policy envelope) tells them apart.
+ */
+export function failureKind(code: string | null, policy: boolean): ActionFailureKind {
+  if (code === "FORBIDDEN") return policy ? "policy" : "permission";
+  switch (code) {
+    case "UNAUTHORIZED": return "sign-in";
+    case "STALE_REVISION": case "CONFLICT": case "IDEMPOTENCY_CONFLICT": case "RUN_ACTIVE": case "WORKFLOW_MISMATCH":
+      return "conflict";
+    case "INVALID_REQUEST": case "INVALID_STATE": case "NOT_FOUND": return "invalid";
+    default: return "unavailable";
+  }
+}
+
 export class CheckRefused extends InferOpsError {
   constructor(code: InferOpsErrorCode, readonly reason: string) {
     super(code, reason, { stage: "unsent" });

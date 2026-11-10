@@ -1,5 +1,9 @@
-import type { ActionApprovalCorrelation, OperateApprovalRequest, OperateApprovalSnapshot } from "@gadgets/workshop-shared/operate-approval";
-import { approvalCorrelation, approvalSnapshot, validateApprovalRequest } from "./operate-approval";
+import {
+  OPERATE_APPROVAL_ERROR_CODES, createOperateApprovalError, operateApprovalErrorCode,
+  type ActionApprovalCorrelation, type ApprovalProposal, type BoardTransitionProposal, type OperateApprovalRequest,
+  type OperateApprovalSnapshot,
+} from "@gadgets/workshop-shared/operate-approval";
+import { actionProposal, approvalCorrelation, approvalExpired, approvalSnapshot, validateApprovalRequest } from "./operate-approval";
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import { canvasRunEffects, canvasRunEventsHeard, type CanvasPage, type CanvasPageOperation, type CanvasRunEvent } from "@gadgets/workshop-shared/canvas-model";
 import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
@@ -68,7 +72,7 @@ import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId,
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
 import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionOutcome, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -264,6 +268,26 @@ export const ACTION_ALREADY_APPROVED = "This action was already approved.";
  * (FAC-118): the action reaches the gatekeeper once, and the decision under way stands.
  */
 export const ACTION_IN_PROGRESS = "This action is being decided; its outcome is recorded when it finishes.";
+
+/**
+ * The approval bridge's typed refusal (FAC-119) for a decision that ended with nothing recorded on
+ * the action: by the kernel's own refusals, matched exactly as the kernel wrote them, never by a
+ * provider's words. A decider the workspace refuses (its role, the deployment's shared-configuration
+ * authority, another company) is `refused`; an action already decided or being decided is
+ * `notPending`; an error already typed passes through; anything else is `unavailable`.
+ */
+export function approvalRefusal(error: unknown): Error {
+  if (operateApprovalErrorCode(error) !== null) return error as Error;
+  let message = error instanceof Error ? error.message : String(error);
+  const ends = (text: string) => message === text || message.endsWith(`: ${text}`);
+  if (ends(SHARED_CONFIGURATION_REFUSED) || ends("Unauthorized")) {
+    return createOperateApprovalError(OPERATE_APPROVAL_ERROR_CODES.refused, SHARED_CONFIGURATION_REFUSED);
+  }
+  if ([ACTION_IN_PROGRESS, ACTION_ALREADY_APPROVED, ACTION_ALREADY_REJECTED].some(ends)) {
+    return createOperateApprovalError(OPERATE_APPROVAL_ERROR_CODES.notPending, message);
+  }
+  return createOperateApprovalError(OPERATE_APPROVAL_ERROR_CODES.unavailable, "The decision couldn't be made just now.");
+}
 
 /**
  * Re-checks, at a protected execution point of a run a person asked for (FAC-104: the run's start,
@@ -7035,6 +7059,8 @@ class OverseerImpl implements AgentHooks {
       message: earlierUnknown && failure.outcome === "notApplied"
           ? `${failure.message} ${EARLIER_ATTEMPT_UNKNOWN_NOTE}` : failure.message,
       ...(failure.code !== undefined ? {code: failure.code} : {}),
+      // Kept only as one of the known kinds (FAC-119): a gatekeeper's other answer reads as unavailable.
+      ...(failure.kind !== undefined ? {kind: actionFailureKind(failure.kind)} : {}),
       retryable: failure.retryable, at: new Date(),
     };
     if (!earlierUnknown && failure.outcome === "notApplied" && !failure.retryable) {
@@ -15942,36 +15968,43 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async operateApproval(raw: OperateApprovalRequest): Promise<OperateApprovalSnapshot> {
     const input = validateApprovalRequest(raw);
     const actions = this.impl.storage.actions;
+    const {refused, notPending, conflict, unavailable} = OPERATE_APPROVAL_ERROR_CODES;
+    // Any action of this workspace's journal (FAC-119), an assigned run's included: it is decided
+    // through the same approveAction and rejectAction as every other surface's decision.
     const read = () => {
       const record = actions.get(input.actionId);
-      // An assigned run's action is decided from the approvals list, through its own facet.
-      if (record?.type !== "action" || record.executedAs) throw new Error("Approval refused");
+      if (record?.type !== "action") throw createOperateApprovalError(refused, "Approval refused");
       return record;
     };
     const facet = (gatekeeperId: number) => this.impl.getGatekeeperFacet(gatekeeperId) as
       Fetcher<Gatekeeper<unknown> & Required<Pick<Gatekeeper<unknown>, "getApprovalProposal" | "editApprovalProposal">>>;
     let record = read();
     if (!record.aguiApproval) {
-      if (input.answer || record.state !== "pending") throw new Error("Approval refused");
-      const proposal = await facet(record.gatekeeperId).getApprovalProposal(record.action);
+      if (input.answer || record.state !== "pending") throw createOperateApprovalError(refused, "Approval refused");
+      const proposal = await this.#approvalProposalOf(record);
       record = read();
       const key = JSON.stringify([this.clientUserId, input.threadId]);
-      if (actions.byApprovalThread.get(key) && !record.aguiApproval) throw new Error("Thread already has an action");
-      if (record.state !== "pending") throw new Error("Approval refused");
+      if (actions.byApprovalThread.get(key) && !record.aguiApproval) {
+        throw createOperateApprovalError(refused, "Thread already has an action");
+      }
+      if (record.state !== "pending") throw createOperateApprovalError(notPending, "Approval is no longer pending");
       record.aguiApproval ??= approvalCorrelation(this.clientUserId, input, proposal);
       actions.put(record);
     }
     const correlation = record.aguiApproval;
     if (correlation.person !== this.clientUserId || correlation.threadId !== input.threadId) {
-      throw new Error("Approval refused");
+      throw createOperateApprovalError(refused, "Approval refused");
     }
+    // Only a gatekeeper's own board-transition projection can be edited, and never an assigned run's.
+    const editable = correlation.proposal.kind !== "action" && !record.executedAs;
     if (input.answer) {
       if (input.answer.interruptId !== correlation.interruptId || input.runId === correlation.runId) {
-        throw new Error("Approval refused");
+        throw createOperateApprovalError(refused, "Approval refused");
       }
       const payload = input.answer.payload;
+      if (payload.editedArgs && !editable) throw createOperateApprovalError(refused, "This approval can't be edited");
       if (correlation.decision && JSON.stringify(correlation.decision) !== JSON.stringify(payload)) {
-        throw new Error("Conflicting approval answer");
+        throw createOperateApprovalError(conflict, "Conflicting approval answer");
       }
       if (!correlation.decision) {
         // Another authorized surface may have decided it while this client was disconnected.
@@ -15979,8 +16012,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
             (record.state === "rejected" && !payload.approved) || record.state === "failed")) {
           return approvalSnapshot(record);
         }
-        if (record.state !== "pending" || record.applyStartedAt || Date.now() >= correlation.expiresAt) {
-          throw new Error("Approval is no longer pending");
+        if (record.state !== "pending" || record.applyStartedAt || approvalExpired(correlation)) {
+          throw createOperateApprovalError(notPending, "Approval is no longer pending");
         }
         // Reserve the answer before awaits, so concurrent/contradictory replies cannot both win.
         correlation.decision = payload;
@@ -15990,12 +16023,12 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     if (correlation.replacement !== undefined) {
       // Old interrupt retries recover the new proposal without reusing the old approval for it.
       const next = actions.get(correlation.replacement);
-      if (next?.type !== "action") throw new Error("Replacement unavailable");
+      if (next?.type !== "action") throw createOperateApprovalError(unavailable, "Replacement unavailable");
       return approvalSnapshot(next);
     }
     const decision = correlation.decision;
     if (decision?.editedArgs && record.state === "pending") {
-      if (Date.now() >= correlation.expiresAt) return approvalSnapshot(record);
+      if (approvalExpired(correlation)) return approvalSnapshot(record);
       // The existing claim also excludes decisions from other authorized surfaces during editing.
       await this.impl.withActionClaim(record.id, async () => {
         const profile = await this.#getClientProfile();
@@ -16010,8 +16043,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
             record = read();
             delete record.aguiApproval!.decision;
             actions.put(record);
+            // The gatekeeper's typed marker: the edit itself is refused, nothing changed (FAC-119).
+            throw createOperateApprovalError(refused, "That edit isn't valid for this action now.");
           }
-          throw error;
+          throw createOperateApprovalError(unavailable, "The edit couldn't be made just now.");
         }
         // The facet retains a durable replacement link. No external effect occurs in this step.
         // submitActionNow writes synchronously within the same journal transaction.
@@ -16034,28 +16069,63 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         });
       });
       const next = actions.get(read().aguiApproval!.replacement!);
-      if (next?.type !== "action") throw new Error("Replacement unavailable");
+      if (next?.type !== "action") throw createOperateApprovalError(unavailable, "Replacement unavailable");
       return approvalSnapshot(next);
     }
     if (input.answer && decision && record.state === "pending" && !record.applyStartedAt) {
-      if (Date.now() >= correlation.expiresAt) throw new Error("Approval expired");
+      if (approvalExpired(correlation)) throw createOperateApprovalError(notPending, "Approval expired");
       try {
         if (decision.approved) {
-          const current = await facet(record.gatekeeperId).getApprovalProposal(record.action);
-          if (JSON.stringify(current) !== JSON.stringify(correlation.proposal)) throw new Error("Approval changed");
+          // A gatekeeper's own projection is read again, so a changed proposal is never applied under
+          // this answer; a derived one is the immutable record's, so it can't have changed.
+          if (correlation.proposal.kind !== "action") {
+            const current = await this.#approvalProposalOf(record);
+            if (JSON.stringify(current) !== JSON.stringify(correlation.proposal)) {
+              throw createOperateApprovalError(conflict, "Approval changed");
+            }
+          }
           await this.#approveAction(record.id, () => {
-            if (Date.now() >= correlation.expiresAt) throw new Error("Approval expired");
+            if (approvalExpired(correlation)) throw createOperateApprovalError(notPending, "Approval expired");
           });
         }
         else await this.rejectAction(record.id);
-      } catch {
-        // applyPendingAction records the provider's known refusal/unknown result before throwing.
-        // A concurrent decision may still be running; that too must not be reported as applied.
+      } catch (error) {
+        // applyPendingAction records the provider's known refusal/unknown result before throwing,
+        // with its kind (FAC-119); a re-check that refused leaves it pending and says why (FAC-118);
+        // the workspace may have rejected it itself. Each is the snapshot's to tell. A concurrent
+        // decision may still be running; that too must not be reported as applied.
         record = read();
-        if (!record.lastAttempt && !record.applyStartedAt && record.state === "pending") throw new Error("Approval refused");
+        if (!record.lastAttempt && !record.applyStartedAt && record.state === "pending" && !record.blocked) {
+          throw approvalRefusal(error);
+        }
       }
     }
     return approvalSnapshot(read());
+  }
+
+  // The proposal a person decides (FAC-119): the gatekeeper's own projection where it gives one (a
+  // board transition), else the action's record as the kernel derives it, as for an assigned run's
+  // action, which never reaches the connection's own facet.
+  async #approvalProposalOf(record: ActionRecord & {type: "action"}): Promise<ApprovalProposal> {
+    let spec = this.impl.storage.gatekeepers.get(record.gatekeeperId)?.creationSpec;
+    let scope = spec && "resourceUrl" in spec && typeof spec.resourceUrl === "string" ? spec.resourceUrl : spec?.type ?? "";
+    if (!record.executedAs) {
+      let projected: BoardTransitionProposal | null = null;
+      try {
+        projected = await (this.impl.getGatekeeperFacet(record.gatekeeperId) as
+          Fetcher<Gatekeeper<unknown> & Required<Pick<Gatekeeper<unknown>, "getApprovalProposal">>>)
+          .getApprovalProposal(record.action) ?? null;
+      } catch (error) {
+        // A gatekeeper without the method projects nothing of its own (the RPC runtime's answer for
+        // a missing method); any other failure is the provider's, and nothing is decided.
+        if (!/does not implement the method "getApprovalProposal"|getApprovalProposal is not a function/.test(String(error))) {
+          throw createOperateApprovalError(OPERATE_APPROVAL_ERROR_CODES.unavailable,
+            "The approval couldn't be read from its connection just now.");
+        }
+      }
+      if (projected) return projected;
+    }
+    return actionProposal(record, scope);
   }
 
   async approveAction(id: number): Promise<void> { return this.#approveAction(id); }

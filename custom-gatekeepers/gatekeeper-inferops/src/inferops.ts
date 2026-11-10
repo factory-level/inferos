@@ -1,5 +1,5 @@
 import type { ServiceQueryName, ServiceQueryOptions, ServiceQueryPage } from "./types";
-import type { ApprovalEdit, ApprovalProposal } from "@gadgets/workshop-shared/operate-approval";
+import type { ApprovalEdit, BoardTransitionProposal as ApprovalProposal } from "@gadgets/workshop-shared/operate-approval";
 import { GovernedRequestError, listGoverned, parseGovernedListRequest } from "@gadgets/workshop-shared/governed-data";
 // InferOps gatekeeper: scoped project-board reads and approved issue creates, updates and
 // transitions.
@@ -122,7 +122,7 @@ import {
   type WikiProposalRecord, type WikiStructureRecord, type WriteStage,
 } from "./inferops-client";
 import {
-  BOARD_WRITES, CheckRefused, PROPOSAL_APPROVE, RECONCILE_ONLY, classifyAttempt, type ApplyPolicy,
+  BOARD_WRITES, CheckRefused, PROPOSAL_APPROVE, RECONCILE_ONLY, classifyAttempt, failureKind, type ApplyPolicy,
 } from "./apply-attempts";
 import {
   WIDGET_SEARCH_DENIED, WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, listWorkspaceSlugs, openHttpInferOpsClient,
@@ -1759,6 +1759,7 @@ class ActionBinding {
         outcome: "notApplied", retryable: false,
         message: stored?.message ?? applyFailureMessage(record, null),
         ...(stored?.code !== undefined ? { code: stored.code } : {}),
+        ...(stored?.kind !== undefined ? { kind: stored.kind } : {}),
       } };
     }
     const earlierUncertain = record.attempts === undefined || record.attempts.dispatchedAt !== undefined;
@@ -1769,6 +1770,7 @@ class ActionBinding {
         outcome: "unknown", retryable: false,
         message: stored?.message ?? reconcileOnlyMessage(record),
         ...(stored?.code !== undefined ? { code: stored.code } : {}),
+        ...(stored?.kind !== undefined ? { kind: stored.kind } : {}),
       } };
     }
     let marked: ActionRecord | undefined;
@@ -1804,7 +1806,8 @@ class ActionBinding {
     const message = outcome === "notApplied"
       ? error instanceof CheckRefused ? error.reason : applyFailureMessage(record, code, detailOf(error))
       : uncertainMessage(record, code, stage, earlierUncertain, retryable && options.policy.replayable);
-    const failure: StoredFailure = { outcome, message, ...(code !== null ? { code } : {}) };
+    const failure: StoredFailure = { outcome, message, ...(code !== null ? { code } : {}),
+      kind: failureKind(code, isPolicyRefusal(error)) };
     if (outcome === "notApplied") {
       // No earlier attempt may have been sent, so any mark is this attempt's, and it proved unsent.
       this.putAction(retryable
@@ -1933,11 +1936,14 @@ export class InferOpsProjectGatekeeper
     return new ProjectSessionImpl(this.#binding(), approvalQueue.dup());
   }
 
-  /** Kernel-only projection of the supported transition, from the facet's immutable action. */
-  async getApprovalProposal(action: number): Promise<ApprovalProposal> {
+  /**
+   * Kernel-only projection of the supported transition, from the facet's immutable action. Null for
+   * any other action (FAC-119): the kernel derives that one's proposal from its own record.
+   */
+  async getApprovalProposal(action: number): Promise<ApprovalProposal | null> {
     const binding = this.#binding();
     const record = binding.action(action);
-    if (record?.kind !== "transition" || !record.fingerprint) throw new Error("Unsupported approval");
+    if (record?.kind !== "transition" || !record.fingerprint) return null;
     await assertFingerprint(binding.projectKey, record, {}, {required: true});
     return {
       scope: projectBoardUrl(this.ctx.props), args: {toStateId: record.toStateId},
@@ -1954,6 +1960,7 @@ export class InferOpsProjectGatekeeper
     if (old?.kind !== "transition") throw new Error("Unsupported approval");
     const result = async (id: number) => {
       const proposal = await this.getApprovalProposal(id);
+      if (!proposal) throw new Error("Unsupported approval");
       return {action: id, proposal, description: {
         title: sanitizeTitle(`Move ${old.identifier} to another state`),
         ...buildDescription("Explicit edited board transition, applied only at the expected revision.")

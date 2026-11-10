@@ -1,3 +1,4 @@
+import type { ActionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
 // The actions a binding records between proposal and decision: on a board binding a transition, an
 // issue create or an issue update; on a coding-dispatch binding a dispatch or a run cancel; on a
 // Wiki binding a section update, a page body update or a proposal approval. Each is
@@ -34,6 +35,11 @@ export type StoredFailure = {
   message: string;
   /** The data-source code, when there was one. */
   code?: string;
+  /**
+   * What kind of reason it was (FAC-119), so a replay answers as the first attempt did. Absent on
+   * failures stored before kinds were kept: those read as `unavailable`.
+   */
+  kind?: ActionFailureKind;
 };
 
 /**
