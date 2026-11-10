@@ -122,7 +122,13 @@ export function beginDueRun(
         }
         return { ...copyProgress(schedule), status: "active", nextFire };
       }
-      const scheduledTime = latestFireAtOrBefore(schedule.spec, schedule.nextFire, now);
+      // Coalescing may collapse missed slots, but an `until` bound still caps the slot being
+      // admitted. If the scheduler wakes after the cutoff, use the last missed slot on or before
+      // that cutoff rather than manufacturing a post-bound occurrence.
+      const coalesceThrough = schedule.occurrences && "until" in schedule.occurrences
+        ? Math.min(now, schedule.occurrences.until)
+        : now;
+      const scheduledTime = latestFireAtOrBefore(schedule.spec, schedule.nextFire, coalesceThrough);
       return {
         ...copyProgress(schedule),
         status: "pending",

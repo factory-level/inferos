@@ -69,8 +69,8 @@ due and takes a `runId`, even if admission or callback delivery then fails; admi
 the slot without retrying it. Retries reuse the same `runId` and do not consume another count.
 Missed occurrences remain skipped and do not count. The default `missedRuns: "skip"` advances past
 multiple elapsed slots without invoking the callback. Set `missedRuns: "coalesce"` to invoke it once
-for the latest elapsed slot; a single due slot is delivered normally in either mode. Bounded
-catch-up is not supported.
+for the latest elapsed slot that remains within the schedule's `until` or `count` bound; a single due
+slot is delivered normally in either mode. Bounded catch-up is not supported.
 
 A bound is checked against live state, so a schedule that reaches it reports `completed`. A schedule
 whose cutoff already passed by the time its hook is enabled reports `expired` instead: it never got
@@ -107,7 +107,8 @@ advance to their next future occurrence; a due one-shot expires.
 
 - Recurrences preserve the phase established at registration.
 - Multiple elapsed slots are skipped by default. `missedRuns: "coalesce"` runs once for the latest
-  missed slot; bounded catch-up is not supported.
+  missed slot within the configured bound; a late alarm cannot admit a slot after `until`. Bounded
+  catch-up is not supported.
 - Fixed intervals measure elapsed time and therefore shift relative to local clocks across DST.
 - Calendar schedules retain their requested local wall-clock cadence across DST.
 - A nonexistent spring-forward time moves forward by the transition gap.

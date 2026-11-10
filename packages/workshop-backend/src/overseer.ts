@@ -25,6 +25,8 @@ import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
   type StoredWorkflowOccurrence,
+  type StoredWorkflowOccurrenceExpiry,
+  type StoredWorkflowOccurrenceCount,
   type QueuedWorkflowRun,
 } from "./workflow-definition-store";
 import { collaboratorAccountName } from "./account-subject";
@@ -1877,6 +1879,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       workflowDeliveries: collection<StoredWorkflowDelivery>()({ primaryKey: "id" }),
       // Seven-day idempotency tombstones for server-verified trigger occurrences (FAC-113).
       workflowOccurrences: collection<StoredWorkflowOccurrence>()({ primaryKey: "key" }),
+      // Ordered expiry pointers and per-trigger counts keep admission bounded (FAC-113).
+      workflowOccurrenceExpiries: collection<StoredWorkflowOccurrenceExpiry>()({ primaryKey: "key" }),
+      workflowOccurrenceCounts: collection<StoredWorkflowOccurrenceCount>()({ primaryKey: "hookId" }),
       // Who may ask a pinned trigger to run now, and the requests admitted but not yet delivered
       // (FAC-102; see workflow-definition-store.ts).
       workflowTriggerControls: collection<StoredTriggerControl>()({ primaryKey: "hookId" }),

@@ -431,6 +431,9 @@ describe("trusted trigger occurrence envelopes", () => {
     let { store: clientStore } = pinnedStore();
     let client = overseerFor(clientStore, true, "grokbot").overseer;
     await expect(client.startHook(HOOK, {
+      occurrence: { kind: "schedule", scheduledTime: 1_800_000_000_000 },
+    })).rejects.toThrow("The scheduled occurrence is invalid.");
+    await expect(client.startHook(HOOK, {
       occurrence: { kind: "event", provider: "cloudflare-email", deliveryId: "client-chosen" },
     })).rejects.toThrow("The event occurrence is invalid.");
     let firstManual = await client.startHook(HOOK);

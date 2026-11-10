@@ -23,8 +23,15 @@ export type StoredTriggerPin = { hookId: number; definitionId: string; revision:
 export type StoredWorkflowDelivery = WorkflowDefinitionDelivery & { id: number };
 
 /** Dedupe tombstones survive delivery-history eviction for the configured occurrence window. */
-export type StoredWorkflowOccurrence = { key: string; deliveryId: number; expiresAt: number };
+export type StoredWorkflowOccurrence = { key: string; hookId: number; deliveryId: number; expiresAt: number };
+/** Ordered expiry pointer, allowing bounded cleanup without scanning all occurrence keys. */
+export type StoredWorkflowOccurrenceExpiry = { key: string; occurrenceKey: string; hookId: number };
+/** Count is maintained transactionally with occurrence insertion and expiry. */
+export type StoredWorkflowOccurrenceCount = { hookId: number; count: number };
 const WORKFLOW_OCCURRENCE_TTL_MS = 7 * 24 * 60 * 60_000;
+/** A trigger refuses new firings at this limit; live-window dedupe is never silently discarded. */
+export const MAX_WORKFLOW_OCCURRENCES_PER_TRIGGER = 10_000;
+const WORKFLOW_OCCURRENCE_EXPIRY_SWEEP_LIMIT = 100;
 
 /**
  * A run a person asked for, queued in the workspace that executes it (FAC-112): the firing's one
@@ -88,7 +95,8 @@ const NOT_FOUND = "Workflow definition not found.";
 export class WorkspaceWorkflowDefinitionStore {
   constructor(private durableStorage: DurableObjectStorage,
       private storage: Pick<OverseerStorage,
-          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "workflowOccurrences" | "nextWorkflowDeliveryId" |
+          "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "workflowOccurrences" |
+          "workflowOccurrenceExpiries" | "workflowOccurrenceCounts" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
           "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired" |
           "workflowRunQueue">,
@@ -314,7 +322,7 @@ export class WorkspaceWorkflowDefinitionStore {
     if (invocationId !== undefined && invocation?.hookId !== hookId) {
       throw new Error("That run request is unknown or already ran.");
     }
-    if (invocation && Date.now() - invocation.requestedAt.getTime() > WORKFLOW_INVOCATION_TTL_MS) {
+    if (invocation && this.retention.now() - invocation.requestedAt.getTime() > WORKFLOW_INVOCATION_TTL_MS) {
       this.storage.workflowInvocations.delete(invocation.id);
       throw new Error("That run request expired. Ask again.");
     }
@@ -357,11 +365,14 @@ export class WorkspaceWorkflowDefinitionStore {
       throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
     }
     return this.durableStorage.transactionSync(() => {
-      let now = Date.now();
-      for (let old of this.storage.workflowOccurrences.list()) {
-        if (old.expiresAt <= now) this.storage.workflowOccurrences.delete(old.key);
-      }
-      let seenOccurrence = this.storage.workflowOccurrences.get(occurrenceKey);
+      let now = this.retention.now();
+      this.#sweepExpiredOccurrences(now);
+      // Prefix the storage key with the trigger so a per-trigger limit is constant-time to check.
+      // The original occurrence identity remains in the suffix for readable durable evidence.
+      let storedKey = `${hookId}:${occurrenceKey}`;
+      let seenOccurrence = this.storage.workflowOccurrences.get(storedKey);
+      // Read tombstones written by the earlier FAC-113 candidate during rolling upgrades.
+      seenOccurrence ??= this.storage.workflowOccurrences.get(occurrenceKey);
       if (seenOccurrence && seenOccurrence.expiresAt > now) {
         // A crash can happen after admission but before the caller queues the run. Return the
         // original delivery while it is retained so the same verified occurrence can finish that
@@ -373,7 +384,11 @@ export class WorkspaceWorkflowDefinitionStore {
         }
         return { alreadyDelivered: true as const };
       }
-      if (seenOccurrence) this.storage.workflowOccurrences.delete(occurrenceKey);
+      if (seenOccurrence) this.#deleteOccurrence(seenOccurrence);
+      let occurrenceCount = this.storage.workflowOccurrenceCounts.get(hookId)?.count ?? 0;
+      if (occurrenceCount >= MAX_WORKFLOW_OCCURRENCES_PER_TRIGGER) {
+        throw new Error("This trigger reached its occurrence deduplication limit. Retry after older occurrences expire.");
+      }
       let deliveries = Array.from(this.storage.workflowDeliveries.list()).toSorted((a, b) => a.id - b.id);
       if (deliveries.length >= MAX_WORKFLOW_DELIVERIES) {
         let isLive = (candidate: StoredWorkflowDelivery) => isLiveWorkflowDelivery(candidate, now);
@@ -408,12 +423,42 @@ export class WorkspaceWorkflowDefinitionStore {
       };
       if (invocation) this.storage.workflowInvocations.delete(invocation.id);
       this.storage.workflowDeliveries.put(delivery);
+      let expiresAt = now + WORKFLOW_OCCURRENCE_TTL_MS;
       this.storage.workflowOccurrences.put({
-        key: occurrenceKey, deliveryId: id, expiresAt: now + WORKFLOW_OCCURRENCE_TTL_MS,
+        key: storedKey, hookId, deliveryId: id, expiresAt,
       });
+      this.storage.workflowOccurrenceExpiries.put({
+        key: `${String(expiresAt).padStart(16, "0")}:${storedKey}`, occurrenceKey: storedKey, hookId,
+      });
+      this.storage.workflowOccurrenceCounts.put({ hookId, count: occurrenceCount + 1 });
       let { id: _, ...shown } = delivery;
       return { ...shown, deliveryId: id };
     });
+  }
+
+  /** Remove at most 100 due tombstones, in expiry order, on each admission. */
+  #sweepExpiredOccurrences(now: number): void {
+    let before = `${String(now + 1).padStart(16, "0")}:`;
+    for (let expiry of this.storage.workflowOccurrenceExpiries.list({ end: before, limit: WORKFLOW_OCCURRENCE_EXPIRY_SWEEP_LIMIT })) {
+      this.#deleteOccurrenceKey(expiry.occurrenceKey, expiry.hookId, expiry.key);
+    }
+  }
+
+  #deleteOccurrence(occurrence: StoredWorkflowOccurrence): void {
+    let expiryKey = `${String(occurrence.expiresAt).padStart(16, "0")}:${occurrence.key}`;
+    if (!Number.isSafeInteger(occurrence.hookId)) {
+      // Rows from the first candidate predate the expiry index and counters.
+      this.storage.workflowOccurrences.delete(occurrence.key);
+      return;
+    }
+    this.#deleteOccurrenceKey(occurrence.key, occurrence.hookId, expiryKey);
+  }
+
+  #deleteOccurrenceKey(occurrenceKey: string, hookId: number, expiryKey: string): void {
+    if (!this.storage.workflowOccurrences.delete(occurrenceKey)) return;
+    this.storage.workflowOccurrenceExpiries.delete(expiryKey);
+    let count = this.storage.workflowOccurrenceCounts.get(hookId)?.count ?? 0;
+    this.storage.workflowOccurrenceCounts.put({ hookId, count: Math.max(0, count - 1) });
   }
 
   /**

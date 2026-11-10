@@ -1844,7 +1844,9 @@ export interface HookController<Hook extends RpcTarget> extends WorkerEntrypoint
   invoke?(invocation: HookInvocation): Promise<void>;
 }
 
-/** An admitted request to run a hook now (HookController.invoke); its id is the overseer's. */
+/**
+ * Server-verified identity of one scheduled slot or provider delivery for trigger deduplication.
+ */
 export type HookOccurrence =
   | { kind: "schedule"; scheduledTime: number }
   | { kind: "event"; provider: string; deliveryId: string };
