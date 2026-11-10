@@ -137,3 +137,22 @@ it('still offers the control when its runs can\'t be read', async () => {
   expect(button('Issue refunds now')).toBeDefined()
   expect(container.querySelector('[role="status"]')).toBeNull()
 })
+
+it('keeps following a run whose outcome comes back unchanged, until it is final', async () => {
+  vi.useFakeTimers()
+  try {
+    let answers = [[run('running', 9)], [run('running', 9)], [run('running', 9)], [run('succeeded', 9)]]
+    const listRequestedRuns = vi.fn<Overseer['listRequestedRuns']>(async () => answers.length > 1 ? answers.shift()! : answers[0]!)
+    await render({ listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }], listRequestedRuns })
+    expect(container.querySelector('[role="status"]')?.textContent).toMatch(new RegExp(`^Last run: ${RUN_REQUESTED_TEXT}`))
+    for (let i = 0; i < 2; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+      expect(container.querySelector('[role="status"]')?.textContent).toMatch(new RegExp(`^Last run: ${RUN_REQUESTED_TEXT}`))
+    }
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+    expect(container.querySelector('[role="status"]')?.textContent).toMatch(new RegExp(`^Last run: ${RUN_OUTCOME_TEXT.succeeded}`))
+    expect(listRequestedRuns).toHaveBeenCalledTimes(4)
+  } finally {
+    vi.useRealTimers()
+  }
+})

@@ -58,13 +58,17 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
   const [controls, setControls] = useState<Pick<TriggerControl, 'hookId' | 'label'>[]>([])
   const [pressed, setPressed] = useState<ReadonlyMap<number, Pressed>>(new Map())
   const [newest, setNewest] = useState<ReadonlyMap<number, RequestedRun>>(new Map())
+  // Counts answers, so each one re-arms the next read of a run that isn't final, even unchanged.
+  const [answered, setAnswered] = useState(0)
   // The overseer whose answers still count: one answered after the page moved to another workspace,
   // or unmounted, is dropped.
   const live = useRef<RpcStub<Overseer> | null>(null)
 
   const readRuns = (asked: RpcStub<Overseer>, hookId: number) => {
     void newestRun(asked, hookId).then(run => {
-      if (run && live.current === asked) setNewest(prev => new Map(prev).set(hookId, run))
+      if (live.current !== asked) return
+      if (run) setNewest(prev => new Map(prev).set(hookId, run))
+      setAnswered(count => count + 1)
     })
   }
 
@@ -82,15 +86,14 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
     return () => { live.current = null }
   }, [overseer])
 
-  // Follow the runs that aren't final yet, until they are; each new answer starts the next wait.
+  // Follow the runs that aren't final yet, until they are; each answer starts the next wait.
   const following = [...newest].filter(([, run]) => !isFinal(run.outcome)).map(([hookId]) => hookId).join(',')
-  const answers = [...newest.values()].map(run => `${run.invocationId}:${run.outcome}`).join(',')
   useEffect(() => {
     const asked = live.current
     if (following === '' || !asked) return
     const timer = setTimeout(() => { for (const hookId of following.split(',')) readRuns(asked, Number(hookId)) }, FOLLOW_MS)
     return () => clearTimeout(timer)
-  }, [following, answers])
+  }, [following, answered])
 
   const press = async (hookId: number) => {
     setPressed(prev => new Map(prev).set(hookId, { status: 'sending' }))
