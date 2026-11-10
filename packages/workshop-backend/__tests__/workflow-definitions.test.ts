@@ -184,7 +184,7 @@ describe("triggers and runs", () => {
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("changed since revision 1");
   });
 
-  it("runs the admission revision after a later publication; new admissions follow latest", () => {
+  it("refuses an admitted revision after the gadget head moves; new admissions follow latest", () => {
     let { store, heads, headOf } = workspace();
     let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
     store.publish(ADA, saved.id, 1);
@@ -194,10 +194,9 @@ describe("triggers and runs", () => {
     heads.set(GADGET, commit(2));
     store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
     store.publish(ADA, saved.id, 2);
-    let alreadyAdmitted = store.fire(11, GADGET, headOf, everyoneBuilds, invocation.id)!;
-    expect(store.run(alreadyAdmitted.run!.runId)).toMatchObject({ revision: 1, commitId: commit(1) });
-    store.queueRun(11, alreadyAdmitted.deliveryId, "run", []);
-    expect(store.deliveries(ADA.id, saved.id)[0].execution?.state).toBe("queued");
+    expect(() => store.fire(11, GADGET, headOf, everyoneBuilds, invocation.id))
+      .toThrow("The workflow changed; ask again");
+    expect(store.deliveries(ADA.id, saved.id)).toEqual([]);
     let nextInvocation = store.beginInvocation(BEN.id, 11);
     expect(store.fire(11, GADGET, headOf, everyoneBuilds, nextInvocation.id))
       .toMatchObject({ revision: 2, commitId: commit(2) });

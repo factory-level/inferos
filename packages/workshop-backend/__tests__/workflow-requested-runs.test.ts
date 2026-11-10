@@ -123,13 +123,23 @@ describe("the runs a person asked a trigger for, read back (FAC-116)", () => {
       expect(await impl.getRequestedRun(PERSON, storedScopeUnknown.invocationId)).toBeNull();
       expect(await impl.listRequestedRuns(PERSON, HOOK)).toEqual([]);
 
-      // With no shared-configuration gatekeeper both sides would otherwise be null, and `null === null`
-      // must not turn unknown scope into authorization.
+      // Without company-scoped deployment authority, the requester's identity is the scope.
       impl.env = { ...impl.env, SHARED_CONFIGURATION_GATEKEEPER: undefined };
-      expect(await impl.getRequestedRun(PERSON, storedScopeUnknown.invocationId)).toBeNull();
-      expect(await impl.listRequestedRuns(PERSON, HOOK)).toEqual([]);
+      expect(await impl.getRequestedRun(PERSON, storedScopeUnknown.invocationId)).not.toBeNull();
+      expect(await impl.listRequestedRuns(PERSON, HOOK)).toHaveLength(1);
+      expect(await impl.getRequestedRun(OTHER, storedScopeUnknown.invocationId)).toBeNull();
 
       let knownScope = asked(impl, store, PERSON, HOOK, new Date(), COMPANY_A);
+      expect(await impl.getRequestedRun(PERSON, knownScope.invocationId)).not.toBeNull();
+      expect(await impl.listRequestedRuns(PERSON, HOOK)).toHaveLength(2);
+
+      impl.env = { ...impl.env, SHARED_CONFIGURATION_GATEKEEPER: "inferops" };
+      let unknownCaller = false;
+      impl.users.get = () => ({ workflowInvokeAnswer: async () => unknownCaller
+        ? ({ holds: true, company: null })
+        : ({ holds: true, company: COMPANY_A }) });
+      expect(await impl.getRequestedRun(PERSON, knownScope.invocationId)).not.toBeNull();
+      unknownCaller = true;
       expect(await impl.getRequestedRun(PERSON, knownScope.invocationId)).toBeNull();
       expect(await impl.listRequestedRuns(PERSON, HOOK)).toEqual([]);
     });

@@ -7299,16 +7299,18 @@ class OverseerImpl implements AgentHooks {
   async getRequestedRun(profileId: string, invocationId: string): Promise<RequestedRun | null> {
     let delivery = this.workflowDefinitionStore().deliveryOfInvocation(invocationId);
     if (!delivery?.run || delivery.invocation?.requestedBy !== profileId) return null;
-    let company: string | null;
-    try {
-      company = await requireWorkflowInvoke(this,
-          this.users.idFromName(profileId).toString(), delivery.hookId);
-    } catch {
-      return null;
+    // A company-scoped deployment must prove a known, equal scope on both the current caller and
+    // the stored run. Without that deployment capability, ownership is the scope (checked above).
+    if (getSharedConfigurationGatekeeper(this.env)) {
+      let company: string | null;
+      try {
+        company = await requireWorkflowInvoke(this,
+            this.users.idFromName(profileId).toString(), delivery.hookId);
+      } catch {
+        return null;
+      }
+      if (!company || !delivery.run.company || company !== delivery.run.company) return null;
     }
-    // Null means company scope is unknown (including deployments with no shared-configuration
-    // gatekeeper). Never let two unknown scopes compare equal and disclose a run.
-    if (!company || !delivery.run.company || company !== delivery.run.company) return null;
     let outcome: WorkflowRunOutcome;
     let reason: RequestedRun["reason"];
     if (delivery.result) {
