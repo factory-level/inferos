@@ -89,7 +89,7 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     "getConsoleWidgetStates" |
     // A widget a Wiki page embeds, by its source gadget, without an open operate session (FAC-12,
     // wiki-embedded-widget.test.ts).
-    "resolveEmbeddedWidget" | "getEmbeddedWidget" |
+    "resolveEmbeddedWidget" | "getEmbeddedWidget" | "listWidgetInstances" |
     // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
     "listWorkflowDefinitions" |
     // A use collaborator listed on a trigger's control may run it, and sees only those controls
@@ -122,6 +122,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   deleteFlow: ws => ws.deleteFlow("flow", "0"),
   saveWorkflowDefinition: ws => ws.saveWorkflowDefinition({ title: "Workflow", gadgetId: 1 }),
   publishWorkflowDefinition: ws => ws.publishWorkflowDefinition("definition", 1),
+  shareWorkflowDefinition: ws => ws.shareWorkflowDefinition("definition", "someone", { read: true, run: false, edit: false }),
+  listWorkflowDefinitionShares: ws => ws.listWorkflowDefinitionShares("definition"),
   pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),

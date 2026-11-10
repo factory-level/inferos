@@ -15,6 +15,10 @@ covers:
   - packages/gatekeeper-kit
   - packages/workshop-shared/src/gatekeeper.ts
   - packages/workshop-backend/src/user.ts
+  - packages/workshop-frontend/src/features/auth/AccountSubjectPassCard.tsx
+  - packages/workshop-backend/src/account-subject.ts
+  - packages/workshop-backend/src/user-directory.ts
+  - packages/workshop-backend/__tests__/account-subject.test.ts
   - packages/workshop-backend/src/auth/config.ts
   - packages/integration-tests/__tests__/inferops-isolation.test.ts
   - packages/integration-tests/__tests__/inferops-live.test.ts
@@ -157,12 +161,17 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
     Set but malformed, the code isn't exchanged and sign-in is off. It only refuses.
 
   Then, by purpose:
-  - **Sign-in** requires `emailVerified: true` (InferLab also issues sessions for emails nobody
-    proved, such as invitations and impersonation), signs the session out again with
-    `POST /auth/logout`, and hands `callback.complete` an account carrying only the normalized
-    email. Signing in grants nothing.
+  - **Sign-in** signs the session out again with `POST /auth/logout`, and hands
+    `callback.complete` an account carrying the InferLab principal (`subject`: the auth origin as
+    issuer and `user.id`, `subjectOf`) and the normalized email only when `emailVerified` is
+    `true`. The Workshop keys the account on the principal ([ADR 0019](../adr/0019-account-keyed-on-stable-subject.md),
+    FAC-165), so an email InferLab doesn't vouch for (after an email change) is just not passed on.
+    The exchange only answers for a `kind = 'sso'` root, opened after the provider edge
+    authenticated the browser as that principal; invitations, impersonation and dev logins never
+    reach it. Signing in grants nothing.
   - **Connect** installs the session and identity in the account's `InferOpsCredentials` object
-    together with the callback, then calls `callback.complete` with the connected account; if
+    together with the callback, then calls `callback.complete` with the connected account (its
+    `subject` too); if
     that throws, the session is signed out and the object wiped.
   - **Reconnect** stages the session in the existing account's object and calls the stored
     callback's `reconnectComplete(stageId)`; `commitReconnect(stageId)` makes it live and signs
@@ -253,6 +262,29 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   `unavailable`. Only the Workshop's build-role `publishConsole` and `deleteConsole` call them (see
   [Operate mode](operate-mode.md#widget-index)), directly rather than as approved actions: the
   divergence below.
+- **Widget search by intent (FAC-13).** `InferOpsAccount.searchWidgets(query, k)` asks InferOps'
+  `widget.search` (`GET /knowledge/widget-search?query&k`, `knowledge:read`) through
+  `InferOpsClient.searchWidgets`, with the connected person's own token, in each of their
+  workspaces (as the sign-in recorded them), and merges the answers (`mergeWidgetSearches`): each
+  built-in kind and each definition (`<sourceId>@<sourceVersion>`) once, at its best score, best
+  first, at most `k` of each. It returns definitions only (`WidgetSearchAnswer`): no instance,
+  record or live data.
+  - **Nothing asked** is said, never shown as "no widgets": an account without a connected person of
+    `INFEROPS_COMPANY` answers `{status: "unavailable", reason: "reconnect"}`, and a person with no
+    InferOps workspace `no-workspace`.
+  - **Denied** only for InferOps' own missing-permission refusal (`Missing permission:
+    knowledge:read`, read from its error envelope; `WIDGET_SEARCH_DENIED`): that workspace was asked
+    and adds nothing, counted in `denied`. Any other 403 (a product refusal, a workspace the person
+    no longer holds) is a workspace not searched.
+  - **Partial outages** are counted in `unsearched`, beside what the other workspaces found. If
+    every workspace failed so, the last failure is thrown. A 404 (an InferOps without
+    `widget.search`) or an outage is `UNAVAILABLE` in `WIDGET_SEARCH_UNAVAILABLE`'s words; an
+    answer that doesn't parse, or holds more than `k` of either, is refused as malformed. The demo's
+    mock has no index and throws.
+  - Scores from workspaces ranked differently (one `semantic`, one `keyword`) are merged on one
+    scale, and the answer reads `semantic`. A deployment has one embedder, so this only orders.
+  - `__tests__/http-inferops.test.ts` ("widget search by intent (FAC-13)") covers the request, its
+    parsing, and which 403 reads as denied.
 - **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses
   `inferops://<tenant>.<workspace>/project/board/<KEY>` (exactly two lowercase slug labels, no
   port; anything else is not a board URL), resolves the workspace, checks the project exists there
@@ -809,6 +841,58 @@ The board, dispatch and Wiki facets build the same bindings from their props: `P
 `WikiBinding` take their target and their parts (store, client, observers, an optional observation
 hook) as arguments, and apply, reject and revert are functions over a binding.
 
+### Accounts keyed on the principal
+
+FAC-165, [ADR 0019](../adr/0019-account-keyed-on-stable-subject.md) (proposed). The vendor declares
+`providesSubject`, and every account answers `getAuthenticatedSubject()`: the principal its sign-in
+or connect recorded, else, for an account connected before that, the `userId` its stored identity
+holds. The Workshop (`account-subject.ts`, `auth/login-flow.ts`) keys the person's account on it:
+
+- **The subject index.** The user directory records which account each subject signs in to
+  (`subjects`, written once per subject) and the account each vouched address currently belongs to
+  (`emails`). A new person gets an account named `subject~<issuer>~<subject>` (no `@` or `:`).
+- **Binding an existing account.** A first subject sign-in with a vouched email binds the account
+  that address names, exactly as the provider gives it (an email-keyed account was named by it
+  unchanged; only the `emails` index folds case) (`UserDurableObject.bindSubject`, set-if-unset):
+  never a password account, never one another subject holds. Without a vouched email, the person
+  gets their own account.
+- **Claimed in one step, then bound.** The directory's subject mapping is itself the claim: one
+  set-if-unset step (`claimSubject`) records the first sign-in's candidate and returns whichever
+  account won, with no read before it, and the mapping is never removed. Every sign-in for that
+  subject then binds the winner (set-if-unset, the same answer for each), never its own candidate;
+  a winner that can't bind is moved, compare-and-set, to the subject's own name (`moveSubject`). So
+  overlapping first sign-ins with different addresses bind one account and all sign in to it, and a
+  sign-in that stopped between claiming and binding is settled by the next one. The one-off pass
+  claims the same way.
+- **A bound account signs in only through its subject.** Gatekeeper email sign-in and Cloudflare
+  Access refuse it (`SIGNS_IN_THROUGH_SUBJECT`), so an address that later belongs to someone else
+  reaches nothing. Profile ids, session tokens and every stored reference keep the account's name.
+- **Finding a person by address** (`collaboratorAccountName`, used by `addCollaborator`) resolves the
+  account whose current vouched address it is, and never a bound account by its old address. A share
+  stores the account, so it never follows an address.
+- **The one-off pass** `AdminApi.bindAccountSubjects()` binds each listed email-keyed account whose
+  own InferOps connection vouches its address, unless the directory already sends that subject to
+  another account (a conflict, left unbound, so nothing is stranded). It creates no account, and a
+  second run binds nothing new. Accounts the directory doesn't list yet bind at their next sign-in.
+- **Running the pass.** A deployment admin runs it from the Admin page's Access tab
+  (`AccountSubjectPassCard`, over the same `AdminApi.bindAccountSubjects()`; nothing else calls
+  it). Binding can't be undone there, so it takes a second, explicit step: *Bind accounts…* says
+  what binding does, and only *Bind accounts* runs it; *Cancel* runs nothing. While it runs the
+  button is disabled. It then shows the pass's counts only (checked, bound, already bound, and how
+  many were left unbound), never an account, with its own words for nothing to bind and for no
+  account holding a vouching connection. A failure shows the server's message and the pass can be
+  run again. Tests: `AccountSubjectPassCard.test.tsx`.
+- **Admins** (`ADMINS`) are still matched by account name: a bound account keeps its address as its
+  name; a new person's account name is its subject form.
+- **Tests:** `account-subject.test.ts` (the email change, a second person on the old address, the
+  binding rules, finding by address, the pass and its conflict, two first sign-ins at once, one
+  acting on an answer from before another finished, a sign-in that stopped before binding, an
+  address with capitals, an address that names an account only later, and a pass whose claimed
+  account another subject took meanwhile) and the gatekeeper's
+  `inferlab-login.test.ts` and `account.test.ts`. `account-subject.test.ts` runs in its own vitest
+  project, `backend-sign-in`, whose Miniflare alone has the empty `BLUEPRINTS` namespace the real
+  sign-in reads its admin config from, so no other backend file runs with it.
+
 ### Sign-in proxy
 
 A browser that InferLab's IP-allowlisting edge refuses cannot open central-auth's `/authorize` page either, since that is a browser leg and carries no edge header. With `INFERLAB_AUTHORIZE_ORIGIN` set (a hostname routed to this gatekeeper, behind the deployment's Access application), `src/auth-proxy.ts` serves it:
@@ -942,7 +1026,7 @@ Recorded on 2026-11-02 against `364deb91c`; the design is InferOps [`docs/human/
 
 ## Evidence
 
-Wiki proposal approval against a local InferOps (MVP-40, opt-in, not CI): `packages/integration-tests/__tests__/inferops-wiki-proposals-live.test.ts`, skipped without `INFEROPS_WIKI_LIVE_BASE_URL`. It runs against inferops' test-only in-process harness (`apps/_shared-api/tests/wiki-proposal-proof-server.ts`: the composed app on 127.0.0.1 over a disposable database, Wiki publishing on, no worker, no secret layer) with two proposals stored by its test-only `domains/knowledge/tests/wiki-proposal-proof-seed.ts`. Over per-person connections (the InferLab legs a fixture, as in members-live), it covers: the owner's reads equal InferOps' `proposal.get`; staging sends nothing; an explicit approval applies as the owner, approved at the hash and never published; re-approval is not pending, and InferOps replays a same-hash resend; the member is refused FORBIDDEN and stays pending; the owner's own request is refused for good. The single publish job is counted by the seed's `verify` step. Step B (`INFEROPS_WIKI_LIVE_PUBLISH`, one phase per run): once inferops' test-only `apps/_shared-worker/tests/wiki-publish-consumer.ts` runs the real `knowledge.wiki.publish` job from the queued envelope, `published` reads P1 published into its filed target at expectedVersion + 1, keeping the page's id, slug, parent and pillar membership, with P1's title and content and no Master role, and P2 still unpublished. After one redelivery of the exact completed envelope, `redelivered` reads P1 and its page unchanged, and a same-hash approval replays. Job states, sibling order and provenance are read by the seed's `verify`. The shared-gadget, stopgap, uncertain-dispatch and no-replay cases stay covered against the mock (below).
+Wiki proposal approval against a local InferOps (MVP-40, opt-in, not CI): `packages/integration-tests/__tests__/inferops-wiki-proposals-live.test.ts`, skipped without `INFEROPS_WIKI_LIVE_BASE_URL`. It runs against inferops' test-only in-process harness (`apps/_shared-api/tests/wiki-proposal-proof-server.ts`: the composed app on 127.0.0.1 over a disposable database, Wiki publishing on, no worker, no secret layer) with two proposals stored by its test-only `domains/knowledge/tests/wiki-proposal-proof-seed.ts`. Over per-person connections (the InferLab legs a fixture, as in members-live), it covers: the owner's reads equal InferOps' `proposal.get`; staging sends nothing; an explicit approval applies as the owner, approved at the hash and never published; re-approval answers as the first, sending nothing (FAC-118), and InferOps replays a same-hash resend; the member is refused FORBIDDEN and stays pending; the owner's own request is refused for good. The single publish job is counted by the seed's `verify` step. Step B (`INFEROPS_WIKI_LIVE_PUBLISH`, one phase per run): once inferops' test-only `apps/_shared-worker/tests/wiki-publish-consumer.ts` runs the real `knowledge.wiki.publish` job from the queued envelope, `published` reads P1 published into its filed target at expectedVersion + 1, keeping the page's id, slug, parent and pillar membership, with P1's title and content and no Master role, and P2 still unpublished. After one redelivery of the exact completed envelope, `redelivered` reads P1 and its page unchanged, and a same-hash approval replays. Job states, sibling order and provenance are read by the seed's `verify`. The shared-gadget, stopgap, uncertain-dispatch and no-replay cases stay covered against the mock (below).
 
 Wiki proposal approval (MVP-40, local synthetic, not live): `__tests__/wiki.test.ts` "Wiki proposal approval" (workerd, over the mock's InferOps rules: A1 reads as observations with state, hash, target, sources and freshness, no principals, the one `NOT_FOUND`, the pending overlay; A2 the exact card, nothing sent before approval, the sorted request under `<instance>:<action>`, applied as approved, then published by the job with the page's id, parent, order, Master role and pillars kept; A3 Viewer and Member `FORBIDDEN`, pending until granted; A4 self-approval final; A5 stale, superseded, moved, decided, malformed and unknown refused at staging; A6 revised after staging, final stale; A7 a lost response resent and replayed once, a redelivered job publishing once, concurrent staging joined, another waiting approval `CONFLICT`, and a lost response then a revision ending unknown and not retryable; A8 a tampered record refused unsent; A9 a new page's parent at staging and InferOps' 422 at apply, and publication under the parent in its pillar; A10 stale and superseded outcomes read from InferOps, never published; A11 the stopgap refused at staging and apply while its reads reach InferOps; A12 no revert, reject forgets; A13 the switch; A14 a shared gadget refused at staging while reads and edits work; A15 a collaborator admitted after staging refused unsent and pending, unknown and retryable after an earlier attempt, and sent once after removal; A16 never auto-approvable and no edit-before-approve path; A17 a card that would truncate refused), and `__tests__/http-inferops.test.ts` "Wiki proposals over HTTP" (field-by-field parsing without principals, the 404 `NOT_FOUND`, the reads' 403 collapse kept, malformed and foreign answers `UNAVAILABLE`, the exact approve request, and H1: each refusal from InferOps' exact envelope to its code, message and stage, a body without the envelope proving nothing, the other writes' mapping unchanged).
 

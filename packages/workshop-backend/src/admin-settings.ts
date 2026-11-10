@@ -1,4 +1,4 @@
-import { AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor, createPublicationError, PUBLICATION_ERROR_CODES, publicationFlagFor, PublicationRecord } from '@gadgets/workshop-shared/api';
+import { AccountSubjectPass, AdminApi, AdminFormat, AdminFormatPatch, AdminResourceVendor, AdminSettingsView, AmbientGatekeeperMode, BannerColor, BlueprintPublicInfo, MAX_ANNOUNCEMENT_LENGTH, MAX_INSTANCE_INSTRUCTIONS_LENGTH, MAX_SITE_NAME_LENGTH, isAmbientGatekeeperMode, isBannerColor, isHexColor, createPublicationError, PUBLICATION_ERROR_CODES, publicationFlagFor, PublicationRecord } from '@gadgets/workshop-shared/api';
 import { GatekeeperVendor } from '@gadgets/workshop-shared/gatekeeper';
 import { DurableObject } from 'cloudflare:workers';
 import { RpcTarget } from 'capnweb';
@@ -10,6 +10,7 @@ import { AdminConfig, DEFAULT_ADMIN_CONFIG, FormatCuration, MAX_AGENT_HINT, defa
 import { SITE_LOGO_R2_KEY, siteLogoImage, validateSiteLogo } from './site-logo.js';
 import { ambientGatekeeperMode, DEFAULT_AMBIENT_GATEKEEPER_MODE } from './provisioning-policy.js';
 import { buildGatekeeperVendorMap } from './auth/auth-vendors.js';
+import { bindAccountSubjects } from './account-subject.js';
 import { UserDurableObject } from './user.js';
 import { bundledBlueprintsManifestVersion, installBundledBlueprints, isBundledFormat } from './bundled-blueprints.js';
 import { BUNDLED_BLUEPRINTS } from './generated/bundled-blueprints.js';
@@ -693,6 +694,18 @@ export class AdminSettings extends DurableObject<Cloudflare.Env> {
     vendors.sort((a, b) => Number(b.autoProvisions) - Number(a.autoProvisions));
     return vendors;
   }
+
+  /**
+   * The one-off subject pass (ADR 0019 decision 7, FAC-165): binds each email-keyed account that
+   * holds a connection of the deployment's `SHARED_CONFIGURATION_GATEKEEPER` vendor to the principal
+   * behind it, when that connection vouches the account's own address. An account whose subject the
+   * directory already sends elsewhere is left unbound (a conflict), so no account is stranded.
+   * Creates no account, and a second run binds nothing new.
+   */
+  async bindAccountSubjects(): Promise<AccountSubjectPass> {
+    return bindAccountSubjects({ users: this.users, directory: this.ctx.exports.UserDirectoryDurableObject },
+      this.env.SHARED_CONFIGURATION_GATEKEEPER ?? null);
+  }
 }
 
 // Capability for managing deployment-wide admin settings, obtained via
@@ -744,6 +757,10 @@ export class AdminApiImpl extends RpcTarget implements AdminApi {
 
   async setSignupsEnabled(enabled: boolean): Promise<void> {
     await this.admin.updateAdminConfig({ signupsEnabled: enabled });
+  }
+
+  bindAccountSubjects(): Promise<AccountSubjectPass> {
+    return this.admin.bindAccountSubjects();
   }
 
   async setUserSearchEnabled(enabled: boolean): Promise<void> {

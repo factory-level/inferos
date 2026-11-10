@@ -22,7 +22,9 @@ function session(total = 5) {
       return { rows: rows.slice(offset, next), nextCursor: next < rows.length ? `c${next}` : null, total: rows.length, truncated: false }
     }),
     get: vi.fn<GovernedWriteSession['get']>(async (id: string) => rows.find(item => item.id === id) ?? null),
-    command: vi.fn<GovernedWriteSession['command']>(async () => ({ outcome: 'proposed' as const })),
+    command: vi.fn<GovernedWriteSession['command']>(async () => ({
+      outcome: 'proposed' as const, actionId: 'test-action', status: async () => ({ outcome: 'waiting' as const }),
+    })),
   }
   return { impl, calls, provider: governedDataProvider(async () => impl) }
 }
@@ -88,8 +90,11 @@ describe('governedDataProvider (FAC-9)', () => {
 
   it('writes only a declared command, proposed for a decision, with exactly its fields', async () => {
     const { provider, impl } = session()
-    expect(await provider.update({ resource: 'queue', id: 'r1', variables: { command: 'setStatus', values: { status: 'closed' }, expectedRevision: '1' } }))
-      .toEqual({ data: { id: 'r1', outcome: 'proposed' } })
+    const receipt = { outcome: 'proposed' as const, actionId: 'opaque-action', status: vi.fn<() => Promise<{ outcome: 'waiting' }>>(async () => ({ outcome: 'waiting' as const })) }
+    impl.command = vi.fn<GovernedWriteSession['command']>(async () => receipt)
+    const result = await provider.update({ resource: 'queue', id: 'r1', variables: { command: 'setStatus', values: { status: 'closed' }, expectedRevision: '1' } })
+    expect(result.data).toMatchObject({ id: 'r1', outcome: 'proposed', receipt: { actionId: 'opaque-action' } })
+    expect(await (result.data as { receipt: { status: () => Promise<{ outcome: string }> } }).receipt.status()).toEqual({ outcome: 'waiting' })
     expect(impl.command).toHaveBeenCalledWith({ command: 'setStatus', id: 'r1', values: { status: 'closed' }, expectedRevision: '1' })
     await expect(provider.update({ resource: 'queue', id: 'r1', variables: { command: 'setStatus', values: {}, expectedRevision: '1', url: 'x' } }))
       .rejects.toThrow('A write is one declared command, with its values and the revision it was read at.')

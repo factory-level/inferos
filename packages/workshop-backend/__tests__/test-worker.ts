@@ -136,3 +136,18 @@ export class FakeGatekeeperAccount extends WorkerEntrypoint<
     return accountCalls.get(this.#key) ?? [];
   }
 }
+
+/**
+ * A sign-in account that yields a stable subject (ADR 0019, FAC-165): `subject` null for one with no
+ * person behind it, `email` only when the provider vouches for one. Its connected-account form
+ * answers the same, for the subject pass.
+ */
+export class FakeSubjectAccount extends WorkerEntrypoint<unknown, { issuer: string; subject: string | null; email?: string }> {
+  async getAuthenticatedEmail(): Promise<string | null> {
+    return this.ctx.props.email ?? null;
+  }
+
+  async getAuthenticatedSubject(): Promise<{ issuer: string; subject: string } | null> {
+    return this.ctx.props.subject === null ? null : { issuer: this.ctx.props.issuer, subject: this.ctx.props.subject };
+  }
+}

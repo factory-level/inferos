@@ -19,16 +19,16 @@ const GADGET = 3;
 const HOOK = 11;
 const commit = (n: number) => n.toString(16).padStart(40, "0");
 const headOf = (id: number) => (id === GADGET ? commit(1) : undefined);
-const everyoneBuilds = () => true;
+const everyoneBuilds = () => "build" as const;
 
 /** A workspace store with one published definition pinned to trigger HOOK. */
 function pinned() {
   let durable = makeMockStorage();
   let storage = makeOverseerStorage(durable);
   let store = new WorkspaceWorkflowDefinitionStore(durable, storage);
-  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
+  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
   store.publish(ADA, saved.id, 1);
-  store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1 });
+  store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1, mode: "pinned" });
   return { durable, storage, store, definitionId: saved.id };
 }
 
@@ -111,7 +111,7 @@ describe("through the Overseer", () => {
         ...(opts.assignmentsEnabled ? { WORKFLOW_ASSIGNMENTS_ENABLED: "true" } : {}),
       },
       isSharedConfiguration: async () => true,
-      workflowDefinitionStore: () => store,
+      workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const,
       getGadgetHead: headOf,
       defaultGadgetId: GADGET,
       assertGatekeeperUsable: () => {},
@@ -333,7 +333,7 @@ describe("an invocation stays on the revision it was admitted for", () => {
     let heads = new Map([[GADGET, commit(1)]]);
     let at = (id: number) => heads.get(id);
     heads.set(GADGET, commit(2));
-    base.store.save(ADA, { id: base.definitionId, title: "Refund", gadgetId: GADGET }, at);
+    base.store.save(ADA, { id: base.definitionId, title: "Refund", gadgetId: GADGET }, at, "build");
     base.store.publish(ADA, base.definitionId, 2);
     base.store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
     return { ...base, at };
@@ -355,7 +355,7 @@ describe("an invocation stays on the revision it was admitted for", () => {
     storage.workflowTriggerPins.put({ hookId: HOOK, definitionId, revision: 2 });
     expect(() => store.fire(HOOK, GADGET, at, everyoneBuilds, invocation.id))
       .toThrow("That run request was for another revision of this workflow. Ask again.");
-    expect(store.deliveries(ADA.id, definitionId)).toEqual([]);
+    expect(store.deliveries(ADA.id, definitionId, "build")).toEqual([]);
   });
 
   it("is dropped when the control changes or is cleared", () => {
@@ -433,7 +433,7 @@ describe("what an invoker sees, and what reaches the gatekeeper", () => {
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
     let impl = {
       env: {}, storage: { boundHooks: { get: () => hook } }, assertGatekeeperUsable: () => {},
-      workflowDefinitionStore: () => store, takenInvocations: new Map<string, boolean>(), getGadgetHead: headOf,
+      workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const, takenInvocations: new Map<string, boolean>(), getGadgetHead: headOf,
     };
     let direct = invokeWorkflowTrigger as unknown as (...args: unknown[]) => Promise<unknown>;
     await direct(impl, "viewer-id", OPERATOR, HOOK, { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" });
@@ -463,7 +463,7 @@ async function invokeSession(mayInvoke?: (resourceUrl: string) => Promise<boolea
     env: mayInvoke ? { SHARED_CONFIGURATION_GATEKEEPER: "inferops" } : {},
     takenInvocations: new Map<string, boolean>(),
     isSharedConfiguration: async () => true,
-    workflowDefinitionStore: () => store,
+    workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const,
     getGadgetHead: head,
     defaultGadgetId: GADGET,
     assertGatekeeperUsable: () => {},
@@ -657,9 +657,9 @@ describe("admission refuses before anything reaches the runtime (FAC-111)", () =
   /** What reached the trigger's gatekeeper, and whether any run was recorded. */
   const nothingRan = (store: WorkspaceWorkflowDefinitionStore, invoke: { mock: { calls: unknown[] } }, definitionId: string) => {
     expect(invoke.mock.calls).toEqual([]);
-    expect(store.deliveries(ADA.id, definitionId)).toEqual([]);
+    expect(store.deliveries(ADA.id, definitionId, "build")).toEqual([]);
   };
-  const definitionOf = (store: WorkspaceWorkflowDefinitionStore) => store.list(ADA.id)[0]!.id;
+  const definitionOf = (store: WorkspaceWorkflowDefinitionStore) => store.list(ADA.id, "build")[0]!.id;
 
   it("without the person's workflow:invoke", async () => {
     let { overseer, store, invoke } = await invokeSession(async () => false);
@@ -693,12 +693,12 @@ describe("admission refuses before anything reaches the runtime (FAC-111)", () =
     expect(() => store.fire(HOOK, GADGET, headNow, everyoneBuilds, admitted.id))
       .toThrow("The workflow changed since revision 1 was saved.");
     // The trigger moved to another revision: the waiting request is dropped and can't start a run.
-    store.save(ADA, { id: definitionId, title: "Refund", gadgetId: GADGET }, headNow);
+    store.save(ADA, { id: definitionId, title: "Refund", gadgetId: GADGET }, headNow, "build");
     store.publish(ADA, definitionId, 2);
     store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId, revision: 2 });
     expect(() => store.fire(HOOK, GADGET, headNow, everyoneBuilds, admitted.id))
       .toThrow("That run request is unknown or already ran.");
-    expect(store.deliveries(ADA.id, definitionId)).toEqual([]);
+    expect(store.deliveries(ADA.id, definitionId, "build")).toEqual([]);
   });
 
   it("for a stale revision asked for through invokeTrigger: no gatekeeper call, the reason given", async () => {

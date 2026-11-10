@@ -97,14 +97,61 @@ it('labels a draft preview, and publishes it or exits the preview', () => {
   expect(onEvent).toHaveBeenCalledWith({ type: 'closeConsole' })
 })
 
-it('offers to reopen on a newer published revision, at the same view while it still exists', () => {
-  const published = { ...SAVED, revision: '2', published: { revision: '2', publishedAt: '2026-10-06T00:00:00.000Z', content: SAVED } }
-  render({ entry: { ...entry, console: published } })
-  expect(container.textContent).toContain('A newer version of this console was published')
-  act(() => buttonNamed('Reopen')!.click())
-  expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ type: 'openConsole', source: 'published', revision: '2', viewId: 'overview' }))
-  render({ entry: { ...entry, console: published }, run: run({ revision: '2' }) })
+// FAC-109: a newer publication is adopted by reopening, never by mixing it into the open run.
+const publishedAt = (revision: string, views = SAVED.views): OperateConsole =>
+  ({ ...SAVED, views, revision, published: { revision, publishedAt: '2026-10-06T00:00:00.000Z', content: { ...SAVED, views } } })
+const dispatched = () => operate.dispatch.mock.calls.map(([event]) => event)
+
+it('reopens a newer published revision by itself, once, at the same view and screen, showing nothing of either meanwhile', async () => {
+  render({ entry: { ...entry, console: publishedAt('2') }, run: run({ viewId: 'board', screenId: 's1' }) })
+  await settle()
+  // Nothing of the new revision renders under the old run: no screen, no flows.
+  expect(container.querySelector('[data-testid="canvas"]')).toBeNull()
+  expect(container.textContent).toContain('Opening the latest version of this console')
+  expect(dispatched()).toEqual([
+    expect.objectContaining({ type: 'openConsole', source: 'published', revision: '2', viewId: 'board' }),
+    { type: 'showScreen', screenId: 's1' },
+  ])
+  // Rendering the same pair again doesn't reopen again.
+  render({ entry: { ...entry, console: publishedAt('2') }, run: run({ viewId: 'board', screenId: 's1' }) })
+  await settle()
+  expect(operate.dispatch).toHaveBeenCalledTimes(2)
+  expect(onEvent).not.toHaveBeenCalled()
+  // Once the session runs the new revision, it renders it.
+  render({ entry: { ...entry, console: publishedAt('2') }, run: run({ viewId: 'board', screenId: 's1', revision: '2' }) })
+  expect(container.querySelector('[data-testid="canvas"]')?.textContent).toBe('Board screen')
   expect(buttonNamed('Reopen')).toBeUndefined()
+})
+
+it('reopens at the first view when the new revision no longer has the open one', async () => {
+  const views = [{ id: 'triage', title: 'Triage', type: 'screen' as const, screen: 's1' }]
+  render({ entry: { ...entry, console: publishedAt('3', views) }, run: run({ viewId: 'board', screenId: 's1' }) })
+  await settle()
+  expect(dispatched()).toEqual([expect.objectContaining({ type: 'openConsole', revision: '3', viewId: 'triage' })])
+})
+
+it('says when a reopen is refused, does not repeat it, and lets the person try again', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  operate.dispatch.mockRejectedValueOnce(new Error('OPERATE_SESSION_CONSOLE_CHANGED'))
+  render({ entry: { ...entry, console: publishedAt('2') } })
+  await settle()
+  expect(container.textContent).toContain("It couldn't be reopened on the latest version")
+  expect(container.querySelector('[data-testid="rollup"]')).toBeNull()
+  render({ entry: { ...entry, console: publishedAt('2') } })
+  await settle()
+  expect(operate.dispatch).toHaveBeenCalledTimes(1)
+  await act(async () => buttonNamed('Reopen')!.click())
+  expect(operate.dispatch).toHaveBeenCalledTimes(2)
+})
+
+it("keeps a builder's draft preview saved again on its banner rather than reopening it", async () => {
+  render({ entry: { ...entry, console: { ...SAVED, revision: '4' } }, run: run({ source: 'draft' }) })
+  await settle()
+  expect(operate.dispatch).not.toHaveBeenCalled()
+  expect(container.textContent).toContain('This draft has been saved since you opened it')
+  expect(container.querySelector('[data-testid="rollup"]')).toBeNull()
+  await act(async () => buttonNamed('Reopen')!.click())
+  expect(dispatched()).toEqual([expect.objectContaining({ type: 'openConsole', source: 'draft', revision: '4', viewId: 'overview' })])
 })
 
 // A published console's frozen flows, with an untrimmed-looking title the page must send as is.
@@ -279,15 +326,24 @@ it("reports the shown screen's chatPane.widgets: the page's override, else the f
   expect(getConsolePage).toHaveBeenLastCalledWith('c1', 's1', 'published')
   expect(heard).toHaveBeenLastCalledWith({ key: at('0'), value: 'none' })
 
+  const at5 = { ...published, revision: '5', published: { ...published.published!, revision: '5' } } as OperateConsole
   getConsolePage.mockResolvedValue({ settings: { 'chatPane.widgets': 'console' } })
-  render({ entry: { ...entry, console: published }, run: run({ viewId: 'board', revision: '5', screenId: 's1' }), onChatPaneWidgets: heard })
+  render({ entry: { ...entry, console: at5 }, run: run({ viewId: 'board', revision: '5', screenId: 's1' }), onChatPaneWidgets: heard })
   await settle()
   expect(heard).toHaveBeenLastCalledWith({ key: at('5'), value: 'console' })
+
+  // A run of another revision than the one listed resolves nothing from it (FAC-109): unknown.
+  heard.mockClear()
+  render({ entry: { ...entry, console: at5 }, run: run({ viewId: 'board', revision: '4', screenId: 's1' }), onChatPaneWidgets: heard })
+  await settle()
+  expect(values().length).toBeGreaterThan(0)
+  expect(values().every(value => value === null)).toBe(true)
 
   // While a read is pending it says unknown (null), never a value it hasn't read.
   heard.mockClear()
   getConsolePage.mockReturnValue(new Promise(() => {}))
-  render({ entry: { ...entry, console: published }, run: run({ viewId: 'board', revision: '7', screenId: 's1' }), onChatPaneWidgets: heard })
+  const at7 = { ...published, revision: '7', published: { ...published.published!, revision: '7' } } as OperateConsole
+  render({ entry: { ...entry, console: at7 }, run: run({ viewId: 'board', revision: '7', screenId: 's1' }), onChatPaneWidgets: heard })
   await settle()
   expect(values().length).toBeGreaterThan(0)
   expect(values().every(value => value === null)).toBe(true)

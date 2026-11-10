@@ -36,12 +36,12 @@ describe("an admitted run across a Durable Object restart (FAC-111)", () => {
     let name = `workflow-run-restart-${crypto.randomUUID()}`;
     const headAt1 = (id: number) => (id === GADGET ? commit(1) : undefined);
     let { runId, definitionId, before } = await withStore(name, store => {
-      let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headAt1);
+      let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headAt1, "build");
       store.publish(ADA, saved.id, 1);
       store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1 });
       store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
       let invocation = store.beginInvocation(OPERATOR, HOOK, COMPANY);
-      let delivery = store.fire(HOOK, GADGET, headAt1, () => true, invocation.id)!;
+      let delivery = store.fire(HOOK, GADGET, headAt1, () => "build" as const, invocation.id)!;
       return { runId: delivery.run!.runId, definitionId: saved.id, before: store.run(delivery.run!.runId) };
     });
     expect(before).toMatchObject({ company: COMPANY, revision: 1, commitId: commit(1) });
@@ -54,7 +54,7 @@ describe("an admitted run across a Durable Object restart (FAC-111)", () => {
     // The definition moves on and the trigger is re-pinned; another restart; the run is unchanged.
     const headAt2 = (id: number) => (id === GADGET ? commit(2) : undefined);
     await withStore(name, store => {
-      store.save(ADA, { id: definitionId, title: "Refund", gadgetId: GADGET }, headAt2);
+      store.save(ADA, { id: definitionId, title: "Refund", gadgetId: GADGET }, headAt2, "build");
       store.publish(ADA, definitionId, 2);
       store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId, revision: 2 });
     });

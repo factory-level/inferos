@@ -24,6 +24,7 @@ covers:
   - packages/workshop-shared/src/canvas.ts
   - packages/workshop-shared/src/governed-data.ts
   - packages/workshop-shared/src/governed-data.test.ts
+  - packages/workshop-backend/__tests__/gatekeeper-lookup.test.ts
   - packages/workshop-shared/src/canvas-model.ts
   - packages/workshop-shared/src/workspace-settings.ts
   - packages/workshop-shared/src/configuration-trace.ts
@@ -41,7 +42,7 @@ covers:
   - scripts/consumer/canvas.ts
   - packages/workshop-backend/src/env.d.ts
   - packages/ui
-updated: 2026-11-05
+updated: 2026-11-10
 ---
 
 # InferOps canvas and transactional widgets
@@ -488,7 +489,11 @@ The agent's `writeFile` and `editFile` refuse `client.js` in a workflow workspac
 
 `AuthenticatedApi.newGadget(kind?)` creates a workspace of a kind, storing it before the workspace is returned. `newGadgetFromBlueprint()` does not take or carry a kind, so a workspace installed from a blueprint is an app until switched.
 
-Behind the `operate-mode` UI flag (on in local development; also requires composable views), the frontend acts on the kind. The Build home page shows a kind picker (App, Widget, Workflow) above the composer. It is a Kumo `Radio.Group` of cards, so the keyboard pattern comes from Kumo: one tab stop on the chosen kind, arrow keys move to and select a neighbour and wrap at the ends, and Home/End do nothing (Kumo's radio group disables them, as the WAI-ARIA radio pattern does not define them). The chosen kind is set on the new workspace in the same batch as its first chat, ahead of it, so that chat's agent builds that kind. The workspace editor header shows a kind switch, with a confirmation step, for the build role. Apps get a Chat ↔ App toggle. Workflows replace the app preview with a Triggers panel listing their bound hooks (scheduled tasks register as hooks) and the pending-approval count. Below it, Definitions (`WorkflowDefinitionsSection`) saves the workflow's current code as a definition revision, and lets its owner save a new revision or publish one; saving publishes nothing (see [Operate mode](operate-mode.md#workflow-definitions)). A trigger pinned to a revision says which ("Runs “Standup”, revision 2"), offers to run a published revision for its gadget, and can be unpinned. Pinning to one's own unpublished revision is in the kernel but not offered here. Refusals are shown in the server's words. The workspace list shows a kind chip. The Build sidebar gains a Build | Operate toggle whose mode is derived from the URL: the InferOps Canvas routes are Operate, where console navigation lives in a separate operator shell (see [Operate session page](#operate-session-page)). Creating a workspace with a kind and publishing to Operate are designed in [operate-mode](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md) but not implemented.
+Behind the `operate-mode` UI flag (on in local development; also requires composable views), the frontend acts on the kind. The Build home page shows a kind picker (App, Widget, Workflow) above the composer. It is a Kumo `Radio.Group` of cards, so the keyboard pattern comes from Kumo: one tab stop on the chosen kind, arrow keys move to and select a neighbour and wrap at the ends, and Home/End do nothing (Kumo's radio group disables them, as the WAI-ARIA radio pattern does not define them). The chosen kind is set on the new workspace in the same batch as its first chat, ahead of it, so that chat's agent builds that kind. The workspace editor header shows a kind switch, with a confirmation step, for the build role. Apps get a Chat ↔ App toggle. Workflows replace the app preview with a Triggers panel listing their bound hooks (scheduled tasks register as hooks) and the pending-approval count. Below it, Definitions (`WorkflowDefinitionsSection`) saves the workflow's current code as a definition revision, and lets its owner save a new revision or publish one; saving publishes nothing (see [Operate mode](operate-mode.md#workflow-definitions)). A dynamic, unsaved definition (FAC-124) shows "Temporary · expires <time> unless saved", and its owner's "Save to keep" is the same save, which retains it. The UI creates no temporary definition.
+
+One whose expiry has passed while shown reads "Expired <time>: gone for new use. Runs it already started stay in their history", with nothing left to save or publish.
+
+A save that lost the race with expiry (`WORKFLOW_DEFINITION_EXPIRED`) is told in its own words, never as "not found" or an error: it expired before it was saved, its started runs stay in their history, and the workflow can be saved again as a new definition. The panel then reloads, so the definition leaves the list; its history stays readable to its owner, as the kernel keeps it. Tests: `WorkflowDefinitionsSection.test.tsx`. A trigger pinned to a revision says which ("Runs “Standup”, revision 2"), offers to run a published revision for its gadget, and can be unpinned. Pinning to one's own unpublished revision is in the kernel but not offered here. Refusals are shown in the server's words. The workspace list shows a kind chip. The Build sidebar gains a Build | Operate toggle whose mode is derived from the URL: the InferOps Canvas routes are Operate, where console navigation lives in a separate operator shell (see [Operate session page](#operate-session-page)). Creating a workspace with a kind and publishing to Operate are designed in [operate-mode](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md) but not implemented.
 
 ## Operate session page
 
@@ -642,7 +647,9 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
   - Every refusal is a fixed code (`GovernedRequestError`) and names no data.
 - **Listing runs on the server,** in the connector (`listGoverned`), over a snapshot of at most 200 rows the connector already reads under its own authority. It filters, then sorts stably with ties broken by id, then pages. `truncated` says when the snapshot hit its bound. A cursor is bound to its request's filters and sort, so another request's cursor, or one that doesn't decode, is refused (`INVALID_CURSOR`). It is not signed: it carries only an offset into what the same request may already read, so an altered one can only skip within that.
 - **Writes** are only a resource's declared commands (`GovernedCommand`, ADR 0013 W4 to W6). Each is proposed, decided, and applied by the connector. There is no generic create, update or delete.
-  - **The session:** `GovernedWriteSession.command(request)` returns `{ outcome: "proposed" }`, never a result. The row is read again to see the outcome.
+  - **The session:** `GovernedWriteSession.command(request)` returns `{ outcome: "proposed", actionId, status }`, never a result. `actionId` is opaque correlation; it does not authorize a log lookup. `status()` is the FAC-97 receipt capability issued for that exact `ApprovalQueue` submission. It projects that action's existing action-journal record through the originating workspace connection; there is no second store or caller-selected action ID. `waiting` and `running` are pending, and only `succeeded` means done.
+  - **One approval path:** a user's Refine write reaches `Overseer.openGovernedSession` and the gatekeeper's declared `command`; an InferOS agent's governed action reaches the same gatekeeper `ApprovalQueue`. Both submission paths enter the existing action journal. The governed command returns the receipt from its queue submission; agent actions continue through the existing approval/action-log path. The connector applies the action only after approval, and the row is read again to observe resource state.
+  - **Boundary:** this receipt covers InferOS-governed actions only. InferOps Dot's direct `chatbot_proposal` does not enter the InferOS action journal; mapping a Dot action into this receipt belongs to FAC-133, when Dot acts through InferOS chat context.
   - **The request** is validated by `parseGovernedCommand` before anything is read or proposed. It holds only `command`, `id`, `values` and `expectedRevision`:
     - a command the resource declares (otherwise `COMMAND_NOT_DECLARED`);
     - one row id;
@@ -677,6 +684,7 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
   - **no longer allowed:** a revocation code (`UNAUTHORIZED`, `FORBIDDEN`, or no such gatekeeper), which also discards everything it read;
   - **a failed read**, in the server's words, with "Try again";
   - **no rows.**
+  - A write remains pending after Refine receives the proposal acknowledgment. The host polls that proposal's caller-bound receipt (not a user-selected action id), showing waiting and applying separately; it only enables another proposal after a terminal applied, rejected, failed or unknown result and rereads the canonical row. A failed status read offers "Retry status" against the same receipt and does not submit the write again. A stale-revision refusal refreshes the row and asks the person to review it before proposing again.
 - **Refine's telemetry is off** (`GOVERNED_REFINE_OPTIONS`), so the trusted host never reports to Refine's service.
 - **The cache** (`GovernedCacheScope`):
   - **What scopes it:** each widget instance, connection and reference has its own query client, within the Overseer stub it was opened through, which is one person's in one workspace, as `BoardData` is scoped. Refine's query keys add the request (filters, sort, page).
@@ -684,6 +692,6 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
   - **Not built:** discarding it when the connection is removed. That shows on the next read as no such gatekeeper, which then discards it.
 - **Adding one:** the section editor's "Table or queue reference" form adds one by its reference. Agents place one as `kind:"inferos.governed-table"`. The binding editor doesn't apply, since its binding follows its reference.
 - **Rollback:** an InferOS from before the governed table reads one as an inert placeholder and refuses to change its canvas (see [A newer InferOS's widgets](#a-newer-infeross-widgets), #411), so this lands only after that reader is deployed. Its own tolerant read keeps it: the placeholder check knows every kind in `CANVAS_WIDGET_KINDS`.
-- **Tests:** `governedDataProvider.test.ts`, `CanvasGovernedTableWidget.test.tsx` and `CanvasWorkspacePane.test.tsx` (frontend); `canvas-model.test.ts` (the kind and its binding).
+- **Tests:** `governedDataProvider.test.ts`, `CanvasGovernedTableWidget.test.tsx` (including terminal receipt states, waiting, status retry and stale revision refresh) and `CanvasWorkspacePane.test.tsx` (frontend); `canvas-model.test.ts` (the kind and its binding).
 - **Tests:** `governed-data.test.ts`, `gatekeeper-inferops`'s `governed-table.test.ts` and `gatekeeper-tickets`'s `governed-queue.test.ts`.
 

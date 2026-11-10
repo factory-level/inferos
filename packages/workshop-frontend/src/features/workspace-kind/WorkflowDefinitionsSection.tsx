@@ -4,6 +4,7 @@ import type { RpcStub } from 'capnweb'
 import type { GadgetSummary, Overseer } from '@gadgets/workshop-shared/api'
 import {
   MAX_WORKFLOW_DEFINITION_TITLE_LENGTH,
+  WORKFLOW_DEFINITION_EXPIRED,
   type WorkflowDefinition,
 } from '@gadgets/workshop-shared/workflow-definition'
 import { useAuthenticatedApi } from '../../AuthContext'
@@ -22,11 +23,21 @@ type Props = {
 const refusalOf = (err: unknown, fallback: string) =>
   err instanceof Error && err.message ? err.message : fallback
 
+/** Whether the server refused because the definition expired first (a save that lost the race). */
+const isExpired = (err: unknown) => err instanceof Error && err.message.includes(WORKFLOW_DEFINITION_EXPIRED)
+
+/** What a person is told when a temporary definition expired before their save: never "not found". */
+const EXPIRED_BEFORE_SAVE =
+  "This temporary definition expired before it was saved, so it's gone for new use. Runs it " +
+  'already started stay in their history. Save the workflow again to keep a new definition.'
+
 /**
  * A workflow's saved definitions: save the workflow's current code as a revision, and publish one
  * revision for everyone else. Saving publishes nothing. The list shows what the server lets this
  * person see: their own definitions with every revision, others' only at the published revision.
- * The server decides who may save and publish; a refusal is shown in its words.
+ * The server decides who may save and publish; a refusal is shown in its words. A dynamic,
+ * unsaved definition (FAC-124: one the Dot or an agent made with `retain: false`) says it is
+ * temporary and when it expires, and its owner's save keeps it; after that it is gone for new use.
  */
 export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, onChanged }: Props) => {
   const toasts = useKumoToastManager()
@@ -43,7 +54,13 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, onC
       await work()
       onChanged()
     } catch (err) {
-      toasts.add({ title: refusalOf(err, failure), variant: 'error' })
+      if (isExpired(err)) {
+        toasts.add({ title: EXPIRED_BEFORE_SAVE, variant: 'error' })
+        // It is gone for new use now, so reload: it leaves the list.
+        onChanged()
+      } else {
+        toasts.add({ title: refusalOf(err, failure), variant: 'error' })
+      }
     } finally {
       setBusy(false)
     }
@@ -116,7 +133,9 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, onC
             const latest = definition.revisions[definition.revisions.length - 1]
             const published = definition.published?.revision
             const own = currentUser !== null && definition.owner.id === currentUser.id
-            const canPublish = own && latest !== undefined && latest.revision !== published
+            // Read at render: a definition whose expiry passed while shown can no longer be saved.
+            const expired = definition.expiresAt !== undefined && definition.expiresAt.getTime() <= Date.now()
+            const canPublish = own && !expired && latest !== undefined && latest.revision !== published
             return (
               <li
                 key={definition.id}
@@ -133,10 +152,23 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, onC
                       definition.owner.name,
                     ].filter(Boolean).join(' · ')}
                   </p>
+                  {definition.expiresAt && (expired ? (
+                    <p className="mt-0.5 mb-0 text-[12px] leading-4 text-kumo-subtle">
+                      Expired{' '}
+                      <time dateTime={definition.expiresAt.toISOString()}>{definition.expiresAt.toLocaleString()}</time>
+                      : gone for new use. Runs it already started stay in their history.
+                    </p>
+                  ) : (
+                    <p className="mt-0.5 mb-0 text-[12px] leading-4 text-kumo-warning">
+                      Temporary · expires{' '}
+                      <time dateTime={definition.expiresAt.toISOString()}>{definition.expiresAt.toLocaleString()}</time>
+                      {' '}unless saved
+                    </p>
+                  ))}
                 </div>
-                {own && (
+                {own && !expired && (
                   <WorkshopButton disabled={busy} onClick={() => save(definition)}>
-                    Save new revision
+                    {definition.expiresAt ? 'Save to keep' : 'Save new revision'}
                   </WorkshopButton>
                 )}
                 {canPublish && (

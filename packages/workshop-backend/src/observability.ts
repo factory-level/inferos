@@ -23,6 +23,7 @@ export type WorkshopObservabilityFields = {
   event: string;
   executionId: string;
   failureCount: number;
+  definitionCount: number;
   gadgetId: string;
   gatekeeperId: number | string;
   handoffKind: "connect" | "restore";
@@ -41,7 +42,7 @@ export type WorkshopObservabilityFields = {
   oidCount: number;
   oidPrefix: string;
   operation: string;
-  outcome: "ok" | "error" | "usage_limit" | "no_email" | "signups_disabled";
+  outcome: "ok" | "error" | "usage_limit" | "no_email" | "signups_disabled" | "no_subject" | "bound_to_subject";
   path: string;
   recordedType: string;
   resourceTitle: string;

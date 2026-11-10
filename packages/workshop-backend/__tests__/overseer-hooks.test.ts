@@ -23,10 +23,10 @@ function makeOverseer(
       // in these fixtures.
       assertGatekeeperUsable: () => {},
       // The workflow-definition pin check (workflow-definition-store.ts): no pin unless a test
-      // supplies a store, and an owner-only workspace.
-      getSharingManager: async () => ({ getEffectiveRole: () => undefined }),
+      // supplies a store, and a workspace whose one collaborator is the operator who asks (FAC-122).
+      getSharingManager: async () => ({ getEffectiveRole: (profileId: string) => (profileId === "operator-profile" ? "use" : undefined) }),
       getOwnerProfileId: async () => "owner-profile",
-      workflowDefinitionStore: () => workflowDefinitions ?? { fire: () => null },
+      workflowDefinitionStore: () => workflowDefinitions ?? { fire: () => null }, definitionRoles: async () => () => "use" as const,
       getGadgetHead: () => gadgetHead,
       defaultGadgetId: 3,
       storage: {
@@ -53,17 +53,17 @@ describe("OverseerDurableObject.startHook", () => {
     let definitions = new WorkspaceWorkflowDefinitionStore(durable, makeOverseerStorage(durable));
     let head = "a".repeat(40);
     let owner = { type: "user" as const, id: "owner-profile", name: "Owner" };
-    let saved = definitions.save(owner, { title: "Intake", gadgetId: 3 }, () => head);
-    definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1 });
+    let saved = definitions.save(owner, { title: "Intake", gadgetId: 3 }, () => head, "build");
+    definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1, mode: "pinned" });
     let config = async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG);
     let hook = { enabled: true, vendorId: "email", callback: { deliver: async () => "ok" } };
 
     await makeOverseer(config, hook, undefined, definitions, head).startHook(1);
-    expect(definitions.deliveries(owner.id, saved.id)).toMatchObject([{ hookId: 1, revision: 1, commitId: head }]);
+    expect(definitions.deliveries(owner.id, saved.id, "build")).toMatchObject([{ hookId: 1, revision: 1, commitId: head }]);
 
     await expect(makeOverseer(config, hook, undefined, definitions, "b".repeat(40)).startHook(1))
       .rejects.toThrow("changed since revision 1");
-    expect(definitions.deliveries(owner.id, saved.id)).toHaveLength(1);
+    expect(definitions.deliveries(owner.id, saved.id, "build")).toHaveLength(1);
   });
 
   // FAC-112: a delivery a person asked for runs in the workspace, from its stored record: the
@@ -73,8 +73,8 @@ describe("OverseerDurableObject.startHook", () => {
     let definitions = new WorkspaceWorkflowDefinitionStore(durable, makeOverseerStorage(durable));
     let head = "a".repeat(40);
     let owner = { type: "user" as const, id: "owner-profile", name: "Owner" };
-    let saved = definitions.save(owner, { title: "Intake", gadgetId: 3 }, () => head);
-    definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1 });
+    let saved = definitions.save(owner, { title: "Intake", gadgetId: 3 }, () => head, "build");
+    definitions.pinTrigger(owner.id, 1, 3, { definitionId: saved.id, revision: 1, mode: "pinned" });
     definitions.setControl(owner, 1, { label: "Run", invokers: ["operator-profile"] });
     let invocation = definitions.beginInvocation("operator-profile", 1, null);
     let onSchedule = vi.fn(async () => "ran in the caller");
@@ -89,7 +89,7 @@ describe("OverseerDurableObject.startHook", () => {
     let { callback } = await overseer.startHook(1, { invocationId: invocation.id });
     await expect((callback as any).onSchedule({ firedAt: "now" })).resolves.toBeUndefined();
     expect(onSchedule).not.toHaveBeenCalled();
-    let [delivery] = definitions.deliveries(owner.id, saved.id) as any[];
+    let [delivery] = definitions.deliveries(owner.id, saved.id, "build") as any[];
     expect(queued).toEqual([[1, expect.any(Number), "onSchedule", [{ firedAt: "now" }]]]);
     expect(delivery.invocation.requestedBy).toBe("operator-profile");
   });

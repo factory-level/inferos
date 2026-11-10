@@ -16,6 +16,38 @@ export const MAX_WORKFLOW_DEFINITION_REVISIONS = 50;
 /** Longest workflow definition title, in characters. */
 export const MAX_WORKFLOW_DEFINITION_TITLE_LENGTH = 120;
 
+/**
+ * How long a dynamic, unsaved workflow definition lasts by default (FAC-124), in hours: 24, a
+ * PROPOSED default (inferops docs/human/architecture/workflows.md, Retention rules, says no duration
+ * is selected yet). A deployment sets `WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS` from
+ * `MIN_DYNAMIC_DEFINITION_TTL_HOURS` to `MAX_DYNAMIC_DEFINITION_TTL_HOURS`.
+ */
+export const DEFAULT_DYNAMIC_DEFINITION_TTL_HOURS = 24;
+
+/** Shortest TTL a deployment may set for a dynamic definition, in hours. */
+export const MIN_DYNAMIC_DEFINITION_TTL_HOURS = 1;
+
+/** Longest TTL a deployment may set for a dynamic definition, in hours (30 days). */
+export const MAX_DYNAMIC_DEFINITION_TTL_HOURS = 720;
+
+/** The refusal of any new use of a dynamic definition past its expiry (FAC-124). */
+export const WORKFLOW_DEFINITION_EXPIRED = "This workflow expired. Create it again.";
+
+/**
+ * A dynamic definition's TTL in milliseconds from the deployment's
+ * `WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS`: the default when unset, else a whole number of hours in
+ * range. Anything else throws, naming the setting, so a misconfigured deployment refuses to create
+ * dynamic definitions rather than pick a duration nobody chose.
+ */
+export function dynamicDefinitionTtlMs(setting: string | undefined): number {
+  if (setting === undefined) return DEFAULT_DYNAMIC_DEFINITION_TTL_HOURS * 60 * 60 * 1000;
+  let hours = /^\d+$/.test(setting) ? Number(setting) : Number.NaN;
+  if (!(hours >= MIN_DYNAMIC_DEFINITION_TTL_HOURS && hours <= MAX_DYNAMIC_DEFINITION_TTL_HOURS)) {
+    throw new Error(`WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS must be a whole number of hours from ${MIN_DYNAMIC_DEFINITION_TTL_HOURS} to ${MAX_DYNAMIC_DEFINITION_TTL_HOURS}.`);
+  }
+  return hours * 60 * 60 * 1000;
+}
+
 /** Most delivery records one workspace keeps; the oldest is dropped past it. */
 export const MAX_WORKFLOW_DELIVERIES = 1000;
 
@@ -34,6 +66,8 @@ export type WorkflowDefinitionRevision = {
   revision: number;
   source: WorkflowDefinitionSource;
   savedAt: Date;
+  /** Who saved it, when it wasn't the owner: an editor the definition is shared with (FAC-122). */
+  savedBy?: AiChatAuthorInfo;
 };
 
 /** The revision a definition's owner made available to others, and when. */
@@ -52,12 +86,62 @@ export type WorkflowDefinition = {
   /** Server-minted id, stable for the definition's life. */
   id: string;
   title: string;
-  /** The person who first saved it. Only they save new revisions or publish. */
+  /**
+   * The person who first saved it. They save new revisions and publish, and so may anyone they
+   * share it with for editing (FAC-122; see `WorkflowDefinitionRights`).
+   */
   owner: AiChatAuthorInfo;
   /** Saved revisions visible to this viewer, oldest first. */
   revisions: WorkflowDefinitionRevision[];
   published: WorkflowDefinitionPublication | null;
+  /** What this viewer may do with it (FAC-122): all three for its owner. */
+  access?: WorkflowDefinitionRights;
+  /** True when its owner shared it with this viewer by name ("Shared with me", FAC-122). */
+  sharedWithMe?: boolean;
+  /**
+   * Present only on a dynamic, unsaved definition (FAC-124): when it stops being available for new
+   * use, unless saved first or kept by a trigger pinned to it. Saving removes it.
+   */
+  expiresAt?: Date;
 };
+
+/**
+ * What a person may do with one owner-maintained definition (FAC-122). `read`: see its published
+ * revision. `run`: run triggers pinned to it, as the trigger's run control also allows. `edit`: save
+ * new revisions of it, which stay unpublished until published (the owner, or whoever holds the
+ * deployment's publish authority in a shared workspace). `run` and `edit` each include `read`.
+ * A right concerns the definition only: it never reaches a record, which a run still reads and
+ * writes only through its own authority and approvals.
+ */
+export type WorkflowDefinitionRights = { read: boolean; run: boolean; edit: boolean };
+
+/** A definition shared with one InferOS account (FAC-122): never an email address. */
+export type WorkflowDefinitionShare = {
+  definitionId: string;
+  /** The account's profile id, which an email change keeps (FAC-165). */
+  profileId: string;
+  rights: WorkflowDefinitionRights;
+  sharedBy: AiChatAuthorInfo;
+  sharedAt: Date;
+};
+
+/** Most people one definition is shared with by name. */
+export const MAX_WORKFLOW_DEFINITION_SHARES = 100;
+
+/**
+ * Checks rights from a client: three booleans, at least one true, with `read` added when `run` or
+ * `edit` is given. To stop sharing, pass null instead.
+ */
+export function parseWorkflowDefinitionRights(input: unknown): WorkflowDefinitionRights {
+  if (typeof input !== "object" || input === null) throw new TypeError("Share a workflow to read, run or edit it.");
+  let { read, run, edit } = input as Record<string, unknown>;
+  for (let value of [read, run, edit]) {
+    if (value !== undefined && typeof value !== "boolean") throw new TypeError("Share a workflow to read, run or edit it.");
+  }
+  let rights = { read: read === true || run === true || edit === true, run: run === true, edit: edit === true };
+  if (!rights.read) throw new TypeError("Share a workflow to read, run or edit it, or stop sharing it.");
+  return rights;
+}
 
 /** What a person saves: a title and the workflow gadget whose current code becomes a revision. */
 export type WorkflowDefinitionSave = {
@@ -66,19 +150,28 @@ export type WorkflowDefinitionSave = {
   /** 1 to `MAX_WORKFLOW_DEFINITION_TITLE_LENGTH` characters. */
   title: string;
   gadgetId: WorkpieceId;
+  /**
+   * `false` creates a dynamic, unsaved definition, which expires at the deployment's TTL
+   * (`dynamicDefinitionTtlMs`) unless saved (FAC-124); only for a new definition. Absent or `true`
+   * keeps the definition: a new one is saved, and saving an existing dynamic one retains it.
+   */
+  retain?: boolean;
 };
 
 /**
- * A reference to one revision of one definition, as a trigger pins it. It stays on that revision
- * when the definition is republished: moving it is an explicit change to the trigger.
+ * A trigger reference. `mode: "pinned"` preserves the requested revision; omitted mode on a newly
+ * stored trigger means follow-latest. Legacy stored references without a mode remain pinned.
  */
 export type WorkflowDefinitionRef = { definitionId: string; revision: number };
 
-/** One firing of a pinned trigger, and the revision and commit it ran. */
+/** How a trigger resolves the selected definition. Omitted mode defaults to follow-latest on new pins. */
+export type WorkflowTriggerDefinitionRef = WorkflowDefinitionRef & { mode?: "pinned" | "follow-latest" };
+
+/** One firing of a trigger, and the published revision and commit it ran. */
 export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
   /** The bound hook that fired. */
   hookId: number;
-  /** The commit the revision named, and the gadget's head at firing (they are equal). */
+  /** The commit named by the published revision at admission. */
   commitId: string;
   at: Date;
   /**
@@ -114,6 +207,27 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
   /** Where the result was delivered, by destination (FAC-114). Run history is always one. */
   delivery?: WorkflowRunDelivery;
 };
+
+/** Whether a delivery still represents work whose durable record must be retained. */
+export function isLiveWorkflowDelivery(delivery: {
+  run?: unknown;
+  at?: Date;
+  execution?: Pick<WorkflowRunExecution, "state">;
+  result?: Pick<WorkflowRunResult, "outcome" | "reason">;
+}, now = Date.now()): boolean {
+  let outcome = delivery.result?.outcome;
+  if (outcome !== undefined) {
+    if (outcome === "uncertain" && delivery.result?.reason === "not-started") return false;
+    return outcome === "queued" || outcome === "running" || outcome === "waiting" || outcome === "uncertain";
+  }
+  // An admitted run that never started wrote nothing; once FAC-114's start window expires, its
+  // uncertain/not-started history is terminal for retention. Any execution state remains live
+  // unless it is known terminal; uncertain writes have a result reason and stay live above.
+  if (!delivery.execution && delivery.run !== undefined && delivery.at &&
+      now - delivery.at.getTime() > WORKFLOW_RUN_START_WINDOW_MS) return false;
+  // Older runs may predate result records. Keep any run without a known terminal execution state.
+  return delivery.run !== undefined && delivery.execution?.state !== "finished" && delivery.execution?.state !== "failed";
+}
 
 /**
  * A requested run's outcome (FAC-114; inferos ADR 0012 §3, proposed):
