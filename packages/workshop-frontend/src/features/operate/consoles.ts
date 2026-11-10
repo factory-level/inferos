@@ -138,12 +138,17 @@ export const flowLength = (flow: OperateFlow): string => {
     : `${count} ${count === 1 ? 'page' : 'pages'}, branching`
 }
 
+// The kernel's fixed refusal to publish one screen (console-store.ts `publishedPages`): a widget's
+// event, a trigger's run results (FAC-116) or a widget binding (FAC-99) it can't publish.
+const SCREEN_REFUSAL = /^Screen \S+ can't be published: /
+
 /**
  * The text to show for a console save or publish refused by the kernel: its own message when it is
- * about one of the console's flows (it names only the builder's own workspace data) or is the
- * deployment's shared-configuration refusal, otherwise `fallback`.
+ * about one of the console's flows or one of its screens (each names only the builder's own
+ * workspace data) or is the deployment's shared-configuration refusal, otherwise `fallback`.
  */
 export const consoleRefusalMessage = (caught: unknown, fallback: string): string => {
   const message = caught instanceof Error ? caught.message : ''
-  return message.startsWith('Console flow ') || message === SHARED_CONFIGURATION_REFUSED ? message : fallback
+  return message.startsWith('Console flow ') || SCREEN_REFUSAL.test(message) || message === SHARED_CONFIGURATION_REFUSED
+    ? message : fallback
 }
