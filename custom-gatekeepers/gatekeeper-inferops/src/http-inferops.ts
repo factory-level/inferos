@@ -428,6 +428,12 @@ function parseSearchHit(value: unknown): WikiSearchRecord {
   };
 }
 
+/**
+ * A workspace where InferOps gives the person no `knowledge:read` (FAC-13): searched, and it adds
+ * nothing. Only that refusal reads so; any other 403 is a workspace that could not be searched.
+ */
+export const WIDGET_SEARCH_DENIED = "InferOps gives you no permission to search widgets in this workspace.";
+
 /** Why a widget search failed when it could not run (FAC-13): never shown as "nothing found". */
 export const WIDGET_SEARCH_UNAVAILABLE =
   "Widget search is unavailable right now, so this is not an empty result. Try again shortly.";
@@ -792,6 +798,16 @@ function parseTableRead(body: unknown, widget: "table-view" | "record-card"): Ta
     throw new Malformed("a record of another table or version was returned");
   }
   return { table, rows };
+}
+
+/** The message of InferOps' error envelope, if it has one (`{error: {message}}`). */
+function wireMessage(body: unknown): string | null {
+  try {
+    let message = record(record(body, "response").error, "error").message;
+    return typeof message === "string" ? message : null;
+  } catch {
+    return null;
+  }
 }
 
 function wireCode(body: unknown): string | null {
@@ -1231,7 +1247,7 @@ type Send = {
   /** A successful response may have no body (InferOps' answer for a missing Wiki item). */
   maybeEmpty?: boolean;
   /** Read a failed response before the shared mapping; undefined falls back to it. */
-  failure?: (status: number, wire: string | null) => SendFailure | undefined;
+  failure?: (status: number, wire: string | null, body: unknown) => SendFailure | undefined;
   /**
    * Read the body through the streaming byte cap before any parsing: a successful one over it
    * throws `BodyTooLarge` (cancelled, nothing parsed), a failed one is capped at
@@ -1325,7 +1341,7 @@ export function openHttpInferOpsClient(
     }
     if (!response.ok) {
       const wire = wireCode(body);
-      const own = response.status === 401 ? undefined : send.failure?.(response.status, wire);
+      const own = response.status === 401 ? undefined : send.failure?.(response.status, wire, body);
       const code = own?.code ?? failureCode(response.status, wire);
       logger.warn("InferOps request failed", {
         event: "http.request.failed", operation, status: response.status, code: wire ?? code,
@@ -2009,7 +2025,10 @@ export function openHttpInferOpsClient(
       const params = new URLSearchParams({ query, k: String(k) });
       let body: unknown;
       try {
-        body = await knowledge("widget.search", { method: "GET", path: `/knowledge/widget-search?${params}` });
+        body = await request("widget.search", { method: "GET", path: `/knowledge/widget-search?${params}`,
+          // InferOps' guard words a missing permission so; only that refusal means "may not search here".
+          failure: (status, _wire, failed) => status === 403 && wireMessage(failed) === "Missing permission: knowledge:read"
+            ? { code: "FORBIDDEN", detail: WIDGET_SEARCH_DENIED } : undefined });
       } catch (error) {
         // An InferOps without `widget.search` (404) and an outage both mean "can't search now".
         if (error instanceof InferOpsError && (error.code === "NOT_FOUND" || error.code === "UNAVAILABLE")) {

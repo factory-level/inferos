@@ -256,16 +256,26 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
 - **Widget search by intent (FAC-13).** `InferOpsAccount.searchWidgets(query, k)` asks InferOps'
   `widget.search` (`GET /knowledge/widget-search?query&k`, `knowledge:read`) through
   `InferOpsClient.searchWidgets`, with the connected person's own token, in each of their
-  workspaces, and merges the answers: each built-in kind and each definition
-  (`<sourceId>@<sourceVersion>`) once, at its best score, best first, at most `k` of each. It
-  returns definitions only (`WidgetSearchResult`): no instance, record or live data. A workspace
-  that answers 403 adds nothing; if none answered and one failed, the failure is thrown, never an
-  empty result. An account without a connected person of `INFEROPS_COMPANY` answers empty. A 404
-  (an InferOps without `widget.search`) or an outage is `UNAVAILABLE` in
-  `WIDGET_SEARCH_UNAVAILABLE`'s words; an answer that doesn't parse, or holds more than `k` of
-  either, is refused as malformed. The demo's mock has no index and throws.
-  `__tests__/http-inferops.test.ts` ("widget search by intent (FAC-13)") covers the request and
-  its parsing.
+  workspaces (as the sign-in recorded them), and merges the answers (`mergeWidgetSearches`): each
+  built-in kind and each definition (`<sourceId>@<sourceVersion>`) once, at its best score, best
+  first, at most `k` of each. It returns definitions only (`WidgetSearchAnswer`): no instance,
+  record or live data.
+  - **Nothing asked** is said, never shown as "no widgets": an account without a connected person of
+    `INFEROPS_COMPANY` answers `{status: "unavailable", reason: "reconnect"}`, and a person with no
+    InferOps workspace `no-workspace`.
+  - **Denied** only for InferOps' own missing-permission refusal (`Missing permission:
+    knowledge:read`, read from its error envelope; `WIDGET_SEARCH_DENIED`): that workspace was asked
+    and adds nothing, counted in `denied`. Any other 403 (a product refusal, a workspace the person
+    no longer holds) is a workspace not searched.
+  - **Partial outages** are counted in `unsearched`, beside what the other workspaces found. If
+    every workspace failed so, the last failure is thrown. A 404 (an InferOps without
+    `widget.search`) or an outage is `UNAVAILABLE` in `WIDGET_SEARCH_UNAVAILABLE`'s words; an
+    answer that doesn't parse, or holds more than `k` of either, is refused as malformed. The demo's
+    mock has no index and throws.
+  - Scores from workspaces ranked differently (one `semantic`, one `keyword`) are merged on one
+    scale, and the answer reads `semantic`. A deployment has one embedder, so this only orders.
+  - `__tests__/http-inferops.test.ts` ("widget search by intent (FAC-13)") covers the request, its
+    parsing, and which 403 reads as denied.
 - **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses
   `inferops://<tenant>.<workspace>/project/board/<KEY>` (exactly two lowercase slug labels, no
   port; anything else is not a board URL), resolves the workspace, checks the project exists there

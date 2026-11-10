@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  WIDGET_INDEX_FORBIDDEN, WIDGET_SEARCH_UNAVAILABLE, WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
+  WIDGET_INDEX_FORBIDDEN, WIDGET_SEARCH_DENIED, WIDGET_SEARCH_UNAVAILABLE, WIKI_FORBIDDEN, connectionFromEnv, endpointFromEnv, listWorkspaceSlugs, openHttpInferOpsClient,
   type InferOpsConnection,
 } from "../src/http-inferops";
 import { PROPOSAL_APPROVE_REFUSED, inferOpsErrorCode, isPolicyRefusal, writeStage } from "../src/inferops-client";
@@ -1597,6 +1597,19 @@ describe("widget search by intent (FAC-13)", () => {
       const failed = await client.searchWidgets("invoices", 8).catch(e => e);
       expect(inferOpsErrorCode(failed)).toBe("UNAVAILABLE");
       expect(failed.detail).toBe(WIDGET_SEARCH_UNAVAILABLE);
+    }
+  });
+
+  const refusing = (message: string) => searching(() => Response.json({ error: { code: "FORBIDDEN", message } }, { status: 403 }));
+
+  it("reads only a missing knowledge:read as 'may not search here'; any other 403 stays a refusal", async () => {
+    const denied = await refusing("Missing permission: knowledge:read").client.searchWidgets("invoices", 8).catch(e => e);
+    expect(inferOpsErrorCode(denied)).toBe("FORBIDDEN");
+    expect(denied.detail).toBe(WIDGET_SEARCH_DENIED);
+    for (const message of ["Wrong product for this route", "Missing permission: knowledge:write", "Permission denied"]) {
+      const other = await refusing(message).client.searchWidgets("invoices", 8).catch(e => e);
+      expect(inferOpsErrorCode(other), message).toBe("FORBIDDEN");
+      expect(other.detail, message).not.toBe(WIDGET_SEARCH_DENIED);
     }
   });
 });

@@ -281,6 +281,11 @@ export class InferOpsFake {
   readonly widgetDefinitions = new Map<string, FakeWidgetDefinition>();
   /** Answer the next N widget index writes with a 503, before changing anything. */
   failNextWidgetWrites = 0;
+  /**
+   * Widget searches in these workspaces fail (FAC-13): `down` is a 503, `forbidden` a 403 that isn't
+   * a missing permission (InferOps' product refusal).
+   */
+  readonly widgetSearchFaults = new Map<WorkspaceSlug, "down" | "forbidden">();
 
   /** Answer the next N InferOps API calls with a 503, before doing anything. */
   failNextRequests = 0;
@@ -944,6 +949,9 @@ export class InferOpsFake {
    * fake has no built-in widget catalog, so `hits` is empty.
    */
   #widgetSearch(url: URL, slug: WorkspaceSlug, person: FakePerson): Response {
+    const fault = this.widgetSearchFaults.get(slug);
+    if (fault === "down") return failure(503, "UNAVAILABLE", "down");
+    if (fault === "forbidden") return failure(403, "FORBIDDEN", "Wrong product for this route");
     if (person.knowledge === "none") return failure(403, "FORBIDDEN", "Missing permission: knowledge:read");
     const query = (url.searchParams.get("query") ?? "").trim();
     if (!query) return failure(400, "VALIDATION", "Say what you want to find");

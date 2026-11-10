@@ -43,7 +43,7 @@ import type {
   ArtifactRevision,
 } from "./agent-artifact.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace, WidgetSearchResult } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace, WidgetSearchAnswer } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
@@ -1036,9 +1036,12 @@ export interface AuthenticatedApi extends RpcTarget {
    * vendor asked through each of their own connected accounts, with their own credentials, and
    * merged, each once, best first, at most `WIDGET_SEARCH_LIMIT` of each kind. Definitions only:
    * no instance or live data (see `Overseer.listWidgetInstances` for a definition's instances).
-   * Empty, by keyword, when the deployment names no vendor or the person has no account of it.
+   * `unavailable`, with the reason, when nothing could be asked: no vendor, no account of it, a
+   * sign-in to renew, or no workspace there (`WidgetSearchAnswer`), so it never reads as "no
+   * widgets". A partial answer counts what couldn't be searched (`unsearched`) and where the person
+   * may not search (`denied`). Throws when everything asked failed.
    */
-  searchWidgets(query: string): Promise<WidgetSearchResult>;
+  searchWidgets(query: string): Promise<WidgetSearchAnswer>;
 
   /**
    * List the outputs of all the user's workspaces. Used to display the Outputs page, which lets

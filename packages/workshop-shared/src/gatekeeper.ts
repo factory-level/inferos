@@ -139,6 +139,53 @@ export type WidgetSearchResult = {
 };
 
 /**
+ * Why a widget search asked nothing (FAC-13), so it is never shown as "no widgets": the deployment
+ * names no service to search (`not-configured`), the person has no account of it (`not-connected`),
+ * their sign-in must be renewed (`reconnect`), or the service gives them no workspace to search
+ * (`no-workspace`).
+ */
+export type WidgetSearchUnavailableReason = "not-configured" | "not-connected" | "reconnect" | "no-workspace";
+
+/**
+ * A widget search's answer (FAC-13). `searched`: the matches, with how many places were asked but
+ * add nothing because the service gives the person no permission to search there (`denied`), and
+ * how many could not be searched just now (`unsearched`: a workspace that failed, or an account to
+ * reconnect), so a partial answer says so. `unavailable`: nothing could be asked, and why. A search
+ * where everything asked failed throws instead.
+ */
+export type WidgetSearchAnswer =
+  | (WidgetSearchResult & { status: "searched"; denied: number; unsearched: number })
+  | { status: "unavailable"; reason: WidgetSearchUnavailableReason };
+
+/**
+ * Merges searches of several places into one answer: each built-in kind and each definition
+ * (`<sourceId>@<sourceVersion>`) once, at its best score, best first, at most `k` of each, ranked
+ * `semantic` if any place was. `denied` and `unsearched` are added to the counts each part carries.
+ */
+export function mergeWidgetSearches(
+  parts: Array<WidgetSearchResult & { denied?: number; unsearched?: number }>, k: number,
+  counts: { denied: number; unsearched: number },
+): WidgetSearchAnswer {
+  let hits = new Map<string, WidgetSearchResult["hits"][number]>();
+  let definitions = new Map<string, WidgetSearchResult["definitions"][number]>();
+  let { denied, unsearched } = counts;
+  for (let part of parts) {
+    denied += part.denied ?? 0;
+    unsearched += part.unsearched ?? 0;
+    for (let hit of part.hits) if ((hits.get(hit.kind)?.score ?? -Infinity) < hit.score) hits.set(hit.kind, hit);
+    for (let definition of part.definitions) {
+      let key = `${definition.sourceId}@${definition.sourceVersion}`;
+      if ((definitions.get(key)?.score ?? -Infinity) < definition.score) definitions.set(key, definition);
+    }
+  }
+  let best = <T extends { score: number }>(items: Iterable<T>) => [...items].toSorted((a, b) => b.score - a.score).slice(0, k);
+  return {
+    status: "searched", hits: best(hits.values()), definitions: best(definitions.values()),
+    ranking: parts.some(part => part.ranking === "semantic") ? "semantic" : "keyword", denied, unsearched,
+  };
+}
+
+/**
  * The service's answer to one widget index write, as it gave it. `applied` is a write it made live;
  * `proposed` is one it took for someone else to confirm, never shown as done; `refused` carries the
  * service's own words (for InferOps, a person without `configuration:publish`); `unavailable` is
@@ -927,10 +974,11 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * The widgets the person behind this account may use that match `query`, their intent in their
    * own words (FAC-13): searched freshly with their own credentials in each of their workspaces of
    * the service, for their company, and merged, each once, best first, at most `k` of each kind.
-   * Definitions only. Empty for an account without a connected person. Called only on accounts of
-   * the vendor `SHARED_CONFIGURATION_GATEKEEPER` names, by the Workshop for the person themself.
+   * Definitions only. `unavailable` when nothing could be asked (see `WidgetSearchAnswer`), and it
+   * throws when everything asked failed. Called only on accounts of the vendor
+   * `SHARED_CONFIGURATION_GATEKEEPER` names, by the Workshop for the person themself.
    */
-  searchWidgets?(query: string, k: number): Promise<WidgetSearchResult>;
+  searchWidgets?(query: string, k: number): Promise<WidgetSearchAnswer>;
 
   // TODO:
   // - Query whether account has scope to access a particular URL.

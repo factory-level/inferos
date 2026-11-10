@@ -11,7 +11,7 @@ import {
   type WidgetStateMachine, type WidgetStateSnapshot,
 } from '@gadgets/workshop-shared/widget-state';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
-import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchResult } from "@gadgets/workshop-shared/gatekeeper";
+import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchUnavailableReason, mergeWidgetSearches } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
@@ -2584,39 +2584,38 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   /**
    * The widgets this person may use that match `query` (FAC-13), as the deployment's
    * SHARED_CONFIGURATION_GATEKEEPER vendor answers through each of their own connected accounts
-   * with live credentials, merged: each built-in kind and each definition (Blueprint version) once,
-   * at its best score, best first, at most `k` of each. Empty, by keyword, when the deployment names
-   * no vendor. Throws when no account could answer, so a search reports that, never "nothing found".
+   * with live credentials, merged (mergeWidgetSearches). `unavailable` when nothing could be asked:
+   * no vendor (`not-configured`), no account of it (`not-connected`), only accounts whose sign-in
+   * must be renewed (`reconnect`), or every account answering so itself. An account to reconnect
+   * or one that failed beside one that answered counts as `unsearched`. Throws when every account
+   * asked failed, so a failure never reads as "nothing found".
    */
-  async searchWidgets(query: string, k: number): Promise<WidgetSearchResult> {
-    let empty: WidgetSearchResult = { hits: [], definitions: [], ranking: "keyword" };
+  async searchWidgets(query: string, k: number): Promise<WidgetSearchAnswer> {
     let vendorId = getSharedConfigurationGatekeeper(this.env);
-    if (!vendorId) return empty;
-    let found: WidgetSearchResult[] = [];
+    if (!vendorId) return { status: "unavailable", reason: "not-configured" };
+    let accounts = [...this.#connectedAccountRecords()].filter(record => record.vendorId === vendorId);
+    if (accounts.length === 0) return { status: "unavailable", reason: "not-connected" };
+    let found: Extract<WidgetSearchAnswer, { status: "searched" }>[] = [];
+    let unavailable: WidgetSearchUnavailableReason[] = [];
     let failed: unknown;
-    for (let record of this.#connectedAccountRecords()) {
-      if (record.vendorId !== vendorId || !areCredentialsValid(record)) continue;
+    let failures = 0;
+    for (let record of accounts) {
+      if (!areCredentialsValid(record)) { unavailable.push("reconnect"); continue; }
       try {
-        found.push(await (record.account as unknown as WidgetSearchAccountStub).searchWidgets(query, k));
+        let answer = await (record.account as unknown as WidgetSearchAccountStub).searchWidgets(query, k);
+        if (answer.status === "searched") found.push(answer);
+        else unavailable.push(answer.reason);
       } catch (error) {
         failed = error;
+        failures++;
       }
     }
-    if (found.length === 0 && failed !== undefined) throw failed;
-    let hits = new Map<string, WidgetSearchResult["hits"][number]>();
-    let definitions = new Map<string, WidgetSearchResult["definitions"][number]>();
-    for (let result of found) {
-      for (let hit of result.hits) if ((hits.get(hit.kind)?.score ?? -Infinity) < hit.score) hits.set(hit.kind, hit);
-      for (let definition of result.definitions) {
-        let key = `${definition.sourceId}@${definition.sourceVersion}`;
-        if ((definitions.get(key)?.score ?? -Infinity) < definition.score) definitions.set(key, definition);
-      }
+    if (found.length === 0) {
+      if (failed !== undefined) throw failed;
+      // The most actionable reason first: renewing a sign-in, then the service's own.
+      return { status: "unavailable", reason: unavailable.includes("reconnect") ? "reconnect" : unavailable[0]! };
     }
-    let best = <T extends { score: number }>(items: Iterable<T>) => [...items].toSorted((a, b) => b.score - a.score).slice(0, k);
-    return {
-      hits: best(hits.values()), definitions: best(definitions.values()),
-      ranking: found.some(result => result.ranking === "semantic") ? "semantic" : "keyword",
-    };
+    return mergeWidgetSearches(found, k, { denied: 0, unsearched: failures + unavailable.length });
   }
 
   /**

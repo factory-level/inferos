@@ -32,7 +32,7 @@ import { deploymentOutputForBlueprint, listFormatOffers, readAdminConfig } from 
 // Re-export the optional-feature Durable Objects + entrypoints so they can be bound in wrangler.
 export { PendingLogin, LoginConnectCallbackImpl };
 export { AuthoredWidgetBuildDurableObject } from "./authored-widget-build.js";
-import { GatekeeperUiFrame, type SharedConfigurationAction, type WidgetSearchResult } from "@gadgets/workshop-shared/gatekeeper";
+import { GatekeeperUiFrame, type SharedConfigurationAction, type WidgetSearchAnswer } from "@gadgets/workshop-shared/gatekeeper";
 import { LanguageModelGatekeeper } from "./ai-models";
 import { ArtifactPublisherGatekeeper } from "./artifact-publisher";
 import { getAiGatewayConfig } from "./ai-gateway.js";
@@ -371,7 +371,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return retryOnDoReset(() => this.#user.listGadgets());
   }
 
-  async searchWidgets(query: string): Promise<WidgetSearchResult> {
+  async searchWidgets(query: string): Promise<WidgetSearchAnswer> {
     // The person's own words, bounded here: a blank one is refused, never searched as "anything".
     if (typeof query !== "string" || query.trim() === "" || query.length > 500) {
       throw new Error("Say what you want to find, in at most 500 characters.");
