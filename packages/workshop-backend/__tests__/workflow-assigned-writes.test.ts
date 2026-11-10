@@ -84,7 +84,7 @@ async function proposeAsRun(impl: any) {
 
 /** The trigger's definition as the store keeps it, published at `published` (or not at all). */
 const definition = (published: number | null) =>
-  ({ id: "def", published: published === null ? null : { revision: published, at: new Date(0), by: ADA } });
+  ({ id: "def", owner: ADA, published: published === null ? null : { revision: published, at: new Date(0), by: ADA } });
 
 async function refusalOf(run: () => Promise<unknown>) {
   let refused: unknown;
