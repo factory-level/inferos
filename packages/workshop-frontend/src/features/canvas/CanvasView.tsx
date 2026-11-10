@@ -5,6 +5,7 @@ import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { CanvasBoardWidget } from './CanvasBoardWidget'
 import { CanvasGadgetWidget, type CanvasConsoleRevision } from './CanvasGadgetWidget'
 import { CanvasWikiWidget } from './CanvasWikiWidget'
+import { CanvasUnsupportedWidget } from './CanvasUnsupportedWidget'
 import { gadgetIdOf, sectionGridClass, widgetSpanClass } from './canvasLayout'
 import { useDecidedActionInvalidation } from './useBoardData'
 
@@ -56,6 +57,7 @@ export const CanvasView = ({ definition, gadgets, overseer, resourceScope, offer
             {widget.kind === 'inferos.gadget'
               ? <CanvasGadgetWidget scrollRoot={scrollRoot} widget={widget} gadget={gadgets.get(gadgetIdOf(widget.targetRef))} overseer={overseer} offeredBy={offeredBy} />
               : widget.kind === 'inferops.wiki' ? <CanvasWikiWidget scrollRoot={scrollRoot} widget={widget} overseer={resources} editable={wikiEditable} />
+              : widget.kind === 'inferos.unsupported' ? <CanvasUnsupportedWidget widget={widget} />
               : <CanvasBoardWidget scrollRoot={scrollRoot} widget={widget} overseer={resources} presentation="card" onOpen={onOpenWidget && (() => onOpenWidget(widget.id))} codingDispatch={codingDispatch}
                   unboundAction={resourceScope && (retry => resourceScope.unboundAction(widget.targetRef, retry))} />}
           </div>)}

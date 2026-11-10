@@ -67,6 +67,56 @@ it("stores consoles over the workspace's own screens, with revisions", () => wit
   expect(await workspace.listConsoles()).toEqual([]);
 }));
 
+it("keeps a published FAC-94 page attachment until its draft is published", () => withHarness(true, async url => {
+  using api = connect(url);
+  using owner = await signUp(api, "attachmentbuilder");
+  using workspace = await owner.newGadget();
+  await workspace.newChat("Attachment workspace", null);
+  const source = await workspace.createCanvas({ title: "Source", sections: [] });
+  const destination = await workspace.createCanvas({ title: "Destination", sections: [] });
+  const originalWiring = [{ id: "route", version: 1 as const, on: "refresh",
+    effect: { kind: "navigate" as const, page: destination.id } }];
+  const draftWiring = [{ id: "route", version: 1 as const, on: "refresh",
+    effect: { kind: "navigate" as const, page: source.id } }];
+  await workspace.editCanvasPage(source.id, source.revision, [
+    { type: "addObject", parent: source.id, index: 0, object: { id: "work", title: "Work", columns: 1 } },
+    { type: "addWidget", parent: "work", index: 0, widget: { id: "board", kind: "inferops.project-board",
+      version: 1, targetRef: "inferops://demo.local/project/board/DEMO", size: "wide",
+      params: { workflow: "software", showCompleted: false } } },
+    { type: "setAttachments", target: "board", attachments: [{ id: "raise-refresh", version: 1,
+      on: "action-completed", effect: { kind: "raise-event", target: source.id, event: "refresh" } }] },
+    { type: "setAttachments", target: source.id, attachments: originalWiring },
+  ]);
+  const created = await workspace.createConsole({
+    title: "Attachment console", fullChat: "off",
+    views: [
+      { id: "source", title: "Source", type: "screen", screen: source.id },
+      { id: "destination", title: "Destination", type: "screen", screen: destination.id },
+    ],
+  });
+  const published = await workspace.publishConsole(created.id, created.revision);
+  using operator = await signUp(api, "attachmentoperator");
+  if (!await workspace.addCollaborator("attachmentoperator", "use")) throw new Error("Failed to share");
+  using operatorWorkspace = await operator.openGadget((await workspace.getMetadata()).id);
+  const publishedBefore = await operatorWorkspace.getConsolePage(created.id, source.id, "published");
+  expect(publishedBefore?.attachments).toEqual(originalWiring);
+
+  await workspace.editCanvasPage(source.id, "1", [
+    { type: "setAttachments", target: source.id, attachments: draftWiring },
+  ]);
+  expect((await workspace.getConsolePage(created.id, source.id, "draft"))?.attachments).toEqual(draftWiring);
+  expect(await operatorWorkspace.getConsolePage(created.id, source.id, "published")).toEqual(publishedBefore);
+
+  using reloadApi = connect(url);
+  using reloadedOperator = await logIn(reloadApi, "attachmentoperator");
+  using reloadedWorkspace = await reloadedOperator.openGadget((await workspace.getMetadata()).id);
+  expect(await reloadedWorkspace.getConsolePage(created.id, source.id, "published")).toEqual(publishedBefore);
+
+  await workspace.publishConsole(created.id, published.revision);
+  expect((await operatorWorkspace.getConsolePage(created.id, source.id, "published"))?.attachments)
+    .toEqual(draftWiring);
+}));
+
 const consoleChanged = (caught: unknown) => {
   expect(getOperateSessionErrorCode(caught)).toBe(OPERATE_SESSION_ERROR_CODES.consoleChanged);
   return true;
@@ -177,6 +227,24 @@ it("lets a use-role operator use only the published revision, while a builder pr
     using builderSession = await owner.getOperateSession();
     let preview = await builderSession.dispatch({ ...open, source: "draft", revision: "2", viewId: "board" }, 0);
     expect(preview.state.console).toMatchObject({ source: "draft", revision: "2", viewId: "board" });
+
+    // A fresh connection for each person preserves the same draft/published boundary after reload.
+    using operatorReloadApi = connect(url);
+    using reloadedOperator = await logIn(operatorReloadApi, "consolesoperator");
+    using reloadedUseWorkspace = await reloadedOperator.openGadget(workspaceId);
+    // Reopen the published console through the operator's fresh authenticated workspace handle.
+    expect(await reloadedUseWorkspace.getConsole(created.id, "published")).toEqual(operatorView);
+    expect(await reloadedUseWorkspace.getCanvas(board.id)).toEqual(board);
+    await expect(reloadedUseWorkspace.getConsole(created.id, "draft")).rejects.toThrow(denied);
+    await expect(reloadedUseWorkspace.getConsolePage(created.id, board.id, "draft")).rejects.toThrow(denied);
+
+    using builderReloadApi = connect(url);
+    using reloadedBuilder = await logIn(builderReloadApi, "consolesbuilder");
+    using reloadedBuilderWorkspace = await reloadedBuilder.openGadget(workspaceId);
+    // The builder's reopened workspace still has the draft and its published predecessor.
+    expect(await reloadedBuilderWorkspace.getConsole(created.id, "draft")).toEqual(draft);
+    expect(await reloadedBuilderWorkspace.getConsoleScreen(created.id, board.id, "draft")).toEqual(renamed);
+    expect(await reloadedBuilderWorkspace.getConsole(created.id, "published")).toEqual(operatorView);
 
     // Publishing again: two publishes at the same revision can't both win.
     const republished = await workspace.publishConsole(created.id, "2");

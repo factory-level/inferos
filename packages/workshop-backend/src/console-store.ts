@@ -1,12 +1,12 @@
 import type { WorkspaceSettings } from "@gadgets/workshop-shared/workspace-settings";
 import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
-import { CANVAS_GADGET_REF, CanvasConflictError, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
+import { CANVAS_GADGET_REF, CanvasConflictError, newerWidgetPlaceholder, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
 import {
   CanvasModelError, canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasRunEffects, canvasRunEventsHeard,
   canvasWidgetEventsHeard, formatCanvasTarget, type CanvasPage,
 } from "@gadgets/workshop-shared/canvas-model";
-import { joinPageSettings, nestedPage, readCanvasDefinition, splitPageSettings } from "./canvas-store";
+import { CANVAS_READ, joinStoredPage, nestedPage, readCanvasDefinition, splitStoredPage, type StoredPagePrompt } from "./canvas-store";
 import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleDraftProblem, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
@@ -414,12 +414,18 @@ export type ConsoleScreenSnapshot = {
    * from before page settings still reads the snapshot. Absent when the page overrides nothing.
    */
   pageSettings?: WorkspaceSettings;
+  /**
+   * That page's `insert-prompt` attachments (FAC-98), kept beside `page` rather than in it, so a
+   * reader from before that effect still reads the snapshot and never fires them. Absent when it has none.
+   */
+  pagePrompts?: StoredPagePrompt[];
 };
 
-// A frozen page as its snapshot stores it: the page without its settings, and the settings beside it.
-function frozenPageRecord(page: CanvasPage): Pick<ConsoleScreenSnapshot, "page" | "pageSettings"> {
-  const split = splitPageSettings(page);
-  return { page: split.page, ...(split.settings ? { pageSettings: split.settings } : {}) };
+// A frozen page as its snapshot stores it: the page without its settings or prompts, and those beside it.
+function frozenPageRecord(page: CanvasPage): Pick<ConsoleScreenSnapshot, "page" | "pageSettings" | "pagePrompts"> {
+  const split = splitStoredPage(page);
+  return { page: split.page, ...(split.settings ? { pageSettings: split.settings } : {}),
+    ...(split.prompts ? { pagePrompts: split.prompts } : {}) };
 }
 
 /** The storage key of one published console screen. Ids never contain "/". */
@@ -635,7 +641,8 @@ function screenProblems(storage: Pick<ConsoleStorage, "gadgets" | "boundHooks">,
       problems.push({ code: "undeclared-event", target,
         message: `Screen ${screenId} can't be published: its widget ${heard.nodeId} listens for "${heard.event}", which gadget ${gadgetId} doesn't declare.`,
         repair: "Listen for an event the widget's states.json declares, or remove the attachment." });
-    // Only navigation runs from a widget event, so none can reach a capability (FAC-94).
+    // Only navigation and a draft in the person's own chat (FAC-98) run from a widget event, so
+    // none can reach a capability (FAC-94).
     } else if (canvasPageEffects(page!, heard.targetRef, heard.event).some(effect => effect.kind === "request-action")) {
       problems.push({ code: "event-leads-to-action", target,
         message: `Screen ${screenId} can't be published: its widget ${heard.nodeId}'s event "${heard.event}" leads to a requested action, which a widget event can't run.`,
@@ -643,7 +650,8 @@ function screenProblems(storage: Pick<ConsoleStorage, "gadgets" | "boundHooks">,
     }
   }
   // FAC-116: an attachment hearing a trigger's runs must name a trigger of that gadget, and lead to
-  // no requested action, since a run's result runs only navigation.
+  // no requested action, since a run's result runs only navigation; nor to a prompt in the chat
+  // (FAC-98), since a run's result delivers only its navigation.
   for (let heard of page ? canvasRunEventsHeard(page) : []) {
     let gadgetId = Number(CANVAS_GADGET_REF.exec(heard.targetRef)![1]);
     let target = formatCanvasTarget({ kind: "attachment", pageId: screenId, attachmentId: heard.attachmentId });
@@ -651,10 +659,17 @@ function screenProblems(storage: Pick<ConsoleStorage, "gadgets" | "boundHooks">,
       problems.push({ code: "run-trigger-mismatch", target,
         message: `Screen ${screenId} can't be published: its widget ${heard.nodeId} hears the runs of trigger ${heard.trigger}, which isn't a trigger of gadget ${gadgetId}.`,
         repair: "Point the attachment at a trigger of this widget's gadget, or remove the attachment." });
-    } else if (canvasRunEffects(page!, heard.trigger, heard.event).some(effect => effect.kind === "request-action")) {
-      problems.push({ code: "run-leads-to-action", target,
-        message: `Screen ${screenId} can't be published: its widget ${heard.nodeId}'s "${heard.event}" for trigger ${heard.trigger} leads to a requested action, which a run's result can't run.`,
-        repair: "Remove the requested action from what this run's result leads to; a run's result can only navigate." });
+    } else {
+      let effects = canvasRunEffects(page!, heard.trigger, heard.event);
+      if (effects.some(effect => effect.kind === "request-action")) {
+        problems.push({ code: "run-leads-to-action", target,
+          message: `Screen ${screenId} can't be published: its widget ${heard.nodeId}'s "${heard.event}" for trigger ${heard.trigger} leads to a requested action, which a run's result can't run.`,
+          repair: "Remove the requested action from what this run's result leads to; a run's result can only navigate." });
+      } else if (effects.some(effect => effect.kind === "insert-prompt")) {
+        problems.push({ code: "run-leads-to-prompt", target,
+          message: `Screen ${screenId} can't be published: its widget ${heard.nodeId}'s "${heard.event}" for trigger ${heard.trigger} puts a prompt in the chat, which a run's result can't do yet.`,
+          repair: "Remove the prompt from what this run's result leads to, or put it on one of the widget's own events." });
+      }
     }
   }
   return problems;
@@ -973,30 +988,35 @@ export class WorkspaceConsoleStore {
 
   /**
    * A screen of one console: as it was published, or (for the draft) the canvas as it is now. Null
-   * if that revision of the console doesn't show the screen.
+   * if that revision of the console doesn't show the screen. It is returned as stored, except that a
+   * widget a newer InferOS stored reads as an inert placeholder (`newerWidgetPlaceholder`).
    */
   screen(consoleId: string, screenId: string, source: ConsoleSource): CanvasDefinition | null {
     let shown = this.get(consoleId, source);
     if (!shown || !consoleScreens(shown).includes(screenId)) return null;
-    if (source === "draft") return readCanvasDefinition(this.storage, screenId);
-    return this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId))?.screen ?? null;
+    let screen = source === "draft" ? readCanvasDefinition(this.storage, screenId, CANVAS_READ)
+      : this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId))?.screen ?? null;
+    // As stored, as this has always been read, but with each newer InferOS's widget as its placeholder.
+    return screen && { ...screen, sections: (screen.sections ?? []).map(section => ({ ...section,
+      widgets: (section.widgets ?? []).map(widget => newerWidgetPlaceholder(widget as unknown as Record<string, unknown>) ?? widget) })) };
   }
 
   /**
    * The page of one console's screen: as its publication froze it, or (for the draft) the page the
    * screen stands for now (see `currentPage`). Null if that revision of the console doesn't show
    * the screen. A publication made before pages were frozen gives its version 1 copy by conversion.
+   * A widget a newer InferOS stored reads as an inert placeholder (`CANVAS_READ`).
    */
   page(consoleId: string, screenId: string, source: ConsoleSource): CanvasPage | null {
     let shown = this.get(consoleId, source);
     if (!shown || !consoleScreens(shown).includes(screenId)) return null;
     if (source === "draft") {
       let row = this.storage.canvases.get(screenId);
-      return row ? nestedPage(this.storage, row) ?? canvasPageFromDefinition(row) : null;
+      return row ? nestedPage(this.storage, row, CANVAS_READ) ?? canvasPageFromDefinition(row, CANVAS_READ) : null;
     }
     let snapshot = this.storage.consoleScreens.get(consoleScreenKey(consoleId, screenId));
     if (!snapshot) return null;
-    return snapshot.page ? joinPageSettings(snapshot.page, snapshot.pageSettings) : canvasPageFromDefinition(snapshot.screen);
+    return snapshot.page ? joinStoredPage(snapshot.page, snapshot.pageSettings, snapshot.pagePrompts, CANVAS_READ) : canvasPageFromDefinition(snapshot.screen, CANVAS_READ);
   }
 
   /**

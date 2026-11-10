@@ -1,6 +1,6 @@
 import type { WorkspaceSettings } from "@gadgets/workshop-shared/workspace-settings";
-import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type CanvasContent, type CanvasDefinition, type CanvasOperation } from "@gadgets/workshop-shared/canvas";
-import { applyCanvasPageOperations, canvasDefinitionFromPage, canvasDefinitionProjection, canvasPageFromDefinition, parseCanvasPage, parseCanvasWorkspacePages, type CanvasPage, type CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
+import { applyCanvasOperations, CanvasConflictError, parseCanvasDefinition, type CanvasContent, type CanvasDefinition, type CanvasOperation, type CanvasReadOptions } from "@gadgets/workshop-shared/canvas";
+import { applyCanvasPageOperations, canvasDefinitionFromPage, canvasDefinitionProjection, canvasPageFromDefinition, parseCanvasPage, parseCanvasWorkspacePages, type CanvasAttachment, type CanvasPage, type CanvasPageOperation } from "@gadgets/workshop-shared/canvas-model";
 import { readCanvasCatalog } from "./canvas-catalog";
 import type { OverseerStorage } from "./overseer";
 
@@ -9,7 +9,7 @@ import type { OverseerStorage } from "./overseer";
  * revision when this was saved: if the row has moved, code without pages edited it, and the row wins.
  */
 export interface StoredCanvasPage {
-  /** The nested page, without its settings (see `settings`). */
+  /** The nested page, without its settings or prompts (see `settings` and `prompts`). */
   page: CanvasPage;
   /** The revision of the `canvases` row this page replaces while the two agree. */
   basedOnRevision: string;
@@ -19,20 +19,103 @@ export interface StoredCanvasPage {
    * and leaves the overrides inert. Absent when the page overrides nothing.
    */
   settings?: WorkspaceSettings;
+  /**
+   * The page's `insert-prompt` attachments (FAC-98), kept beside the page rather than in it, so a
+   * reader from before that effect, which refuses an effect kind it doesn't know, still reads the
+   * page and never fires them. Absent when the page has none.
+   */
+  prompts?: StoredPagePrompt[];
 }
 
 /**
- * A page split for storage (FAC-95 follow-up): the page as a reader before page settings takes
- * it, and its settings to keep beside it. `joinPageSettings` puts them back.
+ * One `insert-prompt` attachment kept beside its page (FAC-98): the page or node holding it
+ * (`owner`, its id), its position among that owner's attachments, and the attachment itself.
  */
-export function splitPageSettings(page: CanvasPage): { page: CanvasPage; settings?: WorkspaceSettings } {
-  const { settings, ...rest } = page;
-  return settings ? { page: rest, settings } : { page: rest };
+export interface StoredPagePrompt {
+  /** The id of the page or node whose attachments held it. */
+  owner: string;
+  /** Its index in that owner's attachments, before any were taken out. */
+  index: number;
+  /** The attachment, as the page held it. */
+  attachment: CanvasAttachment;
 }
 
-/** A stored page with the settings kept beside it, parsed back into one page. */
-export function joinPageSettings(page: unknown, settings: WorkspaceSettings | undefined): CanvasPage {
-  return parseCanvasPage(settings ? { ...(page as object), settings } : page);
+/** A page as storage keeps it: what an earlier reader parses, and what is kept beside it. */
+export interface SplitStoredPage {
+  /** The page without its settings or its prompts. */
+  page: CanvasPage;
+  /** Its settings overrides (FAC-95), when it has any. */
+  settings?: WorkspaceSettings;
+  /** Its `insert-prompt` attachments (FAC-98), when it has any. */
+  prompts?: StoredPagePrompt[];
+}
+
+/**
+ * A page split for storage, so a reader from before page settings (FAC-95 follow-up) or before
+ * `insert-prompt` (FAC-98) still parses it and leaves what it doesn't know inert: the settings and
+ * the prompt attachments go beside the page. `joinStoredPage` puts them back.
+ */
+export function splitStoredPage(page: CanvasPage): SplitStoredPage {
+  const { settings, ...rest } = page;
+  const prompts: StoredPagePrompt[] = [];
+  const keep = (owner: string, attachments: CanvasAttachment[]) => attachments.filter((attachment, index) => {
+    if (attachment.effect.kind !== "insert-prompt") return true;
+    prompts.push({ owner, index, attachment });
+    return false;
+  });
+  const stripped = { ...rest, attachments: keep(page.id, page.attachments),
+    nodes: page.nodes.map(node => ({ ...node, attachments: keep(node.id, node.attachments) })) } as CanvasPage;
+  return { page: stripped, ...(settings ? { settings } : {}), ...(prompts.length > 0 ? { prompts } : {}) };
+}
+
+/**
+ * A stored page with its settings and prompts put back, parsed into one page. Each prompt returns
+ * to its owner at its index; one whose owner the page no longer holds throws, as a corrupt record.
+ * With `tolerateNewer` (reads only), a widget a newer InferOS stored reads as a placeholder (FAC-9).
+ */
+export function joinStoredPage(page: unknown, settings: WorkspaceSettings | undefined,
+    prompts?: readonly StoredPagePrompt[], options: CanvasReadOptions = {}): CanvasPage {
+  let joined = settings ? { ...(page as object), settings } : page;
+  if (prompts && prompts.length > 0) joined = withPrompts(joined as Record<string, unknown>, prompts);
+  return parseCanvasPage(joined, options);
+}
+
+// `page` with each prompt back among its owner's attachments, in ascending index order so each lands
+// where it was. The stored page is untrusted shape, so only what's there is copied.
+function withPrompts(page: Record<string, unknown>, prompts: readonly StoredPagePrompt[]): Record<string, unknown> {
+  const restore = (owner: unknown, attachments: unknown) => {
+    const list = Array.isArray(attachments) ? [...attachments] : [];
+    for (const prompt of prompts.filter(item => item.owner === owner).toSorted((a, b) => a.index - b.index)) {
+      list.splice(prompt.index, 0, prompt.attachment);
+    }
+    return list;
+  };
+  const nodes = Array.isArray(page.nodes) ? page.nodes as Record<string, unknown>[] : [];
+  const owners = new Set([page.id, ...nodes.map(node => node.id)]);
+  const lost = prompts.find(prompt => !owners.has(prompt.owner));
+  if (lost) throw new Error(`A stored prompt names ${lost.owner}, which its page doesn't hold`);
+  return { ...page, attachments: restore(page.id, page.attachments),
+    nodes: nodes.map(node => ({ ...node, attachments: restore(node.id, node.attachments) })) };
+}
+
+/** How every read of a saved canvas parses it: a newer InferOS's widget is an inert placeholder (FAC-9). */
+export const CANVAS_READ: CanvasReadOptions = { tolerateNewer: true };
+
+/**
+ * `read` strictly, for a write. Where only a tolerant read succeeds, the canvas holds a newer
+ * InferOS's widget, and the write is refused in those words rather than as a parse failure.
+ */
+export function readStrictly<T>(read: (options: CanvasReadOptions) => T): T {
+  try {
+    return read({});
+  } catch (error) {
+    try {
+      read(CANVAS_READ);
+    } catch {
+      throw error;
+    }
+    throw new Error("This canvas holds a widget from a newer InferOS, so it can't be changed here", { cause: error });
+  }
 }
 
 /**
@@ -41,27 +124,29 @@ export function joinPageSettings(page: unknown, settings: WorkspaceSettings | un
  * this, so a nested save is never shown as the layout it replaced (FAC-83). The row is returned as
  * stored, unparsed, as the console store has always read it; the canvas store parses its own reads.
  * A console publication (FAC-89) reads the page itself (`currentPage`), never this projection.
+ * `options` is how a nested page is parsed (see `CANVAS_READ`).
  */
-export function readCanvasDefinition(storage: Pick<OverseerStorage, "canvases" | "canvasPages">, id: string): CanvasDefinition | null {
+export function readCanvasDefinition(storage: Pick<OverseerStorage, "canvases" | "canvasPages">, id: string, options: CanvasReadOptions = {}): CanvasDefinition | null {
   const row = storage.canvases.get(id);
   if (!row) return null;
-  const nested = nestedPage(storage, row);
+  const nested = nestedPage(storage, row, options);
   return nested ? canvasDefinitionProjection(nested) : row;
 }
 
 /**
  * The page a `canvases` row currently stands for: its nested page while that page is based on the
  * row's revision, otherwise the row by conversion. What the store's page reads and a console
- * publication (FAC-89) both read. Reads never write.
+ * publication (FAC-89) both read. Reads never write. `options` is how it's parsed (see `CANVAS_READ`).
  */
-export function currentPage(storage: Pick<OverseerStorage, "canvasPages">, row: CanvasDefinition): CanvasPage {
-  return nestedPage(storage, row) ?? canvasPageFromDefinition(row);
+export function currentPage(storage: Pick<OverseerStorage, "canvasPages">, row: CanvasDefinition, options: CanvasReadOptions = {}): CanvasPage {
+  return nestedPage(storage, row, options) ?? canvasPageFromDefinition(row, options);
 }
 
 /** The nested page that currently replaces `row`, if any: one based on the row's revision. */
-export function nestedPage(storage: Pick<OverseerStorage, "canvasPages">, row: Pick<CanvasDefinition, "id" | "revision">): CanvasPage | null {
+export function nestedPage(storage: Pick<OverseerStorage, "canvasPages">, row: Pick<CanvasDefinition, "id" | "revision">,
+    options: CanvasReadOptions = {}): CanvasPage | null {
   const stored = storage.canvasPages.get(row.id);
-  return stored?.basedOnRevision === row.revision ? joinPageSettings(stored.page, stored.settings) : null;
+  return stored?.basedOnRevision === row.revision ? joinStoredPage(stored.page, stored.settings, stored.prompts, options) : null;
 }
 
 /**
@@ -69,6 +154,10 @@ export function nestedPage(storage: Pick<OverseerStorage, "canvasPages">, row: P
  *
  * `canvases` only ever holds version 1, because code before pages parses every row to list any of
  * them: one nested row there would blank the whole workspace after a rollback (ADR 0014).
+ *
+ * Reads are tolerant (FAC-9): a widget a newer InferOS stored reads as an inert placeholder, and a
+ * listing leaves out a row it can't read rather than failing whole. Writes read strictly, so a
+ * canvas holding a newer InferOS's widget can't be changed here.
  */
 export class WorkspaceCanvasStore {
   constructor(private durableStorage: DurableObjectStorage,
@@ -81,23 +170,35 @@ export class WorkspaceCanvasStore {
     }
   }
 
-  /** Every canvas as a version 1 reader sees it (`readCanvasDefinition`). */
+  /** Every canvas as a version 1 reader sees it (`readCanvasDefinition`), leaving out any it can't read. */
   list(): CanvasDefinition[] {
     this.#requireEnabled();
-    return Array.from(this.storage.canvases.list(), row => parseCanvasDefinition(readCanvasDefinition(this.storage, parseCanvasDefinition(row).id)));
+    return this.#readable(row => parseCanvasDefinition(readCanvasDefinition(this.storage, row.id, CANVAS_READ), CANVAS_READ));
   }
 
   /** One canvas as a version 1 reader sees it (`readCanvasDefinition`). */
   get(id: string): CanvasDefinition | null {
     this.#requireEnabled();
-    const value = readCanvasDefinition(this.storage, id);
-    return value ? parseCanvasDefinition(value) : null;
+    const value = readCanvasDefinition(this.storage, id, CANVAS_READ);
+    return value ? parseCanvasDefinition(value, CANVAS_READ) : null;
+  }
+
+  /** Each stored row read by `read`; one that can't be read is left out and logged, never failing the rest. */
+  #readable<T>(read: (row: CanvasDefinition) => T): T[] {
+    return Array.from(this.storage.canvases.list()).flatMap(row => {
+      try {
+        return [read(row)];
+      } catch (error) {
+        console.warn("canvas_unreadable", { id: typeof row?.id === "string" ? row.id.slice(0, 64) : null, reason: error instanceof Error ? error.message : String(error) });
+        return [];
+      }
+    });
   }
 
   /** The stored version 1 row itself, which writers check revisions against. */
   #row(id: string): CanvasDefinition | null {
     const value = this.storage.canvases.get(id);
-    return value ? parseCanvasDefinition(value) : null;
+    return value ? readStrictly(options => parseCanvasDefinition(value, options)) : null;
   }
 
   create(content: CanvasContent): CanvasDefinition {
@@ -142,21 +243,21 @@ export class WorkspaceCanvasStore {
 
   /** The nested page that currently replaces this row, if any. */
   #nestedPage(row: CanvasDefinition): CanvasPage | null {
-    return nestedPage(this.storage, row);
+    return readStrictly(options => nestedPage(this.storage, row, options));
   }
 
   /** One page by ID: its nested page, or its version 1 row by conversion (see `currentPage`). Reads never write. */
   getPage(id: string): CanvasPage | null {
     this.#requireEnabled();
     // The raw row: `get` shows a nested page's projection, whose revision is the page's.
-    const row = this.#row(id);
-    return row ? currentPage(this.storage, row) : null;
+    const value = this.storage.canvases.get(id);
+    return value ? currentPage(this.storage, parseCanvasDefinition(value, CANVAS_READ), CANVAS_READ) : null;
   }
 
-  /** Every page of this workspace. Reads never write. */
+  /** Every page of this workspace, leaving out any it can't read. Reads never write. */
   listPages(): CanvasPage[] {
     this.#requireEnabled();
-    return Array.from(this.storage.canvases.list(), row => currentPage(this.storage, parseCanvasDefinition(row)));
+    return this.#readable(row => currentPage(this.storage, parseCanvasDefinition(row, CANVAS_READ), CANVAS_READ));
   }
 
   /**
@@ -166,7 +267,9 @@ export class WorkspaceCanvasStore {
   editPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): CanvasPage {
     this.#requireEnabled();
     return this.durableStorage.transactionSync(() => {
-      const current = this.getPage(id);
+      // Read strictly: a page holding a newer InferOS's widget can't be changed here.
+      const row = this.#row(id);
+      const current = row ? this.#nestedPage(row) ?? canvasPageFromDefinition(row) : null;
       if (!current) throw new Error("Canvas not found");
       if (current.revision !== expectedRevision) throw new CanvasConflictError(current.revision);
       return this.#save(applyCanvasPageOperations(current, operations), expectedRevision);
@@ -208,7 +311,7 @@ export class WorkspaceCanvasStore {
       this.storage.canvases.put(definition);
       this.storage.canvasPages.delete(page.id);
     } else {
-      this.storage.canvasPages.put({ ...splitPageSettings(updated), basedOnRevision: row.revision });
+      this.storage.canvasPages.put({ ...splitStoredPage(updated), basedOnRevision: row.revision });
     }
     return updated;
   }
