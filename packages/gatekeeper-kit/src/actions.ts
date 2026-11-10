@@ -788,83 +788,60 @@ export function defineActions<Host, M extends Record<string, unknown>>(
         await resolved("rejected");
       };
 
+      const prepareSubmission = async (kind: keyof M, payload: unknown, fence?: ActionFence) => {
+        const definition = byName.get(String(kind));
+        if (definition === undefined) throw new Error(`Unknown action kind "${String(kind)}".`);
+        const policy = fencePolicyFor(kind);
+        // Declared, not inferred from what the call site happened to pass: an omitted fence on a
+        // connection-scoped kind is the silent failure this policy exists to prevent, and a
+        // fence on an authority-independent one would pin an action nothing needed pinned.
+        if (policy === "authority" && fence === undefined) {
+          throw new Error(`Action kind "${String(kind)}" is authority-fenced; stage it with the `
+            + "authority this operation ran under -- usually its `CredentialRead` -- as `fence`.");
+        }
+        if (policy === "none" && fence !== undefined) {
+          throw new Error(`Action kind "${String(kind)}" is declared authority-independent; `
+            + "remove the `fence`, or declare the kind \"authority\".");
+        }
+        // Snapshotted before the first await: the payload must be the one describe rendered, the
+        // fence the connection this call staged under.
+        const clonedPayload = structuredClone(payload);
+        const staged = fence && { generation: fence.generation };
+        // Cloned for the same reason as the payload: staging serializes behind the journal's
+        // lane, and `describe` may still own what it returned.
+        const {
+          title, description: body, fields, descriptionIsComplete, pushedCommits, implementsRevert,
+        } = structuredClone(await definition.describe(clonedPayload, host));
+        const action = { kind, payload: clonedPayload } as TaggedAction<M>;
+        const description: ActionDescription = {
+          // Destructured, not spread: a port returning a full `ActionDescription` here would
+          // otherwise carry its own `awaitDecision` past the delivery the definition declares.
+          title,
+          description: body,
+          implementsRevert,
+          // Spread, so an action with no fields, no git, no kind, no awaited decision, or no claim
+          // of completeness puts no key on the wire at all. A push is never complete, whatever the
+          // hook claims: the approver sees commit ids, not the bytes they carry.
+          ...(fields?.length ? { fields } : {}),
+          ...(pushedCommits ? { pushedCommits } : {}),
+          ...(descriptionIsComplete === true && !pushedCommits?.length
+            ? { descriptionIsComplete: true }
+            : {}),
+          autoApprovable: definition.autoApprovable === true,
+          ...(definition.kind ? { actionKind: definition.kind } : {}),
+          ...(definition.delivery === "await-decision" ? { awaitDecision: true } : {}),
+        };
+        return { action, description, staged };
+      };
       const set: BoundActionSet<M> = {
         submit: async (queue, kind, payload, { fence } = {}) => {
-          const definition = byName.get(String(kind));
-          if (definition === undefined) throw new Error(`Unknown action kind "${String(kind)}".`);
-          const policy = fencePolicyFor(kind);
-          // Declared, not inferred from what the call site happened to pass: an omitted fence on a
-          // connection-scoped kind is the silent failure this policy exists to prevent, and a
-          // fence on an authority-independent one would pin an action nothing needed pinned.
-          if (policy === "authority" && fence === undefined) {
-            throw new Error(`Action kind "${String(kind)}" is authority-fenced; stage it with the `
-              + "authority this operation ran under -- usually its `CredentialRead` -- as `fence`.");
-          }
-          if (policy === "none" && fence !== undefined) {
-            throw new Error(`Action kind "${String(kind)}" is declared authority-independent; `
-              + "remove the `fence`, or declare the kind \"authority\".");
-          }
-          // Snapshotted before the first await: the payload must be the one describe rendered, the
-          // fence the connection this call staged under.
-          payload = structuredClone(payload);
-          const staged = fence && { generation: fence.generation };
-          // Cloned for the same reason as the payload: staging serializes behind the journal's
-          // lane, and `describe` may still own what it returned.
-          const {
-            title, description, fields, descriptionIsComplete, pushedCommits, implementsRevert,
-          } = structuredClone(await definition.describe(payload, host));
-          const action = { kind, payload } as TaggedAction<M>;
-          return stageAction(journal, queue, action, {
-            // Destructured, not spread: a port returning a full `ActionDescription` here would
-            // otherwise carry its own `awaitDecision` past the delivery the definition declares.
-            title,
-            description,
-            implementsRevert,
-            // Spread, so an action with no fields, no git, no kind, no awaited decision, or no claim
-            // of completeness puts no key on the wire at all. A push is never complete, whatever the
-            // hook claims: the approver sees commit ids, not the bytes they carry.
-            ...(fields?.length ? { fields } : {}),
-            ...(pushedCommits ? { pushedCommits } : {}),
-            ...(descriptionIsComplete === true && !pushedCommits?.length
-              ? { descriptionIsComplete: true }
-              : {}),
-            autoApprovable: definition.autoApprovable === true,
-            ...(definition.kind ? { actionKind: definition.kind } : {}),
-            ...(definition.delivery === "await-decision" ? { awaitDecision: true } : {}),
-          }, staged);
+          const { action, description, staged } = await prepareSubmission(kind, payload, fence);
+          return stageAction(journal, queue, action, description, staged);
         },
 
         submitWithReceipt: async (queue, kind, payload, { fence } = {}) => {
-          const definition = byName.get(String(kind));
-          if (definition === undefined) throw new Error(`Unknown action kind "${String(kind)}".`);
-          const policy = fencePolicyFor(kind);
-          if (policy === "authority" && fence === undefined) {
-            throw new Error(`Action kind "${String(kind)}" is authority-fenced; stage it with the `
-              + "authority this operation ran under -- usually its `CredentialRead` -- as `fence`.");
-          }
-          if (policy === "none" && fence !== undefined) {
-            throw new Error(`Action kind "${String(kind)}" is declared authority-independent; `
-              + "remove the `fence`, or declare the kind \"authority\".");
-          }
-          payload = structuredClone(payload);
-          const staged = fence && { generation: fence.generation };
-          const {
-            title, description, fields, descriptionIsComplete, pushedCommits, implementsRevert,
-          } = structuredClone(await definition.describe(payload, host));
-          const action = { kind, payload } as TaggedAction<M>;
-          return stageActionWithReceipt(journal, queue, action, {
-            title,
-            description,
-            implementsRevert,
-            ...(fields?.length ? { fields } : {}),
-            ...(pushedCommits ? { pushedCommits } : {}),
-            ...(descriptionIsComplete === true && !pushedCommits?.length
-              ? { descriptionIsComplete: true }
-              : {}),
-            autoApprovable: definition.autoApprovable === true,
-            ...(definition.kind ? { actionKind: definition.kind } : {}),
-            ...(definition.delivery === "await-decision" ? { awaitDecision: true } : {}),
-          }, staged);
+          const { action, description, staged } = await prepareSubmission(kind, payload, fence);
+          return stageActionWithReceipt(journal, queue, action, description, staged);
         },
 
         apply: (id, context) => resolutionQueue.run(() => applyRecord(id, context)),
