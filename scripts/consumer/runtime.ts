@@ -98,6 +98,9 @@ export const capabilitySources: Record<CapabilityName, string | null> = {
   // The gatekeeper's workflow-policy switch (MVP-18): off withholds the resource kind and refuses
   // new workflow-policy bindings and every call on existing ones (DISABLED).
   INFEROPS_WORKFLOW_POLICY_ENABLED: "custom-gatekeepers/gatekeeper-inferops/src/workflow-policy.ts",
+  // The gatekeeper's Dot switch (FAC-133): off withholds the resource kind and refuses new Dot
+  // bindings and every call on existing ones (DISABLED).
+  INFEROPS_DOT_ENABLED: "custom-gatekeepers/gatekeeper-inferops/src/dot.ts",
   // The kernel's host-board switch (proposed): off refuses host-board registration and
   // publication, selection, acquisition and every read; the gatekeeper's facet checks it too.
   INFEROPS_HOST_BOARDS: "packages/workshop-backend/src/host-boards.ts",

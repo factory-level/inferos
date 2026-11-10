@@ -34,17 +34,19 @@ import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
+  WorkflowDefinitionRights, WorkflowDefinitionShare,
   WorkflowTriggerDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation, RequestedRun,
 } from "./workflow-definition.js";
 import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
+import type { WidgetPlacementInput, WidgetPlacements } from "./widget-placements.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
   ArtifactPin, ArtifactPublishResult, ArtifactQualification, ArtifactRef, ArtifactRefusal,
   ArtifactRevision,
 } from "./agent-artifact.js";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
-import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace, WidgetSearchAnswer } from "./gatekeeper.js";
+import { AccountDescription, ActionKind, ActionDescription, AvatarImage, GatekeeperUiFrame, ObservationDescription, ResourceDescription, ResourceConfiguratorFrame, SupportedResource, VendorDescription, HookDescription, SharedConfigurationAction, WidgetIndexWorkspace, WidgetSearchAnswer, ActionFailureKind } from "./gatekeeper.js";
 import type { CodeChange } from "./code-change.js";
 import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
@@ -514,6 +516,28 @@ export interface OperateSession extends RpcTarget {
    * accepts), `WIDGET_STATE_CONFLICT` or `WIDGET_HAS_NO_STATES`.
    */
   transitionWidget(ref: OperateWidgetRef, event: string, expectedSeq: number): Promise<WidgetStateSnapshot>;
+
+  /**
+   * This person's widget placements on the Operate canvas (FAC-13, widget-placements.ts), for the
+   * company they work in now, in canvas order, with the revision a change names. Saved in their
+   * own user Durable Object, so they survive a reload and another device, and dropped when the
+   * company changes. References only: a placement grants nothing, and what it shows is opened on
+   * its own checked path (a console widget through `Overseer.getEmbeddedWidget`) every time.
+   */
+  listWidgetPlacements(): Promise<WidgetPlacements>;
+  /**
+   * Saves one placement if `expectedRevision` is current: a new one, whose id the kernel mints,
+   * when `placement` names none, else a change to that placement's layout and filters (never to
+   * the widget it shows). Returns the placements as they are now. Refused, changing nothing, with
+   * `WIDGET_PLACEMENTS_CONFLICT`, `WIDGET_PLACEMENT_NOT_FOUND`, `WIDGET_PLACEMENT_REF_CHANGED`,
+   * `WIDGET_PLACEMENTS_FULL` or `WIDGET_PLACEMENT_INVALID`.
+   */
+  saveWidgetPlacement(placement: WidgetPlacementInput, expectedRevision: number): Promise<WidgetPlacements>;
+  /**
+   * Removes one placement, and the widget states kept for it, if `expectedRevision` is current.
+   * Refused with `WIDGET_PLACEMENTS_CONFLICT` or `WIDGET_PLACEMENT_NOT_FOUND`.
+   */
+  removeWidgetPlacement(placementId: string, expectedRevision: number): Promise<WidgetPlacements>;
 
   /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
   listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;
@@ -2564,6 +2588,12 @@ export type ActionAttempt = {
   /** The provider's error code, when it gave one. */
   code?: string;
   /**
+   * What kind of reason it was (FAC-119; `ActionFailureKind`), as the gatekeeper reported it. Absent
+   * on an attempt recorded before kinds were kept, a thrown error and a recovered interrupted apply:
+   * read those with `actionFailureKind`, which gives `unavailable`.
+   */
+  kind?: ActionFailureKind;
+  /**
    * Whether approving again may succeed and is safe, as the gatekeeper's structured answer said
    * (`ActionApplyFailure.retryable`). A thrown error and a recovered interrupted apply are recorded
    * as false. An action with a last attempt is sent again only when this is true, whatever the
@@ -2865,6 +2895,18 @@ export interface Overseer extends RpcTarget {
    * they pinned.
    */
   publishWorkflowDefinition(id: string, revision: number): Promise<WorkflowDefinition>;
+  /**
+   * Share the caller's own definition `id` with the account `profileId` (FAC-122; its profile id,
+   * never an email) to read, run or edit it, or stop sharing it with null. The recipient must be a
+   * collaborator of this workspace, and editing needs their build role. A share concerns the
+   * definition only: running still needs the trigger's run control, and every record a run reads or
+   * writes still goes through its own authority and approvals. Returns who it is shared with now.
+   * Build only; in a shared workspace it also takes the deployment's `build` authority.
+   */
+  shareWorkflowDefinition(id: string, profileId: string, rights: WorkflowDefinitionRights | null)
+    : Promise<WorkflowDefinitionShare[]>;
+  /** Who the caller's own definition `id` is shared with by name, and how (FAC-122). Build only. */
+  listWorkflowDefinitionShares(id: string): Promise<WorkflowDefinitionShare[]>;
   /**
    * Pin bound hook `hookId` to one revision the caller may see (published, or their own saved one)
    * of a definition for the gadget the hook wakes, or clear its pin with null. A pinned hook fires

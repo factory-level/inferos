@@ -95,6 +95,7 @@ export const INFEROPS_OPTIONAL_RESOURCES = {
   tables: "INFEROPS_TABLES_ENABLED",
   members: "INFEROPS_MEMBERS_ENABLED",
   workflowPolicy: "INFEROPS_WORKFLOW_POLICY_ENABLED",
+  dot: "INFEROPS_DOT_ENABLED",
 } as const;
 
 /** One optional InferOps resource kind a stage can offer. */

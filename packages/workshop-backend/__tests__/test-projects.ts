@@ -94,6 +94,7 @@ export const WORKERD_LIGHT: readonly string[] = [
   "access.test.ts",
   "action-log-pagination.test.ts",
   "operate-approval.test.ts",
+  "operate-approval-actions.test.ts",
   "ai-models.test.ts",
   "bundled-blueprints.test.ts",
   "commit-reads.test.ts",
@@ -106,6 +107,7 @@ export const WORKERD_LIGHT: readonly string[] = [
   "workflow-definitions.test.ts",
   "workflow-dynamic-definitions.test.ts",
   "workflow-invocation.test.ts",
+  "workflow-definition-shares.test.ts",
   "workflow-system-run.test.ts",
   "user-directory.test.ts",
 ];
@@ -121,6 +123,7 @@ export const BACKEND: readonly string[] = [
   "widget-state.test.ts",
   "widget-event-navigation.test.ts",
   "personal-state-partition.test.ts",
+  "widget-placements.test.ts",
   "workflow-requested-runs.test.ts",
   "run-navigation.test.ts",
   "workflow-run-delivery.test.ts",
@@ -149,6 +152,7 @@ export const BACKEND: readonly string[] = [
   "user-commit-email.test.ts",
   "user-models.test.ts",
   "workflow-assigned-writes.test.ts",
+  "action-failure-kinds.test.ts",
   "worktree-session.test.ts",
 ];
 

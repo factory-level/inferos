@@ -77,7 +77,8 @@ no state ids.
    - Another signed-in person sending the approver's answer is refused 403 `APPROVAL_REFUSED`, with
      no write, and the action is still `pending`.
    - After the approver approves (one write), a conflicting `{approved: false}` to the same
-     interrupt is refused 403, with no further write, and the action is still `applied`.
+     interrupt is a conflict, 409 `APPROVAL_CONFLICT` (FAC-119), with no further write, and the
+     action is still `applied`.
 
 Every check is an assertion on the run itself. Only the report's comparison leaves dynamic ids out.
 

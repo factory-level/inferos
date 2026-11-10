@@ -26,10 +26,10 @@ describe("the alarm for dynamic definitions (FAC-124)", () => {
   it("wakes an idle workspace at a new dynamic definition's expiry", async () => {
     await withImpl(async impl => {
       expect(await impl.ctx.storage.getAlarm()).toBeNull();
-      let made = impl.workflowDefinitionStore().save(ADA, { title: "One-off", gadgetId: GADGET, retain: false }, head);
+      let made = impl.workflowDefinitionStore().save(ADA, { title: "One-off", gadgetId: GADGET, retain: false }, head, "build");
       expect(await impl.ctx.storage.getAlarm()).toBe(made.expiresAt.getTime());
       // Saving it again retains it: nothing left to wake for.
-      impl.workflowDefinitionStore().save(ADA, { id: made.id, title: "Kept", gadgetId: GADGET }, head);
+      impl.workflowDefinitionStore().save(ADA, { id: made.id, title: "Kept", gadgetId: GADGET }, head, "build");
       expect(await impl.ctx.storage.getAlarm()).toBeNull();
     });
   });

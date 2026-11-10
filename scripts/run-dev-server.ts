@@ -42,6 +42,7 @@ import {
   INFERLAB_LOGIN_GATEKEEPER, INFEROPS_GATEKEEPER, gatekeeperBaseUrl, gatekeeperBinding, getDevRouterAssets,
   getDevRouterConfig, getDevServerConfig, getInferLabLoginVars, inferLabLoginStartupError, resolveCodingWorkbenchEnabled, resolveInferOpsEnabled,
   resolveInferOpsMembersEnabled,
+  resolveInferOpsDotEnabled,
   resolveInferOpsWorkflowPolicyEnabled,
   resolveInferOpsTablesEnabled,
   resolveInferOpsHostBoards,
@@ -191,6 +192,12 @@ const inferOpsMembersEnabled = resolveInferOpsMembersEnabled({
   capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.INFEROPS_MEMBERS_ENABLED : null,
   inferOpsEnabled,
   shell: process.env.INFEROPS_MEMBERS_ENABLED,
+});
+// The person's own Dot through the gatekeeper (FAC-133), resolved as custom tables are: off by default.
+const inferOpsDotEnabled = resolveInferOpsDotEnabled({
+  capability: consumerConfig?.schemaVersion === 2 ? consumerConfig.capabilities.INFEROPS_DOT_ENABLED : null,
+  inferOpsEnabled,
+  shell: process.env.INFEROPS_DOT_ENABLED,
 });
 // Workflow policies through the gatekeeper (MVP-18), resolved as custom tables are: off by default.
 const inferOpsWorkflowPolicyEnabled = resolveInferOpsWorkflowPolicyEnabled({
@@ -660,6 +667,7 @@ const RESOLVED_GATEKEEPER_VARS: Record<string, Record<string, string | undefined
     INFEROPS_TABLES_ENABLED: inferOpsTablesEnabled,
     INFEROPS_MEMBERS_ENABLED: inferOpsMembersEnabled,
     INFEROPS_WORKFLOW_POLICY_ENABLED: inferOpsWorkflowPolicyEnabled,
+    INFEROPS_DOT_ENABLED: inferOpsDotEnabled,
     INFEROPS_HOST_BOARDS: inferOpsHostBoards,
   },
 };

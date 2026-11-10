@@ -1,3 +1,4 @@
+import type { ApprovalProposal } from "@gadgets/workshop-shared/operate-approval";
 // Real authenticated HTTP + stock AG-UI 1.0.2 client, real Workshop/Gatekeeper Workers.
 // InferLab identities and InferOps transport/data are synthetic; no model or external write.
 import { beforeAll, afterAll, expect, it } from "vitest";
@@ -104,7 +105,9 @@ it("snapshots then interrupts; unchanged approve writes once, replay and reload 
   expect(first.events.map(e => e.type)).toEqual(["RUN_STARTED", "STATE_SNAPSHOT", "MESSAGES_SNAPSHOT", "RUN_FINISHED"]);
   expect(first.interrupt).toMatchObject({reason: "inferos.gatekeeper.approval.v1",
     responseSchema: {required: ["approved"]}, metadata: {actionId: f.action.id}});
-  expect(Date.parse(first.interrupt!.expiresAt!) - Date.now()).toBeGreaterThan(500_000);
+  // No deadline of its own (FAC-119): it waits as long as the action is pending.
+  expect(first.interrupt!.expiresAt).toBeUndefined();
+  expect(first.snapshot.expiresAt).toBeNull();
   expect(first.snapshot.status).toBe("pending");
   expect(fake.issue("ENG-1")).toEqual(f.before);
   const payload = {approved: true};
@@ -114,8 +117,10 @@ it("snapshots then interrupts; unchanged approve writes once, replay and reload 
   expect(fake.commits.length).toBe(commits + 1);
   expect(fake.issue("ENG-1").stateId).toBe(f.target.id);
   expect(fake.commits.at(-1)?.person).toBe(f.username);
+  // A later different answer conflicts with the stored one (FAC-119: its own code, not a refusal).
   const conflict = await f.raw({resume: [{interruptId: first.interrupt!.id, status: "resolved", payload: {approved: false}}]});
-  expect(conflict.status).toBe(403);
+  expect(conflict.status).toBe(409);
+  expect(await conflict.json()).toEqual({error: "APPROVAL_CONFLICT"});
 });
 
 it("rejects without a write and reconciles decisions from the existing action surface", async () => {
@@ -131,6 +136,12 @@ it("rejects without a write and reconciles decisions from the existing action su
   expect((await other.run(undefined, true)).snapshot.status).toBe("applied");
 });
 
+// Both are the gatekeeper's own board-transition projection, the one kind that can be edited.
+const transition = (proposal: ApprovalProposal) => {
+  if (proposal.kind === "action") throw new Error("expected a board transition");
+  return proposal;
+};
+
 it("invalid edits do nothing; valid edits demand a new interrupt and cannot reuse the old approval", async () => {
   using f = await fixture();
   const commits = fake.commits.length;
@@ -142,8 +153,8 @@ it("invalid edits do nothing; valid edits demand a new interrupt and cannot reus
   const edit = {approved: true, editedArgs: {toStateId: target.id}};
   const next = await f.run({interrupt: first.interrupt!, payload: edit});
   expect(next.interrupt!.id).not.toBe(first.interrupt!.id);
-  expect(next.snapshot.proposal.args.toStateId).toBe(target.id);
-  expect(next.snapshot.proposal.idempotencyKey).not.toBe(first.snapshot.proposal.idempotencyKey);
+  expect(transition(next.snapshot.proposal).args.toStateId).toBe(target.id);
+  expect(transition(next.snapshot.proposal).idempotencyKey).not.toBe(transition(first.snapshot.proposal).idempotencyKey);
   expect((await f.run({interrupt: first.interrupt!, payload: edit}, true)).snapshot).toEqual(next.snapshot);
   expect(fake.commits.length).toBe(commits);
   expect((await f.workspace.listActions({filter: "pending"})).entries.map(e => e.id)).toEqual([next.snapshot.actionId]);

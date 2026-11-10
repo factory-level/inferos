@@ -73,12 +73,15 @@ export function putAction(
  */
 export async function openFakeOverseer(
     storage: object,
-    opts: { role?: "build" | "use", exports?: object, impl?: object } = {}): Promise<Overseer> {
+    opts: { role?: "build" | "use", exports?: object, impl?: object, userId?: string } = {}): Promise<Overseer> {
   let role = opts.role ?? "build";
   let ownerId = "owner-id";
-  let userId = role === "build" ? ownerId : "viewer-id";
+  // Another identity of the same role, when a test needs two people deciding one action.
+  let userId = opts.userId ?? (role === "build" ? ownerId : "viewer-id");
   let overseer = {
     open: OverseerDurableObject.prototype.open,
+    // The Durable Object's own id, which open() compares with an operate session's recorded one.
+    ctx: { id: { toString: () => "workspace-id" } },
     impl: {
       ownerId,
       // A deployment with no optional authorization settings (e.g. SHARED_CONFIGURATION_GATEKEEPER).

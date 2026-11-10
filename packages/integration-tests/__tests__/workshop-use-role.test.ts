@@ -122,6 +122,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   deleteFlow: ws => ws.deleteFlow("flow", "0"),
   saveWorkflowDefinition: ws => ws.saveWorkflowDefinition({ title: "Workflow", gadgetId: 1 }),
   publishWorkflowDefinition: ws => ws.publishWorkflowDefinition("definition", 1),
+  shareWorkflowDefinition: ws => ws.shareWorkflowDefinition("definition", "someone", { read: true, run: false, edit: false }),
+  listWorkflowDefinitionShares: ws => ws.listWorkflowDefinitionShares("definition"),
   pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),

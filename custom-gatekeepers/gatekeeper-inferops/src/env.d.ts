@@ -72,6 +72,11 @@ declare namespace Cloudflare {
      */
     INFEROPS_MEMBERS_ENABLED?: string;
     /**
+     * `"true"` or `"false"`: whether Dot bindings are on (`INFEROPS_DOT_ENABLED`, FAC-133). Unset
+     * counts as off (see dot.ts); it also needs `INFEROPS_ENABLED`.
+     */
+    INFEROPS_DOT_ENABLED?: string;
+    /**
      * `"true"` or `"false"`: whether workflow-policy bindings are on (`INFEROPS_WORKFLOW_POLICY_ENABLED`).
      * Unset counts as off (see workflow-policy.ts); it also needs `INFEROPS_ENABLED`.
      */

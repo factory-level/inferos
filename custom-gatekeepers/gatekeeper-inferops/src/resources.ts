@@ -83,6 +83,18 @@ export const PORTAL_MEMBERS_RESOURCE: SupportedResource = {
 };
 
 /**
+ * The person's own Dot in one InferOps workspace (FAC-133): its conversations with them, and the
+ * changes it proposes, each decided here. Offered only while the deployment has
+ * `INFEROPS_DOT_ENABLED` on. Never shared, and never the operate chat's own context.
+ */
+export const CHATBOT_DOT_RESOURCE: SupportedResource = {
+  urlPattern: "inferops://*/chatbot/dot",
+  title: "Your InferOps Dot",
+  description: "Talk to your own Dot in one InferOps workspace. Every change it proposes waits for your approval.",
+  excludeFromOperateChat: true,
+};
+
+/**
  * One project's published content-workflow policy, read-only: its lanes, rules, guards and
  * transitions, without rule reasons, agent notes or its publisher. Offered only while the deployment
  * has `INFEROPS_WORKFLOW_POLICY_ENABLED` on. Never shared: a gadget that read it admits no collaborator.
@@ -220,7 +232,7 @@ export function projectResourceKind(url: string): ProjectResourceKind | null {
 }
 
 /** Every resource kind, by what its URL's path names. */
-export type ResourceKind = ProjectResourceKind | "wiki" | "table" | "members" | "account";
+export type ResourceKind = ProjectResourceKind | "wiki" | "table" | "members" | "dot" | "account";
 
 /** The kind a resource URL names, or null when it names none (the parsers explain why). */
 export function resourceKind(url: string): ResourceKind | null {
@@ -228,6 +240,7 @@ export function resourceKind(url: string): ResourceKind | null {
   if (/^inferops:\/\/[^/?#]+\/knowledge\/wiki\/?$/.test(url.trim())) return "wiki";
   if (/^inferops:\/\/[^/?#]+\/object\/table\//.test(url.trim())) return "table";
   if (/^inferops:\/\/[^/?#]+\/portal\/members\/?$/.test(url.trim())) return "members";
+  if (/^inferops:\/\/[^/?#]+\/chatbot\/dot\/?$/.test(url.trim())) return "dot";
   return projectResourceKind(url);
 }
 
@@ -282,6 +295,26 @@ export function parseMembersUrl(url: string): MembersRef {
 /** The canonical URL of a workspace's member list. Inverse of `parseMembersUrl`. */
 export function membersUrl({ host }: Pick<MembersRef, "host">): string {
   return `inferops://${host}/portal/members`;
+}
+
+/** A parsed Dot resource URL: the workspace's `<tenant>.<workspace>` host and its labels. */
+export type DotRef = { host: string; tenant: string; workspace: string };
+
+/** Parse a Dot resource URL, or throw a message naming the expected form. Syntax only. */
+export function parseDotUrl(url: string): DotRef {
+  const host = /^inferops:\/\/([^/?#]+)\/chatbot\/dot\/?$/.exec(url.trim())?.[1];
+  const labels = host ? parseHost(host) : null;
+  if (!host || !labels) {
+    throw new Error(
+      "Not an InferOps Dot URL: expected inferops://<tenant>.<workspace>/chatbot/dot, for example " +
+      "inferops://acme.operations/chatbot/dot.");
+  }
+  return { host, ...labels };
+}
+
+/** The canonical URL of a person's Dot in a workspace. Inverse of `parseDotUrl`. */
+export function dotUrl({ host }: Pick<DotRef, "host">): string {
+  return `inferops://${host}/chatbot/dot`;
 }
 
 /** A parsed Wiki resource URL: the workspace's `<tenant>.<workspace>` host and its labels. */

@@ -66,6 +66,12 @@ describe("a write receipt's code (FAC-97)", () => {
     expect(actionReceiptCode("constructor")).toBe("PROVIDER_ERROR");
   });
 
+  test("names a write that expired before it was decided EXPIRED (FAC-133)", () => {
+    expect(ACTION_RECEIPT_CODES).toContain("EXPIRED");
+    expect(actionReceiptCode("EXPIRED")).toBe("EXPIRED");
+    expect(actionReceiptCode("PROPOSAL_EXPIRED")).toBe("EXPIRED");
+  });
+
   test("gives every code exactly one fixed sentence", () => {
     for (const code of ACTION_RECEIPT_CODES) expect(ACTION_RECEIPT_REASON[code]).toMatch(/^[A-Z].*\.$/);
   });

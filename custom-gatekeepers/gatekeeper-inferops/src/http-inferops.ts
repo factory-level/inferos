@@ -59,7 +59,9 @@ import {
   type WikiSearchRecord, type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
   type WikiProposalRecord, type WikiProposalState, PROPOSAL_APPROVE_REFUSED,
   ActivityWindow, type HistoryEntryRecord,
+  type DotConversationWire, type DotEvent, type DotProposalWire, type DotRunEnd, type DotRunRequest,
 } from "./inferops-client";
+import { DOT_RELAY_LIMITS, DotMalformed, parseDotConversation, parseDotProposal, relayDotStream } from "./dot-relay";
 import { membersNotFound } from "./members";
 import { readWorkflowPolicyAnswer, workflowPolicyNotFound, type WorkflowHeadRecord } from "./workflow-policy";
 import { isSlug } from "./resources";
@@ -844,7 +846,62 @@ const FAILURE_DETAIL: Record<InferOpsErrorCode, string> = {
   UNAVAILABLE: "InferOps could not be reached or returned an unusable response.",
   // Never mapped from a response: the gatekeeper raises it itself (enablement.ts).
   DISABLED: "InferOps is turned off for this deployment.",
+  EXPIRED: "This proposal expired before it was decided. Ask the Dot again.",
 };
+
+/** The Dot's own refusals (FAC-133), each in one fixed sentence: never InferOps' words. */
+const DOT_DETAIL = {
+  conversation: "No such Dot conversation of yours.",
+  selection: "The page or record isn't one you can open.",
+  forbidden: "Your InferOps access doesn't allow this here.",
+  running: "Another turn of this conversation is still running. Wait for it, or cancel it.",
+  unavailable: "Your Dot can't run now. Try again later.",
+  proposal: "No such proposal in this conversation.",
+  decided: "This proposal was already decided.",
+} as const;
+
+/** A Dot request's failure: its own sentence per cause, so nothing from InferOps is passed on. */
+function dotFailure(status: number, wire: string | null): SendFailure | undefined {
+  if (status === 404) {
+    return wire === "RESOURCE_UNAVAILABLE"
+      ? { code: "NOT_FOUND", detail: DOT_DETAIL.selection, refusal: true }
+      : wire === "PROPOSAL_NOT_FOUND"
+        ? { code: "NOT_FOUND", detail: DOT_DETAIL.proposal, refusal: true }
+        : { code: "NOT_FOUND", detail: DOT_DETAIL.conversation, refusal: true };
+  }
+  if (status === 403) return { code: "FORBIDDEN", detail: DOT_DETAIL.forbidden, refusal: true };
+  if (status === 409) {
+    if (wire === "PROPOSAL_EXPIRED") return { code: "EXPIRED", detail: FAILURE_DETAIL.EXPIRED, refusal: true };
+    if (wire === "PROPOSAL_DECIDED") return { code: "CONFLICT", detail: DOT_DETAIL.decided, refusal: true };
+    return { code: "CONFLICT", detail: DOT_DETAIL.running, refusal: true };
+  }
+  if (status === 503) return { code: "UNAVAILABLE", detail: DOT_DETAIL.unavailable };
+  return undefined;
+}
+
+/** Refuse an id that isn't a UUID before it can reach a Dot request's path. */
+function dotIds(...ids: string[]): void {
+  for (const value of ids) if (!UUID.test(value)) throw new InferOpsError("NOT_FOUND", DOT_DETAIL.conversation);
+}
+
+/** `{proposal}` naming exactly `proposalId`, else the answer is malformed. */
+function onlyProposal(raw: unknown, proposalId: string): DotProposalWire {
+  const proposal = parseDotProposal((raw as { proposal?: unknown } | null)?.proposal);
+  if (proposal.id !== proposalId.toLowerCase()) throw new DotMalformed("another proposal was returned");
+  return proposal;
+}
+
+/** A Dot answer's parse: a shape InferOps didn't declare is UNAVAILABLE, never read as data. */
+function dotParsed<T>(operation: string, body: unknown, parse: (body: unknown) => T): T {
+  try {
+    return parse(body);
+  } catch (error) {
+    if (!(error instanceof DotMalformed)) throw error;
+    // The message names a field, never its value.
+    logger.error("InferOps response did not match the contract", { event: "http.response.malformed", operation, error });
+    throw new InferOpsError("UNAVAILABLE", FAILURE_DETAIL.UNAVAILABLE);
+  }
+}
 
 /**
  * The statuses with which InferOps refuses a write before it takes effect, when the body is its
@@ -1539,7 +1596,131 @@ export function openHttpInferOpsClient(
     return { ...run, issueIdentifier: issue.identifier };
   }
 
+  /**
+   * One Dot turn (FAC-133): the only request whose answer streams, so it is sent without the request
+   * timeout or a whole-body read. The relay bounds it instead (`DOT_RELAY_LIMITS`: a deadline, a
+   * silence timeout and size caps). A refusal before the stream starts is mapped as every request's.
+   */
+  function streamDot(conversationId: string, run: DotRunRequest, onEvent: (event: DotEvent) => void,
+                     signal?: AbortSignal): Promise<DotRunEnd> {
+    return authorize(async authority => {
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      const deadline = setTimeout(stop, DOT_RELAY_LIMITS.deadlineMs);
+      signal?.addEventListener("abort", stop, { once: true });
+      try {
+        let response: Response;
+        try {
+          response = await fetcher(`${connection.baseUrl}/chatbot/conversations/${conversationId}/runs`, {
+            method: "POST",
+            headers: {
+              accept: "text/event-stream", "content-type": "application/json",
+              authorization: `Bearer ${authority.token}`, "x-workspace-id": authority.workspaceId,
+            },
+            body: JSON.stringify({
+              runId: run.runId, prompt: run.prompt, context: [],
+              ...(run.selection ? { selection: run.selection } : {}),
+            }),
+            redirect: "manual",
+            signal: controller.signal,
+          });
+        } catch (error) {
+          logger.warn("InferOps request failed", { event: "http.request.failed", operation: "chatbot.run", status: 0, code: "UNAVAILABLE", error });
+          throw new InferOpsError("UNAVAILABLE", DOT_DETAIL.unavailable);
+        }
+        if (!response.ok) {
+          let body: unknown;
+          try {
+            body = JSON.parse(await readTextCapped(response, L.errorBytes));
+          } catch {
+            body = undefined;
+          }
+          const wire = wireCode(body);
+          const own = response.status === 401 ? undefined : dotFailure(response.status, wire);
+          const code = own?.code ?? failureCode(response.status, wire);
+          logger.warn("InferOps request failed", { event: "http.request.failed", operation: "chatbot.run", status: response.status, code: wire ?? code });
+          throw new InferOpsError(code, own?.detail ?? FAILURE_DETAIL[code],
+            { stage: response.status === 401 || (own?.refusal === true && wire !== null) ? "refused" : undefined });
+        }
+        // A replayed run id answers JSON, not a stream: nothing ran, so there is nothing to relay.
+        if (!(response.headers.get("content-type") ?? "").includes("text/event-stream") || !response.body) {
+          await response.body?.cancel().catch(() => {});
+          return { kind: "cut" } satisfies DotRunEnd;
+        }
+        return await relayDotStream(response.body, onEvent, DOT_RELAY_LIMITS, controller.signal);
+      } finally {
+        clearTimeout(deadline);
+        signal?.removeEventListener("abort", stop);
+      }
+    });
+  }
+
+  /** A Dot request: the id it names is checked before it can reach the path. */
+  function dot(operation: string, send: Send): Promise<unknown> {
+    return request(operation, { ...send, failure: dotFailure });
+  }
+
   return {
+    async createDotConversation() {
+      const body = await dot("chatbot.conversation_create", { method: "POST", path: "/chatbot/conversations", body: {} });
+      return dotParsed("chatbot.conversation_create", body, raw => {
+        const id = (raw as { id?: unknown } | null)?.id;
+        if (typeof id !== "string" || !UUID.test(id)) throw new DotMalformed("conversation.id is not a UUID");
+        return { id: id.toLowerCase() };
+      });
+    },
+
+    async readDotConversation(conversationId: string, before?: string): Promise<DotConversationWire> {
+      dotIds(conversationId);
+      const query = before === undefined ? "" : `?before=${encodeURIComponent(before)}`;
+      const body = await dot("chatbot.conversation_get", { method: "GET", path: `/chatbot/conversations/${conversationId}${query}` });
+      return dotParsed("chatbot.conversation_get", body, raw => {
+        const read = parseDotConversation(raw);
+        if (read.id !== conversationId.toLowerCase()) throw new DotMalformed("another conversation was returned");
+        return read;
+      });
+    },
+
+    async runDot(conversationId: string, run: DotRunRequest, onEvent: (event: DotEvent) => void,
+                 signal?: AbortSignal): Promise<DotRunEnd> {
+      dotIds(conversationId, run.runId);
+      return streamDot(conversationId, run, onEvent, signal);
+    },
+
+    async cancelDotRun(conversationId: string, runId: string): Promise<void> {
+      dotIds(conversationId, runId);
+      await dot("chatbot.conversation_cancel", {
+        method: "POST", path: `/chatbot/conversations/${conversationId}/runs/${runId}/cancel`, body: {},
+      });
+    },
+
+    async listDotProposals(conversationId: string): Promise<DotProposalWire[]> {
+      dotIds(conversationId);
+      const body = await dot("chatbot.proposal_list", { method: "GET", path: `/chatbot/conversations/${conversationId}/proposals` });
+      return dotParsed("chatbot.proposal_list", body, raw => {
+        const proposals = (raw as { proposals?: unknown } | null)?.proposals;
+        if (!Array.isArray(proposals)) throw new DotMalformed("proposals is not a list");
+        return proposals.map(parseDotProposal);
+      });
+    },
+
+    async confirmDotProposal(conversationId: string, proposalId: string, idempotencyKey: string): Promise<DotProposalWire> {
+      await beforeSending(async () => dotIds(conversationId, proposalId));
+      const body = await dot("chatbot.proposal_confirm", {
+        method: "POST", path: `/chatbot/conversations/${conversationId}/proposals/${proposalId}/confirm`, body: {},
+        idempotencyKey,
+      });
+      return dotParsed("chatbot.proposal_confirm", body, raw => onlyProposal(raw, proposalId));
+    },
+
+    async declineDotProposal(conversationId: string, proposalId: string): Promise<DotProposalWire> {
+      await beforeSending(async () => dotIds(conversationId, proposalId));
+      const body = await dot("chatbot.proposal_decline", {
+        method: "POST", path: `/chatbot/conversations/${conversationId}/proposals/${proposalId}/decline`, body: {},
+      });
+      return dotParsed("chatbot.proposal_decline", body, raw => onlyProposal(raw, proposalId));
+    },
+
     async commentIssue(projectKey, issueId, comment, expectedRevision, idempotencyKey) {
       await beforeSending(async () => {
         if (!idempotencyKey || !REVISION.test(expectedRevision) || !comment.trim() || comment.length > 20_000) {

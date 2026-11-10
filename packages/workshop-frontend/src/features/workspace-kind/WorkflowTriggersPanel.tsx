@@ -298,6 +298,7 @@ export const WorkflowTriggersPanel = ({
             overseer={overseer}
             gadgets={gadgets}
             definitions={loaded.definitions}
+            collaborators={loaded.collaborators}
             onChanged={() => setReloadTick(t => t + 1)}
           />
         )}
