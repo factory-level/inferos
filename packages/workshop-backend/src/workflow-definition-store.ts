@@ -2,7 +2,7 @@ import type { AiChatAuthorInfo, WorkpieceId } from "@gadgets/workshop-shared/api
 import {
   MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKFLOW_DELIVERIES, MAX_WORKFLOW_INVOCATIONS,
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, TRIGGER_RUNS_PER_INVOKER, TRIGGER_RUNS_PER_TRIGGER,
-  WORKFLOW_INVOCATION_TTL_MS, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
+  WORKFLOW_DEFINITION_EXPIRED, WORKFLOW_INVOCATION_TTL_MS, dynamicDefinitionTtlMs, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
   type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery,
   type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunFailure, type WorkflowRunResult,
   type WorkflowTriggerDefinitionRef, isLiveWorkflowDelivery,
@@ -27,6 +27,17 @@ export type StoredWorkflowDelivery = WorkflowDefinitionDelivery & { id: number }
  * scope and authority are its delivery's `run`, never anything here.
  */
 export type QueuedWorkflowRun = { deliveryId: number; hookId: number; method: string | null; args: unknown[] };
+
+/**
+ * How the store tells time and how long a dynamic definition lasts (FAC-124). `dynamicTtlMs` is read
+ * only when a dynamic definition is created, so a misconfigured deployment refuses just that.
+ * `onChange` is called after anything that can change what is due to expire (a save, a pin added
+ * or removed, a trigger forgotten, a run ended or settled), so the Overseer reschedules its alarm
+ * for `nextExpiry`.
+ */
+export type DefinitionRetention = { now: () => number; dynamicTtlMs: () => number; onChange?: () => void };
+
+const DEFAULT_RETENTION: DefinitionRetention = { now: () => Date.now(), dynamicTtlMs: () => dynamicDefinitionTtlMs(undefined) };
 
 /** The refusal of a second call on a run that was already queued (FAC-112). */
 export const WORKFLOW_RUN_ALREADY_STARTED = "This run already started.";
@@ -75,12 +86,84 @@ export class WorkspaceWorkflowDefinitionStore {
           "workflowDefinitions" | "workflowTriggerPins" | "workflowDeliveries" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
           "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired" |
-          "workflowRunQueue">) {}
+          "workflowRunQueue">,
+      private retention: DefinitionRetention = DEFAULT_RETENTION) {}
+
+  // FAC-124: whether `stored` is available for new use at `now`: retained, not yet expired, or
+  // scheduled (a trigger is pinned to it, which keeps it while the pin exists).
+  // `pinned` is `#pinnedIds()`, read once per operation rather than per definition.
+  #available(stored: StoredWorkflowDefinition, now: number, pinned = this.#pinnedIds()): boolean {
+    return stored.expiresAt === undefined || now < stored.expiresAt.getTime() || pinned.has(stored.id);
+  }
+
+  // The definitions a trigger is pinned to: each is scheduled, and kept while its pin exists.
+  #pinnedIds(): Set<string> {
+    return new Set(Array.from(this.storage.workflowTriggerPins.list(), pin => pin.definitionId));
+  }
+
+  // The definitions a live run names (FAC-108's `isLiveWorkflowDelivery`, at this store's clock):
+  // kept until it ends.
+  #liveIds(now: number): Set<string> {
+    let live = new Set<string>();
+    for (let delivery of Array.from(this.storage.workflowDeliveries.list())) {
+      if (isLiveWorkflowDelivery(delivery, now)) live.add(delivery.definitionId);
+    }
+    return live;
+  }
+
+  /**
+   * Deletes every dynamic definition past its expiry that nothing keeps (FAC-124): no trigger pinned
+   * to it, and no live run naming it (FAC-108's `isLiveWorkflowDelivery`). Retained definitions are never touched, nor
+   * any delivery, run or result record. One transaction, reading the clock inside it, so a save
+   * either ran before it (and retained the definition) or is refused after it. Returns how many.
+   */
+  sweepExpired(): number {
+    return this.durableStorage.transactionSync(() => this.#sweepAt(this.retention.now()));
+  }
+
+  // The sweep's body, for a caller already in a transaction: deletes what expired by `now` and
+  // nothing keeps, and returns how many.
+  #sweepAt(now: number): number {
+    let pinned = this.#pinnedIds();
+    let live = this.#liveIds(now);
+    let swept = 0;
+    for (let stored of Array.from(this.storage.workflowDefinitions.list())) {
+      if (this.#available(stored, now, pinned) || live.has(stored.id)) continue;
+      this.storage.workflowDefinitions.delete(stored.id);
+      swept++;
+    }
+    return swept;
+  }
+
+  /**
+   * When to wake to sweep (FAC-124), or undefined: the earliest expiry among dynamic definitions no
+   * trigger is pinned to. One already past counts (it is due now) unless a live run keeps it, whose
+   * end is followed by a sweep anyway; so unpinning an expired definition wakes for it at once.
+   */
+  nextExpiry(): number | undefined {
+    let now = this.retention.now();
+    let pinned = this.#pinnedIds();
+    let live = this.#liveIds(now);
+    let next: number | undefined;
+    for (let stored of Array.from(this.storage.workflowDefinitions.list())) {
+      let at = stored.expiresAt?.getTime();
+      if (at === undefined || pinned.has(stored.id) || (at <= now && live.has(stored.id))) continue;
+      if (next === undefined || at < next) next = at;
+    }
+    return next;
+  }
+
+  #changed(): void {
+    this.retention.onChange?.();
+  }
 
   /** The definitions `viewer` may see: their own in full, and others' published revision only. */
   list(viewer: string): WorkflowDefinition[] {
+    let now = this.retention.now();
+    let pinned = this.#pinnedIds();
     let shown: WorkflowDefinition[] = [];
-    for (let stored of this.storage.workflowDefinitions.list()) {
+    for (let stored of Array.from(this.storage.workflowDefinitions.list())) {
+      if (!this.#available(stored, now, pinned)) continue;
       let view = viewOf(stored, viewer);
       if (view) shown.push(view);
     }
@@ -90,7 +173,7 @@ export class WorkspaceWorkflowDefinitionStore {
   /** One definition as `viewer` may see it, or null when it doesn't exist for them. */
   get(viewer: string, id: string): WorkflowDefinition | null {
     let stored = this.storage.workflowDefinitions.get(id);
-    return stored ? viewOf(stored, viewer) : null;
+    return stored && this.#available(stored, this.retention.now()) ? viewOf(stored, viewer) : null;
   }
 
   /**
@@ -102,12 +185,18 @@ export class WorkspaceWorkflowDefinitionStore {
   save(caller: AiChatAuthorInfo, input: WorkflowDefinitionSave,
        headOf: (gadgetId: WorkpieceId) => string | undefined): WorkflowDefinition {
     let title = parseWorkflowDefinitionTitle(input.title);
+    if (input.retain !== undefined && typeof input.retain !== "boolean") throw new TypeError("retain is true, false or absent.");
     let commitId = headOf(input.gadgetId);
     if (!commitId) throw new Error("A workflow definition is saved from a workflow gadget with committed code.");
-    return this.durableStorage.transactionSync(() => {
-      let now = new Date();
+    // Read before the transaction: a misconfigured TTL refuses only creating a dynamic definition.
+    let ttl = input.id === undefined && input.retain === false ? this.retention.dynamicTtlMs() : undefined;
+    let result = this.durableStorage.transactionSync(() => {
+      let now = new Date(this.retention.now());
       let source = { kind: "gadget" as const, gadgetId: input.gadgetId, commitId };
       if (input.id === undefined) {
+        // Expired definitions nothing keeps no longer count toward the limit: sweep them first, in
+        // this transaction, at this clock (FAC-124, #416 round 1).
+        this.#sweepAt(now.getTime());
         if (Array.from(this.storage.workflowDefinitions.list({ limit: MAX_WORKSPACE_WORKFLOW_DEFINITIONS })).length
             >= MAX_WORKSPACE_WORKFLOW_DEFINITIONS) {
           throw new Error("Workspace workflow definition limit reached.");
@@ -115,18 +204,27 @@ export class WorkspaceWorkflowDefinitionStore {
         let created: StoredWorkflowDefinition = {
           id: crypto.randomUUID(), title, owner: caller,
           revisions: [{ revision: 1, source, savedAt: now }], published: null,
+          ...(ttl === undefined ? {} : { expiresAt: new Date(now.getTime() + ttl) }),
         };
         this.storage.workflowDefinitions.put(created);
         return created;
       }
       let stored = this.#owned(caller.id, input.id);
+      // FAC-124: saving retains a dynamic definition, but only while it is still available, by the
+      // clock read in this transaction; at or after its expiry it is refused, swept or not.
+      if (!this.#available(stored, now.getTime())) throw new Error(WORKFLOW_DEFINITION_EXPIRED);
+      if (input.retain === false) {
+        if (stored.expiresAt === undefined) throw new Error("A saved workflow can't be made temporary.");
+        throw new Error("This workflow is already temporary; save it without retain to keep it.");
+      }
       let latest = stored.revisions[stored.revisions.length - 1]!;
       let unchanged = latest.source.gadgetId === source.gadgetId && latest.source.commitId === commitId;
       if (!unchanged && stored.revisions.length >= MAX_WORKFLOW_DEFINITION_REVISIONS) {
         throw new Error("This workflow definition has reached its revision limit. Save it as a new definition.");
       }
+      let { expiresAt: _retained, ...kept } = stored;
       let next: StoredWorkflowDefinition = {
-        ...stored, title,
+        ...kept, title,
         revisions: unchanged
             ? stored.revisions
             : [...stored.revisions, { revision: latest.revision + 1, source, savedAt: now }],
@@ -134,6 +232,8 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowDefinitions.put(next);
       return next;
     });
+    this.#changed();
+    return result;
   }
 
   /**
@@ -143,6 +243,7 @@ export class WorkspaceWorkflowDefinitionStore {
   publish(caller: AiChatAuthorInfo, id: string, revision: number): WorkflowDefinition {
     return this.durableStorage.transactionSync(() => {
       let stored = this.#owned(caller.id, id);
+      if (!this.#available(stored, this.retention.now())) throw new Error(WORKFLOW_DEFINITION_EXPIRED);
       if (!stored.revisions.some(r => r.revision === revision)) throw new Error("No such revision.");
       let next = { ...stored, published: { revision, at: new Date(), by: caller } };
       this.storage.workflowDefinitions.put(next);
@@ -176,6 +277,7 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowTriggerPins.put({ hookId, definitionId: ref.definitionId,
         revision: ref.revision, mode: ref.mode ?? "follow-latest" });
     });
+    this.#changed();
   }
 
   /** The pin of bound hook `hookId`, or null. */
@@ -538,6 +640,7 @@ export class WorkspaceWorkflowDefinitionStore {
         if (invocation.hookId === hookId) this.storage.workflowInvocations.delete(invocation.id);
       }
     });
+    this.#changed();
   }
 
   /**
@@ -633,6 +736,7 @@ export class WorkspaceWorkflowDefinitionStore {
         },
       });
     });
+    this.#changed();
   }
 
   /** The delivery a person's request `invocationId` made, or null (FAC-114): at most one, ever. */
@@ -683,11 +787,18 @@ export class WorkspaceWorkflowDefinitionStore {
       },
       delivery: { ...delivery.delivery, history: "delivered" },
     });
+    this.#changed();
   }
 
-  /** The recorded deliveries of a definition visible to `viewer`, oldest first. */
+  /**
+   * The recorded deliveries of a definition visible to `viewer`, oldest first. History is gated on
+   * who may see the definition (its owner, or anyone for a published one), not on its availability:
+   * expiry blocks new use only (FAC-124), so an expired definition's deliveries stay listable while
+   * its record exists. Once it is swept, its runs are read from their own records (`run`).
+   */
   deliveries(viewer: string, definitionId: string): WorkflowDefinitionDelivery[] {
-    if (!this.get(viewer, definitionId)) throw new Error(NOT_FOUND);
+    let stored = this.storage.workflowDefinitions.get(definitionId);
+    if (!stored || !viewOf(stored, viewer)) throw new Error(NOT_FOUND);
     let shown: WorkflowDefinitionDelivery[] = [];
     for (let { id: _, ...delivery } of this.storage.workflowDeliveries.list()) {
       if (delivery.definitionId === definitionId) shown.push(delivery);

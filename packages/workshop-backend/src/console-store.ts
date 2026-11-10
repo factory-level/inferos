@@ -7,7 +7,7 @@ import {
   canvasWidgetEventsHeard, formatCanvasTarget, type CanvasPage,
 } from "@gadgets/workshop-shared/canvas-model";
 import { CANVAS_READ, joinStoredPage, nestedPage, readCanvasDefinition, splitStoredPage, type StoredPagePrompt } from "./canvas-store";
-import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleDraftProblem, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleDraftProblem, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsoleWidgetInstance, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
 import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
@@ -1063,6 +1063,32 @@ export class WorkspaceConsoleStore {
     if (entry.frozen?.ui === false) return { status: "unavailable", reason: "no-ui" };
     return { status: "available", consoleId, revision: shown.revision, gadgetId: entry.gadgetId,
       label: entry.label, blueprintId: entry.blueprintId, version: entry.version };
+  }
+
+  /**
+   * The instances of widget `blueprintId` version `version` that this workspace's published
+   * consoles offer now, with a UI (FAC-13), by console title then label. Reads only what each
+   * console publishes, and lists only what `getEmbeddedWidget` would open: never a draft, an
+   * unpublished console's, a tools-only widget or one published before installs were frozen.
+   */
+  widgetInstances(blueprintId: string, version: number): ConsoleWidgetInstance[] {
+    let found: ConsoleWidgetInstance[] = [];
+    for (let shown of this.listPublished()) {
+      for (let entry of shown.widgets ?? []) {
+        let sourceGadgetId = entry.frozen?.sourceGadgetId;
+        // Gadget ids start at 0, so only an absent source (a publication from before freezing) skips.
+        if (entry.blueprintId !== blueprintId || entry.version !== version || sourceGadgetId === undefined ||
+            entry.frozen?.ui === false) continue;
+        try {
+          this.offeredWidget(shown.id, shown.revision, entry.gadgetId);
+        } catch {
+          continue;
+        }
+        found.push({ consoleId: shown.id, consoleTitle: shown.title, revision: shown.revision, sourceGadgetId,
+          gadgetId: entry.gadgetId, label: entry.label, blueprintId, version });
+      }
+    }
+    return found.toSorted((a, b) => a.consoleTitle.localeCompare(b.consoleTitle) || a.label.localeCompare(b.label));
   }
 
   /**

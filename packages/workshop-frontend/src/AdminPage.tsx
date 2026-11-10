@@ -10,6 +10,7 @@ import SiteLogo from './components/SiteLogo'
 import { useDocumentTitle } from './useDocumentTitle'
 import AdminFormatsPanel from './components/format/AdminFormatsPanel'
 import { AdminPublicationsPanel } from './features/publication/AdminPublicationsPanel'
+import { AccountSubjectPassCard } from './features/auth/AccountSubjectPassCard'
 
 // Preset accent colors offered in the Theme section ('' = default brand).
 const ACCENT_PRESETS: { label: string; value: string }[] = [
@@ -498,6 +499,7 @@ export default function AdminPage() {
               />
             </div>
           </div>
+          <AccountSubjectPassCard admin={admin.api} />
         </>
       )}
 

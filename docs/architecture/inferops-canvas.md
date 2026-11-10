@@ -680,6 +680,7 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
   - **no longer allowed:** a revocation code (`UNAUTHORIZED`, `FORBIDDEN`, or no such gatekeeper), which also discards everything it read;
   - **a failed read**, in the server's words, with "Try again";
   - **no rows.**
+  - A write remains pending after Refine receives the proposal acknowledgment. The host polls that proposal's caller-bound receipt (not a user-selected action id), showing waiting and applying separately; it only enables another proposal after a terminal applied, rejected, failed or unknown result and rereads the canonical row. A failed status read offers "Retry status" against the same receipt and does not submit the write again. A stale-revision refusal refreshes the row and asks the person to review it before proposing again.
 - **Refine's telemetry is off** (`GOVERNED_REFINE_OPTIONS`), so the trusted host never reports to Refine's service.
 - **The cache** (`GovernedCacheScope`):
   - **What scopes it:** each widget instance, connection and reference has its own query client, within the Overseer stub it was opened through, which is one person's in one workspace, as `BoardData` is scoped. Refine's query keys add the request (filters, sort, page).
@@ -687,6 +688,6 @@ The contract a source-agnostic Refine provider reads and writes through, on any 
   - **Not built:** discarding it when the connection is removed. That shows on the next read as no such gatekeeper, which then discards it.
 - **Adding one:** the section editor's "Table or queue reference" form adds one by its reference. Agents place one as `kind:"inferos.governed-table"`. The binding editor doesn't apply, since its binding follows its reference.
 - **Rollback:** an InferOS from before the governed table reads one as an inert placeholder and refuses to change its canvas (see [A newer InferOS's widgets](#a-newer-infeross-widgets), #411), so this lands only after that reader is deployed. Its own tolerant read keeps it: the placeholder check knows every kind in `CANVAS_WIDGET_KINDS`.
-- **Tests:** `governedDataProvider.test.ts`, `CanvasGovernedTableWidget.test.tsx` and `CanvasWorkspacePane.test.tsx` (frontend); `canvas-model.test.ts` (the kind and its binding).
+- **Tests:** `governedDataProvider.test.ts`, `CanvasGovernedTableWidget.test.tsx` (including terminal receipt states, waiting, status retry and stale revision refresh) and `CanvasWorkspacePane.test.tsx` (frontend); `canvas-model.test.ts` (the kind and its binding).
 - **Tests:** `governed-data.test.ts`, `gatekeeper-inferops`'s `governed-table.test.ts` and `gatekeeper-tickets`'s `governed-queue.test.ts`.
 
