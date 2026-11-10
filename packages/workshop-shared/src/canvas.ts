@@ -1,3 +1,5 @@
+import { governedResourceOf, type GovernedResource } from "./governed-data";
+
 /** Registered, renderer-owned project board. A target reference never grants resource access. */
 export interface CanvasProjectBoardWidget {
   /** Stable instance ID, unique across this definition. */
@@ -69,13 +71,36 @@ export interface CanvasWikiWidget {
   };
 }
 
+/**
+ * One governed resource's rows (FAC-9): an InferOps custom table or a tickets queue, read through
+ * the host's governed provider over the connection that serves it. Like a board, the reference
+ * identifies the resource and is resolved only through a separately granted connection; it grants
+ * nothing. Writes are only the resource's declared commands, each proposed for a decision.
+ */
+export interface CanvasGovernedTableWidget {
+  /** Stable instance ID, unique across this definition. */
+  id: string;
+  /** Registered governed-table kind. */
+  kind: "inferos.governed-table";
+  /** Widget parameter schema version. */
+  version: 1;
+  /** A governed resource reference (`governedResourceOf`): a custom table or a tickets queue. */
+  targetRef: string;
+  /** Typed read source, normalized from `targetRef` by `parseCanvasWidget`; it grants no authority. */
+  dataBinding?: CanvasDataBinding;
+  /** Curated column span; the renderer clamps it to the section's column count. */
+  size: "normal" | "wide" | "full";
+  /** No parameters are defined for v1; the parser rejects any key. */
+  params: {};
+}
+
 /** Registered widget instance; unknown kinds and versions are rejected. */
-export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget | CanvasWikiWidget;
+export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget | CanvasWikiWidget | CanvasGovernedTableWidget;
 
 /** A schema-versioned read reference to one supported InferOps resource. */
 export interface CanvasDataBinding {
-  /** Resource kind, which must match the consuming widget. */
-  resource: "project/board" | "knowledge/wiki";
+  /** Resource kind, which must match the consuming widget (a governed table's, its reference's). */
+  resource: "project/board" | "knowledge/wiki" | GovernedResource;
   /** Canonical URI; identifies the resource but does not authorize reading it. */
   ref: string;
   /** Version of the typed data-binding contract. */
@@ -86,7 +111,7 @@ export interface CanvasDataBinding {
 export type CanvasWidgetKind = CanvasWidget["kind"];
 
 /** Every registered widget kind, in display order. */
-export const CANVAS_WIDGET_KINDS: readonly CanvasWidgetKind[] = ["inferops.project-board", "inferos.gadget", "inferops.wiki"];
+export const CANVAS_WIDGET_KINDS: readonly CanvasWidgetKind[] = ["inferops.project-board", "inferos.gadget", "inferops.wiki", "inferos.governed-table"];
 
 /** Workspace-local gadget reference syntax accepted by `inferos.gadget` widgets. */
 export const CANVAS_GADGET_REF = /^gadget:(0|[1-9][0-9]{0,15})$/;
@@ -201,6 +226,13 @@ function widget(value: unknown): CanvasWidget {
     const params = record(w.params, ["page"], "widget parameters");
     if (params.page !== null && (typeof params.page !== "string" || !CANVAS_WIKI_PAGE.test(params.page))) return invalid("wiki page");
     return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, dataBinding, size: w.size, params: { page: params.page } };
+  }
+  if (w.kind === "inferos.governed-table") {
+    const resource = governedResourceOf(w.targetRef);
+    if (resource === null) return invalid("target reference");
+    const dataBinding = parseDataBinding(w.dataBinding, resource, w.targetRef);
+    record(w.params, [], "widget parameters");
+    return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, dataBinding, size: w.size, params: {} };
   }
   if (w.kind !== "inferops.project-board") return invalid("widget kind/version");
   if (!/^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/project\/board\/[A-Za-z0-9_-]+$/.test(w.targetRef)) return invalid("target reference");

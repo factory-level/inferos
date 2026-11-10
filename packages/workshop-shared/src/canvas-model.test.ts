@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
+import { CANVAS_WIDGET_KINDS, parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
 import {
   CANVAS_RUN_EVENTS, canvasPageEffects, canvasRunEffects, canvasRunEvent, canvasRunEventsHeard, parseCanvasRunEvent,
   canvasWidgetEventsHeard,
@@ -121,6 +121,58 @@ describe("valid fixtures", () => {
     const board = page.nodes.find(node => node.id === "board-1")!;
     board.dataBinding = dataBinding;
     expect(rejection(() => parseCanvasPage(page)).code).toBe(code);
+  });
+
+  // FAC-9: a governed table widget reads a custom table or a tickets queue through the same typed
+  // binding, its resource named by its reference; the binding still grants nothing.
+  const TABLE_REF = "inferops://acme.operations/object/table/70000000-0000-4000-8000-000000000001";
+  const QUEUE_REF = "tickets://support/queue/billing";
+  const governedPage = (widget: Record<string, unknown>) => ({
+    schemaVersion: 2, id: "p", revision: "0", title: "P", children: ["s"], attachments: [], nodes: [
+      { nodeType: "object", id: "s", title: "S", columns: 1, children: ["t"], attachments: [] },
+      { nodeType: "widget", id: "t", kind: "inferos.governed-table", version: 1, targetRef: TABLE_REF, size: "wide",
+        params: {}, attachments: [], ...widget },
+    ],
+  });
+
+  test("normalizes a custom table's and a tickets queue's references into typed read bindings (FAC-9)", () => {
+    const page = canvasPageFromDefinition({ schemaVersion: 1, id: "p", revision: "0", title: "P", sections: [{
+      id: "s", title: "S", columns: 1, widgets: [
+        { id: "t", kind: "inferos.governed-table", version: 1, targetRef: TABLE_REF, size: "wide", params: {} },
+        { id: "q", kind: "inferos.governed-table", version: 1, targetRef: QUEUE_REF, size: "normal", params: {} },
+      ],
+    }] });
+    const byId = new Map(page.nodes.map(node => [node.id, node]));
+    expect((byId.get("t") as Extract<CanvasNode, {nodeType: "widget"}>).dataBinding)
+      .toEqual({ resource: "object/table", ref: TABLE_REF, schemaVersion: 1 });
+    expect((byId.get("q") as Extract<CanvasNode, {nodeType: "widget"}>).dataBinding)
+      .toEqual({ resource: "tickets/queue", ref: QUEUE_REF, schemaVersion: 1 });
+    expect(CANVAS_WIDGET_KINDS).toContain("inferos.governed-table");
+    // It names its resource; it requests nothing of it.
+    expect(CANVAS_WIDGET_ACTIONS["inferos.governed-table"]).toEqual([]);
+  });
+
+  test.each([
+    ["a queue resource on a table reference", { dataBinding: { resource: "tickets/queue", ref: TABLE_REF, schemaVersion: 1 } }, "incompatible-data-binding"],
+    ["a board resource on a governed table", { dataBinding: { resource: "project/board", ref: TABLE_REF, schemaVersion: 1 } }, "incompatible-data-binding"],
+    ["a reference different from targetRef", { dataBinding: { resource: "object/table", ref: QUEUE_REF, schemaVersion: 1 } }, "invalid-data-binding"],
+    ["an unsupported schema version", { dataBinding: { resource: "object/table", ref: TABLE_REF, schemaVersion: 2 } }, "invalid-data-binding"],
+    ["an authority field", { dataBinding: { resource: "object/table", ref: TABLE_REF, schemaVersion: 1, commands: ["setStatus"] } }, "invalid-data-binding"],
+  ] as const)("rejects a governed table with %s (FAC-9)", (_name, widget, code) => {
+    expect(rejection(() => parseCanvasPage(governedPage(widget))).code).toBe(code);
+  });
+
+  test("refuses a governed table whose reference names no governed resource, or that has parameters (FAC-9)", () => {
+    for (const widget of [
+      { targetRef: "inferops://acme.operations/project/board/ENG", dataBinding: undefined },
+      { targetRef: "https://example.com/rows", dataBinding: undefined },
+      { params: { url: "https://example.com" } },
+    ]) {
+      const page = governedPage(widget) as { nodes: Record<string, unknown>[] };
+      const node = page.nodes[1]!;
+      if ("dataBinding" in widget) delete node.dataBinding;
+      expect(() => parseCanvasPage(page), JSON.stringify(widget)).toThrow();
+    }
   });
 
   test("accepts the largest version 1 canvas", () => {
