@@ -49,6 +49,7 @@ vi.mock('@tanstack/react-router', () => ({ useNavigate: () => operate.navigate }
 vi.mock('./OperateSessionContext', () => ({ useOperateSession: () => ({ dispatch: operate.dispatch }) }))
 
 import { ConsolePage } from './ConsolePage'
+import { chatWidgetsKey, type ResolvedChatWidgets } from './chatPaneWidgets'
 import type { ConsoleEntry } from './consoles'
 import type { SessionWorkspace } from './useSessionWorkspace'
 
@@ -261,36 +262,39 @@ it('shows a restored board as opening, not as refused, until its workspace has r
 const settle = async () => { await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) }) }
 
 // FAC-98 enforces FAC-95's chatPane.widgets: the page reports the shown screen's value, its own
-// override over the workspace's value the publication froze, read through the viewer's access.
+// override over the workspace's value the publication froze, read through the viewer's access, with
+// the screen it was resolved for.
 it("reports the shown screen's chatPane.widgets: the page's override, else the frozen workspace value", async () => {
   const getConsolePage = vi.fn<(consoleId: string, screenId: string, source: string) => Promise<unknown>>()
   consoleOpen.overseer = { stub: { ...CONSOLE_STUB, getConsolePage } }
   const published = { ...SAVED, published: { revision: '0', publishedAt: '2026-10-06T00:00:00.000Z', content: SAVED,
     settings: { 'chatPane.widgets': 'none' } } } as OperateConsole
-  const heard = vi.fn<(value: 'console' | 'none' | null) => void>()
+  const heard = vi.fn<(resolved: ResolvedChatWidgets) => void>()
+  const values = () => heard.mock.calls.map(([resolved]) => resolved.value)
+  const at = (revision: string) => chatWidgetsKey(run({ viewId: 'board', revision, screenId: 's1' }), entry)
 
   getConsolePage.mockResolvedValue({ settings: {} })
-  render({ entry: { ...entry, console: published }, run: run({ viewId: 'board' }), onChatPaneWidgets: heard })
+  render({ entry: { ...entry, console: published }, run: run({ viewId: 'board', screenId: 's1' }), onChatPaneWidgets: heard })
   await settle()
   expect(getConsolePage).toHaveBeenLastCalledWith('c1', 's1', 'published')
-  expect(heard).toHaveBeenLastCalledWith('none')
+  expect(heard).toHaveBeenLastCalledWith({ key: at('0'), value: 'none' })
 
   getConsolePage.mockResolvedValue({ settings: { 'chatPane.widgets': 'console' } })
   render({ entry: { ...entry, console: published }, run: run({ viewId: 'board', revision: '5', screenId: 's1' }), onChatPaneWidgets: heard })
   await settle()
-  expect(heard).toHaveBeenLastCalledWith('console')
+  expect(heard).toHaveBeenLastCalledWith({ key: at('5'), value: 'console' })
 
   // While a read is pending it says unknown (null), never a value it hasn't read.
   heard.mockClear()
   getConsolePage.mockReturnValue(new Promise(() => {}))
   render({ entry: { ...entry, console: published }, run: run({ viewId: 'board', revision: '7', screenId: 's1' }), onChatPaneWidgets: heard })
   await settle()
-  expect(heard.mock.calls.length).toBeGreaterThan(0)
-  expect(heard.mock.calls.flat().every(value => value === null)).toBe(true)
+  expect(values().length).toBeGreaterThan(0)
+  expect(values().every(value => value === null)).toBe(true)
 
   // A page that can't be read says unknown too: the Operate page then offers nothing.
   getConsolePage.mockRejectedValue(new Error('refused'))
   render({ entry: { ...entry, console: published }, run: run({ viewId: 'overview', screenId: 's1', revision: '1' }), onChatPaneWidgets: heard })
   await settle()
-  expect(heard).toHaveBeenLastCalledWith(null)
+  expect(heard).toHaveBeenLastCalledWith({ key: chatWidgetsKey(run({ viewId: 'overview', screenId: 's1', revision: '1' }), entry), value: null })
 })

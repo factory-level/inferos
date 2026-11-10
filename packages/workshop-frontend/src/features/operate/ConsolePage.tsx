@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react'
-import { resolveWorkspaceSetting, type WorkspaceSettingValue } from '@gadgets/workshop-shared/workspace-settings'
+import { resolveWorkspaceSetting } from '@gadgets/workshop-shared/workspace-settings'
+import { chatWidgetsKey, type ResolvedChatWidgets } from './chatPaneWidgets'
 import { Banner, Button } from '@cloudflare/kumo'
 import { ArrowLeftIcon } from '@phosphor-icons/react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
@@ -49,10 +50,11 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   /**
    * Hears the shown screen's `chatPane.widgets` (FAC-95, enforced by FAC-98): the page's override,
    * else the workspace's value the publication froze (a draft's: the workspace's now), else the
-   * default. Null means unknown: it is reported as each read starts, when a read fails, and when the
-   * page goes, so the listener can fail closed until a value arrives.
+   * default, with the screen it was resolved for (`chatWidgetsKey`). A null value means unknown: it
+   * is reported as each read starts, when a read fails, and when the page goes, so the listener can
+   * fail closed until a value for the screen it shows arrives.
    */
-  onChatPaneWidgets?: (value: WorkspaceSettingValue<'chatPane.widgets'> | null) => void
+  onChatPaneWidgets?: (resolved: ResolvedChatWidgets) => void
 }) => {
   const { authenticatedApi } = useAuthenticatedApi()
   const { overseer, error } = useWorkspaceOpen({
@@ -68,9 +70,11 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   const onChatPaneWidgetsRef = useRef(onChatPaneWidgets)
   onChatPaneWidgetsRef.current = onChatPaneWidgets
   const frozenSettings = entry?.console.published?.settings
+  const widgetsKey = chatWidgetsKey(run, entry)
   useEffect(() => {
-    const report = onChatPaneWidgetsRef.current
-    if (!report) return
+    const listener = onChatPaneWidgetsRef.current
+    if (!listener) return
+    const report = (value: ResolvedChatWidgets['value']) => listener({ key: widgetsKey, value })
     report(null)
     if (!overseer) return
     let current = true
@@ -82,7 +86,7 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
       ([settings, shown]) => { if (current) report(resolveWorkspaceSetting('chatPane.widgets', settings, shown?.settings).value) },
       () => { if (current) report(null) })
     return () => { current = false; report(null) }
-  }, [overseer, run.consoleId, run.source, run.revision, screenId, frozenSettings])
+  }, [overseer, run.consoleId, run.source, run.revision, screenId, frozenSettings, widgetsKey])
   const screen = screenId === null ? undefined : entry?.screens.find(candidate => candidate.id === screenId)
   const boardWidgets = (screen?.sections.flatMap(section => section.widgets) ?? [])
     .filter((widget): widget is CanvasProjectBoardWidget => widget.kind === 'inferops.project-board')

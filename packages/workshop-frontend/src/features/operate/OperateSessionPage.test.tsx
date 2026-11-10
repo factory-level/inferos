@@ -19,8 +19,9 @@ const testState = vi.hoisted(() => ({
   search: {} as { setup?: string; tools?: boolean; settings?: string; workspace?: string },
   navigate: vi.fn<(options: unknown) => void>(),
   hostBoards: false,
-  // What the mocked ConsolePage reports as the shown screen's chatPane.widgets (FAC-98).
-  chatWidgets: null as 'console' | 'none' | null,
+  // What the mocked ConsolePage reports as each screen's chatPane.widgets (FAC-98), by screen id;
+  // a screen not listed has not said yet (its read is pending).
+  chatWidgets: {} as Record<string, 'console' | 'none' | null>,
 }))
 
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => testState.navigate, useSearch: () => testState.search }))
@@ -58,12 +59,18 @@ vi.mock('./ConsoleMosaic', () => ({ ConsoleMosaic: () => <div data-testid="mosai
 vi.mock('./ConsolePage', async () => {
   const { useEffect } = await import('react')
   const { useInsertOperatePrompt } = await import('./OperatePromptContext')
+  const { chatWidgetsKey } = await import('./chatPaneWidgets')
   return {
-    ConsolePage: ({ entry, presentation, onChatPaneWidgets }: { entry?: { console: { title: string } }; presentation: string;
-        onChatPaneWidgets?: (value: 'console' | 'none' | null) => void }) => {
+    ConsolePage: ({ run, entry, presentation, onChatPaneWidgets }: { run: import('@gadgets/workshop-shared/operate-session').OperateConsoleRun;
+        entry?: import('./consoles').ConsoleEntry; presentation: string;
+        onChatPaneWidgets?: (resolved: import('./chatPaneWidgets').ResolvedChatWidgets) => void }) => {
       // A widget on the page, which can put a draft in the chat (FAC-98).
       const insert = useInsertOperatePrompt()
-      useEffect(() => { onChatPaneWidgets?.(testState.chatWidgets) }, [onChatPaneWidgets])
+      const key = chatWidgetsKey(run, entry)
+      useEffect(() => {
+        const screenId = run.screenId ?? ''
+        if (screenId in testState.chatWidgets) onChatPaneWidgets?.({ key, value: testState.chatWidgets[screenId]! })
+      }, [onChatPaneWidgets, key, run.screenId])
       return <div data-testid="console">{entry?.console.title}/{presentation}
         <button type="button" onClick={() => insert?.('Summarise this intake')}>Widget event</button></div>
     },
@@ -112,7 +119,7 @@ beforeEach(() => {
   testState.search = {}
   testState.navigate = vi.fn<(options: unknown) => void>()
   testState.hostBoards = false
-  testState.chatWidgets = null
+  testState.chatWidgets = {}
 })
 
 afterEach(() => {
@@ -313,7 +320,7 @@ describe('a widget prompt and the chat pane', () => {
     ['none', 'false'],
     ['console', 'true'],
   ] as const)('with the shown screen resolving chatPane.widgets to %s, offers the widgets: %s', (value, offered) => {
-    testState.chatWidgets = value
+    testState.chatWidgets = { board: value }
     render(RUN)
     expect(chat().getAttribute('data-offer-widgets')).toBe(offered)
   })
@@ -321,13 +328,34 @@ describe('a widget prompt and the chat pane', () => {
   // r2 on #412: unknown (the page read still pending, or failed) is not "no override"; nothing is
   // offered until the screen says, so a page overriding it to "none" never shows the offer first.
   it('offers no widgets while the shown screen has not said (pending or failed read)', () => {
-    testState.chatWidgets = null
+    testState.chatWidgets = { board: null }
+    render(RUN)
+    expect(chat().getAttribute('data-offer-widgets')).toBe('false')
+    testState.chatWidgets = {}
     render(RUN)
     expect(chat().getAttribute('data-offer-widgets')).toBe('false')
   })
 
+  // r2 on #412 round 2: a value resolved for the previous screen never enables the next screen's
+  // offer, not even for the one commit before ConsolePage says otherwise.
+  it("never shows a destination screen's offer from the previous screen's value", () => {
+    testState.chatWidgets = { board: 'console' }
+    render(RUN)
+    expect(chat().getAttribute('data-offer-widgets')).toBe('true')
+    // Screen "other" overrides it to none, but its read hasn't answered yet.
+    testState.chatWidgets = { board: 'console' }
+    // Every value the attribute held across the move: each change's old value, then the final one.
+    const observer = new MutationObserver(() => {})
+    observer.observe(container, { attributes: true, subtree: true, attributeOldValue: true, attributeFilter: ['data-offer-widgets'] })
+    render({ ...RUN, console: { ...RUN.console!, screenId: 'other' } })
+    const held = [...observer.takeRecords().map(record => record.oldValue), chat().getAttribute('data-offer-widgets')]
+    observer.disconnect()
+    // The first is the previous screen's own "true"; nothing after it may be.
+    expect(held.slice(1)).not.toContain('true')
+    expect(chat().getAttribute('data-offer-widgets')).toBe('false')
+  })
+
   it("uses the frozen workspace value in a flow, which has no screen page here", () => {
-    testState.chatWidgets = null
     render({ ...RUN, flow: { workspaceId: 'ws1', flowId: 'f', title: 'Shift', steps: ['board'], index: 0 } } as OperatePageState)
     expect(chat().getAttribute('data-offer-widgets')).toBe('true')
   })

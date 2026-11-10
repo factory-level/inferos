@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
-import { resolveWorkspaceSetting, type WorkspaceSettingValue } from '@gadgets/workshop-shared/workspace-settings'
+import { resolveWorkspaceSetting } from '@gadgets/workshop-shared/workspace-settings'
+import { chatWidgetsKey, type ResolvedChatWidgets } from './chatPaneWidgets'
 import { OperatePromptProvider } from './OperatePromptContext'
 import { Button, useKumoToastManager } from '@cloudflare/kumo'
 import { useNavigate, useSearch } from '@tanstack/react-router'
@@ -59,8 +60,8 @@ export const OperateSessionPage = () => {
   // A draft a widget put in the person's chat (FAC-98), until the composer has it.
   const [draft, setDraft] = useState<{ text: string; nonce: number } | null>(null)
   const draftNonce = useRef(0)
-  // The shown screen's chatPane.widgets, as ConsolePage read it (null while unknown).
-  const [pageChatWidgets, setPageChatWidgets] = useState<WorkspaceSettingValue<'chatPane.widgets'> | null>(null)
+  // The shown screen's chatPane.widgets as ConsolePage last resolved it, with the screen it is for.
+  const [pageChatWidgets, setPageChatWidgets] = useState<ResolvedChatWidgets | null>(null)
   const consoleId = operate?.snapshot?.state.console?.consoleId
   const notifyRefused = (caught: unknown) => {
     console.error('Operate session change failed:', caught)
@@ -177,10 +178,12 @@ export const OperateSessionPage = () => {
   // console's page that is the shown screen's resolved value, and while it is unknown (being read,
   // or the read failed) nothing is offered: a page that overrides it to "none" never shows the offer
   // first. A flow has no screen page here, so it uses the workspace's value the publication froze.
-  // It grants nothing; it only hides the offer.
+  // A value resolved for another screen or console (the page just moved, before ConsolePage says
+  // otherwise) is unknown too, decided here during render, so it never enables the new screen's
+  // offer even for one commit. It grants nothing; it only hides the offer.
   const chatWidgets = state.flow
     ? resolveWorkspaceSetting('chatPane.widgets', run?.source === 'published' ? entry?.console.published?.settings ?? {} : {}).value
-    : pageChatWidgets
+    : run && pageChatWidgets?.key === chatWidgetsKey(run, entry) ? pageChatWidgets.value : null
 
   return <OperatePromptProvider value={insertDraft}>
   <ConsoleWorkspaceShell onOpenWidget={target => void openWidget(target)} onNavigate={() => setWidgetTarget(null)}>
