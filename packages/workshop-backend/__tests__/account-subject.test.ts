@@ -11,7 +11,7 @@ import type { LoginConnectCallbackImpl, PendingLogin } from "../src/auth/login-f
 import type { UserDurableObject } from "../src/user.js";
 import { SIGNS_IN_THROUGH_SUBJECT } from "../src/user.js";
 import type { UserDirectoryDurableObject } from "../src/user-directory.js";
-import { bindAccountSubjects, collaboratorAccountName, subjectAccountName } from "../src/account-subject.js";
+import { bindAccountSubjects, collaboratorAccountName, resolveSubjectAccount, subjectAccountName } from "../src/account-subject.js";
 import type { FakeSubjectAccount } from "./test-worker.js";
 
 declare module "cloudflare:workers" {
@@ -161,6 +161,78 @@ describe("taking over someone's old address (acceptance 2)", () => {
     expect(await legacy.bindSubject(mine)).toBe("bound");
     expect(await legacy.bindSubject(theirs)).toBe("bound-elsewhere");
     expect(await env.TEST_USER.getByName(`absent-${fresh()}@example.test`).bindSubject(mine)).toBe("absent");
+  });
+});
+
+describe("two first sign-ins for one subject at once (FAC-165 round 1)", () => {
+  it("bind exactly one account, whatever their vouched addresses, and both sign in to it", async () => {
+    const [first, second] = [`race-a-${fresh()}@example.test`, `race-b-${fresh()}@example.test`];
+    await legacyAccount(first);
+    await legacyAccount(second);
+    const subject = subjectName(fresh());
+    // Each bind waits until both sign-ins have reached one, so both are past the directory's
+    // check before either binds: the overlap is forced, not left to timing.
+    let arrived = 0;
+    let release!: () => void;
+    const bothArrived = new Promise<void>(resolve => (release = resolve));
+    const users = {
+      idFromName: (name: string) => env.TEST_USER.idFromName(name),
+      get(id: DurableObjectId) {
+        const user = env.TEST_USER.get(id);
+        return {
+          bindSubject: async (name: string) => {
+            if (++arrived === 2) release();
+            await Promise.race([bothArrived, new Promise(resolve => setTimeout(resolve, 1000))]);
+            return user.bindSubject(name);
+          },
+        };
+      },
+    } as unknown as DurableObjectNamespace<UserDurableObject>;
+    const ns = { users, directory: env.TEST_USER_DIRECTORY };
+    const names = await Promise.all([
+      resolveSubjectAccount(ns, subject, first),
+      resolveSubjectAccount(ns, subject, second),
+    ]);
+    expect(arrived).toBe(2);
+    expect(names[0]).toBe(names[1]);
+    const bound = [await env.TEST_USER.getByName(first).isSubjectBound(),
+                   await env.TEST_USER.getByName(second).isSubjectBound()];
+    expect(bound.filter(Boolean)).toHaveLength(1);
+    expect(names[0]).toBe(bound[0] ? first : second);
+    // Both sign-ins then land in that one account, and the other stays reachable by its address.
+    for (const email of [first, second]) {
+      expect(await env.TEST_USER.getByName(names[0]!).loginOrCreateViaSubject(names[0]!, subject, email, true))
+        .not.toBeNull();
+    }
+    expect(await collaboratorAccountName(NS(), bound[0] ? second : first)).toBe(bound[0] ? second : first);
+  });
+
+  it("recovers a sign-in that stopped between binding and recording: the next one settles the same account", async () => {
+    const [first, second] = [`stop-a-${fresh()}@example.test`, `stop-b-${fresh()}@example.test`];
+    await legacyAccount(first);
+    await legacyAccount(second);
+    const subject = subjectName(fresh());
+    // The first sign-in claimed its account and bound it, then stopped before recording.
+    const directory = env.TEST_USER_DIRECTORY.getByName("");
+    expect(await directory.claimSubject(subject, first)).toBe(first);
+    expect(await env.TEST_USER.getByName(first).bindSubject(subject)).toBe("bound");
+    expect(await directory.accountForSubject(subject)).toBeNull();
+    // A later sign-in, even with another address, settles that claim: the bound account isn't stranded.
+    expect(await resolveSubjectAccount(NS(), subject, second)).toBe(first);
+    expect(await directory.accountForSubject(subject)).toBe(first);
+    expect(await env.TEST_USER.getByName(second).isSubjectBound()).toBe(false);
+  });
+});
+
+describe("an address with capitals (FAC-165 round 1)", () => {
+  it("binds the account it named, exactly as the provider gave it, and finds it by any case", async () => {
+    const email = `Mixed-${fresh()}@Example.Test`;
+    await legacyAccount(email);
+    const subject = fresh();
+    expect(await signIn(subject, email)).toBe(email);
+    expect(await env.TEST_USER.getByName(email).isSubjectBound()).toBe(true);
+    expect(await signIn(subject, email)).toBe(email);
+    expect(await collaboratorAccountName(NS(), email.toLowerCase())).toBe(email);
   });
 });
 

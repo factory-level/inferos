@@ -27,6 +27,12 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
       subject TEXT PRIMARY KEY,
       account TEXT NOT NULL
     ) STRICT`);
+    // The account a subject's first sign-in claimed for it, before that account is bound: every
+    // sign-in for the subject settles this one candidate, so concurrent first sign-ins agree on it.
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS subject_claims (
+      subject TEXT PRIMARY KEY,
+      account TEXT NOT NULL
+    ) STRICT`);
     ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS emails (
       email TEXT PRIMARY KEY,
       account TEXT NOT NULL
@@ -46,9 +52,26 @@ export class UserDirectoryDurableObject extends DurableObject<Cloudflare.Env> {
    * with it.
    */
   recordSubject(subject: string, account: string): string {
-    this.ctx.storage.sql.exec(
-      `INSERT INTO subjects (subject, account) VALUES (?, ?) ON CONFLICT (subject) DO NOTHING`, subject, account);
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        `INSERT INTO subjects (subject, account) VALUES (?, ?) ON CONFLICT (subject) DO NOTHING`, subject, account);
+      this.ctx.storage.sql.exec(`DELETE FROM subject_claims WHERE subject = ?`, subject);
+    });
     return this.accountForSubject(subject)!;
+  }
+
+  /**
+   * Claims `account` as the one `subject`'s sign-in will settle, set-if-unset, and returns the
+   * claimed account: the first claim stands until `recordSubject` records the subject. A sign-in
+   * that loses the claim settles the winner's candidate, never its own, so no second account is
+   * ever bound to the subject.
+   */
+  claimSubject(subject: string, account: string): string {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO subject_claims (subject, account) VALUES (?, ?) ON CONFLICT (subject) DO NOTHING`,
+      subject, account);
+    return this.ctx.storage.sql.exec<{ account: string }>(
+      `SELECT account FROM subject_claims WHERE subject = ?`, subject).toArray()[0]!.account;
   }
 
   /** The account whose current vouched address `email` is (ADR 0018), or null. */

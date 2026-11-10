@@ -36,19 +36,24 @@ type Namespaces = {
  * The name of the account `subject` signs in to (ADR 0018 decisions 2 and 3): the one the directory
  * already records for it; else the account the vouched `email` names, when that account binds to
  * it (an existing gatekeeper account, not bound to another subject, not a password account); else
- * a new account named by the subject. The binding is written on the account first, set-if-unset,
- * then recorded in the directory, which keeps the first record for a subject; so concurrent first
- * sign-ins agree, and a second subject can never take an account. Writes no account itself: the
- * caller's sign-in creates a new one.
+ * a new account named by the subject. Writes no account itself: the caller's sign-in creates a new
+ * one.
+ *
+ * The directory is claimed before any account is bound: the first sign-in's candidate (its vouched
+ * address, or the subject's own name) is claimed set-if-unset, and every sign-in for the subject,
+ * the first or one overlapping it with another address, settles that one candidate. Binding is
+ * set-if-unset and answers the same for every caller (`bound` again for the same subject), so they
+ * all record the same account, and no account a sign-in lost the claim for is ever bound.
  */
 export async function resolveSubjectAccount(ns: Namespaces, subject: string, email: string | null): Promise<string> {
   const directory = ns.directory.getByName("");
   const recorded = await directory.accountForSubject(subject);
   if (recorded !== null) return recorded;
+  const candidate = await directory.claimSubject(subject, email ?? subject);
   let name = subject;
-  if (email !== null) {
-    const legacy = ns.users.get(ns.users.idFromName(email));
-    if (await legacy.bindSubject(subject) === "bound") name = email;
+  if (candidate !== subject) {
+    const legacy = ns.users.get(ns.users.idFromName(candidate));
+    if (await legacy.bindSubject(subject) === "bound") name = candidate;
   }
   return directory.recordSubject(subject, name);
 }
@@ -86,9 +91,11 @@ export async function bindAccountSubjects(ns: Namespaces, vendorId: string | nul
     const wasBound = await user.isSubjectBound();
     const subject = await user.subjectFromConnections(vendorId);
     if (subject === null) continue;
+    // As for a sign-in, the directory is claimed for this account before it is bound, so a pass
+    // racing a first sign-in with another address never binds a second account.
     const recorded = await directory.accountForSubject(subject);
-    if ((recorded !== null && recorded !== id) || await user.bindSubject(subject) !== "bound" ||
-        await directory.recordSubject(subject, id) !== id) {
+    if ((recorded !== null && recorded !== id) || await directory.claimSubject(subject, id) !== id ||
+        await user.bindSubject(subject) !== "bound" || await directory.recordSubject(subject, id) !== id) {
       result.conflicts++;
       continue;
     }

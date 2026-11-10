@@ -289,8 +289,10 @@ export class LoginConnectCallbackImpl
       return;
     }
     const subject = subjectAccountName(found);
-    const vouched = await account.getAuthenticatedEmail();
-    const email = vouched ? vouched.toLowerCase() : null;
+    // The address exactly as the provider vouches for it: an email-keyed account was named by it
+    // unchanged (the email sign-in above), so a mixed-case address still finds its account. Only the
+    // directory's emails index folds case (`recordEmail`).
+    const email = (await account.getAuthenticatedEmail()) || null;
     const users = this.ctx.exports.UserDurableObject;
     const directory = this.ctx.exports.UserDirectoryDurableObject;
     const name = await resolveSubjectAccount({ users, directory }, subject, email);
