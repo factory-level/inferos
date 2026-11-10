@@ -100,7 +100,11 @@ function connectorSession(calls: string[], commands = true) {
     command: async (request: unknown) => {
       if (!commands) throw new TypeError('The RPC receiver does not implement the method "command".');
       calls.push(`command ${JSON.stringify(request)}`);
-      return { outcome: "proposed" };
+      return {
+        outcome: "proposed",
+        actionId: "opaque-action-correlation",
+        status: async () => ({ outcome: "waiting" }),
+      };
     },
     listRecords: async () => { calls.push("listRecords"); return []; },
     [Symbol.dispose]: () => { calls.push("disposed"); },
@@ -131,7 +135,9 @@ describe("openGovernedSession (FAC-9)", () => {
     await handle.session.describe();
     await handle.session.list({ pageSize: 5 });
     await handle.session.get("r1");
-    await handle.session.command({ command: "setStatus", id: "r1", values: {}, expectedRevision: "1" });
+    const receipt = await handle.session.command({ command: "setStatus", id: "r1", values: {}, expectedRevision: "1" });
+    expect(receipt.actionId).toBe("opaque-action-correlation");
+    expect(await receipt.status()).toEqual({ outcome: "waiting" });
     expect(calls).toEqual(["open 5", "describe", 'list {"pageSize":5}', "get r1",
       'command {"command":"setStatus","id":"r1","values":{},"expectedRevision":"1"}']);
     // Nothing else the connector's session offers is reachable through it.

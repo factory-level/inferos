@@ -19,6 +19,7 @@ import {
 } from "@gadgets/workshop-shared/governed-data";
 import type {
   AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper,
+  ActionReceipt,
   GatekeeperConnectCallback, GatekeeperConnectOptions, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   ResourceConfiguratorFrame, ResourceDescription, SupportedResource, VendorDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
@@ -349,7 +350,8 @@ export class TicketsQueueGatekeeper extends DurableObject<Cloudflare.Env, Bindin
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<TicketsQueueSession> {
     const queue = approvalQueue.dup();
     return new QueueSessionImpl(this.#host, queue,
-      payload => this.#actions().submit(queue, "setStatus", payload));
+      payload => this.#actions().submit(queue, "setStatus", payload),
+      async payload => (await this.#actions().submitWithReceipt(queue, "setStatus", payload)).receipt);
   }
 
   /** Strategy B: the binding is one queue, so admit an observer who can see that queue. */
@@ -394,13 +396,16 @@ class QueueSessionImpl extends RpcTarget implements TicketsQueueSession {
   readonly #host: Host;
   readonly #queue: RpcStub<ApprovalQueue>;
   readonly #submit: (payload: Actions["setStatus"]) => Promise<number>;
+  readonly #submitWithReceipt: (payload: Actions["setStatus"]) => Promise<ActionReceipt>;
 
   constructor(host: Host, queue: RpcStub<ApprovalQueue>,
-              submit: (payload: Actions["setStatus"]) => Promise<number>) {
+              submit: (payload: Actions["setStatus"]) => Promise<number>,
+              submitWithReceipt: (payload: Actions["setStatus"]) => Promise<ActionReceipt>) {
     super();
     this.#host = host;
     this.#queue = queue;
     this.#submit = submit;
+    this.#submitWithReceipt = submitWithReceipt;
   }
 
   [Symbol.dispose]() {
@@ -473,14 +478,15 @@ class QueueSessionImpl extends RpcTarget implements TicketsQueueSession {
     }
   }
 
-  async command(request: unknown): Promise<{ outcome: "proposed" }> {
+  async command(request: unknown): Promise<{ outcome: "proposed" } & ActionReceipt> {
     const command: GovernedCommandRequest = governedRequest(() => parseGovernedCommand(request, QUEUE_DESCRIPTION));
     // setStatus is the one declared command, so this proposes exactly what setStatus proposes.
-    await this.setStatus(command.id, command.values.status as TicketStatus, command.expectedRevision);
-    return { outcome: "proposed" };
+    const payload = await this.#statusPayload(command.id, command.values.status as TicketStatus, command.expectedRevision);
+    const receipt = await this.#submitWithReceipt(payload);
+    return { outcome: "proposed", ...receipt };
   }
 
-  async setStatus(ticketId: string, status: TicketStatus, expectedRevision: Revision): Promise<void> {
+  async #statusPayload(ticketId: string, status: TicketStatus, expectedRevision: Revision): Promise<Actions["setStatus"]> {
     if (!STATUSES.includes(status) || !/^\d+$/.test(expectedRevision)) {
       throw new Error(refusal("INVALID_REQUEST"));
     }
@@ -489,6 +495,10 @@ class QueueSessionImpl extends RpcTarget implements TicketsQueueSession {
     // Nothing read is returned, so this is not an observation. The provider checks again at apply.
     const current = await this.#read(() => client.readTicket(queueId, ticketId));
     if (current.status === "closed" || current.status === status) throw new Error(refusal("INVALID_STATE"));
-    await this.#submit({ ticketId, status, expectedRevision });
+    return { ticketId, status, expectedRevision };
+  }
+
+  async setStatus(ticketId: string, status: TicketStatus, expectedRevision: Revision): Promise<void> {
+    await this.#submit(await this.#statusPayload(ticketId, status, expectedRevision));
   }
 }

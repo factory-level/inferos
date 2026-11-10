@@ -12,7 +12,7 @@
 //   `in_review`;
 // - L3: approving it applies it as the owner: InferOps shows `approved`, decided by the owner, at
 //   the hash, and nothing in InferOS or InferOps says published;
-// - L4: approving the applied action again is refused as not pending, and InferOps itself replays a
+// - L4: approving the applied action again answers as the first did, sending nothing (FAC-118), and InferOps itself replays a
 //   same-principal, same-hash resend without changing the decision;
 // - L5: the member, who lacks `knowledge:publish`, is refused FORBIDDEN at apply and the action
 //   stays pending; the proposal stays in review;
@@ -315,11 +315,11 @@ describe.skipIf(!LIVE.baseUrl || LIVE.publish !== "")("Wiki proposal approval ag
     evidence.push(`L3 applied: InferOps approved, decidedBy owner ${people.owner.person.user.id}, approvedHash = seed hash, not published`);
 
     // L4: approving the applied action again sends nothing; a direct resend replays the decision.
-    expect(await failure(ws.approveAction(action.id))).toMatch(/not pending/);
+    await ws.approveAction(action.id);
     const replay = await approveDirect(people.owner.person, seed.p1.id, seed.p1.proposalHash, seed.p1.sources);
     expect(replay.status).toBe(200);
     expect(replay.body.proposal).toMatchObject({ id: seed.p1.id, state: "approved", decidedAt: after.decidedAt });
-    evidence.push("L4 re-approve of the applied action refused (not pending); direct same-hash resend replayed (200, same decidedAt)");
+    evidence.push("L4 re-approve of the applied action answered as approved, sending nothing; direct same-hash resend replayed (200, same decidedAt)");
   });
 
   it("L5: the member, without knowledge:publish, is refused FORBIDDEN and the action stays pending", async () => {

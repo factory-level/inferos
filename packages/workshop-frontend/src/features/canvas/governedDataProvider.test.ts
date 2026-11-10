@@ -22,7 +22,9 @@ function session(total = 5) {
       return { rows: rows.slice(offset, next), nextCursor: next < rows.length ? `c${next}` : null, total: rows.length, truncated: false }
     }),
     get: vi.fn<GovernedWriteSession['get']>(async (id: string) => rows.find(item => item.id === id) ?? null),
-    command: vi.fn<GovernedWriteSession['command']>(async () => ({ outcome: 'proposed' as const })),
+    command: vi.fn<GovernedWriteSession['command']>(async () => ({
+      outcome: 'proposed' as const, actionId: 'test-action', status: async () => ({ outcome: 'waiting' as const }),
+    })),
   }
   return { impl, calls, provider: governedDataProvider(async () => impl) }
 }

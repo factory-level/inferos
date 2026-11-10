@@ -243,8 +243,8 @@
       {
         "kind": "project/dispatch",
         "cases": ["resource-scope", "observation", "approval", "apply-once", "stale-revision", "lost-response-retry"],
-        "reason": "No shared-suite adapter yet: dispatch needs the coding-workbench switch and repository allowlist set per test. Its own suite covers these cases.",
-        "coveredBy": ["__tests__/dispatch.test.ts"]
+        "reason": "No shared-suite adapter yet: dispatch needs the coding-workbench switch and repository allowlist set per test. Its own suite covers these cases; account.test.ts also verifies that a stored connection from another deployment company is refused before dispatch project lookup.",
+        "coveredBy": ["__tests__/dispatch.test.ts", "__tests__/account.test.ts"]
       },
       {
         "kind": "knowledge/wiki",
@@ -272,6 +272,28 @@
         "kind": "object/table",
         "cases": ["approval", "apply-once", "stale-revision", "lost-response-retry"],
         "reason": "Not applicable: the kind proposes no writes, so there is nothing to approve, apply or retry. Its tests assert the mock and the HTTP client see no non-GET request."
+      },
+      {
+        "kind": "portal/members",
+        "cases": ["resource-scope", "observation", "sharing", "revocation"],
+        "reason": "Read-only and private-only: its session lists one bound workspace, observations exclude member identity, sharing is refused, and account revocation stops reads. account.test.ts also verifies that a stored connection from another deployment company is refused before the members probe. There are no writes, revisions, or write retries to express in the shared suite.",
+        "coveredBy": ["__tests__/members.test.ts", "__tests__/members-http.test.ts", "__tests__/account.test.ts"]
+      },
+      {
+        "kind": "portal/members",
+        "cases": ["approval", "apply-once", "stale-revision", "server-error-retry", "lost-response-retry"],
+        "reason": "Not applicable: this read-only resource has no write path. Provider read failures return unavailable and are not retried as writes."
+      },
+      {
+        "kind": "project/workflow",
+        "cases": ["resource-scope", "observation", "sharing", "revocation"],
+        "reason": "Read-only and private-only: its session reads the bound project's policy projection, observes each read, refuses sharing, and stops after account revocation. There are no writes, revisions, or write retries to express in the shared suite.",
+        "coveredBy": ["__tests__/workflow-policy.test.ts", "__tests__/workflow-policy-http.test.ts", "__tests__/account.test.ts"]
+      },
+      {
+        "kind": "project/workflow",
+        "cases": ["approval", "apply-once", "stale-revision", "server-error-retry", "lost-response-retry"],
+        "reason": "Not applicable: this read-only resource has no write path. Provider read failures return unavailable and are not retried as writes."
       },
       {
         "kind": "account",

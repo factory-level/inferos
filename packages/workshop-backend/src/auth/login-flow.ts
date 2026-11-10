@@ -37,7 +37,8 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { ConnectHandoff, GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "../observability";
-import { CLOUDFLARE_VENDOR_ID, type UserDurableObject } from "../user.js";
+import { CLOUDFLARE_VENDOR_ID, SIGNS_IN_THROUGH_SUBJECT, type UserDurableObject } from "../user.js";
+import { resolveSubjectAccount, subjectAccountName } from "../account-subject.js";
 import { readAdminConfig } from "../admin-config.js";
 import {
   CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken,
@@ -174,7 +175,11 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
   }
 }
 
-type LoginCallbackProps = { pendingId: string; vendorId: string };
+/**
+ * `subject`: the vendor declares `providesSubject`, so the account is keyed on the subject its
+ * sign-in yields (ADR 0019), not on the email.
+ */
+type LoginCallbackProps = { pendingId: string; vendorId: string; subject?: boolean };
 
 export class LoginConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, LoginCallbackProps>
@@ -206,6 +211,10 @@ export class LoginConnectCallbackImpl
     // returns — no explicit disposal needed. We read the verified email to resolve/create the user.
     // The email's local-part seeds the initial display name, like the Cloudflare Access flow.
     try {
+      if (this.ctx.props.subject) {
+        await this.#deliverBySubject(account, pending, ticketHash, loginLogger);
+        return;
+      }
       const email = await account.getAuthenticatedEmail();
       if (!email) {
         loginLogger.info("gatekeeper login finished", {
@@ -219,7 +228,20 @@ export class LoginConnectCallbackImpl
       // Closed signups block first-time account creation here too (not just password signup); an
       // existing user signing in is unaffected.
       const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
-      const secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
+      let secret: string | null;
+      try {
+        secret = await userStub.loginOrCreateViaGatekeeper(email, signupsEnabled);
+      } catch (error) {
+        // A bound account signs in only through its subject (ADR 0019 decision 4).
+        if (error instanceof Error && error.message === SIGNS_IN_THROUGH_SUBJECT) {
+          loginLogger.info("gatekeeper login finished", {
+            event: "gatekeeper.login.finished", outcome: "bound_to_subject",
+          });
+          await pending.fail(SIGNS_IN_THROUGH_SUBJECT);
+          return;
+        }
+        throw error;
+      }
       if (secret === null) {
         loginLogger.info("gatekeeper login finished", {
           event: "gatekeeper.login.finished", outcome: "signups_disabled",
@@ -250,6 +272,41 @@ export class LoginConnectCallbackImpl
       });
       await pending.fail("Sign-in failed. Please try again.");
     }
+  }
+
+  /**
+   * A sign-in keyed on the subject the vendor yields (ADR 0019): the account the directory resolves
+   * for it (`resolveSubjectAccount`), signed in through it. An email the provider vouches for may bind
+   * an email-keyed account once, and is recorded as the account's current address; without one the
+   * sign-in still proceeds, and the address is not used.
+   */
+  async #deliverBySubject(account: Fetcher<GatekeeperUser>, pending: DurableObjectStub<PendingLogin>,
+                          ticketHash: string, loginLogger: ReturnType<typeof logger.with>): Promise<void> {
+    const found = await (account as unknown as Required<Pick<GatekeeperUser, "getAuthenticatedSubject">>).getAuthenticatedSubject();
+    if (!found) {
+      loginLogger.info("gatekeeper login finished", { event: "gatekeeper.login.finished", outcome: "no_subject" });
+      await pending.fail("This account has no person behind it, so it can't be used to sign in.");
+      return;
+    }
+    const subject = subjectAccountName(found);
+    // The address exactly as the provider vouches for it: an email-keyed account was named by it
+    // unchanged (the email sign-in above), so a mixed-case address still finds its account. Only the
+    // directory's emails index folds case (`recordEmail`).
+    const email = (await account.getAuthenticatedEmail()) || null;
+    const users = this.ctx.exports.UserDurableObject;
+    const directory = this.ctx.exports.UserDirectoryDurableObject;
+    const name = await resolveSubjectAccount({ users, directory }, subject, email);
+    const userStub = users.get(users.idFromName(name));
+    const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+    const secret = await userStub.loginOrCreateViaSubject(name, subject, email, signupsEnabled);
+    if (secret === null) {
+      loginLogger.info("gatekeeper login finished", { event: "gatekeeper.login.finished", outcome: "signups_disabled" });
+      await pending.fail("New sign-ups are currently disabled on this deployment.");
+      return;
+    }
+    if (email) await directory.getByName("").recordEmail(email, name);
+    await pending.deliver(`${name}:${secret}`, ticketHash);
+    loginLogger.info("gatekeeper login finished", { event: "gatekeeper.login.finished", outcome: "ok" });
   }
 
   // The user DO and account id a sign-in linked (Cloudflare), or null for a transient sign-in
