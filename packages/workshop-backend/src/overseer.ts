@@ -14,11 +14,13 @@ import type {
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionRights, WorkflowDefinitionShare,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
-  WorkflowTriggerDefinitionRef,
+  WorkflowTriggerDefinitionRef, WorkflowDefinitionDuplicate, WorkflowRequiredBinding,
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
+  WORKFLOW_BINDINGS_NEEDED, parseWorkflowDefinitionTitle,
 } from "@gadgets/workshop-shared/workflow-definition";
+import { checkAssignments, requireBound, requirementsOf, unmetBindings } from "./workflow-duplicate.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
 import {
   SYSTEM_RUN_ASSIGNMENT_CHANGED, SystemRunRegistry, WORKFLOW_ASSIGNMENTS_DISABLED, assignedActionProblem, openSystemRunSession, runAssignedDelivery,
@@ -234,6 +236,7 @@ export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
   if (message === SYSTEM_RUN_ASSIGNMENT_CHANGED || message === WORKFLOW_ASSIGNMENTS_DISABLED ||
       message === TRIGGER_AUTO_RETIRED) return "assignment-changed";
   if (message === "Hook has been deleted or disabled.") return "trigger-gone";
+  if (message === WORKFLOW_BINDINGS_NEEDED) return "bindings-needed";
   return "runtime-error";
 }
 
@@ -856,6 +859,13 @@ export type GadgetRecord = {
    * edge. Expected to stay small, so it's a map on the record rather than a separate collection.
    */
   bindings: Record<string, BindingRecord>;
+
+  /**
+   * Present on a duplicated workflow's gadget (FAC-123): the connections it must have set up before
+   * any run of it starts, copied by name and kind from its source's bindings (never their targets).
+   * Kept for the gadget's life, so a connection removed later stops its runs again (`requireBound`).
+   */
+  requiredBindings?: WorkflowRequiredBinding[];
 
   /**
    * Present while the gadget is provisional: it was created within the given chat and follows
@@ -1712,6 +1722,11 @@ export function actionRecordToLog(record: ActionRecord): ActionLogEntry {
 // An account and resource resolved through the admin-policy chokepoint (UserDurableObject's
 // getGatekeeperClassFor), ready to become a workspace connection.
 type ResolvedConnection = Awaited<ReturnType<UserDurableObject["getGatekeeperClassFor"]>>;
+
+// A connection checked for one of a duplicate's requirements (FAC-123), ready to be made.
+type PreparedConnection =
+  | { kind: "gatekeeper"; connection: ResolvedConnection; resourceUrl: string }
+  | { kind: "aiModel"; modelId: string };
 
 // Reflect a hook toggle (or deletion, which also severs the hookId reference) onto the hook's
 // bindHook action record, stamping the state-change time the byLastChanged index keys on.
@@ -6907,6 +6922,8 @@ class OverseerImpl implements AgentHooks {
     try {
       let runOf = record.executedAs ?? record.workflowRun;
       if (runOf) this.#requireSameDefinition(runOf.hookId, runOf.deliveryId);
+      // A duplicate's write waits while a connection it needs isn't set up (FAC-123).
+      if (runOf) this.requireHookBound(runOf.hookId);
       if (record.executedAs) {
         let problem = this.assignedActionProblem(record);
         if (problem) throw new Error(problem);
@@ -6942,6 +6959,7 @@ class OverseerImpl implements AgentHooks {
           // After the last await, with none before the write: the definition the run started on is
           // still the trigger's (FAC-118), so a re-pin during the re-checks is seen.
           this.#requireSameDefinition(record.executedAs.hookId, record.executedAs.deliveryId);
+          this.requireHookBound(record.executedAs.hookId);
         } catch (error) {
           assigned.close();
           throw error;
@@ -6955,6 +6973,7 @@ class OverseerImpl implements AgentHooks {
         requester.revalidate();
         // After the last await, with none before the write (FAC-118), as for an assigned run.
         this.#requireSameDefinition(record.workflowRun.hookId, record.workflowRun.deliveryId);
+        this.requireHookBound(record.workflowRun.hookId);
       }
     } catch (error) {
       if (record.executedAs || record.workflowRun) {
@@ -7351,6 +7370,7 @@ class OverseerImpl implements AgentHooks {
     let requester = await requireRunRequester(this, hookId, delivery.deliveryId);
     // Once right after the answer, and again inside the run after its last await (below).
     requester.revalidate();
+    this.requireHookBound(hookId);
     let recorded = this.workflowDefinitionStore().deliveryRun(delivery.deliveryId);
     let run = recorded?.run;
     if (run) {
@@ -7404,6 +7424,8 @@ class OverseerImpl implements AgentHooks {
     let error: unknown;
     let returned: unknown;
     try {
+      // As it starts, whatever started it (FAC-123): a duplicate's connections must be set up now.
+      this.requireHookBound(hookId);
       this.startWorkflowRunProposals(deliveryId);
       if (delivery.executedAs) {
         returned = await this.runAssignedDelivery(hookId,
@@ -12718,7 +12740,25 @@ class OverseerImpl implements AgentHooks {
         if (this.toolLane) this.#updateAlarm();
         else this.#alarmOwed = true;
       },
-    }, this.definitionAudience);
+    }, this.definitionAudience, gadgetId => this.bindingsNeeded(gadgetId));
+  }
+
+  // The connections gadget `gadgetId` still needs set up (FAC-123): none unless it is a duplicate's.
+  bindingsNeeded(gadgetId: WorkpieceId): WorkflowRequiredBinding[] {
+    let gadget = this.storage.gadgets.get(gadgetId);
+    return gadget?.type === "gadget" ? unmetBindings(gadget, target => this.storage.gatekeepers.get(target)?.creationSpec) : [];
+  }
+
+  /**
+   * Refuses with `WORKFLOW_BINDINGS_NEEDED` while the gadget bound hook `hookId` wakes needs a
+   * connection set up (FAC-123): at admission, at firing, as a run starts and before each of its
+   * writes. Synchronous, so a protected point can call it after its last await.
+   */
+  requireHookBound(hookId: number): void {
+    let hook = this.storage.boundHooks.get(hookId);
+    let gadgetId = hook ? hook.gadgetId ?? this.defaultGadgetId : undefined;
+    let gadget = gadgetId === undefined ? undefined : this.storage.gadgets.get(gadgetId);
+    requireBound(gadget?.type === "gadget" ? gadget : undefined, target => this.storage.gatekeepers.get(target)?.creationSpec);
   }
 
   /**
@@ -13861,6 +13901,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     // have landed while it was in flight, and issuing from the captured record would hand out a
     // firing on a dead hook (the enableHookRecord/disableHook idiom).
     record = requireLiveHook(this.impl, hookId);
+    // A duplicate fires only once its connections are set up (FAC-123), scheduled or asked for.
+    this.impl.requireHookBound(hookId);
 
     // A trigger pinned to a workflow definition revision fires only that revision's code, and the
     // firing is recorded with it (workflow-definition-store.ts); it never falls back to another.
@@ -14669,6 +14711,115 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
   async listWorkflowDefinitionShares(id: string): Promise<WorkflowDefinitionShare[]> {
     return this.impl.workflowDefinitionStore().shares(await this.#getClientProfile(), id);
+  }
+  // Duplicating a definition (FAC-123) is building, gated as saving is. The copy is the caller's own:
+  // a new gadget at the source revision's commit, with none of the source's connections; each of
+  // those becomes a requirement, filled only by a connection the caller makes from their own
+  // account or model, checked here before anything is created.
+  async duplicateWorkflowDefinition(input: WorkflowDefinitionDuplicate): Promise<WorkflowDefinition> {
+    await this.#requireSharedConfiguration("build", "shared");
+    if (typeof input !== "object" || input === null) throw new TypeError("Say which workflow to duplicate.");
+    let profile = await this.#getClientProfile();
+    let store = this.impl.workflowDefinitionStore();
+    let title = parseWorkflowDefinitionTitle(input.title);
+    let chosen = store.duplicateSource(profile.id, input.sourceId, input.revision, "build");
+    let sourceGadget = this.impl.getGadgetRecord(chosen.revision.source.gadgetId);
+    let required = requirementsOf(this.impl.visibleBindings(sourceGadget),
+        target => this.impl.storage.gatekeepers.get(target)?.creationSpec);
+    let prepared = await this.#prepareConnections(checkAssignments(required, input.bindings));
+    let taken = (name: string) => this.impl.storage.gadgets.byBindingName.get(name) !== undefined;
+    let created = store.duplicate(profile, chosen, { title, retain: input.retain }, "build", commitId => {
+      let gadget = this.impl.createGadget(title, fallbackBindingName(`${sourceGadget.bindingName}_COPY`, taken),
+          undefined, sourceGadget.output, commitId);
+      if (required.length > 0) {
+        gadget.requiredBindings = required;
+        this.impl.storage.gadgets.put(gadget);
+      }
+      return gadget.id;
+    });
+    await this.#bindPrepared(created.revisions[0]!.source.gadgetId, prepared);
+    return store.get(profile.id, created.id, "build") ?? created;
+  }
+  // Setting up a duplicate's connections is its owner's (FAC-123), a build act. Every connection is
+  // checked before any is made; one already set up is replaced.
+  async rebindWorkflowDefinition(id: string, bindings: Record<string, BlueprintBindingAssignment>)
+      : Promise<WorkflowDefinition> {
+    await this.#requireSharedConfiguration("build", "shared");
+    let profile = await this.#getClientProfile();
+    let store = this.impl.workflowDefinitionStore();
+    let gadgetId = store.ownedGadget(profile.id, id);
+    let required = this.impl.getGadgetRecord(gadgetId).requiredBindings ?? [];
+    if (required.length === 0) throw new Error("This workflow has no connections to set up.");
+    let checked = checkAssignments(required, bindings);
+    if (checked.size === 0) throw new TypeError("Choose a connection to set up.");
+    let prepared = await this.#prepareConnections(checked);
+    // Re-read after the awaits: the definition may have expired or changed hands meanwhile.
+    if (store.ownedGadget(profile.id, id) !== gadgetId) throw new Error("This workflow changed. Try again.");
+    await this.#bindPrepared(gadgetId, prepared, { replace: true });
+    return store.get(profile.id, id, "build")!;
+  }
+
+  // Checks each connection offered for a duplicate's requirements (FAC-123) without creating
+  // anything: an account is resolved through the caller's own User (the install chokepoint) and
+  // must be of the vendor and resource type required; for the deployment's InferOps connection the
+  // caller's own workflow:invoke must hold in that resource's company; a model must be one of the
+  // caller's that a binding may use.
+  async #prepareConnections(checked: ReturnType<typeof checkAssignments>)
+      : Promise<Map<string, PreparedConnection>> {
+    let prepared = new Map<string, PreparedConnection>();
+    let invokeVendor = getSharedConfigurationGatekeeper(this.impl.env);
+    for (let [name, { requirement, assignment }] of checked) {
+      if (assignment.type === "gatekeeper" && requirement.type === "gatekeeper") {
+        let connection = await this.#resolveConnection(assignment.accountId, assignment.resourceUrl);
+        if (connection.vendorId.toLowerCase() !== requirement.vendorId || connection.typeUrlPattern !== requirement.typeUrlPattern) {
+          throw new Error(`The connection "${name}" needs the same kind of resource as the workflow it was copied from.`);
+        }
+        if (invokeVendor !== null && invokeVendor.toLowerCase() === requirement.vendorId) {
+          let answer = await this.#clientUser.workflowInvokeAnswer(assignment.resourceUrl);
+          if (answer?.holds !== true || typeof answer.company !== "string" || answer.company === "") {
+            throw new Error(WORKFLOW_INVOKE_REFUSED);
+          }
+        }
+        prepared.set(name, { kind: "gatekeeper", connection, resourceUrl: assignment.resourceUrl });
+      } else if (assignment.type === "aiModel") {
+        let chatMeta = await retryOnDoReset(() => this.#clientUser.getChatContext(assignment.modelId), this.impl.logger);
+        if (!chatMeta.aiModel) throw new Error(`The connection "${name}" needs one of your models.`);
+        let refusal = modelBindingRefusal(this.impl.env, chatMeta.aiModel);
+        if (refusal) throw new Error(refusal);
+        prepared.set(name, { kind: "aiModel", modelId: assignment.modelId });
+      }
+    }
+    return prepared;
+  }
+
+  // Makes and binds the prepared connections into duplicate gadget `gadgetId` (FAC-123). A failure
+  // part-way unbinds what this call bound (one it replaced stays removed), so its requirements are
+  // unmet and its runs refused until it is set up; it never runs on a half-made set.
+  async #bindPrepared(gadgetId: WorkpieceId, prepared: Map<string, PreparedConnection>,
+                      { replace = false }: { replace?: boolean } = {}): Promise<void> {
+    // A chat's provisional edge isn't this call's to replace: refused before anything is made.
+    for (let name of prepared.keys()) {
+      if (this.impl.getGadgetRecord(gadgetId).bindings[name]?.pending) {
+        throw new Error(`A chat is changing the connection "${name}" now. Accept or revert its changes first.`);
+      }
+    }
+    let bound: string[] = [];
+    try {
+      for (let [name, item] of prepared) {
+        let client = item.kind === "gatekeeper"
+          ? await this.#addConnection(item.connection, item.resourceUrl)
+          : await this.newAiModelGatekeeper(item.modelId);
+        let target = await client.getId();
+        if (replace && this.impl.getGadgetRecord(gadgetId).bindings[name]) this.impl.unbindWorkpiece(gadgetId, name);
+        this.impl.bindWorkpiece(gadgetId, name, target);
+        bound.push(name);
+      }
+    } catch (error) {
+      for (let name of bound) {
+        try { this.impl.unbindWorkpiece(gadgetId, name); } catch { /* already gone */ }
+      }
+      throw error;
+    }
   }
   async pinTriggerDefinition(hookId: number, ref: WorkflowTriggerDefinitionRef | null): Promise<void> {
     await this.#requireSharedConfiguration("build", "shared");
@@ -17439,6 +17590,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async shareWorkflowDefinition(_id: string, _profileId: string, _rights: WorkflowDefinitionRights | null)
       : Promise<WorkflowDefinitionShare[]> { this.#deny(); }
   async listWorkflowDefinitionShares(_id: string): Promise<WorkflowDefinitionShare[]> { this.#deny(); }
+  async duplicateWorkflowDefinition(_input: WorkflowDefinitionDuplicate): Promise<WorkflowDefinition> { this.#deny(); }
+  async rebindWorkflowDefinition(_id: string, _bindings: Record<string, BlueprintBindingAssignment>)
+      : Promise<WorkflowDefinition> { this.#deny(); }
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
@@ -18113,6 +18267,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async shareWorkflowDefinition(_id: string, _profileId: string, _rights: WorkflowDefinitionRights | null)
       : Promise<WorkflowDefinitionShare[]> { this.#deny(); }
   async listWorkflowDefinitionShares(_id: string): Promise<WorkflowDefinitionShare[]> { this.#deny(); }
+  async duplicateWorkflowDefinition(_input: WorkflowDefinitionDuplicate): Promise<WorkflowDefinition> { this.#deny(); }
+  async rebindWorkflowDefinition(_id: string, _bindings: Record<string, BlueprintBindingAssignment>)
+      : Promise<WorkflowDefinition> { this.#deny(); }
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
@@ -18962,7 +19119,7 @@ async function forgetProvisioned(
 export async function invokeWorkflowTrigger(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
         "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations" | "getGadgetHead" |
-        "definitionRoles">,
+        "definitionRoles" | "requireHookBound">,
     userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
@@ -18973,6 +19130,8 @@ export async function invokeWorkflowTrigger(
   let company = await requireWorkflowInvoke(impl, userId, hookId);
   // Re-read after the await: the input gate was open, so the hook may have been disabled meanwhile.
   let record = requireLiveHook(impl as OverseerImpl, hookId);
+  // A duplicate's connections must be set up before anything is admitted (FAC-123).
+  impl.requireHookBound(hookId);
   let store = impl.workflowDefinitionStore();
   // Assignments off (FAC-102): a trigger assigned before is refused here, before anything is minted.
   if (!workflowAssignmentsEnabled(impl.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
@@ -19084,6 +19243,7 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
     // uncaught, too).
     async apply(_target, _thisArg, args: unknown[]) {
       let record = requireLiveHook(impl, hookId);
+      impl.requireHookBound(hookId);
       return Reflect.apply(record.callback as any, undefined, args);
     },
     get(_target, prop) {
@@ -19093,6 +19253,7 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
       if (typeof prop === "symbol" || prop === "then") return undefined;
       return async (...args: unknown[]) => {
         let record = requireLiveHook(impl, hookId);
+        impl.requireHookBound(hookId);
         return Reflect.apply((record.callback as any)[prop], record.callback, args);
       };
     },
