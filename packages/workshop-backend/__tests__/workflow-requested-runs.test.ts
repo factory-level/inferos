@@ -37,7 +37,7 @@ function triggers(impl: any) {
     creationSpec: { type: "gatekeeper", vendorId: "scheduler", resourceUrl: "scheduler://tasks", typeUrlPattern: "scheduler://*" },
   });
   let store = impl.workflowDefinitionStore();
-  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, head);
+  let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, head, "build");
   store.publish(ADA, saved.id, 1);
   for (let hook of [HOOK, OTHER_HOOK]) {
     impl.storage.boundHooks.put({
@@ -71,7 +71,7 @@ function triggers(impl: any) {
 /** One run `profileId` asked trigger `hook` for, fired at `at`; returns its invocation and delivery ids. */
 function asked(impl: any, store: any, profileId: string, hook: number, at: Date, company: string | null = COMPANY_A) {
   let invocation = store.beginInvocation(profileId, hook, company);
-  let delivery = store.fire(hook, GADGET, head, () => true, invocation.id)!;
+  let delivery = store.fire(hook, GADGET, head, () => "build" as const, invocation.id)!;
   let stored = impl.storage.workflowDeliveries.get(delivery.deliveryId);
   impl.storage.workflowDeliveries.put({ ...stored, at });
   return { invocationId: invocation.id as string, deliveryId: delivery.deliveryId as number };

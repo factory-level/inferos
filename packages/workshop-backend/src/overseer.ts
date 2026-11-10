@@ -8,6 +8,7 @@ import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
+  WorkflowDefinitionRights, WorkflowDefinitionShare,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
   WorkflowTriggerDefinitionRef,
 } from "@gadgets/workshop-shared/workflow-definition";
@@ -23,6 +24,7 @@ import {
 } from "./system-run.js";
 import {
   WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
+  type StoredWorkflowDefinitionShare, type WorkflowDefinitionAudience, WORKSPACE_AUDIENCE,
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
   type QueuedWorkflowRun,
 } from "./workflow-definition-store";
@@ -278,9 +280,10 @@ export const ACTION_IN_PROGRESS = "This action is being decided; its outcome is 
  */
 export async function requireRunRequester(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" |
-        "workflowDefinitionStore">,
+        "workflowDefinitionStore" | "definitionRoles">,
     hookId: number, deliveryId: number): Promise<RunRequesterCheck> {
   let store = impl.workflowDefinitionStore();
+  let roleOf = await impl.definitionRoles();
   let recorded = store.deliveryRun(deliveryId);
   if (!recorded) throw new Error(RUN_REQUESTER_REVOKED);
   if (!recorded.invoked && recorded.run?.requester.kind !== "person") return NO_RUN_REQUESTER;
@@ -295,6 +298,12 @@ export async function requireRunRequester(
       : assignment === null;
     if (!sameExecutor || impl.storage.boundHooks.get(hookId)?.enabled !== true ||
         !store.controls(profileId).some(control => control.hookId === hookId)) {
+      throw new Error(RUN_REQUESTER_REVOKED);
+    }
+    // Last (FAC-122): they may still run the definition, by a share or the audience rule.
+    try {
+      store.requireRunRight(profileId, hookId, roleOf(profileId));
+    } catch {
       throw new Error(RUN_REQUESTER_REVOKED);
     }
   };
@@ -1872,6 +1881,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Saved and published workflow definitions, the triggers pinned to them, and the deliveries
       // those triggers made (see workflow-definition-store.ts).
       workflowDefinitions: collection<StoredWorkflowDefinition>()({ primaryKey: "id" }),
+      // Who each definition is shared with by account, and how (FAC-122).
+      workflowDefinitionShares: collection<StoredWorkflowDefinitionShare>()({ primaryKey: "key" }),
       workflowTriggerPins: collection<StoredTriggerPin>()({ primaryKey: "hookId" }),
       workflowDeliveries: collection<StoredWorkflowDelivery>()({ primaryKey: "id" }),
       // Who may ask a pinned trigger to run now, and the requests admitted but not yet delivered
@@ -12681,7 +12692,24 @@ class OverseerImpl implements AgentHooks {
         if (this.toolLane) this.#updateAlarm();
         else this.#alarmOwed = true;
       },
-    });
+    }, this.definitionAudience);
+  }
+
+  /**
+   * Who may read and run a published definition beyond its owner and the people it is shared with
+   * (FAC-122): today's rule, the whole workspace, until the product decision lands. Tests set it.
+   */
+  definitionAudience: WorkflowDefinitionAudience = WORKSPACE_AUDIENCE;
+
+  /**
+   * The role of `profileId` in this workspace now, for a definition right (FAC-122): `build` for
+   * the owner, else their collaborator role, else null. Synchronous once the sharing manager and
+   * the owner's profile are known; callers resolve both first (`definitionRoles`).
+   */
+  async definitionRoles(): Promise<(profileId: string) => CollaboratorRole | null> {
+    let sharing = await this.getSharingManager();
+    let owner = await this.getOwnerProfileId();
+    return profileId => profileId === owner ? "build" : sharing.getEffectiveRole(profileId) ?? null;
   }
 
   /** See the module-level `requireSharedConfiguration`. */
@@ -13825,7 +13853,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
     }
     let delivery = this.impl.workflowDefinitionStore().fire(hookId, record.gadgetId ?? this.impl.defaultGadgetId ?? null,
         gadgetId => this.impl.getGadgetHead(gadgetId),
-        profileId => profileId === ownerProfileId || sharing.getEffectiveRole(profileId) === "build",
+        profileId => profileId === ownerProfileId ? "build" : sharing.getEffectiveRole(profileId) ?? null,
         invocationId);
     // The request is taken: from here a failure is the run's own (invokeWorkflowTrigger).
     // Only for an invokeTrigger call still waiting on it: a late delivery leaves nothing behind.
@@ -14586,24 +14614,45 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // Workflow definitions: saving is building and publishing is publishing, each gated as such in a
   // shared workspace; the store decides ownership and visibility (workflow-definition-store.ts).
   async listWorkflowDefinitions(): Promise<WorkflowDefinition[]> {
-    return this.impl.workflowDefinitionStore().list((await this.#getClientProfile()).id);
+    return this.impl.workflowDefinitionStore().list((await this.#getClientProfile()).id, "build");
   }
+  // An editor a definition is shared with (FAC-122) saves it here too: this is a build session.
   async saveWorkflowDefinition(input: WorkflowDefinitionSave): Promise<WorkflowDefinition> {
     await this.#requireSharedConfiguration("build", "shared");
     let profile = await this.#getClientProfile();
-    return this.impl.workflowDefinitionStore().save(profile, input, id => this.impl.getGadgetHead(id));
+    return this.impl.workflowDefinitionStore().save(profile, input, id => this.impl.getGadgetHead(id), "build");
   }
+  // An editor publishes only where the deployment's shared configuration is in force here, whose
+  // publish authority was just asked; in a personal workspace only the owner publishes (FAC-122).
   async publishWorkflowDefinition(id: string, revision: number): Promise<WorkflowDefinition> {
     await this.#requireSharedConfiguration("publish", "shared");
+    let editorsMayPublish = getSharedConfigurationGatekeeper(this.impl.env) !== null &&
+        await this.impl.isSharedConfiguration();
     let profile = await this.#getClientProfile();
-    return this.impl.workflowDefinitionStore().publish(profile, id, revision);
+    return this.impl.workflowDefinitionStore().publish(profile, id, revision, { editorsMayPublish, role: "build" });
+  }
+  // Sharing a definition is its owner's (FAC-122), a build act, gated as saving is in a shared
+  // workspace. The recipient's role is read here, so only a collaborator can be shared with.
+  async shareWorkflowDefinition(id: string, profileId: string, rights: WorkflowDefinitionRights | null)
+      : Promise<WorkflowDefinitionShare[]> {
+    await this.#requireSharedConfiguration("build", "shared");
+    let profile = await this.#getClientProfile();
+    let roleOf = await this.impl.definitionRoles();
+    return this.impl.workflowDefinitionStore().share(profile, id, profileId, rights,
+        typeof profileId === "string" ? roleOf(profileId) : null);
+  }
+  async listWorkflowDefinitionShares(id: string): Promise<WorkflowDefinitionShare[]> {
+    return this.impl.workflowDefinitionStore().shares(await this.#getClientProfile(), id);
   }
   async pinTriggerDefinition(hookId: number, ref: WorkflowTriggerDefinitionRef | null): Promise<void> {
     await this.#requireSharedConfiguration("build", "shared");
     let profile = await this.#getClientProfile();
     let hook = this.impl.storage.boundHooks.get(hookId);
     if (!hook) throw new Error("No such hook.");
-    // Clearing the pin removes the trigger's assignment too: retire it first (#374 round 2).
+    // Only the definition's owner or an editor changes what the trigger runs (FAC-122), checked
+    // before anything changes. Clearing the pin removes the trigger's assignment too: retire it first
+    // (#374 round 2).
+    this.impl.workflowDefinitionStore().requireTriggerChangeable(profile.id, hookId);
     if (ref === null) this.impl.retireTriggerAssignment(hookId);
     this.impl.workflowDefinitionStore().pinTrigger(profile.id, hookId,
         hook.gadgetId ?? this.impl.defaultGadgetId ?? null, ref);
@@ -14612,7 +14661,7 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.impl.workflowDefinitionStore().pinOf(hookId);
   }
   async listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]> {
-    return this.impl.workflowDefinitionStore().deliveries((await this.#getClientProfile()).id, definitionId);
+    return this.impl.workflowDefinitionStore().deliveries((await this.#getClientProfile()).id, definitionId, "build");
   }
   // A control lets named people run a pinned trigger now; setting one is building. Running one is
   // the listed person's own request, checked against the authenticated session's profile.
@@ -17292,7 +17341,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async deleteFlow(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
   // A use session sees published workflow definitions only, and changes nothing.
   async listWorkflowDefinitions(): Promise<WorkflowDefinition[]> {
-    return this.impl.workflowDefinitionStore().list(this.clientProfileId)
+    return this.impl.workflowDefinitionStore().list(this.clientProfileId, "use")
         .filter(definition => definition.published !== null)
         .map(definition => ({
           ...definition,
@@ -17301,6 +17350,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   async saveWorkflowDefinition(_input: WorkflowDefinitionSave): Promise<WorkflowDefinition> { this.#deny(); }
   async publishWorkflowDefinition(_id: string, _revision: number): Promise<WorkflowDefinition> { this.#deny(); }
+  async shareWorkflowDefinition(_id: string, _profileId: string, _rights: WorkflowDefinitionRights | null)
+      : Promise<WorkflowDefinitionShare[]> { this.#deny(); }
+  async listWorkflowDefinitionShares(_id: string): Promise<WorkflowDefinitionShare[]> { this.#deny(); }
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
@@ -17972,6 +18024,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async listWorkflowDefinitions(): Promise<WorkflowDefinition[]> { this.#deny(); }
   async saveWorkflowDefinition(_input: WorkflowDefinitionSave): Promise<WorkflowDefinition> { this.#deny(); }
   async publishWorkflowDefinition(_id: string, _revision: number): Promise<WorkflowDefinition> { this.#deny(); }
+  async shareWorkflowDefinition(_id: string, _profileId: string, _rights: WorkflowDefinitionRights | null)
+      : Promise<WorkflowDefinitionShare[]> { this.#deny(); }
+  async listWorkflowDefinitionShares(_id: string): Promise<WorkflowDefinitionShare[]> { this.#deny(); }
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
@@ -18820,10 +18875,13 @@ async function forgetProvisioned(
  */
 export async function invokeWorkflowTrigger(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
-        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations" | "getGadgetHead">,
+        "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations" | "getGadgetHead" |
+        "definitionRoles">,
     userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
+  // Who may run what here (FAC-122), resolved before the other awaits and read after the last one.
+  let roleOf = await impl.definitionRoles();
   // The person's own InferOps grant (workflow:invoke), asked freshly at every request, so a removed
   // grant stops the next run. Before anything is minted or handed on.
   let company = await requireWorkflowInvoke(impl, userId, hookId);
@@ -18837,6 +18895,9 @@ export async function invokeWorkflowTrigger(
   // uses, before anything is minted or the trigger's gatekeeper is asked to run it (FAC-111).
   store.requireCurrentRevision(hookId, record.gadgetId ?? impl.defaultGadgetId ?? null,
       gadgetId => impl.getGadgetHead(gadgetId));
+  // The definition the trigger runs must be one the person may run (FAC-122): a share or the audience
+  // rule, beside the trigger's run control, which beginInvocation checks. Both, never either.
+  store.requireRunRight(profileId, hookId, roleOf(profileId));
   // The company the person was answered in becomes the run's scope (FAC-111).
   let invocation = store.beginInvocation(profileId, hookId, company);
   // What startHook reads to tell this call's delivery taken (see takenInvocations).
