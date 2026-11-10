@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
+import { ACTION_FAILURE_KIND_TEXT, RECONNECT_GUIDANCE } from '../../actionDecision'
 import { act } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
@@ -68,6 +69,18 @@ const button = (label: string) => {
 const status = () => document.querySelector('[role="status"]')?.textContent ?? ''
 
 describe('SessionApprovals', () => {
+  it('says why a pending action last failed by its kind, under the heading the Dot points to (FAC-119)', async () => {
+    const signIn = { ...MOVE, lastAttempt: { outcome: 'notApplied', message: 'token expired at the provider', code: 'UNAUTHORIZED',
+      kind: 'sign-in', retryable: true, at: new Date(0) } } as ActionLogEntry
+    await renderPending({}, signIn)
+    const text = document.body.textContent ?? ''
+    expect(document.querySelector('h2')?.textContent).toBe('Needs your approval')
+    expect(text).toContain(ACTION_FAILURE_KIND_TEXT['sign-in'])
+    expect(text).toContain(RECONNECT_GUIDANCE)
+    expect(text).not.toContain('token expired at the provider')
+    expect(button('Approve').disabled).toBe(false)
+  })
+
   it('lists a pending action with its resource and who asked for it', async () => {
     await renderPending()
     const text = document.body.textContent ?? ''
@@ -106,7 +119,7 @@ describe('SessionApprovals', () => {
       { type: 'approvalResolved', approval: REF, outcome: 'applied' },
     ])
     expect(server.listCalls).toEqual([{ beforeId: 5 }])
-    expect(status()).toContain('approved and applied')
+    expect(status()).toContain('”: Applied.')
   })
 
   it('reports a refused apply as failed, with the gatekeeper’s message', async () => {
@@ -120,7 +133,7 @@ describe('SessionApprovals', () => {
       { type: 'approvalResolved', approval: REF, outcome: 'failed' },
     ])
     expect(status()).toContain('STALE_REVISION: the board changed since this move was proposed')
-    expect(status()).not.toContain('approved and applied')
+    expect(status()).not.toContain('Applied.')
     // The action stays pending, so no decided entry re-reads its board: it is re-read here.
     expect(boards.invalidated).toEqual(['inferops://demo.local/project/board/DEMO'])
   })
@@ -132,7 +145,7 @@ describe('SessionApprovals', () => {
 
     expect(rejectAction).toHaveBeenCalledWith(4)
     expect(onEvent).toHaveBeenLastCalledWith({ type: 'approvalResolved', approval: REF, outcome: 'rejected' })
-    expect(status()).toContain('was rejected')
+    expect(status()).toContain('”: Rejected, not applied.')
   })
 
   it('offers only Deny for an attempt that was not explicitly retryable, and Approve for one that was', async () => {
@@ -152,7 +165,7 @@ describe('SessionApprovals', () => {
     const { server } = await renderPending({}, uncertain)
     await act(async () => button('Deny').click())
     await server.resolvePage({ entries: [{ ...uncertain, state: 'rejected' } as ActionLogEntry] })
-    expect(status()).toContain('was rejected. It may already have been applied')
+    expect(status()).toContain('”: Outcome unknown: it may or may not have applied. Its last attempt may have reached the service.')
     expect(status()).toContain('local approval is closed')
     view.cleanup()
 
@@ -162,7 +175,7 @@ describe('SessionApprovals', () => {
       lastAttempt: { outcome: 'unknown', message: 'Lost.', retryable: false, at: new Date(Date.now() - 30_000) },
       description: { title: 'Update DEMO-1: priority', description: '', implementsRevert: false },
     })] })
-    expect(document.body.textContent).toContain('“Update DEMO-1: priority” was rejected. It may already have been applied')
+    expect(document.body.textContent).toContain('“Update DEMO-1: priority”: Outcome unknown: it may or may not have applied. Its last attempt may have reached the service.')
     expect(document.body.textContent).toContain('local approval is closed')
   })
 
@@ -184,13 +197,15 @@ describe('SessionApprovals', () => {
     await act(async () => button('Approve').click())
     await server.resolvePage({ entries: [attempted('unknown', 'Lost after sending.')] })
     await show({ reviewing: REF, lastApprovalOutcome: { ...REF, outcome: 'failed' } })
-    expect(status()).toContain('Lost after sending.')
+    // The provider's words never reach the status (FAC-119): the decision's words do.
+    expect(status()).toContain('Its last attempt may have reached the service.')
+    expect(status()).not.toContain('Lost after sending.')
 
     // Another tab rejects it: the newer outcome wins over this tab's notice, read afresh.
     await show({ reviewing: REF, lastApprovalOutcome: { ...REF, outcome: 'rejected' } })
     await server.resolvePage({ entries: [attempted('unknown', 'Lost after sending.', 'rejected')] })
-    expect(status()).toContain('“Move DEMO-1 to Done” was rejected.')
-    expect(status()).toContain('It may already have been applied')
+    expect(status()).toContain('“Move DEMO-1 to Done”: Outcome unknown: it may or may not have applied.')
+    expect(status()).toContain('Its last attempt may have reached the service.')
     expect(status()).toContain('local approval is closed')
     expect(status()).not.toContain('Not yet.')
   })
@@ -212,7 +227,7 @@ describe('SessionApprovals', () => {
       description: { title: 'Update DEMO-1: priority', description: '', implementsRevert: false },
     })] })
     expect(server.listCalls).toEqual([{ beforeId: 3 }])
-    expect(document.body.textContent).toContain('“Update DEMO-1: priority” was rejected. · just now')
+    expect(document.body.textContent).toContain('“Update DEMO-1: priority”: Rejected, not applied. · just now')
     expect(document.body.textContent).not.toContain('Action 2')
     expect(status()).toBe('')
   })
@@ -220,7 +235,7 @@ describe('SessionApprovals', () => {
   it('drops a restored outcome that is no longer recent', async () => {
     const { server } = await renderPending({ lastApprovalOutcome: { workspaceId: 'ops', actionId: 2, outcome: 'applied' } })
     await server.resolvePage({ entries: [entry(2, { state: 'approved', appliedAt: new Date(Date.now() - 10 * 60_000) })] })
-    expect(document.body.textContent).not.toContain('was approved and applied')
+    expect(document.body.textContent).not.toContain('”: Applied.')
     expect(status()).toBe('')
   })
 
@@ -229,7 +244,7 @@ describe('SessionApprovals', () => {
     await show({ lastApprovalOutcome: { workspaceId: 'ops', actionId: 4, outcome: 'applied' } })
     expect(status()).toBe('')
     await server.resolvePage({ entries: [{ ...MOVE, state: 'approved', appliedAt: new Date() } as ActionLogEntry] })
-    expect(status()).toBe('“Move DEMO-1 to Done” was approved and applied.')
+    expect(status()).toBe('“Move DEMO-1 to Done”: Applied.')
   })
 
   it('renders nothing for a workspace the viewer may only use', async () => {

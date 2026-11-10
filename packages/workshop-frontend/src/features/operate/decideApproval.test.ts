@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, ActionState, Overseer } from '@gadgets/workshop-shared/api'
-import { decideApproval } from './decideApproval'
+import { APPROVE_UNREADABLE_TEXT, decideApproval } from './decideApproval'
 
 const logged = (state: ActionState) =>
   ({ id: 4, state, type: 'action', resourceTitle: 'Board', createdAt: new Date() }) as ActionLogEntry
@@ -25,13 +25,22 @@ describe('decideApproval', () => {
     expect(result.outcome).toBeNull()
   })
 
+  it("says only that it couldn't read why, when an approve threw and its record can't be read", async () => {
+    const result = await decideApproval(overseer({
+      approve: async () => { throw new Error('InferOps said: token expired for acme-bot') },
+      list: async () => { throw new Error('connection lost') },
+    }), 4, 'approve')
+    expect(result).toEqual({ outcome: 'failed', error: APPROVE_UNREADABLE_TEXT })
+  })
+
   it('reports a provider refusal as failed, with the reason the log kept', async () => {
     const result = await decideApproval(overseer({
       approve: async () => { throw new Error('refused') },
       list: async () => ({ entries: [{ ...logged('failed'),
         lastAttempt: { outcome: 'notApplied', message: 'Policy denies it.', at: new Date() } } as ActionLogEntry] }),
     }), 4, 'approve')
-    expect(result).toEqual({ outcome: 'failed', error: 'Policy denies it.' })
+    // The kind (unavailable, for a record with none) and the receipt's reason, never the provider's words.
+    expect(result).toEqual({ outcome: 'failed', error: "The service couldn't be reached, or didn't say why. The service refused this change." })
   })
 
   it('reports an unknown outcome as neither applied nor failed, only as a warning', async () => {
@@ -40,7 +49,7 @@ describe('decideApproval', () => {
       list: async () => ({ entries: [{ ...logged('pending'),
         lastAttempt: { outcome: 'unknown', message: 'Timed out after sending.', at: new Date() } } as ActionLogEntry] }),
     }), 4, 'approve')
-    expect(result).toEqual({ outcome: null, error: 'It may already have been applied; the outcome is unknown: Timed out after sending.' })
+    expect(result).toEqual({ outcome: null, error: 'Its last attempt may have reached the service. It may or may not have been applied. Check before making it again.' })
   })
 
   it('reports what the log says when someone else decided first', async () => {

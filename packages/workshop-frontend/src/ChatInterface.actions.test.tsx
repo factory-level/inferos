@@ -210,7 +210,7 @@ describe('apply attempts on the card', () => {
     }))
     expect(approve()?.disabled).toBe(true)
     expect(document.body.textContent).not.toContain('Always approve')
-    expect(document.body.textContent).toContain('It cannot be sent again: check it at the provider, then deny it.')
+    expect(document.body.textContent).toContain('It cannot be sent again: check it at the service, then deny it.')
   })
 
   it('keeps Approve after an explicitly retryable attempt', async () => {
@@ -225,7 +225,7 @@ describe('apply attempts on the card', () => {
       state: 'rejected', resolvedBy: { type: 'user', id: 'u', name: 'U' },
       lastAttempt: { outcome: 'unknown', message: 'Lost after sending.', retryable: false, at: new Date() },
     }))
-    expect(document.body.textContent).toContain('Denied, may have applied')
+    expect(document.body.textContent).toContain('Outcome unknown: it may or may not have applied')
     const toggle = [...document.querySelectorAll('button')].find(b => b.getAttribute('aria-expanded') === 'false')
     act(() => toggle!.click())
     expect(document.body.textContent).toContain('local approval is closed')
@@ -243,7 +243,7 @@ describe('outcomes on the card', () => {
 
   it('says an approved action whose apply is in flight is applying, not done, and offers no second approval', async () => {
     await renderPendingCard(entry(1, { applying: true }))
-    expect(document.body.textContent).toContain('Applying, not done yet')
+    expect(document.body.textContent).toContain('Approved, applying now, not done yet')
     expect(document.body.textContent).not.toContain('Applied')
     expect([...document.querySelectorAll('button')].some(b => b.textContent === 'Approve' && !b.disabled)).toBe(false)
   })

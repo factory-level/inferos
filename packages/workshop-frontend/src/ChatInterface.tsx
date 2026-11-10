@@ -1,4 +1,6 @@
-import { attemptNotice, canApproveAgain } from "./actionAttempt";
+import { canApproveAgain } from "./actionAttempt";
+import { ACTION_OUTCOME_TEXT, actionOutcome } from "@gadgets/workshop-shared/action-outcome";
+import { ActionDecision } from "./components/ActionDecision";
 import { logRpcFailure } from "./rpcErrors";
 import {
   useState,
@@ -3319,10 +3321,8 @@ function ChatInterface({
     // offered, and it says it is applying until the provider answers (FAC-97).
     const isApplying = state === "pending" && log.applying === true;
     const isPending = state === "pending" && !isApplying;
-    const isApproved = state === "approved";
     const isRejected = state === "rejected";
     const isFailed = state === "failed";
-    const notice = attemptNotice(log);
     // A blocking (awaitDecision) pending action suspends the agent turn and blocks the composer, so
     // present it as a prominent callout with its details expanded by default.
     const isBlocking = isPending && log.description.awaitDecision === true;
@@ -3331,16 +3331,9 @@ function ChatInterface({
     // decision. Resolved actions are history, and collapse so a long thread stays scannable.
     const showDescription = isPending || open;
     const metadata = log.resourceTitle;
-    const stateLabel = isApproved
-      ? "Applied"
-      : isApplying
-        ? "Applying, not done yet"
-      : isRejected
-        // A denial does not undo an attempt that may already have applied.
-        ? log.lastAttempt?.outcome === "unknown" ? "Denied, may have applied" : "Denied"
-        : isFailed
-          ? "Failed, not applied"
-          : null;
+    // Where it stands, in FAC-97's words (FAC-119), as every decision card says it. A rejection
+    // after an attempt that may have applied reads as unknown: rejecting it undid nothing.
+    const stateLabel = isPending ? null : ACTION_OUTCOME_TEXT[actionOutcome(log)];
     const stateLabelCls = isRejected || isFailed
       ? "text-kumo-danger"
       : "text-kumo-inactive";
@@ -3462,11 +3455,7 @@ function ChatInterface({
                   </div>
                 )}
                 {incomplete && <IncompleteDescriptionNotice id={incompleteId} className="mt-2" />}
-                {notice && (
-                  <p className={`mt-2 text-[12.5px] leading-[18px] ${notice.tone === "warning" ? "text-kumo-warning" : "text-kumo-danger"}`}>
-                    {notice.text}
-                  </p>
-                )}
+                <ActionDecision entry={log} showOutcome={false} className="mt-2 text-[12.5px] leading-[18px]" />
               </div>
               <div className="ml-3 flex flex-shrink-0 items-center gap-1 self-center">
                 {actionControls}
@@ -3534,11 +3523,7 @@ function ChatInterface({
               </div>
             )}
             {incomplete && <IncompleteDescriptionNotice id={incompleteId} />}
-            {notice && (
-              <p className={`m-0 ${notice.tone === "warning" ? "text-kumo-warning" : "text-kumo-danger"}`}>
-                {notice.text}
-              </p>
-            )}
+            <ActionDecision entry={log} showOutcome={false} />
             {resourceMeta}
           </div>
         )}

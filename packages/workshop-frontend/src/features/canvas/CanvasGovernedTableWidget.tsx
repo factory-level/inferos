@@ -4,7 +4,8 @@ import { QueryClient } from '@tanstack/react-query'
 import { Button, Select } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { GovernedSessionHandle, Overseer } from '@gadgets/workshop-shared/api'
-import { ACTION_OUTCOME_TEXT, type ActionOutcome } from '@gadgets/workshop-shared/action-outcome'
+import { type ActionOutcome, type ActionResult } from '@gadgets/workshop-shared/action-outcome'
+import { ActionReceiptLine } from '../../components/ActionReceipt'
 import type { ActionReceipt } from '@gadgets/workshop-shared/gatekeeper'
 import type { CanvasGovernedTableWidget as Widget } from '@gadgets/workshop-shared/canvas'
 import type { GovernedCommand, GovernedDescription, GovernedWriteSession } from '@gadgets/workshop-shared/governed-data'
@@ -162,7 +163,7 @@ const GovernedTable = ({ resource, session }: { resource: string; session: Gover
 const RECEIPT_POLL_MS = 1_000
 const RECEIPT_POLL_MAX_MS = 30_000
 const RECEIPT_POLL_MAX_ATTEMPTS = 8
-type CommandState = { kind: 'receipt'; outcome: ActionOutcome; reason?: string } | { kind: 'status-error' } | { kind: 'stale'; reason?: string } | { kind: 'error'; message: string } | null
+type CommandState = { kind: 'receipt'; outcome: ActionOutcome; reason?: string; result?: ActionResult } | { kind: 'status-error' } | { kind: 'stale'; reason?: string } | { kind: 'error'; message: string } | null
 
 const CommandForm = ({ resource, row, command, description, refresh }: { resource: string; row: GovernedRecord; command: GovernedCommand; description: GovernedDescription; refresh: () => Promise<unknown> }) => {
   const field = description.fields.find(item => item.name === command.fields[0])
@@ -185,7 +186,7 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
         return
       }
       if (status.outcome === 'waiting' || status.outcome === 'running') {
-        if (mounted.current) setState({ kind: 'receipt', outcome: status.outcome, ...(status.reason ? { reason: status.reason } : {}) })
+        if (mounted.current) setState({ kind: 'receipt', outcome: status.outcome, ...(status.reason ? { reason: status.reason } : {}), ...(status.result ? { result: status.result } : {}) })
         if (poll === RECEIPT_POLL_MAX_ATTEMPTS - 1) {
           if (mounted.current) setState({ kind: 'status-error' })
           return
@@ -195,7 +196,7 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
         delay = Math.min(delay * 2, RECEIPT_POLL_MAX_MS)
         continue
       }
-      if (mounted.current) setState({ kind: 'receipt', outcome: status.outcome, ...(status.reason ? { reason: status.reason } : {}) })
+      if (mounted.current) setState({ kind: 'receipt', outcome: status.outcome, ...(status.reason ? { reason: status.reason } : {}), ...(status.result ? { result: status.result } : {}) })
       let refreshed = true
       try { await refresh() } catch { refreshed = false }
       if (mounted.current && status.code === 'STALE_REVISION') {
@@ -243,7 +244,7 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
       {field.options.filter(option => option !== row.values[field.name]).map(option => <Select.Option key={option} value={option}>{option}</Select.Option>)}
     </Select>
     <Button size="sm" disabled={!value || pending} onClick={() => void propose()}>Propose</Button>
-    {state?.kind === 'receipt' && <span role="status" className="text-xs text-kumo-subtle">{ACTION_OUTCOME_TEXT[state.outcome]}{state.reason ? `: ${state.reason}` : ''}</span>}
+    {state?.kind === 'receipt' && <ActionReceiptLine outcome={state.outcome} reason={state.reason} result={state.result} />}
     {state?.kind === 'status-error' && <span role="status" className="text-xs text-kumo-danger">Could not check this operation's status. It has not been resubmitted. Reload to check it in approvals.</span>}
     {state?.kind === 'status-error' && <Button size="sm" onClick={() => setAttempt(count => count + 1)}>Retry status</Button>}
     {state?.kind === 'stale' && <span role="status" className="text-xs text-kumo-danger">This row changed since it was read. {state.reason ?? 'It has been refreshed; review it and try again.'}</span>}

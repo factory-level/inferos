@@ -1,5 +1,6 @@
 import { actionOutcome } from '@gadgets/workshop-shared/action-outcome'
-import { attemptNotice, canApproveAgain } from './actionAttempt'
+import { ActionDecision } from './components/ActionDecision'
+import { canApproveAgain } from './actionAttempt'
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Switch, useKumoToastManager } from '@cloudflare/kumo'
 import { CaretRight, Check, Eye, Lightning, ShieldCheck } from '@phosphor-icons/react'
@@ -660,7 +661,6 @@ function ReviewRequest({
   const fieldsId = `${reviewId}-fields`
   const incompleteId = `${reviewId}-incomplete`
   const incomplete = isDescriptionIncomplete(record)
-  const attempt = attemptNotice(record)
   const describedBy = restricted
     ? [
       noticeId,
@@ -714,11 +714,7 @@ function ReviewRequest({
         </div>
       </div>
 
-      {attempt && (
-        <p className={`m-0 mt-1.5 max-w-2xl text-[12px] leading-4 ${attempt.tone === 'warning' ? 'text-kumo-warning' : 'text-kumo-danger'}`}>
-          {attempt.text}
-        </p>
-      )}
+      {record.type === 'action' && <ActionDecision entry={record} showOutcome={false} className="mt-1.5 max-w-2xl text-[12px]" />}
 
       {restricted && <RestrictedApprovalNotice id={noticeId} className="mt-2 max-w-2xl" />}
 
@@ -761,7 +757,6 @@ function HistoryRow({
   const autoApproved = record.type === 'action' && record.autoApproved === true
   const at = actionChangeTime(record)
   const status = activityStatus(record)
-  const notice = attemptNotice(record)
 
   return (
     <div className={expanded ? 'bg-kumo-elevated/30' : ''}>
@@ -801,18 +796,8 @@ function HistoryRow({
             </p>
           )}
           <ActionFields fields={entryFields(record)} className="mt-2 max-w-2xl" />
-          {notice && (
-            <p className={`m-0 mt-2 whitespace-pre-wrap text-[12.5px] leading-[18px] ${notice.tone === 'warning' ? 'text-kumo-warning' : 'text-kumo-danger'}`}>
-              {notice.text}
-            </p>
-          )}
-          {record.type === 'action' && record.result && (
-            <dl aria-label="What the provider reported" className="m-0 mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[12px] text-kumo-subtle">
-              {Object.entries(record.result).map(([key, value]) => (
-                <div key={key} className="flex gap-1"><dt className="text-kumo-inactive">{key}:</dt><dd className="m-0 break-all">{String(value)}</dd></div>
-              ))}
-            </dl>
-          )}
+          {/* The same decision words as every approval surface (FAC-119), the provider's result included. */}
+          {record.type === 'action' && <ActionDecision entry={record} showOutcome={false} className="mt-2 max-w-2xl text-[12.5px] leading-[18px]" />}
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11.5px] text-kumo-inactive">
             <span>{formatFullDate(at)}</span>
             <span className="text-kumo-subtle">{record.resourceTitle}</span>
