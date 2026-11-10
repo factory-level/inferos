@@ -75,6 +75,12 @@ async function legacyAccount(email: string): Promise<DurableObjectStub<UserDurab
   return user;
 }
 
+/**
+ * A refused call's message ("signed in" when it wasn't refused), caught on the call itself: `rejects`
+ * leaves a Durable Object RPC promise's rejection reported as unhandled, failing the run.
+ */
+const refusal = (call: Promise<unknown>) => call.then(() => "signed in", (error: Error) => error.message);
+
 const profileOf = async (name: string) => (await env.TEST_USER.getByName(name).whoamiIfExists())?.id ?? null;
 
 describe("a sign-in keyed on the stable subject (ADR 0018)", () => {
@@ -128,8 +134,6 @@ describe("taking over someone's old address (acceptance 2)", () => {
     expect(await signIn(second, old)).toBe(subjectName(second));
     expect(await profileOf(subjectName(second))).toBe(subjectName(second));
     // Every email-keyed way into the old account is closed to whoever holds the address now.
-    // Caught on the call itself: `rejects` leaves the RPC promise's rejection reported as unhandled.
-    const refusal = (call: Promise<unknown>) => call.then(() => "signed in", (error: Error) => error.message);
     expect(await refusal(legacy.loginOrCreateViaGatekeeper(old, true))).toBe(SIGNS_IN_THROUGH_SUBJECT);
     expect(await refusal(legacy.authenticateFromCfAccess(old, true))).toBe(SIGNS_IN_THROUGH_SUBJECT);
     // And the first person still has it.
