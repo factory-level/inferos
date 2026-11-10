@@ -709,11 +709,11 @@ function validateAgentSpawnerInstructions(instructions: unknown): void {
   }
 }
 
-// A gatekeeper (connection) workpiece. IDs are allocated from the shared workpiece counter (see
-// the `nextGatekeeperId` singleton), so they never collide with gadget IDs.
 /** Whose connected account a connection uses (FAC-119): their user id and that account's id. */
 type GatekeeperConnectedBy = {userId: string; accountId: number};
 
+// A gatekeeper (connection) workpiece. IDs are allocated from the shared workpiece counter (see
+// the `nextGatekeeperId` singleton), so they never collide with gadget IDs.
 type GatekeeperRecord = {
   id: WorkpieceId;
   resourceTitle?: string,   // denormalized to avoid gatekeeper query
