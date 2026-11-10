@@ -14,6 +14,7 @@ import { useOperateSession } from './OperateSessionContext'
 import { refusalMessage } from './sessionRefusal'
 import { AgentActivityNote } from './AgentActivityNote'
 import { InferOpsCanvasHome } from '../../pages/inferops-canvas/InferOpsCanvasHome'
+import { ConsoleDraftPreview } from './ConsoleDraftPreview'
 import { ConsoleMosaic } from './ConsoleMosaic'
 import { ConsolePage } from './ConsolePage'
 import { ConsoleBuilder } from './ConsoleBuilder'
@@ -50,6 +51,9 @@ export const OperateSessionPage = () => {
   const screens = useWorkspaceScreens(authenticatedApi, durableViews)
   const sessionWorkspace = useSessionWorkspace(operate?.session ?? null)
   const [savedEntry, setSavedEntry] = useState<ConsoleEntry | null>(null)
+  // The console draft a builder simulates (FAC-96): local to this page, never an operate event.
+  const [simulating, setSimulating] = useState<{ workspaceId: string; consoleId: string } | null>(null)
+  const simulate = (entry: ConsoleEntry) => setSimulating({ workspaceId: entry.workspace.id, consoleId: entry.console.id })
   const [publishing, setPublishing] = useState<ConsoleEntry | null>(null)
 
   const [widgetTarget, setWidgetTarget] = useState<ConsoleWidgetTarget | null>(null)
@@ -208,7 +212,10 @@ export const OperateSessionPage = () => {
       <div hidden={centered} className={centered ? 'hidden' : home
         ? 'mx-auto w-full max-w-6xl shrink-0 px-5 pb-4 pt-6 sm:px-8'
         : `min-h-0 min-w-0 flex-1 overflow-auto ${!hideChat ? 'max-md:hidden' : ''}`}>
-        {boundViewShown
+        {simulating && home
+          ? <ConsoleDraftPreview key={`${simulating.workspaceId}/${simulating.consoleId}`} workspaceId={simulating.workspaceId}
+              consoleId={simulating.consoleId} onClose={() => setSimulating(null)} />
+          : boundViewShown
           ? <p role="status" className="p-6 text-sm text-kumo-subtle">A view is open. Close it to return to this page.</p>
           : settings
           ? settingsEntry ? <ConsoleSettings key={`${settingsEntry.console.id}/${settingsEntry.console.revision}`} entry={settingsEntry}
@@ -242,10 +249,11 @@ export const OperateSessionPage = () => {
             : <>
                 {savedEntry && <div role="status" className="mb-4 flex items-center gap-3 text-sm text-kumo-subtle">
                   <span>{savedEntry.console.title} saved as a draft. Operators see it once you publish.</span>
-                  <Button size="sm" onClick={() => openConsole(savedEntry, 'draft')}>Preview</Button>
+                  <Button size="sm" onClick={() => simulate(savedEntry)}>Simulate draft</Button>
+                  <Button size="sm" variant="ghost" onClick={() => openConsole(savedEntry, 'draft')}>Open draft in Operate (live data)</Button>
                   <Button size="sm" variant="primary" onClick={() => setPublishing(savedEntry)}>Publish</Button>
                 </div>}
-                <ConsoleMosaic key={savedEntry?.console.id} screens={screens} highlighted={savedEntry?.console.id}
+                <ConsoleMosaic key={savedEntry?.console.id} screens={screens} highlighted={savedEntry?.console.id} onSimulate={simulate}
                   onOpen={openConsole} onEdit={edit} onPublish={setPublishing} />
                 {state.workingSet.length > 0 && <nav aria-label="Open in this session" className="mt-4 flex flex-wrap gap-2">
                   {state.workingSet.map(ref => <Button key={ref.type === 'screen' ? `${ref.workspaceId}/${ref.screenId}` : ref.workspaceId}

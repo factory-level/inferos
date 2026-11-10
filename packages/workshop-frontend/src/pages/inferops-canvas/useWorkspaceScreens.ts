@@ -126,7 +126,7 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
         return await withLoadTimeout((async () => {
           const [consoles, screens] = await Promise.all([overseer.listConsoles(), overseer.listCanvases()])
           if (consoles.length === 0) return null
-          return { workspace, screens: screens.map(parseCanvasDefinition), flows: [], consoles,
+          return { workspace, screens: screens.map(value => parseCanvasDefinition(value)), flows: [], consoles,
             publishedScreens: await readPublishedScreens(overseer, consoles) }
         })(), `Workspace ${workspace.id}`, WORKSPACE_READ_TIMEOUT_MS)
       } catch {
@@ -145,7 +145,7 @@ const loadWorkspaceScreens = (api: RpcStub<AuthenticatedApi>, durableViews: bool
         return await withLoadTimeout((async () => {
           const [screens, flows, consoles] =
             await Promise.all([overseer.listCanvases(), overseer.listFlows(), overseer.listConsoles()])
-          return { workspace, screens: screens.map(parseCanvasDefinition), flows, consoles,
+          return { workspace, screens: screens.map(value => parseCanvasDefinition(value)), flows, consoles,
             publishedScreens: await readPublishedScreens(overseer, consoles) }
         })(), `Workspace ${workspace.id}`, WORKSPACE_READ_TIMEOUT_MS)
       } catch {
