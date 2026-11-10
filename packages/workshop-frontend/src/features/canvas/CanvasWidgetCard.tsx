@@ -5,6 +5,7 @@ import type { CanvasOperation, CanvasSection, CanvasWidget } from '@gadgets/work
 import { CanvasBoardSummary } from './CanvasBoardSummary'
 import { CanvasDataBindingEditor } from './CanvasDataBindingEditor'
 import { widgetLabel, widgetSpanClass } from './canvasLayout'
+import { CanvasUnsupportedWidget } from './CanvasUnsupportedWidget'
 
 export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, overseer, onEdit }: {
   widget: CanvasWidget
@@ -15,6 +16,8 @@ export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, overse
   overseer: RpcStub<Overseer>
   onEdit: (operations: CanvasOperation[]) => Promise<boolean>
 }) => {
+  // A newer InferOS's widget is shown, never configured: its canvas can't be changed here.
+  if (widget.kind === 'inferos.unsupported') return <div className={`min-w-0 ${widgetSpanClass(widget.size, section.columns)}`}><CanvasUnsupportedWidget widget={widget} /></div>
   const configure = (nextWidget: CanvasWidget) => void onEdit([{ type: 'configureWidget', widget: nextWidget }])
   const noun = widget.kind === 'inferos.gadget' ? 'gadget' : widget.kind === 'inferops.wiki' ? 'Wiki' : 'board'
   const label = widgetLabel(widget, gadgets)
