@@ -4,7 +4,7 @@
 // bound to the request that made it. Listing runs on the server over a bounded snapshot.
 import { describe, expect, it } from "vitest";
 import {
-  GOVERNED_PAGE_MAX, GOVERNED_SNAPSHOT_MAX, GovernedRequestError, listGoverned, parseGovernedCommand,
+  GOVERNED_PAGE_MAX, GOVERNED_SNAPSHOT_MAX, GovernedRequestError, governedResourceOf, listGoverned, parseGovernedCommand,
   parseGovernedListRequest, type GovernedDescription, type GovernedRow,
 } from "./governed-data.js";
 
@@ -130,5 +130,20 @@ describe("a governed command request (FAC-9)", () => {
       expect(refusal(() => parseGovernedCommand(request, QUEUE)), JSON.stringify(request)).toBe(code);
     }
     expect(refusal(() => parseGovernedCommand(base, { ...QUEUE, commands: [] }))).toBe("COMMAND_NOT_DECLARED");
+  });
+});
+
+describe("a governed resource reference (FAC-9)", () => {
+  it("names a custom table or a tickets queue exactly as their connectors accept them, and nothing else", () => {
+    expect(governedResourceOf("inferops://acme.operations/object/table/70000000-0000-4000-8000-000000000001")).toBe("object/table");
+    expect(governedResourceOf("inferops://demo.local/object/table/70000000-0000-4000-8000-000000000001")).toBe("object/table");
+    expect(governedResourceOf("tickets://demo/queue/support")).toBe("tickets/queue");
+    for (const ref of [
+      "inferops://demo.local/project/board/DEMO", "inferops://demo.local/knowledge/wiki",
+      "inferops://demo.local/object/table/70000000-0000-4000-8000-00000000000A",
+      "inferops://demo.local/object/table/70000000-0000-4000-8000-000000000001/",
+      "inferops://demo/object/table/70000000-0000-4000-8000-000000000001",
+      "tickets://Demo/queue/support", "tickets://demo/queue/", "https://example.com/queue/1", "",
+    ]) expect(governedResourceOf(ref)).toBeNull();
   });
 });

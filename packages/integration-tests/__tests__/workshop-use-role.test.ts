@@ -163,6 +163,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   getGatekeeperById: ws => ws.getGatekeeperById(1),
   getGatekeeperByResourceUrl: ws =>
     ws.getGatekeeperByResourceUrl("https://gadgets-test.example/things/use-denied"),
+  // A governed resource's session (FAC-9) is the builder's, as every connection is.
+  openGovernedSession: ws => ws.openGovernedSession("tickets://use-denied/queue/q1"),
   newGatekeeper: ws => ws.newGatekeeper(1, "https://gadgets-test.example/things/use-denied"),
   newAiModelGatekeeper: ws => ws.newAiModelGatekeeper("model"),
   newAgentSpawnerGatekeeper: ws =>

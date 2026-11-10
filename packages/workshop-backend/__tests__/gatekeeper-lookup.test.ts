@@ -86,3 +86,91 @@ describe("getGatekeeperByResourceUrl", () => {
     await expect(client.getGatekeeperByResourceUrl(BOARD)).rejects.toThrow(/Unauthorized/);
   });
 });
+
+// FAC-9: the host reads a governed resource (a custom table, a tickets queue) through a session
+// that offers only the governed contract, never the connector's other methods.
+const TABLE = "inferops://demo.local/object/table/70000000-0000-4000-8000-000000000001";
+
+/** A connector session as the gatekeeper hands it out: the governed methods plus others. */
+function connectorSession(calls: string[], commands = true) {
+  return {
+    describe: async () => { calls.push("describe"); return { resource: "object/table", fields: [], commands: [] }; },
+    list: async (request: unknown) => { calls.push(`list ${JSON.stringify(request)}`); return { rows: [], nextCursor: null, total: 0, truncated: false }; },
+    get: async (id: string) => { calls.push(`get ${id}`); return null; },
+    command: async (request: unknown) => {
+      if (!commands) throw new TypeError('The RPC receiver does not implement the method "command".');
+      calls.push(`command ${JSON.stringify(request)}`);
+      return { outcome: "proposed" };
+    },
+    listRecords: async () => { calls.push("listRecords"); return []; },
+    [Symbol.dispose]: () => { calls.push("disposed"); },
+  };
+}
+
+async function openGoverned(storage: ReturnType<typeof makeActionStorage>, calls: string[],
+    options: { blocked?: number[]; commands?: boolean } = {}) {
+  return openFakeOverseer(storage, { impl: {
+    getGatekeeperFacet: () => ({}),
+    assertGatekeeperUsable: (id: number) => {
+      if (options.blocked?.includes(id)) throw new Error("The workspace is restarting; retry.");
+    },
+    openGatekeeperSession: async (id: number) => { calls.push(`open ${id}`); return connectorSession(calls, options.commands); },
+  } });
+}
+
+describe("openGovernedSession (FAC-9)", () => {
+  it("opens the oldest connection for a governed reference, offering only the governed methods", async () => {
+    let storage = makeActionStorage();
+    seed(storage, 5, TABLE);
+    seed(storage, 7, TABLE);
+    let calls: string[] = [];
+    let client = await openGoverned(storage, calls);
+
+    let handle = (await client.openGovernedSession(TABLE))!;
+    expect(handle).toMatchObject({ gatekeeperId: 5, resource: "object/table" });
+    await handle.session.describe();
+    await handle.session.list({ pageSize: 5 });
+    await handle.session.get("r1");
+    await handle.session.command({ command: "setStatus", id: "r1", values: {}, expectedRevision: "1" });
+    expect(calls).toEqual(["open 5", "describe", 'list {"pageSize":5}', "get r1",
+      'command {"command":"setStatus","id":"r1","values":{},"expectedRevision":"1"}']);
+    // Nothing else the connector's session offers is reachable through it.
+    expect("listRecords" in handle.session).toBe(false);
+    handle.session[Symbol.dispose]();
+    expect(calls.at(-1)).toBe("disposed");
+  });
+
+  it("answers null for a governed reference no connection serves, and refuses one that isn't governed", async () => {
+    let storage = makeActionStorage();
+    seed(storage, 2, BOARD);
+    let calls: string[] = [];
+    let client = await openGoverned(storage, calls);
+
+    expect(await client.openGovernedSession(TABLE)).toBeNull();
+    await expect(client.openGovernedSession(BOARD)).rejects.toThrow("Not a governed resource reference");
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a connection blocked pending a scope-widening restart", async () => {
+    let storage = makeActionStorage();
+    seed(storage, 4, TABLE);
+    let client = await openGoverned(storage, [], { blocked: [4] });
+    await expect(client.openGovernedSession(TABLE)).rejects.toThrow(/restarting/);
+  });
+
+  it("is denied to a use-role collaborator", async () => {
+    let storage = makeActionStorage();
+    seed(storage, 4, TABLE);
+    let client = await openFakeOverseer(storage, { role: "use" });
+    await expect(client.openGovernedSession(TABLE)).rejects.toThrow(/Unauthorized/);
+  });
+
+  it("says a resource takes no commands, rather than the connector's internal error", async () => {
+    let storage = makeActionStorage();
+    seed(storage, 4, TABLE);
+    let client = await openGoverned(storage, [], { commands: false });
+    let handle = (await client.openGovernedSession(TABLE))!;
+    await expect(handle.session.command({ command: "x", id: "r", values: {}, expectedRevision: "1" }))
+      .rejects.toThrow("This resource takes no commands.");
+  });
+});

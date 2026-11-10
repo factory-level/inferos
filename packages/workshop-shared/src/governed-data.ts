@@ -13,6 +13,23 @@
 /** The resources a governed session serves (FAC-9): custom tables, and ticket queues. */
 export type GovernedResource = "object/table" | "tickets/queue";
 
+// The references each governed resource is named by: exactly what its connector accepts
+// (gatekeeper-inferops `parseTableUrl`, gatekeeper-tickets `parseQueueUrl`), so a reference names
+// one resource and nothing else.
+const GOVERNED_REFS: readonly [GovernedResource, RegExp][] = [
+  ["object/table", /^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/object\/table\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/],
+  ["tickets/queue", /^tickets:\/\/[a-z0-9-]+\/queue\/[A-Za-z0-9_-]{1,64}$/],
+];
+
+/**
+ * The governed resource reference `ref` names (FAC-9): a custom table,
+ * `inferops://<tenant>.<workspace>/object/table/<tableId>`, or a tickets queue,
+ * `tickets://<workspace>/queue/<id>`. Null for anything else. It names a resource; it grants nothing.
+ */
+export function governedResourceOf(ref: string): GovernedResource | null {
+  return GOVERNED_REFS.find(([, pattern]) => pattern.test(ref))?.[0] ?? null;
+}
+
 /**
  * The filter operators a request may use: `eq`, equality with a value of the field's own type (or
  * null), and `contains`, case-insensitive substring, on a text field only.

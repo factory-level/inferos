@@ -49,6 +49,7 @@ import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
 } from "./operate-session.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import type { GovernedResource, GovernedWriteSession } from "./governed-data.js";
 import type { OpenAiAssistantPluginApi } from "./openai-plugin.js";
 
 export { SERVICE_SALT } from "./password-salt.js";
@@ -2610,6 +2611,16 @@ export type ActionLogEntry = {
   // are enabled/disabled, which the user can freely toggle as often as they want.
 });
 
+/**
+ * A governed resource opened through `Overseer.openGovernedSession` (FAC-9): the connection that
+ * serves it, the resource kind, and a session offering only the governed contract.
+ */
+export type GovernedSessionHandle = {
+  gatekeeperId: WorkpieceId;
+  resource: GovernedResource;
+  session: GovernedWriteSession;
+};
+
 export type BoundHookInfo = {
   id: number;
 
@@ -3293,6 +3304,17 @@ export interface Overseer extends RpcTarget {
    * from their own connected account.
    */
   getGatekeeperByResourceUrl(resourceUrl: string): Promise<GatekeeperClient<any> | null>;
+
+  /**
+   * Opens the connection this workspace holds for governed resource `ref` (FAC-9; a custom table or
+   * a tickets queue, `governedResourceOf`), found as `getGatekeeperByResourceUrl` finds one, as the
+   * caller: a session offering only the governed contract (`describe`, `list`, `get`, `command`),
+   * never the connector's other methods. The connector validates each request and logs each read as
+   * an observation; a command is proposed for a decision. Null when no connection serves `ref`;
+   * refused for a reference that names no governed resource. Open to build sessions and forwarded
+   * by operate; refused to a use collaborator.
+   */
+  openGovernedSession(ref: string): Promise<GovernedSessionHandle | null>;
 
   /**
    * Try to create a new gatekeeper for this URL.
