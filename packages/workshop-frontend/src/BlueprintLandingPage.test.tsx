@@ -285,11 +285,30 @@ describe('BlueprintLandingPage model configuration', () => {
     supportedResources: patterns.map(urlPattern => ({ urlPattern, name: urlPattern })),
   })
 
-  async function openConfigure(patterns: string[], blueprint = policyBlueprint()): Promise<void> {
+  async function openConfigure(
+    patterns: string[],
+    blueprint = policyBlueprint(),
+    withExistingTableAccount = false,
+  ): Promise<void> {
+    const subscribeConnectedAccounts = withExistingTableAccount
+      ? (subscriber: { add: (...args: unknown[]) => void; ready?: () => void }) => {
+          subscriber.add(
+            9,
+            { displayName: 'Existing table connection', grantedResourceUrlPatterns: [TABLE_PATTERN] },
+            { displayName: 'InferOps' },
+            [{ title: 'Custom tables', urlPattern: TABLE_PATTERN }],
+            true,
+            'inferops',
+          )
+          subscriber.ready?.()
+          return subscription()
+        }
+      : authenticatedApi().subscribeConnectedAccounts
     testState.authenticatedApi = {
       ...(authenticatedApi() as unknown as Record<string, unknown>),
       getBlueprintInfo: async () => blueprint,
       listGatekeeperVendors: async () => [inferops(patterns)],
+      subscribeConnectedAccounts,
     } as unknown as RpcStub<AuthenticatedApi>
     rootContainer = document.createElement('div')
     document.body.appendChild(rootContainer)
@@ -319,6 +338,14 @@ describe('BlueprintLandingPage model configuration', () => {
     expect(document.body.textContent).toContain('Custom table binding')
     expect(document.body.textContent).toContain(
       "The required resource type for this binding isn't offered by InferOps.")
+  })
+
+  it('does not treat an existing workspace table connection as configured when the switch is off', async () => {
+    await openConfigure(['inferops://*/project/board/*'], tableBlueprint(), true)
+    expect(document.body.textContent).not.toContain('Ready')
+    expect(document.body.textContent).toContain(
+      "The required resource type for this binding isn't offered by InferOps.",
+    )
   })
 
   it('offers a stored custom-table binding when the tables switch is on', async () => {
