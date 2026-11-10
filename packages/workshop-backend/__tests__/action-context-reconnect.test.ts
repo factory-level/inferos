@@ -7,7 +7,7 @@
 // account are refused, with nothing started.
 import { describe, expect, it, vi } from "vitest";
 import {
-  GATEKEEPER_RECONNECT_NOT_YOURS, GATEKEEPER_RECONNECT_UNKNOWN, type ActionLogEntry,
+  GATEKEEPER_RECONNECT_REFUSED, type ActionLogEntry,
 } from "@gadgets/workshop-shared/api";
 import { actionContextOf, actionRecordToLog, type ActionRecord } from "../src/overseer.js";
 import { makeActionStorage, openFakeOverseer, putAction } from "./fixtures.js";
@@ -49,11 +49,12 @@ describe("an action's context", () => {
 })
 
 /** A workspace whose owner, `owner-id`, holds connections `gatekeepers`, and whose reconnects are recorded. */
-async function workspace(gatekeepers: Record<number, object>, opts: { role?: "build" | "use"; reconnect?: () => Promise<object> } = {}) {
+async function workspace(gatekeepers: Record<number, object>,
+    opts: { role?: "build" | "use"; userId?: string; reconnect?: () => Promise<object> } = {}) {
   const storage = makeActionStorage() as ReturnType<typeof makeActionStorage> & { gatekeepers: unknown }
   Object.assign(storage, { gatekeepers: { get: (id: number) => gatekeepers[id] } })
   const reconnectAccount = vi.fn(opts.reconnect ?? (async () => ({ url: "https://connect.example/again", nonce: "n" })))
-  const client = await openFakeOverseer(storage, { role: opts.role, impl: {
+  const client = await openFakeOverseer(storage, { role: opts.role, userId: opts.userId, impl: {
     users: { idFromString: (id: string) => id, get: () => ({
       whoami: async () => ({ id: "profile-id", name: "Ada" }), recordSharedGadgetOpen: async () => {}, reconnectAccount,
     }) },
@@ -74,20 +75,30 @@ describe("reconnecting a connection", () => {
     expect(reconnectAccount).toHaveBeenCalledWith(13)
   })
 
+  it("reconnects an ambient connection for the workspace's owner, whose account it always is, and no one else", async () => {
+    const ambient = { 6: { id: 6, creationSpec: { type: "ambient", vendorId: "inferops", accountId: 14 } } }
+    const owner = await workspace(ambient)
+    await owner.client.reconnectGatekeeper(6)
+    expect(owner.reconnectAccount).toHaveBeenCalledWith(14)
+    const other = await workspace(ambient, { userId: "builder-2" })
+    await expect(other.client.reconnectGatekeeper(6)).rejects.toThrow(GATEKEEPER_RECONNECT_REFUSED)
+    expect(other.reconnectAccount).not.toHaveBeenCalled()
+  })
+
   it("refuses another person's connection, another company's included, starting nothing", async () => {
     const { client, reconnectAccount } = await workspace({ 4: { id: 4, connectedBy: { userId: "someone-else", accountId: 12 } } })
-    await expect(client.reconnectGatekeeper(4)).rejects.toThrow(GATEKEEPER_RECONNECT_NOT_YOURS)
+    await expect(client.reconnectGatekeeper(4)).rejects.toThrow(GATEKEEPER_RECONNECT_REFUSED)
     expect(reconnectAccount).not.toHaveBeenCalled()
   })
 
-  it("refuses a connection that records no account, one that doesn't exist, and an account since removed", async () => {
+  it("refuses, in the same words, a connection that records no account, one that doesn't exist, and an account since removed", async () => {
     const { client, reconnectAccount } = await workspace({ 4: { id: 4 } })
-    await expect(client.reconnectGatekeeper(4)).rejects.toThrow(GATEKEEPER_RECONNECT_UNKNOWN)
-    await expect(client.reconnectGatekeeper(99)).rejects.toThrow(GATEKEEPER_RECONNECT_UNKNOWN)
+    await expect(client.reconnectGatekeeper(4)).rejects.toThrow(GATEKEEPER_RECONNECT_REFUSED)
+    await expect(client.reconnectGatekeeper(99)).rejects.toThrow(GATEKEEPER_RECONNECT_REFUSED)
     expect(reconnectAccount).not.toHaveBeenCalled()
     const removed = await workspace({ 4: { id: 4, connectedBy: { userId: "owner-id", accountId: 12 } } },
       { reconnect: async () => { throw new Error("No such account.") } })
-    await expect(removed.client.reconnectGatekeeper(4)).rejects.toThrow(GATEKEEPER_RECONNECT_UNKNOWN)
+    await expect(removed.client.reconnectGatekeeper(4)).rejects.toThrow(GATEKEEPER_RECONNECT_REFUSED)
   })
 
   it("is not available to the use role", async () => {

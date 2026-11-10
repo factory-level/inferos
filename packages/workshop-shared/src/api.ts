@@ -3102,11 +3102,12 @@ export interface Overseer extends RpcTarget {
    * Starts reconnecting the connected account that connection `gatekeeperId` uses (FAC-119), for a
    * decision whose last attempt found its sign-in expired: the same flow as
    * `AuthenticatedApi.reconnectAccount`, for the caller's own account only. The account is resolved
-   * here, so no client ever holds a connection's account id. Refused, starting nothing, with
-   * `GATEKEEPER_RECONNECT_NOT_YOURS` when the connection uses another person's account (another
-   * company's included), and `GATEKEEPER_RECONNECT_UNKNOWN` when it records no account (one made
-   * before it was recorded, a built-in one, or an account since removed) or doesn't exist. Not
-   * available to the use role; the operate session reconnects its own workspace's connections.
+   * here, so no client ever holds a connection's account id. Refused, starting nothing, with the one
+   * `GATEKEEPER_RECONNECT_REFUSED` for every reason (another person's connection, another company's
+   * included; one that records no account, or whose account was since removed; no such connection),
+   * so a guessed id can't be told from another person's: the specific reason is logged on the server
+   * only. Not available to the use role; the operate session reconnects its own workspace's
+   * connections.
    */
   reconnectGatekeeper(gatekeeperId: WorkpieceId): Promise<ConnectFlowStart>;
   /**
@@ -5856,12 +5857,12 @@ export type BlueprintScreenshotUpload = {
  * (`AuthenticatedApi.holdsSharedConfiguration`) doesn't let the caller share, publish or change a
  * shared workspace, so a client can show it as is. It names no role.
  */
-/** `Overseer.reconnectGatekeeper`'s refusal for a connection that uses another person's account. */
-export const GATEKEEPER_RECONNECT_NOT_YOURS =
-    "This connection uses another person's account, so only they can reconnect it.";
-/** `Overseer.reconnectGatekeeper`'s refusal when the connection records no account to reconnect. */
-export const GATEKEEPER_RECONNECT_UNKNOWN =
-    "This connection doesn't say which account it uses. Reconnect the account in your connections.";
+/**
+ * `Overseer.reconnectGatekeeper`'s one refusal, whatever the reason, so it reveals nothing of a
+ * connection the caller may not reconnect.
+ */
+export const GATEKEEPER_RECONNECT_REFUSED =
+    "This connection can't be reconnected from here. Reconnect its account in your connections.";
 
 export const SHARED_CONFIGURATION_REFUSED =
     "You don't have permission to share or publish configuration other people use.";
