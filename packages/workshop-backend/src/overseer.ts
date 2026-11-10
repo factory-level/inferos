@@ -12426,6 +12426,8 @@ class OverseerImpl implements AgentHooks {
     return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage, {
       now: () => Date.now(),
       dynamicTtlMs: () => dynamicDefinitionTtlMs(this.env.WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS),
+      // Wake for the next expiry whenever what expires changes (#416 round 1).
+      onChange: () => this.#updateAlarm(),
     });
   }
 
