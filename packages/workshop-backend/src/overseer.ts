@@ -69,7 +69,7 @@ import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/o
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
 import { RUN_REQUESTER_REVOKED, RUN_DEFINITION_CHANGED, RUN_WRITE_EXPIRED } from '@gadgets/workshop-shared/action-outcome';
-import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionContext, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, ActionBlocked, ActionRejectedBecause, SHARED_CONFIGURATION_REFUSED, GATEKEEPER_RECONNECT_NOT_YOURS, GATEKEEPER_RECONNECT_UNKNOWN, ConnectFlowStart } from '@gadgets/workshop-shared/api';
+import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId, WorkpieceSummary, WorkpiecesSubscriber, GadgetClient, GadgetBindingInfo, GatekeeperClient, ActionState, ActionLogEntry, ActionContext, ActionsSubscriber, ActionHistoryFilter, ActionHistoryPage, WorkspaceRecordExport, ChatGadgetPin, ChatCodeBase, ChatGadgetPinState, CodeChangeSubmission, CommitIdentity, CommitInfo, FileAtCommit, MAX_READ_FILES_PER_CALL, TreeNode, MergeChangesResult, AiChatMetadata, AiChatMessage, AiChatHistoryPage, AiChatSubscriber, AiChatAuthorInfo, AiModelConfig, AiChatMessageBody, AgentSpawnerConfig, AgentSpawnerBehaviour, MAX_INSTANCE_INSTRUCTIONS_LENGTH, ConsoleLogSubscriber, ConsoleLogEvent, CapsuleSpecifier, CollaboratorInfo, CollaboratorRole, AffectedCollaborator, ShareLinkInfo, GatekeeperCreationSpec, ObserverConfigCallback, ObserverBindingNeed, ObserverBindingFailure, BlueprintBindingAnnotation, BlueprintBinding, BlueprintMetadata, BlueprintOutput, MessageFormatRef, isOutputIcon, SpawnerEnvTarget, BlueprintGadgetSummary, AiChatStreamEvent, BlueprintScreenshotUpload, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ChatAttachmentUpload, ChatAttachmentHandle, ChatAttachmentRef, BoundHookInfo, PreApprovableAction, PresenceParticipant, PresenceSubscriber, SlashCommandChoice, SlashCommandRequest, validateBindingName, createOpenGadgetError, OPEN_GADGET_ERROR_CODES, resolveSiteName, actionChangeTime, WorkspaceKind, DEFAULT_WORKSPACE_KIND, BlueprintInstall, BlueprintBindingAssignment, BlueprintPublishOptions, SpaceInstallOptions, ConsoleWidgetFrozenFor, ActionAttempt, ActionBlocked, ActionRejectedBecause, SHARED_CONFIGURATION_REFUSED, GATEKEEPER_RECONNECT_REFUSED, ConnectFlowStart } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
@@ -238,13 +238,10 @@ export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
   return "runtime-error";
 }
 
-
-
-
-/** An approval of an action already rejected (FAC-118): the decision stands, nothing is applied. */
 // The run refusals moved to workshop-shared (FAC-119), so a decision can tell a known block apart.
 export { RUN_REQUESTER_REVOKED, RUN_DEFINITION_CHANGED, RUN_WRITE_EXPIRED };
 
+/** An approval of an action already rejected (FAC-118): the decision stands, nothing is applied. */
 export const ACTION_ALREADY_REJECTED = "This action was already rejected.";
 /** A rejection of an action already approved (FAC-118): it was applied, so it can't be rejected now. */
 export const ACTION_ALREADY_APPROVED = "This action was already approved.";
@@ -10224,7 +10221,7 @@ class OverseerImpl implements AgentHooks {
         await this.addGatekeeper(
             cls,
             {type: "ambient", vendorId: account.vendorId, accountId: account.accountId},
-            ownerId);
+            ownerId, undefined, false, undefined, undefined, {userId: ownerId, accountId: account.accountId});
       } catch (err) {
         this.logger.error("failed to provision ambient capsule", {
           event: "ambient.capsule.provision.failed",
@@ -14921,16 +14918,26 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // FAC-119: only the person whose account a connection uses reconnects it, through their own User
   // DO, which holds only their accounts; the account id never leaves the server.
   async reconnectGatekeeper(gatekeeperId: WorkpieceId): Promise<ConnectFlowStart> {
+    // The reason is the log's alone, in its event name; the caller hears the one refusal.
+    let refuse = (reason: "unknown" | "no-account" | "not-owner" | "account-removed"): never => {
+      logger.warn("connection reconnect refused", { event: `gatekeeper.reconnect.refused.${reason}`, gatekeeperId });
+      throw new Error(GATEKEEPER_RECONNECT_REFUSED);
+    };
     let record = this.impl.storage.gatekeepers.get(gatekeeperId);
+    let spec = record?.creationSpec;
+    // An ambient connection is always the workspace owner's own account (ensureAmbientCapsules), so
+    // one recorded before `connectedBy` was kept is still known.
     let by = record?.connectedBy ??
-      (record?.hostBoardMint ? {userId: record.hostBoardMint.by, accountId: record.hostBoardMint.accountId} : undefined);
-    if (!by) throw new Error(GATEKEEPER_RECONNECT_UNKNOWN);
-    if (by.userId !== this.clientUserId) throw new Error(GATEKEEPER_RECONNECT_NOT_YOURS);
+      (record?.hostBoardMint ? {userId: record.hostBoardMint.by, accountId: record.hostBoardMint.accountId} : undefined) ??
+      (spec?.type === "ambient" && this.impl.ownerId ? {userId: this.impl.ownerId, accountId: spec.accountId} : undefined);
+    if (!record) return refuse("unknown");
+    if (!by) return refuse("no-account");
+    if (by.userId !== this.clientUserId) return refuse("not-owner");
     try {
       return await this.#clientUser.reconnectAccount(by.accountId);
     } catch (err) {
       // The account was removed since: there is nothing of theirs to reconnect.
-      if (err instanceof Error && err.message.endsWith("No such account.")) throw new Error(GATEKEEPER_RECONNECT_UNKNOWN, { cause: err });
+      if (err instanceof Error && err.message.endsWith("No such account.")) return refuse("account-removed");
       throw err;
     }
   }
