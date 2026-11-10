@@ -29,7 +29,7 @@ import type { OperateApprovalRequest, OperateApprovalSnapshot } from "./operate-
 import type { CanvasCatalog, CanvasContent, CanvasDefinition, CanvasOperation } from "./canvas.js";
 import type { WorkspaceConfiguration, WorkspaceSettings } from "./workspace-settings.js";
 import type { ConfigurationTraceEntry } from "./configuration-trace.js";
-import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
+import type { OperateConsoleRead, ConsoleRef, ConsoleSource, ConsoleWidgetCandidate, ConsoleWidgetIndexReport, ConsoleDraftProblem, EmbeddedConsoleWidget, HostBoardReadAudit, HostBoardSelection, HostBoardSelectionUpdate, HostBoardView, OperateConsole, OperateConsoleContent } from "./operate-console.js";
 import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
@@ -49,6 +49,7 @@ import type {
   OperateBoardRef, OperateEvent, OperateEventRecord, OperateHandover, OperateSessionSnapshot,
 } from "./operate-session.js";
 import type { UiFeatureFlags } from "./feature-flags.js";
+import type { GovernedResource, GovernedWriteSession } from "./governed-data.js";
 import type { OpenAiAssistantPluginApi } from "./openai-plugin.js";
 
 export { SERVICE_SALT } from "./password-salt.js";
@@ -2610,6 +2611,17 @@ export type ActionLogEntry = {
   // are enabled/disabled, which the user can freely toggle as often as they want.
 });
 
+/**
+ * A governed resource opened through `Overseer.openGovernedSession` (FAC-9): the connection that
+ * serves it, the resource kind, and a session offering only the governed contract.
+ */
+export type GovernedSessionHandle = {
+  gatekeeperId: WorkpieceId;
+  resource: GovernedResource;
+  /** Dispose it to release the session when done with the resource. */
+  session: GovernedWriteSession & { [Symbol.dispose](): void };
+};
+
 export type BoundHookInfo = {
   id: number;
 
@@ -2890,6 +2902,17 @@ export interface Overseer extends RpcTarget {
    * (including one already published) throws the canvas conflict error.
    */
   publishConsole(id: string, expectedRevision: string): Promise<OperateConsole>;
+  /**
+   * Every problem that would stop console `id`'s draft being published as it stands (FAC-96): the
+   * same checks `publishConsole` runs and refuses with the first of, each with its target and a
+   * repair (`ConsoleDraftProblem`), in publication's order. An empty list means the draft would
+   * publish, apart from its size once published, which only publication can measure. It reads
+   * InferOS storage and the gadgets' git commits only, never InferOps or any connection, and writes
+   * nothing: the draft, its pages and their revisions are unchanged. Build access only; the use
+   * role and the operate session are refused. A gadget whose commit moves while it runs refuses
+   * with `CONSOLE_CHANGED`, to try again.
+   */
+  validateConsoleDraft(id: string): Promise<ConsoleDraftProblem[]>;
   /**
    * Read one console: its `published` revision as operators see it, or its `draft`, which needs
    * build access. Null if there is no such console or it has never been published.
@@ -3293,6 +3316,17 @@ export interface Overseer extends RpcTarget {
    * from their own connected account.
    */
   getGatekeeperByResourceUrl(resourceUrl: string): Promise<GatekeeperClient<any> | null>;
+
+  /**
+   * Opens the connection this workspace holds for governed resource `ref` (FAC-9; a custom table or
+   * a tickets queue, `governedResourceOf`), found as `getGatekeeperByResourceUrl` finds one, as the
+   * caller: a session offering only the governed contract (`describe`, `list`, `get`, `command`),
+   * never the connector's other methods. The connector validates each request and logs each read as
+   * an observation; a command is proposed for a decision. Null when no connection serves `ref`;
+   * refused for a reference that names no governed resource. Open to build sessions and forwarded
+   * by operate; refused to a use collaborator.
+   */
+  openGovernedSession(ref: string): Promise<GovernedSessionHandle | null>;
 
   /**
    * Try to create a new gatekeeper for this URL.
