@@ -26,7 +26,9 @@ const refusalOf = (err: unknown, fallback: string) =>
  * A workflow's saved definitions: save the workflow's current code as a revision, and publish one
  * revision for everyone else. Saving publishes nothing. The list shows what the server lets this
  * person see: their own definitions with every revision, others' only at the published revision.
- * The server decides who may save and publish; a refusal is shown in its words.
+ * The server decides who may save and publish; a refusal is shown in its words. A dynamic,
+ * unsaved definition (FAC-124: one the Dot or an agent made with `retain: false`) says it is
+ * temporary and when it expires, and its owner's save keeps it; after that it is gone for new use.
  */
 export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, onChanged }: Props) => {
   const toasts = useKumoToastManager()
@@ -133,10 +135,17 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, onC
                       definition.owner.name,
                     ].filter(Boolean).join(' · ')}
                   </p>
+                  {definition.expiresAt && (
+                    <p className="mt-0.5 mb-0 text-[12px] leading-4 text-kumo-warning">
+                      Temporary · expires{' '}
+                      <time dateTime={definition.expiresAt.toISOString()}>{definition.expiresAt.toLocaleString()}</time>
+                      {' '}unless saved
+                    </p>
+                  )}
                 </div>
                 {own && (
                   <WorkshopButton disabled={busy} onClick={() => save(definition)}>
-                    Save new revision
+                    {definition.expiresAt ? 'Save to keep' : 'Save new revision'}
                   </WorkshopButton>
                 )}
                 {canPublish && (
