@@ -163,7 +163,7 @@ it('refreshes after a stale-revision refusal and asks the person to review the r
   await act(async () => { button('Propose')!.click() }); await settle()
   expect(container.querySelector('[role="status"]')?.textContent).toContain('This row changed since it was read.')
   expect(list).toHaveBeenCalledTimes(2)
-  expect(button('Propose')?.disabled).toBe(false)
+  expect(button('Propose')?.disabled).toBe(true)
 })
 
 it('preserves a stale-revision failure receipt and refreshes its row', async () => {

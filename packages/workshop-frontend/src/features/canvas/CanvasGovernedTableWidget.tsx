@@ -154,6 +154,7 @@ const GovernedTable = ({ resource, session }: { resource: string; session: Gover
 
 /** One declared command on one row: its one field's allowed values, proposed for a decision. */
 const RECEIPT_POLL_MS = 1_000
+const RECEIPT_POLL_MAX_MS = 30_000
 type CommandState = { kind: 'receipt'; outcome: ActionOutcome; reason?: string } | { kind: 'status-error' } | { kind: 'stale' } | { kind: 'error'; message: string } | null
 
 const CommandForm = ({ resource, row, command, description, refresh }: { resource: string; row: GovernedRecord; command: GovernedCommand; description: GovernedDescription; refresh: () => Promise<unknown> }) => {
@@ -168,6 +169,7 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
   useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
 
   const checkReceipt = async (current: ActionReceipt) => {
+    let delay = RECEIPT_POLL_MS
     for (;;) {
       let status
       try { status = await current.status() }
@@ -177,13 +179,15 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
       }
       if (status.outcome === 'waiting' || status.outcome === 'running') {
         if (mounted.current) setState({ kind: 'receipt', outcome: status.outcome, ...(status.reason ? { reason: status.reason } : {}) })
-        await new Promise(resolve => setTimeout(resolve, RECEIPT_POLL_MS))
+        await new Promise(resolve => setTimeout(resolve, delay))
         if (!mounted.current) return
+        delay = Math.min(delay * 2, RECEIPT_POLL_MAX_MS)
         continue
       }
       if (mounted.current) setState({ kind: 'receipt', outcome: status.outcome, ...(status.reason ? { reason: status.reason } : {}) })
       await refresh()
       if (mounted.current && status.code === 'STALE_REVISION') {
+        setValue('')
         setState({ kind: 'receipt', outcome: status.outcome, reason: `${status.reason ?? 'The row changed since it was read.'} The row was refreshed; review it before proposing again.` })
       }
       if (mounted.current) setPending(false)
@@ -212,7 +216,7 @@ const CommandForm = ({ resource, row, command, description, refresh }: { resourc
     } catch (error) {
       const message = messageOf(error)
       await refresh()
-      if (/STALE_REVISION/.test(message)) setState({ kind: 'stale' })
+      if (/STALE_REVISION/.test(message)) { setValue(''); setState({ kind: 'stale' }) }
       else setState({ kind: 'error', message })
       setPending(false)
     }
