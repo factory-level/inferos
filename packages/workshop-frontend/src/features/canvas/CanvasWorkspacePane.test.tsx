@@ -6,7 +6,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { GadgetSummary, Overseer, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { DEFAULT_CANVAS_CATALOG, type CanvasCatalog, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
-import { canvasPageFromDefinition, type CanvasPage, type CanvasPageOperation } from '@gadgets/workshop-shared/canvas-model'
+import { canvasPageFromDefinition, canvasRunEvent, type CanvasPage, type CanvasPageOperation } from '@gadgets/workshop-shared/canvas-model'
 import { CanvasWorkspacePane } from './CanvasWorkspacePane'
 import type { CanvasStorage } from './useCanvasWorkspace'
 
@@ -14,9 +14,12 @@ vi.mock('../../GadgetUI', () => ({ default: () => null }))
 
 let root: Root
 let container: HTMLDivElement
+// The workspace's triggers (FAC-116), none unless a test sets them; `listHooks` answers with this.
+let hooks: () => Promise<unknown[]> = async () => []
 // The read-only view watches the action log for decided moves and resolves board references;
 // nothing else here reaches the workspace.
 const overseer = {
+  listHooks: () => hooks(),
   subscribeToActions: async () => ({ [Symbol.dispose]: () => {} }),
   listActions: async () => ({ entries: [] }),
   getGatekeeperByResourceUrl: async () => null,
@@ -61,7 +64,7 @@ beforeEach(() => {
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
   onOpenWidgetChange.mockClear()
 })
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals() })
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); vi.unstubAllGlobals(); hooks = async () => [] })
 
 it('labels temporary views as unsaved and opens a newly created view for editing', async () => {
   await render({ kind: 'temporary' })
@@ -407,7 +410,7 @@ it('says a gadget widget with no states declares no events, and offers none', as
   await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-plain'))
   await act(async () => { button('Edit layout')!.click() })
   await pickWidget()
-  expect(inspector().textContent).toContain('This widget declares no events, so nothing on the page can listen for one.')
+  expect(inspector().textContent).toContain('This widget declares no events and its gadget has no triggers, so nothing on the page can listen for one.')
   expect(button('Add attachment')).toBeUndefined()
 })
 
@@ -418,4 +421,70 @@ it('reads the nested page only in edit mode, so viewing (as the use role does) n
   await act(async () => { button('Edit layout')!.click() })
   await settle()
   expect(api.getCanvasPage).toHaveBeenCalledWith('ops')
+})
+
+// FAC-116: a gadget widget's attachment may also hear the run results of a trigger its gadget binds.
+const hook = (id: number, gadgetId: number, title: string) =>
+  ({ id, gatekeeperId: 2, gadgetId, description: { title }, enabled: true })
+
+it("offers the run results of its own gadget's triggers beside its own events, and wires one to a view", async () => {
+  hooks = async () => [hook(11, 7, 'Refunds'), hook(12, 8, 'Another gadget')]
+  const { api, storage } = editable([gadgetView(7)])
+  api.editCanvasPage.mockImplementation(async () => ({ ...canvasPageFromDefinition(gadgetView(7)), revision: '1' }))
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-stateful'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  await choose('When', 'Refunds: Finished')
+  // Its own events first, then only its own gadget's trigger, never another gadget's.
+  expect([...document.querySelectorAll('[role="option"]')].map(item => item.textContent)).toEqual([
+    'submit', 'reopen', 'Refunds: Finished', "Refunds: Didn't finish", 'Refunds: Uncertain'])
+  await choose('Open', 'Ops')
+  await act(async () => { button('Add attachment')!.click() })
+  expect(api.editCanvasPage).toHaveBeenLastCalledWith('ops', '0', [{ type: 'setAttachments', target: 'g',
+    attachments: [{ id: expect.any(String), version: 1, on: canvasRunEvent('run-succeeded', 11), effect: { kind: 'navigate', page: 'ops' } }] }])
+})
+
+it('offers a run result on a widget that declares no events of its own, and none on one whose gadget has no trigger', async () => {
+  hooks = async () => [hook(11, 7, 'Refunds')]
+  const { storage } = editable([gadgetView(7)])
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-plain'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  await choose('When', 'Refunds: Uncertain')
+  expect([...document.querySelectorAll('[role="option"]')].map(item => item.textContent)).toEqual([
+    'Refunds: Finished', "Refunds: Didn't finish", 'Refunds: Uncertain'])
+})
+
+it("says when the gadget's triggers can't be read, and still offers the widget's own events", async () => {
+  hooks = async () => { throw new Error('Workspace unavailable') }
+  const { storage } = editable([gadgetView(7)])
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-stateful'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  expect(inspector().querySelector('[role="alert"]')?.textContent).toBe("This gadget's triggers couldn't be read: Workspace unavailable")
+  await choose('When', 'submit')
+  expect([...document.querySelectorAll('[role="option"]')].map(item => item.textContent)).toEqual(['submit', 'reopen'])
+})
+
+it("says it's reading the gadget's triggers until they arrive", async () => {
+  hooks = () => new Promise(() => {})
+  const { storage } = editable([gadgetView(7)])
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-plain'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  expect(inspector().textContent).toContain("Reading this gadget's triggers…")
+})
+
+it('describes a wired run result in words', async () => {
+  hooks = async () => [hook(11, 7, 'Refunds')]
+  const wired = canvasPageFromDefinition(gadgetView(7))
+  const page = { ...wired, nodes: wired.nodes.map(node => node.nodeType === 'widget'
+    ? { ...node, attachments: [{ id: 'r', version: 1 as const, on: canvasRunEvent('run-failed', 11), effect: { kind: 'navigate' as const, page: 'ops' } }] }
+    : node) }
+  const { api, storage } = editable([gadgetView(7)])
+  api.getCanvasPage.mockImplementation(async () => page)
+  await render(storage, DEFAULT_CANVAS_CATALOG, undefined, null, gadgetsWith('fac94-plain'))
+  await act(async () => { button('Edit layout')!.click() })
+  await pickWidget()
+  expect(inspector().textContent).toContain("When a Refunds run didn't finish, open Ops")
 })

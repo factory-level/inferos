@@ -53,6 +53,16 @@ describe('consoleRefusalMessage', () => {
     expect(consoleRefusalMessage(new Error(SHARED_CONFIGURATION_REFUSED), 'fallback')).toBe(SHARED_CONFIGURATION_REFUSED)
     expect(consoleRefusalMessage(new Error('internal detail'), 'fallback')).toBe('fallback')
   })
+
+  // FAC-116: publication's own refusals about a screen, a trigger's run results among them.
+  it("shows the kernel's refusal to publish a screen, and only one that begins as the kernel's does", () => {
+    for (const refusal of [
+      "Screen form can't be published: its widget g hears the runs of trigger 11, which isn't a trigger of gadget 7.",
+      `Screen form can't be published: its widget g's "run-succeeded" for trigger 11 leads to a requested action, which a run's result can't run.`,
+    ]) expect(consoleRefusalMessage(new Error(refusal), 'fallback')).toBe(refusal)
+    for (const other of ['Network connection lost.', "Some Screen form can't be published: injected", 'Screen form was refused'])
+      expect(consoleRefusalMessage(new Error(other), 'fallback')).toBe('fallback')
+  })
 })
 
 describe('startFlowEvent', () => {
