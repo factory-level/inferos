@@ -13,6 +13,7 @@ import { useServerConfig } from '../../ServerConfigContext'
 import { useOperateSession } from './OperateSessionContext'
 import { refusalMessage } from './sessionRefusal'
 import { AgentActivityNote } from './AgentActivityNote'
+import { PersonalCanvas } from './PersonalCanvas'
 import { InferOpsCanvasHome } from '../../pages/inferops-canvas/InferOpsCanvasHome'
 import { ConsoleDraftPreview } from './ConsoleDraftPreview'
 import { ConsoleMosaic } from './ConsoleMosaic'
@@ -42,7 +43,7 @@ export const OperateSessionPage = () => {
   const toasts = useKumoToastManager()
   const navigate = useNavigate()
   const search = useSearch({ from: '/inferops-canvas' })
-  const { authenticatedApi } = useAuthenticatedApi()
+  const { authenticatedApi, accountKey } = useAuthenticatedApi()
   const serverConfig = useServerConfig()
   const durableViews = serverConfig?.canvasFeatures?.durableViews === true
   const hostBoardsOn = serverConfig?.hostBoards === true
@@ -93,9 +94,11 @@ export const OperateSessionPage = () => {
   const settings = search.settings
   const configuring = !!setup || !!settings
   const tools = search.tools === true
-  const home = !state.flow && !run && !state.board && !state.focus && !tools && !configuring
-  const centered = !state.flow && !tools && !configuring && run !== null && state.presentation === 'chat'
-  const hideChat = configuring || tools || (!home && !centered && !state.chatOpen)
+  // The person's own canvas (FAC-13), beside the consoles rather than inside one.
+  const canvas = search.canvas === true && !tools
+  const home = !state.flow && !run && !state.board && !state.focus && !tools && !canvas && !configuring
+  const centered = !state.flow && !tools && !canvas && !configuring && run !== null && state.presentation === 'chat'
+  const hideChat = configuring || tools || canvas || (!home && !centered && !state.chatOpen)
   const showHome = async () => {
     try {
       await operate.dispatch({ type: 'showHome' })
@@ -193,13 +196,14 @@ export const OperateSessionPage = () => {
   <ConsoleWorkspaceShell onOpenWidget={target => void openWidget(target)} onNavigate={() => setWidgetTarget(null)}>
     <div className="flex h-full min-h-0 flex-col bg-kumo-base">
     {!configuring && <header className="flex min-h-14 shrink-0 flex-wrap items-center gap-3 px-5 py-3">
-      <h1 className="min-w-0 flex-1 truncate text-sm font-medium text-kumo-default">{state.flow ? state.flow.title : tools ? 'Screens and flows' : (run ? centered ? 'Assistant' : viewTitle ?? 'Console' : state.focus ? titleOf(state.focus) : 'Consoles')}</h1>
+      <h1 className="min-w-0 flex-1 truncate text-sm font-medium text-kumo-default">{state.flow ? state.flow.title : tools ? 'Screens and flows' : canvas ? 'My canvas' : (run ? centered ? 'Assistant' : viewTitle ?? 'Console' : state.focus ? titleOf(state.focus) : 'Consoles')}</h1>
       <div className="hidden max-w-[30%] md:block"><AgentActivityNote records={operate.recentEvents} titleOf={titleOf} /></div>
       {home && <>
+        <Button variant="ghost" size="sm" onClick={() => void navigate({ to: '/inferops-canvas', search: { canvas: true } })}>My canvas</Button>
         <Button variant="ghost" size="sm" onClick={() => void navigate({ to: '/inferops-canvas', search: { tools: true } })}>Screens and flows</Button>
         <Button variant="primary" size="sm" disabled={!durableViews} onClick={() => void navigate({ to: '/inferops-canvas', search: { setup: 'new' } })}><PlusIcon size={14} aria-hidden />New console</Button>
       </>}
-      {tools && <Button size="sm" onClick={() => void showHome()}>All consoles</Button>}
+      {(tools || canvas) && <Button size="sm" onClick={() => void showHome()}>All consoles</Button>}
       {entry && !state.flow && <Button size="sm" variant="ghost" aria-label="Console settings" title="Console settings" onClick={() => void navigate({ to: '/inferops-canvas', search: { settings: entry.console.id, workspace: entry.workspace.id } })}><SlidersHorizontalIcon size={16} aria-hidden /></Button>}
       {!home && !tools && !centered && <Button size="sm" aria-pressed={state.chatOpen}
         onClick={() => send({ type: 'setChatOpen', open: !state.chatOpen })}>{state.chatOpen ? 'Hide assistant' : 'Show assistant'}</Button>}
@@ -229,6 +233,13 @@ export const OperateSessionPage = () => {
               : <ConsoleBuilder key={`${search.workspace ?? ''}/${setup}`} workspaces={workspaces.filter(canBuild)} initial={editing}
                   onCancel={() => void showHome()} onSaved={saved => { setSavedEntry(saved); void showHome() }} />
           : tools ? <InferOpsCanvasHome />
+          : canvas ? operate.session
+            ? <div className="mx-auto w-full max-w-6xl px-5 pb-6 pt-4 sm:px-8">
+                <PersonalCanvas api={authenticatedApi} viewer={accountKey ?? null} session={operate.session.stub}
+                  sessionWorkspace={sessionWorkspace?.stub ?? null} recentEvents={operate.recentEvents} screens={screens}
+                  currentBoard={state.board?.boardRef ?? null} focusedPlacement={search.placement} />
+              </div>
+            : <p role="status" className="p-6 text-sm text-kumo-subtle">Opening your canvas…</p>
           : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={operate.dispatch}
               console={{ open: run, entry, loading: screens.status === 'loading', sessionWorkspace }} />
           : run && visibleWidget?.presentation === 'page' && run.screenId === visibleWidget.screenId ? <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />

@@ -136,6 +136,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   listConsoleWidgetCandidates: ws => ws.listConsoleWidgetCandidates(),
   // The widget index is read and written by a builder's own publication only (FAC-11).
   getConsoleWidgetIndex: ws => ws.getConsoleWidgetIndex("console"),
+  // Reconnecting a connection's account (FAC-119 K2) is a build act.
+  reconnectGatekeeper: ws => ws.reconnectGatekeeper(1),
   listConsoleWidgetIndexWorkspaces: ws => ws.listConsoleWidgetIndexWorkspaces(),
   setConsoleWidgetIndexTarget: ws => ws.setConsoleWidgetIndexTarget("console", null),
   replaceConsole: ws => ws.replaceConsole("console", "0", { title: "Console", fullChat: "off", views: [{ id: "v", title: "V", type: "screen", screen: "view" }] }),
