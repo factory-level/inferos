@@ -16,13 +16,16 @@ const STATUS = {
 /**
  * The console launcher: eight real consoles per page. Opening a tile opens the published console
  * operators use. Where the viewer can build, each tile also shows its publication status and offers
- * edit, a preview of the draft and publish.
+ * edit, a simulated preview of the draft (FAC-96: nothing live, nothing sent), the draft opened in
+ * the builder's own Operate session with live data, and publish.
  */
-export const ConsoleMosaic = ({ screens, onOpen, onEdit, onPublish, highlighted }: {
+export const ConsoleMosaic = ({ screens, onOpen, onEdit, onPublish, onSimulate, highlighted }: {
   screens: WorkspaceScreensState
   onOpen: (entry: ConsoleEntry, source: ConsoleSource) => void
   onEdit: (entry: ConsoleEntry) => void
   onPublish: (entry: ConsoleEntry) => void
+  /** Open the simulated preview of the entry's draft. */
+  onSimulate: (entry: ConsoleEntry) => void
   highlighted?: string
 }) => {
   const [requestedPage, setPage] = useState<number | null>(null)
@@ -49,7 +52,7 @@ export const ConsoleMosaic = ({ screens, onOpen, onEdit, onPublish, highlighted 
             const source: ConsoleSource = status === 'unpublished' ? 'draft' : 'published'
             return <li key={`${entry.workspace.id}/${saved.id}`}
               className={`group relative rounded-xl border bg-kumo-base transition-colors hover:border-kumo-ring ${saved.id === highlighted ? 'border-kumo-ring' : 'border-kumo-line'}`}>
-              <button type="button" onClick={() => onOpen(entry, source)} aria-label={`${source === 'draft' ? 'Preview' : 'Open'} ${saved.title}`}
+              <button type="button" onClick={() => onOpen(entry, source)} aria-label={source === 'draft' ? `Open the draft of ${saved.title} in Operate (live data)` : `Open ${saved.title}`}
                 className="flex min-h-40 w-full flex-col p-4 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring rounded-xl">
                 <Icon size={22} aria-hidden className="mb-5 text-kumo-subtle" />
                 <span className="line-clamp-2 pr-4 text-sm font-medium text-kumo-default">{saved.title}</span>
@@ -66,8 +69,11 @@ export const ConsoleMosaic = ({ screens, onOpen, onEdit, onPublish, highlighted 
                 <div className="flex flex-wrap items-center gap-2 border-t border-kumo-line px-4 py-2">
                   <Badge variant={STATUS[status].variant}>{STATUS[status].label}</Badge>
                   {status !== 'published' && <span className="ml-auto flex gap-1">
-                    {status === 'changed' && <Button variant="ghost" size="sm" aria-label={`Preview the draft of ${saved.title}`} onClick={() => onOpen(entry, 'draft')}>
-                      <EyeIcon size={14} aria-hidden />Preview
+                    <Button variant="ghost" size="sm" aria-label={`Simulate the draft of ${saved.title}`} onClick={() => onSimulate(entry)}>
+                      <EyeIcon size={14} aria-hidden />Simulate draft
+                    </Button>
+                    {status === 'changed' && <Button variant="ghost" size="sm" aria-label={`Open the draft of ${saved.title} in Operate (live data)`} onClick={() => onOpen(entry, 'draft')}>
+                      Open draft in Operate (live data)
                     </Button>}
                     <Button variant="ghost" size="sm" aria-label={`Publish ${saved.title}`} onClick={() => onPublish(entry)}>
                       <UploadSimpleIcon size={14} aria-hidden />Publish

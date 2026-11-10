@@ -181,6 +181,35 @@ export function consoleWidgetVersionId(widget: Pick<ConsoleWidgetEntry, "bluepri
 }
 
 /**
+ * Why a console's draft can't be published as it stands (FAC-96), as its publication would refuse
+ * it: one shared check gives publication its first refusal and a builder the whole list, so the two
+ * never disagree. Each names what it is about and what fixes it, in fixed words.
+ */
+export type ConsoleDraftProblem = {
+  code: ConsoleDraftProblemCode;
+  /**
+   * What the problem is about: a page, node or attachment (`formatCanvasTarget`), or a console
+   * part, `console:<id>/widget:<gadget>`, `console:<id>/flow:<flow>` or
+   * `console:<id>/bound-view:<entry>`.
+   */
+  target: string;
+  /** The words publication refuses with. */
+  message: string;
+  /** What fixes it. */
+  repair: string;
+};
+
+/** A console draft problem's kind (see `ConsoleDraftProblem`). */
+export type ConsoleDraftProblemCode =
+  | "widget-refused" | "widget-not-registered" | "widget-no-ui" | "invalid-widget"
+  | "navigation-outside-console" | "undeclared-event" | "event-leads-to-action"
+  | "flow-missing" | "flow-step-outside-console" | "bound-view-refused" | "bound-view-too-large"
+  /** A screen's page, stored outside the editor, isn't a valid page (`CanvasModelError`). */
+  | "invalid-page"
+  /** FAC-116: an attachment hears runs of a trigger that isn't its gadget's, or a run leads to an action. */
+  | "run-trigger-mismatch" | "run-leads-to-action";
+
+/**
  * A published console's widget as a Wiki page embeds it (FAC-12): named by its source gadget, which
  * a republish keeps, and resolved to what the console publishes now. `available` names the current
  * publication's frozen install, which the page opens through `Overseer.getEmbeddedWidget` exactly

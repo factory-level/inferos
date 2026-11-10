@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { CANVAS_WIDGET_KINDS, parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
+import { applyCanvasOperations, CANVAS_WIDGET_KINDS, parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
 import {
   CANVAS_RUN_EVENTS, canvasPageEffects, canvasRunEffects, canvasRunEvent, canvasRunEventsHeard, parseCanvasRunEvent,
   canvasWidgetEventsHeard,
@@ -606,5 +606,68 @@ describe("a page's settings (FAC-95)", () => {
     expect(applyCanvasPageOperations(set, [{ type: "setSettings", settings: {} }])).not.toHaveProperty("settings");
     expect(rejection(() => applyCanvasPageOperations(page, [{ type: "setSettings", settings: { x: 1 } }])))
       .toEqual({ code: "invalid-setting", at: "operations[0]" });
+  });
+});
+
+// FAC-9 rollback safety: a reader that meets a widget a newer InferOS stored shows it as an inert
+// placeholder instead of refusing the whole view, but only where it reads; writes stay strict.
+describe("a widget from a newer InferOS (FAC-9)", () => {
+  const newer = { id: "n", kind: "inferos.future-widget", version: 1, targetRef: "future://thing/1", size: "wide",
+    params: { anything: true }, dataBinding: { resource: "future/thing", ref: "future://thing/1", schemaVersion: 1 } };
+  const v1 = (widget: Record<string, unknown>) => ({ schemaVersion: 1, id: "c", revision: "4", title: "C", sections: [{
+    id: "s", title: "S", columns: 2, widgets: [
+      widget,
+      { id: "g", kind: "inferos.gadget", version: 1, targetRef: "gadget:1", size: "normal", params: {} },
+    ],
+  }] });
+  const placeholder = { id: "n", kind: "inferos.unsupported", version: 1, targetRef: "", size: "wide", params: {}, storedKind: "inferos.future-widget" };
+
+  test("reads an unknown kind, or a known kind at an unknown version, as a placeholder, keeping its id and place", () => {
+    expect(parseCanvasDefinition(v1(newer), { tolerateNewer: true }).sections[0]!.widgets).toEqual([placeholder,
+      { id: "g", kind: "inferos.gadget", version: 1, targetRef: "gadget:1", size: "normal", params: {} }]);
+    const nextVersion = { id: "n", kind: "inferops.wiki", version: 2, targetRef: "inferops://acme.k/knowledge/wiki", size: "full", params: { page: null, more: 1 } };
+    expect(parseCanvasDefinition(v1(nextVersion), { tolerateNewer: true }).sections[0]!.widgets[0])
+      .toEqual({ ...placeholder, size: "full", storedKind: "inferops.wiki" });
+    // A write, or any strict read, still refuses it.
+    expect(() => parseCanvasDefinition(v1(newer))).toThrow("Invalid canvas widget");
+  });
+
+  test("a tolerant read keeps every kind this InferOS registers, the governed table included", () => {
+    const table = { id: "n", kind: "inferos.governed-table", version: 1, targetRef: "tickets://support/queue/billing", size: "wide", params: {} };
+    expect(parseCanvasDefinition(v1(table), { tolerateNewer: true }).sections[0]!.widgets[0])
+      .toMatchObject({ id: "n", kind: "inferos.governed-table", targetRef: "tickets://support/queue/billing" });
+  });
+
+  test("grants and offers nothing: no actions, never offered by the catalog, and never added by an edit", () => {
+    expect(CANVAS_WIDGET_ACTIONS["inferos.unsupported"]).toEqual([]);
+    expect(CANVAS_WIDGET_KINDS).not.toContain("inferos.unsupported");
+    // The placeholder itself parses, so a reader can pass on what it read; it can't be written.
+    expect(parseCanvasDefinition(v1(placeholder)).sections[0]!.widgets[0]).toEqual(placeholder);
+    const current = parseCanvasDefinition(v1({ id: "b", kind: "inferos.gadget", version: 1, targetRef: "gadget:2", size: "normal", params: {} }));
+    expect(() => applyCanvasOperations(current, "4", [{ type: "addWidget", sectionId: "s", index: 0, widget: { ...placeholder, id: "x" } }]))
+      .toThrow("A widget from a newer InferOS can't be added or changed here.");
+  });
+
+  test("reads a nested page holding one: the placeholder hears and runs nothing, and the rest of the page reads", () => {
+    const page = {
+      schemaVersion: 2, id: "p", revision: "0", title: "P", children: ["a"], attachments: [], nodes: [
+        { nodeType: "object", id: "a", title: "A", columns: 1, children: ["n", "b"], attachments: [
+          { id: "ask", version: 1, on: "ping", effect: { kind: "request-action", target: "n", action: "do-future-thing" } },
+        ] },
+        { ...newer, nodeType: "widget", attachments: [{ id: "x", version: 1, on: "future-event", effect: { kind: "navigate", page: "q" } }] },
+        { nodeType: "widget", id: "b", kind: "inferops.project-board", version: 1, targetRef: "inferops://acme.operations/project/board/ENG",
+          size: "normal", params: { workflow: "software", showCompleted: false },
+          attachments: [{ id: "up", version: 1, on: "action-completed", effect: { kind: "raise-event", target: "a", event: "ping" } }] },
+      ],
+    };
+    const read = parseCanvasPage(page, { tolerateNewer: true });
+    expect(read.nodes.find(node => node.id === "n")).toEqual({ ...placeholder, nodeType: "widget", attachments: [] });
+    // An attachment that asks the placeholder for an action is dropped; everything else stays.
+    expect(read.nodes.find(node => node.id === "a")!.attachments).toEqual([]);
+    expect(read.nodes.find(node => node.id === "b")!.attachments.map(item => item.id)).toEqual(["up"]);
+    expect(() => parseCanvasPage(page)).toThrow();
+    // Converting a tolerantly read definition keeps the placeholder.
+    expect(canvasPageFromDefinition(v1(newer), { tolerateNewer: true }).nodes.find(node => node.id === "n"))
+      .toEqual({ ...placeholder, nodeType: "widget", attachments: [] });
   });
 });

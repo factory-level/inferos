@@ -94,8 +94,33 @@ export interface CanvasGovernedTableWidget {
   params: {};
 }
 
-/** Registered widget instance; unknown kinds and versions are rejected. */
-export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget | CanvasWikiWidget | CanvasGovernedTableWidget;
+/**
+ * A widget a newer InferOS stored that this one can't show (FAC-9 rollback safety): a kind it
+ * doesn't know, or a known kind at a version it doesn't know. A tolerant read
+ * (`parseCanvasDefinition(value, { tolerateNewer: true })`) shows one in its place, keeping its id
+ * and size, so the rest of the view still reads. It reads nothing, grants nothing and offers no
+ * actions, and no edit may add or change one: only reads produce it, and writes stay strict, so the
+ * stored widget is never replaced by its placeholder.
+ */
+export interface CanvasUnsupportedWidget {
+  /** The stored widget's ID. */
+  id: string;
+  /** The placeholder kind; never offered by a catalog. */
+  kind: "inferos.unsupported";
+  /** Widget parameter schema version. */
+  version: 1;
+  /** Empty when read: nothing is resolved for it (typed `string` so generic widget mappers keep it). */
+  targetRef: string;
+  /** The stored widget's size. */
+  size: "normal" | "wide" | "full";
+  /** No parameters. */
+  params: {};
+  /** The stored widget's kind (at most 64 characters), to say what it needs; never resolved. */
+  storedKind: string;
+}
+
+/** Registered widget instance; unknown kinds and versions are rejected (a tolerant read shows a placeholder). */
+export type CanvasWidget = CanvasProjectBoardWidget | CanvasGadgetWidget | CanvasWikiWidget | CanvasGovernedTableWidget | CanvasUnsupportedWidget;
 
 /** A schema-versioned read reference to one supported InferOps resource. */
 export interface CanvasDataBinding {
@@ -205,9 +230,39 @@ const revision = (value: unknown): string => typeof value === "string" && CANVAS
 const columns = (value: unknown): 1 | 2 | 3 => value === 1 || value === 2 || value === 3 ? value : invalid("columns");
 const position = (value: unknown, length: number): number => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= length ? value : invalid("position");
 
-function widget(value: unknown): CanvasWidget {
+// The kinds this InferOS can show, each at version 1: every kind it registers. Anything else is a
+// newer InferOS's.
+const KNOWN_KINDS: readonly unknown[] = CANVAS_WIDGET_KINDS;
+
+/**
+ * The placeholder a tolerant read shows for `raw`, a stored widget a newer InferOS wrote (an
+ * unknown kind, or a known one at another version), or null when this InferOS knows it. Its id must
+ * still be valid; an unknown size reads as `normal`.
+ */
+export function newerWidgetPlaceholder(raw: Record<string, unknown>): CanvasUnsupportedWidget | null {
+  if (raw.kind === "inferos.unsupported" || (KNOWN_KINDS.includes(raw.kind) && raw.version === 1)) return null;
+  const size = raw.size === "wide" || raw.size === "full" ? raw.size : "normal";
+  return { id: id(raw.id), kind: "inferos.unsupported", version: 1, targetRef: "", size, params: {},
+    storedKind: typeof raw.kind === "string" ? raw.kind.slice(0, 64) : "unknown" };
+}
+
+/** How a definition is read: `tolerateNewer` shows a newer InferOS's widgets as placeholders, for reads only. */
+export type CanvasReadOptions = { tolerateNewer?: boolean };
+
+function widget(value: unknown, options: CanvasReadOptions = {}): CanvasWidget {
   if (!value || typeof value !== "object" || Array.isArray(value)) return invalid("widget");
   const raw = value as Record<string, unknown>;
+  if (options.tolerateNewer) {
+    const placeholder = newerWidgetPlaceholder(raw);
+    if (placeholder) return placeholder;
+  }
+  if (raw.kind === "inferos.unsupported") {
+    const u = record(value, ["id", "kind", "version", "targetRef", "size", "params", "storedKind"], "widget");
+    if (u.version !== 1 || u.targetRef !== "" || (u.size !== "normal" && u.size !== "wide" && u.size !== "full")) return invalid("widget");
+    if (typeof u.storedKind !== "string" || u.storedKind.length === 0 || u.storedKind.length > 64) return invalid("widget");
+    record(u.params, [], "widget parameters");
+    return { id: id(u.id), kind: "inferos.unsupported", version: 1, targetRef: "", size: u.size, params: {}, storedKind: u.storedKind };
+  }
   const w = record(value, Object.hasOwn(raw, "dataBinding")
     ? ["id", "kind", "version", "targetRef", "size", "params", "dataBinding"]
     : ["id", "kind", "version", "targetRef", "size", "params"], "widget");
@@ -254,27 +309,31 @@ function parseDataBinding(value: unknown, resource: CanvasDataBinding["resource"
 }
 
 /** Validate and detach one widget instance under the registered kind and version rules. It resolves nothing. */
-export const parseCanvasWidget = (value: unknown): CanvasWidget => widget(value);
+export const parseCanvasWidget = (value: unknown, options: CanvasReadOptions = {}): CanvasWidget => widget(value, options);
 
-function section(value: unknown): CanvasSection {
+function section(value: unknown, options: CanvasReadOptions = {}): CanvasSection {
   const s = record(value, ["id", "title", "columns", "widgets"], "section");
   if (!Array.isArray(s.widgets) || s.widgets.length > 48) return invalid("widgets");
-  return { id: id(s.id), title: title(s.title), columns: columns(s.columns), widgets: s.widgets.map(widget) };
+  return { id: id(s.id), title: title(s.title), columns: columns(s.columns), widgets: s.widgets.map(item => widget(item, options)) };
 }
 
-function content(value: unknown): CanvasContent {
+function content(value: unknown, options: CanvasReadOptions = {}): CanvasContent {
   const c = record(value, ["title", "sections"], "content");
   if (!Array.isArray(c.sections) || c.sections.length > 12) return invalid("sections");
-  const sections = c.sections.map(section);
+  const sections = c.sections.map(item => section(item, options));
   if (sections.reduce((sum, item) => sum + item.widgets.length, 0) > 48) return invalid("widget count");
   return { title: title(c.title), sections };
 }
 
-/** Validate and detach a snapshot; rejects unknown fields, kinds, schema versions and duplicate IDs. */
-export function parseCanvasDefinition(value: unknown): CanvasDefinition {
+/**
+ * Validate and detach a snapshot; rejects unknown fields, kinds, schema versions and duplicate IDs.
+ * With `tolerateNewer` (reads only), a widget a newer InferOS stored reads as a placeholder
+ * (`CanvasUnsupportedWidget`) instead.
+ */
+export function parseCanvasDefinition(value: unknown, options: CanvasReadOptions = {}): CanvasDefinition {
   const d = record(value, ["schemaVersion", "id", "revision", "title", "sections"], "definition");
   if (d.schemaVersion !== 1) return invalid("schema version");
-  const parsed = content({ title: d.title, sections: d.sections });
+  const parsed = content({ title: d.title, sections: d.sections }, options);
   const ids = new Set<string>([id(d.id)]);
   for (const entry of parsed.sections) {
     for (const item of [entry, ...entry.widgets]) {
@@ -298,6 +357,8 @@ export function applyCanvasOperations(current: unknown, expectedRevision: unknow
     allowedKinds?: readonly CanvasWidgetKind[]): CanvasDefinition {
   let result = parseCanvasDefinition(current);
   const allowed = (item: CanvasWidget): CanvasWidget => {
+    // A placeholder stands for a newer InferOS's widget; writing it would replace that widget.
+    if (item.kind === "inferos.unsupported") throw new Error("A widget from a newer InferOS can't be added or changed here.");
     if (allowedKinds && !allowedKinds.includes(item.kind)) throw new Error(`Widget kind ${item.kind} is not enabled for this installation`);
     return item;
   };
@@ -364,7 +425,7 @@ export function applyCanvasOperations(current: unknown, expectedRevision: unknow
         const op = record(input, ["type", "content"], "restore");
         const restored = content(op.content);
         const existing = new Set(result.sections.flatMap(entry => entry.widgets.map(item => item.id)));
-        restored.sections.forEach(entry => entry.widgets.filter(item => !existing.has(item.id)).forEach(allowed));
+        restored.sections.forEach(entry => entry.widgets.filter(item => !existing.has(item.id) || item.kind === "inferos.unsupported").forEach(allowed));
         result = { ...result, ...restored }; break;
       }
       default: return invalid("operation type");
