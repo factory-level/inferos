@@ -9,7 +9,7 @@ import {
   MAX_WORKFLOW_DEFINITION_SHARES, parseWorkflowDefinitionRights,
   type WorkflowDefinitionRights, type WorkflowDefinitionShare,
   type WorkflowRunRecord, WORKFLOW_RUN_HISTORY_CAP_REFUSAL, WORKFLOW_RUN_HISTORY_RETENTION_MS,
-  WORKFLOW_RUN_HISTORY_SWEEP_BATCH,
+  WORKFLOW_RUN_HISTORY_SWEEP_BATCH, WORKFLOW_RUN_START_WINDOW_MS,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 import type { HookOccurrence } from "@gadgets/workshop-shared/gatekeeper";
@@ -182,6 +182,9 @@ export class WorkspaceWorkflowDefinitionStore {
   // The sweep's body, for a caller already in a transaction: deletes what expired by `now` and
   // nothing keeps, and returns how many.
   #sweepAt(now: number): number {
+    // Backfill legacy run ownership while its temporary definition still exists. A history sweep
+    // after this one may remove the definition, but must not erase the only source of attribution.
+    this.#ensureHistoryIndex();
     let pinned = this.#pinnedIds();
     let live = this.#liveIds(now);
     let swept = 0;
@@ -221,10 +224,28 @@ export class WorkspaceWorkflowDefinitionStore {
   }
 
   #historyExpiry(delivery: StoredWorkflowDelivery): number | undefined {
+    let now = this.retention.now();
+    let ttl = this.retention.runHistoryTtlMs?.() ?? WORKFLOW_RUN_HISTORY_RETENTION_MS;
     let outcome = delivery.result?.outcome;
     let settledAt = delivery.result?.settledAt?.getTime();
-    if ((outcome !== "succeeded" && outcome !== "failed") || !Number.isFinite(settledAt)) return undefined;
-    return settledAt! + (this.retention.runHistoryTtlMs?.() ?? WORKFLOW_RUN_HISTORY_RETENTION_MS);
+    if (outcome === "uncertain" && delivery.result?.reason !== "not-started") return undefined;
+    if (outcome === "queued" || outcome === "running" || outcome === "waiting") return undefined;
+    if ((outcome === "succeeded" || outcome === "failed") && Number.isFinite(settledAt)) return settledAt! + ttl;
+    // Index never-started runs at admission; queueRun removes this future pointer if execution
+    // begins. The sweeper will see it only after the full start window plus retention has passed.
+    if (delivery.execution === undefined && delivery.run !== undefined) {
+      let admittedAt = delivery.at?.getTime();
+      return Number.isFinite(admittedAt) ? admittedAt! + WORKFLOW_RUN_START_WINDOW_MS + ttl : undefined;
+    }
+    if (isLiveWorkflowDelivery(delivery, now)) return undefined;
+    let endedAt = delivery.execution?.endedAt?.getTime();
+    if (Number.isFinite(endedAt)) return endedAt! + ttl;
+    let admittedAt = delivery.at?.getTime();
+    if (!Number.isFinite(admittedAt)) return undefined;
+    let terminalAt = delivery.execution === undefined && delivery.run !== undefined
+      ? admittedAt! + WORKFLOW_RUN_START_WINDOW_MS
+      : admittedAt!;
+    return terminalAt + ttl;
   }
 
   #historyExpiryKey(expiresAt: number, deliveryId: number): string {
@@ -658,8 +679,15 @@ export class WorkspaceWorkflowDefinitionStore {
         throw error;
       }
       this.#ensureHistoryIndex();
-      this.#sweepRunHistoryAt(now);
       let maxDeliveries = this.retention.maxWorkflowDeliveries?.() ?? MAX_WORKFLOW_DELIVERIES;
+      let historyEnd = `${String(now + 1).padStart(16, "0")}:`;
+      this.#sweepRunHistoryAt(now);
+      while ((this.storage.workflowDeliveryCount.get()?.count ?? 0) >= maxDeliveries) {
+        this.#sweepRunHistoryAt(now);
+        // Each pass is limited to one sweep batch. Continue while another due pointer exists, so
+        // expired records beyond the first batch cannot keep an otherwise-open workspace capped.
+        if (Array.from(this.storage.workflowDeliveryExpiries.list({ end: historyEnd, limit: 1 })).length === 0) break;
+      }
       if ((this.storage.workflowDeliveryCount.get()?.count ?? 0) >= maxDeliveries) {
         throw new Error(WORKFLOW_RUN_HISTORY_CAP_REFUSAL);
       }
@@ -1150,7 +1178,8 @@ export class WorkspaceWorkflowDefinitionStore {
     let stored = this.storage.workflowDefinitions.get(definitionId);
     let matches = Array.from(this.storage.workflowDeliveries.list()).filter(delivery => delivery.definitionId === definitionId);
     let owner = stored?.owner.id ?? matches.find(delivery => delivery.historyOwnerProfileId)?.historyOwnerProfileId;
-    if (stored ? !this.#rights(stored, viewer, role).edit : (!owner || (owner !== viewer && role !== "build"))) {
+    let editShare = role === "build" && this.storage.workflowDefinitionShares.get(shareKey(definitionId, viewer))?.rights.edit === true;
+    if (stored ? !this.#rights(stored, viewer, role).edit : (!owner || (owner !== viewer && !editShare))) {
       throw new Error(NOT_FOUND);
     }
     let shown: WorkflowDefinitionDelivery[] = [];

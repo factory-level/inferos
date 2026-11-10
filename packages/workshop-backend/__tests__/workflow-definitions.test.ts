@@ -385,23 +385,60 @@ describe("triggers and runs", () => {
     expect(store.run(first.run!.runId)).not.toBeNull();
   });
 
-  it("does not treat a not-started or uncertain record as expired history", () => {
-    let { store, storage, headOf } = workspace({ max: 3, ttlMs: 1 });
+  it("expires not-started history after the start window", () => {
+    let now = Date.now();
+    let { store, headOf } = workspace({ max: 3, ttlMs: 1, now: () => now });
     let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
 
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
-    let template = store.fire(11, GADGET, headOf, everyoneBuilds)!;
-    fillRetainedDeliveries(storage, template, 3);
-    let firstStored = storage.workflowDeliveries.get(first.deliveryId)!;
-    storage.workflowDeliveries.put({
-      ...firstStored, at: new Date(Date.now() - WORKFLOW_RUN_START_WINDOW_MS - 1),
-    });
+    store.fire(11, GADGET, headOf, everyoneBuilds);
+    store.fire(11, GADGET, headOf, everyoneBuilds);
+    now += WORKFLOW_RUN_START_WINDOW_MS + 10_000;
+    let admitted = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    expect(store.run(first.run!.runId)).toBeNull();
+    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(1);
+    expect(admitted.run).toBeDefined();
+  });
 
-    expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("Wait for older completed runs to expire");
-    expect(store.run(first.run!.runId)).not.toBeNull();
-    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(3);
+  it("expires legacy finished history without a result using endedAt", () => {
+    let now = Date.now();
+    let { store, headOf } = workspace({ max: 3, ttlMs: 1, now: () => now });
+    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
+
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    store.queueRun(11, first.deliveryId, "run", []);
+    store.endRun(first.deliveryId);
+    now += 10_000;
+
+    expect(store.sweepExpiredRunHistory(now)).toBe(1);
+    let admitted = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    expect(store.run(first.run!.runId)).toBeNull();
+    expect(admitted.run).toBeDefined();
+  });
+
+  it("sweeps expired history across multiple bounded batches before refusing admission", () => {
+    let now = Date.now();
+    let { store, storage, headOf } = workspace({ max: 1_000, ttlMs: 1, now: () => now });
+    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
+
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    fillRetainedDeliveries(storage, first, 1_105);
+    let oldAt = new Date(now - WORKFLOW_RUN_START_WINDOW_MS - 10_000);
+    for (let delivery of storage.workflowDeliveries.list()) {
+      storage.workflowDeliveries.put({ ...delivery, at: oldAt });
+    }
+    storage.workflowDeliveryCount.put({ count: 1_105, indexed: false });
+    now += WORKFLOW_RUN_START_WINDOW_MS + 10_000;
+
+    let admitted = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(906);
+    expect(admitted.run).toBeDefined();
   });
 
   it("expires reconciled terminal history before admitting at the cap", () => {
@@ -425,18 +462,23 @@ describe("triggers and runs", () => {
 
   it("keeps an owner's run history listable after its temporary definition is swept", () => {
     let now = Date.now();
-    let { store, headOf } = workspace({ now: () => now });
+    let { store, storage, headOf } = workspace({ now: () => now });
     let saved = store.save(ADA, { title: "Temporary", gadgetId: GADGET, retain: false }, headOf, "build");
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     let run = store.fire(11, GADGET, headOf, everyoneBuilds)!;
     store.recordResult(run.deliveryId, { outcome: "succeeded" });
     store.pinTrigger(ADA.id, 11, GADGET, null);
+    let legacy = storage.workflowDeliveries.get(run.deliveryId)!;
+    delete legacy.historyOwnerProfileId;
+    storage.workflowDeliveries.put(legacy);
+    storage.workflowDeliveryCount.put(null);
     now += 25 * 60 * 60_000;
 
     expect(store.sweepExpired()).toBe(1);
     expect(store.get(ADA.id, saved.id)).toBeNull();
     expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(1);
+    expect(() => store.deliveries(BEN.id, saved.id, "build")).toThrow("Workflow definition not found.");
     expect(store.deliveries(ADA.id, saved.id, "build")[0]).not.toHaveProperty("historyOwnerProfileId");
     expect(() => store.deliveries(BEN.id, saved.id, null)).toThrow("Workflow definition not found.");
   });
