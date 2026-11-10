@@ -184,8 +184,12 @@ export type GovernedRequestCode =
 
 /** A refused request: nothing was read. */
 export class GovernedRequestError extends Error {
-  constructor(readonly code: GovernedRequestCode, message: string) {
+  /** Why it was refused. */
+  readonly code: GovernedRequestCode;
+
+  constructor(code: GovernedRequestCode, message: string) {
     super(message);
+    this.code = code;
     this.name = "GovernedRequestError";
   }
 }
