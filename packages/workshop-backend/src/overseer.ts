@@ -13360,9 +13360,23 @@ class OverseerImpl implements AgentHooks {
   }
 
   // FAC-14: the built-in kinds the owner's own widget search has returned in this session, which
-  // InferOps returns only to someone holding each kind's declared permission. A built-in suggestion
-  // must name one of them. In memory only: after a restart the agent finds again, never more.
+  // InferOps returns only to someone holding each kind's declared permission, and the owner's
+  // presentation epoch they were found in. A built-in suggestion must name one of them, found in the
+  // epoch the owner is in now: a company change raises it (#resetPresentationState), so nothing
+  // found for one company is suggested in another. In memory only: after a restart the agent finds
+  // again, never more.
   #foundBuiltinKinds = new Set<string>();
+  #foundBuiltinEpoch: number | null = null;
+
+  // The found kinds for the owner's epoch now, dropped first when it has moved.
+  async #foundKindsNow(owner: DurableObjectStub<UserDurableObject>): Promise<Set<string>> {
+    let epoch = await owner.presentationEpoch();
+    if (epoch !== this.#foundBuiltinEpoch) {
+      this.#foundBuiltinKinds = new Set();
+      this.#foundBuiltinEpoch = epoch;
+    }
+    return this.#foundBuiltinKinds;
+  }
 
   /**
    * The widgets the operate session's owner may use that match `query` (FAC-14, the agent's
@@ -13399,7 +13413,8 @@ class OverseerImpl implements AgentHooks {
         }
       }));
     }
-    for (let {kind} of answer.hits) this.#foundBuiltinKinds.add(kind);
+    let found = await this.#foundKindsNow(owner);
+    for (let {kind} of answer.hits) found.add(kind);
     return {
       status: "searched", ranking: answer.ranking, denied: answer.denied, unsearched: answer.unsearched, unreached,
       builtins: answer.hits.map(({kind, description, metadata}) => ({kind, description, ...(metadata ? {metadata} : {})})),
@@ -13482,7 +13497,7 @@ class OverseerImpl implements AgentHooks {
       if (!found?.[0]?.some(instance => instance.consoleId === ref.consoleId && instance.sourceGadgetId === ref.sourceGadgetId)) {
         throw new Error(AGENT_WIDGET_UNAVAILABLE);
       }
-    } else if (!this.#foundBuiltinKinds.has(ref.kind)) {
+    } else if (!(await this.#foundKindsNow(owner)).has(ref.kind)) {
       throw new Error(AGENT_WIDGET_UNAVAILABLE);
     }
     return await owner.proposeAgentPlacement(proposal);

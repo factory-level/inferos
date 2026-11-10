@@ -293,7 +293,8 @@ describe("the agent overlay in the person's user Durable Object", () => {
 // The operate session's side: S, the owner's operate workspace, asking W for them.
 
 type Session = { impl: any; owner: { calls: string[]; overlay: AgentViewOverlay; page: OperateConsoleRun | null; seq: number;
-  dispatched: { event: unknown; expectedSeq: number | null }[]; placements: unknown[]; workspaces: { id: string; title: string }[] } };
+  dispatched: { event: unknown; expectedSeq: number | null }[]; placements: unknown[]; workspaces: { id: string; title: string }[];
+  epoch: number } };
 
 // Runs `fn` in an operate session S owned by p1, who holds `role` in a console workspace W.
 async function withSession(role: "use" | undefined, fn: (s: Session, h: Harness) => Promise<void>): Promise<void> {
@@ -309,7 +310,7 @@ async function withSession(role: "use" | undefined, fn: (s: Session, h: Harness)
   await runInDurableObject(sStub, async (instance: OverseerDurableObject) => {
     let impl = (instance as unknown as { impl: any }).impl;
     let owner: Session["owner"] = { calls: [], overlay: { views: [], proposals: [] }, page: page(h), seq: 4, dispatched: [],
-      placements: [], workspaces: [{ id: h.workspaceId, title: "Console workspace" }] };
+      placements: [], workspaces: [{ id: h.workspaceId, title: "Console workspace" }], epoch: 0 };
     let fakeOwner = {
       searchWidgets: async (query: string) => {
         owner.calls.push(`search ${query}`);
@@ -330,6 +331,7 @@ async function withSession(role: "use" | undefined, fn: (s: Session, h: Harness)
         return owner.overlay;
       },
       getOperatePage: async () => ({ seq: owner.seq, state: { console: owner.page } }),
+      presentationEpoch: async () => owner.epoch,
       dispatchOperateEvent: async (event: unknown, expectedSeq: number | null) => {
         owner.dispatched.push({ event, expectedSeq });
         return { seq: owner.seq + 1, state: { console: owner.page } };
@@ -413,6 +415,12 @@ describe("the operate session asking, as its owner", () => {
       expect((await s.impl.proposeSessionPlacement({ ref: board })).proposals).toMatchObject([{ ref: board }]);
       expect(await refusal(s.impl.proposeSessionPlacement({ ref: { ...board, kind: "project/invented" } })))
         .toBe(AGENT_WIDGET_UNAVAILABLE);
+      // The owner moves to another company (their presentation epoch rises): what was found for the
+      // first is not suggested in the second, and a search there finds again.
+      s.owner.epoch = 1;
+      expect(await refusal(s.impl.proposeSessionPlacement({ ref: board }))).toBe(AGENT_WIDGET_UNAVAILABLE);
+      await s.impl.findSessionWidgets("boards");
+      expect((await s.impl.proposeSessionPlacement({ ref: board })).proposals).toHaveLength(1);
     }));
 
   it("moves within the open console only when the console, read as the owner, holds the view, at the sequence it read", () =>
