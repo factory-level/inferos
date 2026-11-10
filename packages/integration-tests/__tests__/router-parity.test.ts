@@ -258,7 +258,8 @@ describe("one person's path through the router", () => {
     expect(writes).toHaveLength(1);
     expect(fake.commits.filter(c => c.idempotencyKey === writes[0]!.idempotencyKey)).toHaveLength(1);
     expect(fake.issue("ENG-2").stateId).toBe(IN_PROGRESS.id);
-    await expect(ws.approveAction(action!.id)).rejects.toThrow(/not pending/);
+    // A second approval answers as the first did and writes nothing (FAC-118).
+    await ws.approveAction(action!.id);
     expect(fake.writeRequests().length).toBe(writesBefore + 1);
 
     // Held across the restart below: proposed now, approved only after it.

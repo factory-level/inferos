@@ -277,6 +277,20 @@ describe("a build session in a shared workspace", () => {
     expect(publisher.asked).toEqual(["publish"]);
   });
 
+  // FAC-118: the decider is the same for both answers; rejecting sends nothing, but a person who may
+  // not approve a shared workspace's action may not reject it either.
+  it("refuses rejecting an action once build is gone, as it refuses approving it (FAC-118)", async () => {
+    let pending = { id: 1, type: "action", state: "pending", gatekeeperId: 7, caller: { from: "user" } };
+    let session = await shared({ build: false, publish: true }, {
+      actions: { get: () => pending },
+      gatekeepers: { get: () => ({ creationSpec: { type: "custom" } }) },
+    });
+    session.asked.length = 0;
+    await expect(session.overseer.rejectAction(1)).rejects.toThrow(REFUSED);
+    expect(session.asked).toEqual(["build"]);
+    expect(pending.state).toBe("pending");
+  });
+
   it("refuses when InferOps can't answer", async () => {
     let { overseer } = await shared({ build: new Error("down"), publish: new Error("down") });
     await expect(overseer.mergeChanges(1)).rejects.toThrow("down");
