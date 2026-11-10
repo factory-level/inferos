@@ -7,9 +7,8 @@
  * A reference identifies a target and an attachment grants nothing; both are checked at use, under
  * the acting person's or run's own authority.
  */
-import { CANVAS_ID, CANVAS_REVISION, newerWidgetPlaceholder, parseCanvasDefinition, parseCanvasWidget, type CanvasDataBinding, type CanvasDefinition, type CanvasReadOptions, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
+import { CANVAS_ID, CANVAS_REVISION, governedResourceOf, newerWidgetPlaceholder, parseCanvasDefinition, parseCanvasWidget, type CanvasDataBinding, type CanvasDefinition, type CanvasReadOptions, type CanvasWidget, type CanvasWidgetKind } from "./canvas";
 import { parseWorkspaceSettings, type WorkspaceSettings } from "./workspace-settings";
-import { governedResourceOf } from "./governed-data";
 
 /** The schema version this module reads. `CanvasDefinition`, with sections, is version 1. */
 export const CANVAS_MODEL_SCHEMA_VERSION = 2;
