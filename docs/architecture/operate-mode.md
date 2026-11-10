@@ -84,6 +84,8 @@ covers:
   - packages/integration-tests/__tests__/wiki-embedded-widget.test.ts
   - packages/workshop-backend/__tests__/console-embedded-widget.test.ts
   - packages/workshop-shared/src/widget-state.ts
+  - packages/workshop-shared/src/widget-placements.ts
+  - packages/workshop-backend/__tests__/widget-placements.test.ts
   - packages/workshop-backend/__tests__/widget-state.test.ts
   - packages/integration-tests/__tests__/operate-bound-views.test.ts
   - packages/workshop-frontend/src/features/operate-publish
@@ -723,7 +725,8 @@ FAC-88. A person's presentation state is theirs alone, and it belongs to the com
 - **What it covers.** Everything here lives in the person's own user DO (`idFromName` of their InferOS identity), so it is never shared between people:
   - **the operate page:** its selection (`focus`, `board` with its `issueId`), the console run, and a flow's position (FAC-87: `index`, `history`, `pageState`);
   - **the page's event log;**
-  - **person-persisted widget states** (`widgetStates`).
+  - **person-persisted widget states** (`widgetStates`);
+  - **widget placements on the Operate canvas** (FAC-13, `widgetPlacements`; see [Widget placements](#widget-placements)).
   
   Session-persisted widget states live only on one operate session connection (`WidgetStateMemory` in `OperateSessionImpl`).
 - **Selecting whose state is read.** No RPC takes a person id. A widget reference (`OperateWidgetRef`) names a console and an install, so the same reference read by another person gives that person's own state. The page holds references (a board's `boardRef`, an issue id), never an entity, so every read of the record goes to InferOps through the reader's own connection.
@@ -736,11 +739,13 @@ FAC-88. A person's presentation state is theirs alone, and it belongs to the com
 - **A company switch.** Every user-DO method that reads or writes the page, a widget state or the operate session workspace runs `#enterPresentationCompany()` first:
   - `getOperatePage`, `dispatchOperateEvent`, `subscribeOperateSession`, `listOperateEvents` and `listOperateSubjectEvents`;
   - `readWidgetState` and `transitionWidgetState`;
+  - `listWidgetPlacements`, `saveWidgetPlacement` and `removeWidgetPlacement`;
   - `claimOperateSessionWorkspace` and `operateSessionWorkspaceId`;
   - `presentationEpoch` and `currentPresentationCompany`.
   
   That covers the person's, the operate agent's and a handover's paths. When the company differs from the recorded one, `#resetPresentationState()` does all of the following in one synchronous step:
   - every stored widget state is deleted;
+  - every widget placement is deleted, and `widgetPlacementsRevision` rises on every reset, with no placements too, so a client holding any revision read in the former company is refused as a conflict;
   - a kernel-only `companyChanged` event returns the page to `INITIAL_OPERATE_PAGE`;
   - `presentationFloorSeq` moves to that event, so earlier entries are kept in storage but never listed again;
   - `presentationEpoch` rises, which makes an open connection drop its session widget states;
@@ -811,6 +816,16 @@ FAC-88. A person's presentation state is theirs alone, and it belongs to the com
 - **Not covered.**
   - A person's own unshared workspaces are theirs in any company.
   - **The open tab's own stub.** The Operate page holds its workspace stub (`useSessionWorkspace`) until the restart drops the connection. Its reconnect then opens the fresh workspace; nothing in the UI says why the chat is empty.
+
+### Widget placements
+
+FAC-13, in part: the kernel half of placing widgets on the Operate canvas; the canvas itself is a later PR. A person's placements are part of their presentation state (above): saved in their own user DO, so they survive a reload and another device, for the company they work in now, and dropped when it changes. Scroll position and other transient UI stay in the browser.
+
+- **What a placement is** (`widget-placements.ts`): a kernel-minted `placementId`, what it shows, where it sits and its filters (`WidgetPlacement`). What it shows is a reference only (`WidgetPlacementRef`): a published console's widget, named as `Overseer.listWidgetInstances` and a Wiki embed name it (workspace, console, source gadget, and the definition placed), or a built-in widget kind with an `inferops://` target. Never a business record, a copy of one, or a credential. The layout is whole cells of a 12-column grid (`WIDGET_PLACEMENT_LIMITS`); filters are at most 16 named strings of at most 256 characters, the person's own choices; a filter named `__proto__`, `constructor` or `prototype` is refused, never dropped. Every field is checked at the session boundary and again in the user DO (`parseWidgetPlacementInput`), and nothing else is read.
+- **The RPCs** (`OperateSession`): `listWidgetPlacements()` returns them in canvas order with a `revision`; `saveWidgetPlacement(placement, expectedRevision)` adds one (no id) or changes one's layout and filters (with its id); `removeWidgetPlacement(placementId, expectedRevision)` removes one. A change at a revision that is no longer current is refused (`WIDGET_PLACEMENTS_CONFLICT`), as is one to a placement that is gone (`WIDGET_PLACEMENT_NOT_FOUND`), a change of the widget a placement shows (`WIDGET_PLACEMENT_REF_CHANGED`: remove it and place the other), a 65th placement (`WIDGET_PLACEMENTS_FULL`) and a malformed one (`WIDGET_PLACEMENT_INVALID`). Each check and write is one synchronous step in the user DO.
+- **A placement grants nothing.** What it shows is opened on its own checked path every time: a console widget through `Overseer.getEmbeddedWidget`, as an embed is.
+- **Independent filters.** An `OperateWidgetRef` may name a `placementId`; its widget state is then kept under a key of its own (`widgetStateKey`), so two placements of one widget keep separate states, and the widget's own state, which its console and a Wiki embed share, is untouched. Without a placement the key is unchanged from FAC-86, so stored states still match. A placement's state is served only for one of the person's own placements of a console widget of that workspace and console (`OperateSessionImpl`, `WIDGET_PLACEMENT_NOT_FOUND` otherwise). Removing a placement drops the states kept for it.
+- **Tests:** `widget-placements.test.ts` (the shape and its refusals; minted ids, canvas order, the revision, a fixed widget, the limit; another person sees none; a removal drops its states and no other; a company switch keeps none and restores none, and refuses a write at a revision read in the former company with an empty canvas; through `OperateSessionImpl`, only checked fields saved, two placements' independent states, and a placement's state refused for one not on the person's canvas or of another console).
 
 ### Callable widget tools
 

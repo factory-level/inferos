@@ -39,6 +39,7 @@ import type {
   WorkflowDefinitionSave, WorkflowInvocation, RequestedRun,
 } from "./workflow-definition.js";
 import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
+import type { WidgetPlacementInput, WidgetPlacements } from "./widget-placements.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
   ArtifactPin, ArtifactPublishResult, ArtifactQualification, ArtifactRef, ArtifactRefusal,
@@ -515,6 +516,28 @@ export interface OperateSession extends RpcTarget {
    * accepts), `WIDGET_STATE_CONFLICT` or `WIDGET_HAS_NO_STATES`.
    */
   transitionWidget(ref: OperateWidgetRef, event: string, expectedSeq: number): Promise<WidgetStateSnapshot>;
+
+  /**
+   * This person's widget placements on the Operate canvas (FAC-13, widget-placements.ts), for the
+   * company they work in now, in canvas order, with the revision a change names. Saved in their
+   * own user Durable Object, so they survive a reload and another device, and dropped when the
+   * company changes. References only: a placement grants nothing, and what it shows is opened on
+   * its own checked path (a console widget through `Overseer.getEmbeddedWidget`) every time.
+   */
+  listWidgetPlacements(): Promise<WidgetPlacements>;
+  /**
+   * Saves one placement if `expectedRevision` is current: a new one, whose id the kernel mints,
+   * when `placement` names none, else a change to that placement's layout and filters (never to
+   * the widget it shows). Returns the placements as they are now. Refused, changing nothing, with
+   * `WIDGET_PLACEMENTS_CONFLICT`, `WIDGET_PLACEMENT_NOT_FOUND`, `WIDGET_PLACEMENT_REF_CHANGED`,
+   * `WIDGET_PLACEMENTS_FULL` or `WIDGET_PLACEMENT_INVALID`.
+   */
+  saveWidgetPlacement(placement: WidgetPlacementInput, expectedRevision: number): Promise<WidgetPlacements>;
+  /**
+   * Removes one placement, and the widget states kept for it, if `expectedRevision` is current.
+   * Refused with `WIDGET_PLACEMENTS_CONFLICT` or `WIDGET_PLACEMENT_NOT_FOUND`.
+   */
+  removeWidgetPlacement(placementId: string, expectedRevision: number): Promise<WidgetPlacements>;
 
   /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
   listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;

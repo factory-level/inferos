@@ -2,6 +2,9 @@ import {
   WIDGET_STATE_ERROR_CODES, WidgetStateError, WidgetStateMemory, parseOperateWidgetRef,
   widgetStateKey, type OperateWidgetRef, type WidgetStateMachine, type WidgetStateSnapshot, type WidgetNavigation, type WidgetPrompt,
 } from "@gadgets/workshop-shared/widget-state";
+import {
+  WIDGET_PLACEMENT_ERROR_CODES, WidgetPlacementError, parseWidgetPlacementInput, type WidgetPlacementInput, type WidgetPlacements,
+} from "@gadgets/workshop-shared/widget-placements";
 import { canvasPageEffects } from "@gadgets/workshop-shared/canvas-model";
 import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import type { OperateReadRun } from "@gadgets/workshop-shared/api";
@@ -1042,9 +1045,23 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     return machine;
   }
 
+  // The state key of the widget `ref` names, from the checked ref. A placement's own state
+  // (FAC-13) is kept only for one of the person's placements that shows a widget of that console.
+  async #widgetStateKey(ref: OperateWidgetRef): Promise<string> {
+    let checked = parseOperateWidgetRef(ref);
+    if (checked.placementId !== undefined) {
+      let { placements } = await this.user().listWidgetPlacements();
+      let placed = placements.find(placement => placement.placementId === checked.placementId)?.ref;
+      if (placed?.type !== "console-widget" || placed.workspaceId !== checked.workspaceId || placed.consoleId !== checked.consoleId) {
+        throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.notFound, "That placement is no longer on your canvas.");
+      }
+    }
+    return widgetStateKey(checked);
+  }
+
   async getWidgetState(ref: OperateWidgetRef): Promise<WidgetStateSnapshot> {
     let machine = await this.#widgetMachine(ref);
-    let key = widgetStateKey(ref);
+    let key = await this.#widgetStateKey(ref);
     if (machine.persistence === "person") return this.user().readWidgetState(key, machine);
     return (await this.#sessionWidgets()).read(key, machine);
   }
@@ -1055,12 +1072,25 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
    */
   async transitionWidget(ref: OperateWidgetRef, event: string, expectedSeq: number): Promise<WidgetStateSnapshot> {
     let machine = await this.#widgetMachine(ref);
-    let key = widgetStateKey(ref);
+    let key = await this.#widgetStateKey(ref);
     let snapshot = machine.persistence === "person"
       ? await this.user().transitionWidgetState(key, machine, event, expectedSeq)
       : (await this.#sessionWidgets()).transition(key, machine, event, expectedSeq);
     let { navigation, prompt } = await this.#wiredEffects(parseOperateWidgetRef(ref), event);
     return { ...snapshot, ...(navigation ? { navigation } : {}), ...(prompt ? { prompt } : {}) };
+  }
+
+  listWidgetPlacements(): Promise<WidgetPlacements> {
+    return this.user().listWidgetPlacements();
+  }
+
+  /** Checked here, at the client's boundary, and again in the user DO, which owns the write. */
+  saveWidgetPlacement(placement: WidgetPlacementInput, expectedRevision: number): Promise<WidgetPlacements> {
+    return this.user().saveWidgetPlacement(parseWidgetPlacementInput(placement), expectedRevision);
+  }
+
+  removeWidgetPlacement(placementId: string, expectedRevision: number): Promise<WidgetPlacements> {
+    return this.user().removeWidgetPlacement(placementId, expectedRevision);
   }
 
   // FAC-94: where `event` on widget `ref` leads, if the published page the person is shown wires it
