@@ -1,30 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Badge, Button, Loader } from '@cloudflare/kumo'
-import type { RpcStub } from 'capnweb'
-import type { GadgetClient } from '@gadgets/workshop-shared/api'
-import type { EmbeddedConsoleWidget, EmbeddedConsoleWidgetUnavailable } from '@gadgets/workshop-shared/operate-console'
 import { useOptionalAuthenticatedApi } from '../../AuthContext'
 import GadgetUI from '../../GadgetUI'
 import type { WikiReference } from './wikiPage'
+import { EMBEDDED_WIDGET_UNAVAILABLE, useEmbeddedConsoleWidget } from './useEmbeddedConsoleWidget'
 
 type GadgetReference = Extract<WikiReference, { kind: 'gadget' }>
-
-/** What the embed shows. Each failure is said in its own words, never as an empty frame. */
-type Shown =
-  | { status: 'loading' }
-  /** The person can't open the console's workspace, or isn't signed in: nothing of it is shown. */
-  | { status: 'no-access' }
-  | { status: 'unavailable'; reason: EmbeddedConsoleWidgetUnavailable }
-  | { status: 'error'; message: string }
-  | { status: 'ready'; widget: Extract<EmbeddedConsoleWidget, { status: 'available' }>; stub: RpcStub<GadgetClient> }
-  /** It was shown, then the console stopped offering it or the person's access ended. */
-  | { status: 'revoked' }
-
-const UNAVAILABLE: Record<EmbeddedConsoleWidgetUnavailable, string> = {
-  'not-published': 'Its console is not published, so the widget is not shown.',
-  'not-offered': 'Its console no longer offers this widget.',
-  'no-ui': 'This widget has no UI to show here; its console offers only its tools.',
-}
 
 const viewerIds = new WeakMap<object, number>()
 let nextViewerId = 1
@@ -55,50 +36,9 @@ export const WikiGadgetEmbed = ({ reference, label }: { reference: GadgetReferen
   const viewer = auth?.accountKey ?? null
   const [attempt, setAttempt] = useState(0)
   const { workspaceId, consoleId, sourceGadgetId, href } = reference
-  // What was shown belongs to the exact reference, attempt and viewer it was resolved for, and is
-  // used only while all three still match: a changed target or a newly signed-in account never
-  // renders the previous answer, even before the effect below has run for it.
-  const key = `${href}\n${attempt}`
-  const [answer, setAnswer] = useState<{ key: string; viewer: object | null; api: unknown; shown: Shown } | null>(null)
-  const shown: Shown = answer?.key === key && answer.viewer === viewer && answer.api === api ? answer.shown : { status: 'loading' }
-
-  useEffect(() => {
-    const setShown = (next: Shown | ((state: Shown) => Shown)) => setAnswer(previous => {
-      const before = previous?.key === key && previous.viewer === viewer && previous.api === api
-        ? previous.shown : { status: 'loading' } as Shown
-      return { key, viewer, api, shown: typeof next === 'function' ? next(before) : next }
-    })
-    if (!api) { setShown({ status: 'no-access' }); return }
-    let current = true
-    let stub: RpcStub<GadgetClient> | null = null
-    const workspace = api.openGadget(workspaceId)
-    ;(async () => {
-      let widget: EmbeddedConsoleWidget
-      try {
-        widget = await workspace.resolveEmbeddedWidget(consoleId, sourceGadgetId)
-      } catch {
-        // Not opening the workspace says nothing about whether it, or the widget, exists.
-        if (current) setShown({ status: 'no-access' })
-        return
-      }
-      if (!current) return
-      if (widget.status === 'unavailable') { setShown({ status: 'unavailable', reason: widget.reason }); return }
-      stub = workspace.getEmbeddedWidget(widget.consoleId, widget.revision, widget.gadgetId)
-      stub.onRpcBroken?.(() => { if (current) setShown(state => state.status === 'ready' ? { status: 'revoked' } : state) })
-      try {
-        await stub.getId()
-      } catch (error) {
-        if (current) setShown({ status: 'error', message: error instanceof Error ? error.message : String(error) })
-        return
-      }
-      if (current) setShown({ status: 'ready', widget, stub })
-    })()
-    return () => {
-      current = false
-      stub?.[Symbol.dispose]()
-      workspace[Symbol.dispose]()
-    }
-  }, [api, viewer, workspaceId, consoleId, sourceGadgetId, key])
+  // The link and the attempt are part of what was shown: a changed link or "Check again" never
+  // renders the previous answer.
+  const shown = useEmbeddedConsoleWidget(api, viewer, { workspaceId, consoleId, sourceGadgetId }, `${href}\n${attempt}`)
 
   const title = shown.status === 'ready' ? shown.widget.label : label || 'Embedded widget'
   const stale = shown.status === 'ready' &&
@@ -114,7 +54,7 @@ export const WikiGadgetEmbed = ({ reference, label }: { reference: GadgetReferen
       <p>This widget is in a workspace you can’t open, so it isn’t shown. <code className="break-all">{reference.href}</code></p>{again}
     </div>}
     {shown.status === 'unavailable' && <div className="flex flex-wrap items-center gap-2 p-3 text-sm text-kumo-subtle">
-      <p>{UNAVAILABLE[shown.reason]}</p>{again}
+      <p>{EMBEDDED_WIDGET_UNAVAILABLE[shown.reason]}</p>{again}
     </div>}
     {shown.status === 'error' && <div className="flex flex-wrap items-center gap-2 p-3 text-sm">
       <p role="alert" className="text-kumo-danger">Couldn’t open this widget: {shown.message}</p>{again}

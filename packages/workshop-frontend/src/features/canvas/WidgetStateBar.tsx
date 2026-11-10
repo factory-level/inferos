@@ -45,11 +45,13 @@ export const WidgetStateBar = ({ session, widgetRef, onStateChange, onPrompt }: 
   }
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'refused' | 'reloaded'; message: string } | null>(null)
-  const { workspaceId, consoleId, revision, gadgetId } = widgetRef
+  const { workspaceId, consoleId, revision, gadgetId, placementId } = widgetRef
+  // A placement's own state (FAC-13) is keyed by its id too, so two placements of one widget differ.
+  const ref = (): OperateWidgetRef => ({ workspaceId, consoleId, revision, gadgetId, ...(placementId ? { placementId } : {}) })
 
   const read = async () => {
     try {
-      const snapshot = await session.getWidgetState({ workspaceId, consoleId, revision, gadgetId })
+      const snapshot = await session.getWidgetState(ref())
       setLoaded({ status: 'ready', snapshot })
     } catch (err) {
       const { code, message } = refusalOf(err)
@@ -62,13 +64,13 @@ export const WidgetStateBar = ({ session, widgetRef, onStateChange, onPrompt }: 
     setNotice(null)
     void read()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the ref's fields are the identity
-  }, [session, workspaceId, consoleId, revision, gadgetId])
+  }, [session, workspaceId, consoleId, revision, gadgetId, placementId])
 
   const send = async (event: string, expectedSeq: number) => {
     setBusy(true)
     setNotice(null)
     try {
-      const snapshot = await session.transitionWidget({ workspaceId, consoleId, revision, gadgetId }, event, expectedSeq)
+      const snapshot = await session.transitionWidget(ref(), event, expectedSeq)
       setLoaded({ status: 'ready', snapshot })
       if (snapshot.prompt) onPromptRef.current?.(snapshot.prompt.text)
     } catch (err) {
