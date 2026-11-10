@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isLiveWorkflowDelivery, MAX_WORKFLOW_DEFINITION_REVISIONS, MAX_WORKFLOW_DELIVERIES,
-  MAX_WORKSPACE_WORKFLOW_DEFINITIONS,
+  MAX_WORKSPACE_WORKFLOW_DEFINITIONS, WORKFLOW_RUN_START_WINDOW_MS,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { makeOverseerStorage } from "../src/overseer.js";
 import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
@@ -34,13 +34,17 @@ const everyoneBuilds = () => true;
 
 describe("workflow delivery retention", () => {
   it("keeps every live outcome and only evicts known terminal outcomes", () => {
-    for (let outcome of ["queued", "running", "waiting", "uncertain"] as const) {
+    for (let outcome of ["queued", "running", "waiting"] as const) {
       expect(isLiveWorkflowDelivery({ run: {}, result: { outcome } })).toBe(true);
     }
+    expect(isLiveWorkflowDelivery({ run: {}, result: { outcome: "uncertain", reason: "lost-after-write" } })).toBe(true);
+    expect(isLiveWorkflowDelivery({ run: {}, result: { outcome: "uncertain", reason: "action-unknown" } })).toBe(true);
+    expect(isLiveWorkflowDelivery({ run: {}, result: { outcome: "uncertain", reason: "not-started" } })).toBe(false);
     for (let outcome of ["succeeded", "failed"] as const) {
       expect(isLiveWorkflowDelivery({ run: {}, result: { outcome } })).toBe(false);
     }
     expect(isLiveWorkflowDelivery({ run: {} })).toBe(true);
+    expect(isLiveWorkflowDelivery({ run: {}, at: new Date(Date.now() - WORKFLOW_RUN_START_WINDOW_MS - 1) })).toBe(false);
     expect(isLiveWorkflowDelivery({})).toBe(false);
   });
 });
@@ -180,20 +184,23 @@ describe("triggers and runs", () => {
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("changed since revision 1");
   });
 
-  it("follows new publications by default while already admitted runs retain their revision", () => {
+  it("runs the admission revision after a later publication; new admissions follow latest", () => {
     let { store, heads, headOf } = workspace();
     let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(BEN.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     store.setControl(ADA, 11, { label: "Run", invokers: [BEN.id] });
     let invocation = store.beginInvocation(BEN.id, 11);
-    let alreadyAdmitted = store.fire(11, GADGET, headOf, everyoneBuilds, invocation.id)!;
-    store.queueRun(11, alreadyAdmitted.deliveryId, "run", []);
     heads.set(GADGET, commit(2));
     store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
     store.publish(ADA, saved.id, 2);
+    let alreadyAdmitted = store.fire(11, GADGET, headOf, everyoneBuilds, invocation.id)!;
     expect(store.run(alreadyAdmitted.run!.runId)).toMatchObject({ revision: 1, commitId: commit(1) });
+    store.queueRun(11, alreadyAdmitted.deliveryId, "run", []);
     expect(store.deliveries(ADA.id, saved.id)[0].execution?.state).toBe("queued");
+    let nextInvocation = store.beginInvocation(BEN.id, 11);
+    expect(store.fire(11, GADGET, headOf, everyoneBuilds, nextInvocation.id))
+      .toMatchObject({ revision: 2, commitId: commit(2) });
     expect(store.fire(11, GADGET, headOf, everyoneBuilds)).toMatchObject({ revision: 2, commitId: commit(2) });
   });
 
@@ -219,13 +226,33 @@ describe("triggers and runs", () => {
     expect(store.queuedRuns()).toContainEqual({ deliveryId: first.deliveryId, hookId: 11, method: "run", args: [] });
   });
 
-  it("refuses admission when every retained delivery is non-terminal", () => {
+  it("refuses admission when every retained delivery is uncertain and reports the reconciliation count", () => {
     let { store, headOf } = workspace();
     let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
-    for (let n = 0; n < MAX_WORKFLOW_DELIVERIES; n++) store.fire(11, GADGET, headOf, everyoneBuilds);
-    expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("Too many workflow runs are in progress.");
+    for (let n = 0; n < MAX_WORKFLOW_DELIVERIES; n++) {
+      let delivery = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+      store.recordResult(delivery.deliveryId, { outcome: "uncertain", reason: "lost-after-write" });
+    }
+    expect(() => store.fire(11, GADGET, headOf, everyoneBuilds))
+      .toThrow(`Too many workflow runs are in progress; ${MAX_WORKFLOW_DELIVERIES} are waiting for reconciliation.`);
+    expect(store.deliveries(ADA.id, saved.id)).toHaveLength(MAX_WORKFLOW_DELIVERIES);
+  });
+
+  it("evicts a not-started run after its start window", () => {
+    let { store, storage, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    for (let n = 1; n < MAX_WORKFLOW_DELIVERIES; n++) store.fire(11, GADGET, headOf, everyoneBuilds);
+    let firstStored = storage.workflowDeliveries.get(first.deliveryId)!;
+    storage.workflowDeliveries.put({
+      ...firstStored, at: new Date(Date.now() - WORKFLOW_RUN_START_WINDOW_MS - 1),
+    });
+    store.fire(11, GADGET, headOf, everyoneBuilds);
+    expect(store.run(first.run!.runId)).toBeNull();
     expect(store.deliveries(ADA.id, saved.id)).toHaveLength(MAX_WORKFLOW_DELIVERIES);
   });
 
@@ -242,14 +269,15 @@ describe("triggers and runs", () => {
     expect(store.deliveries(ADA.id, saved.id).some(delivery => delivery.result?.outcome === "failed")).toBe(false);
   });
 
-  it("keeps firing the published commit after an unpublished code change", () => {
+  it("refuses follow-latest when the gadget head is newer than the published commit", () => {
     let { store, heads, headOf } = workspace();
     let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     heads.set(GADGET, commit(7));
     store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
-    expect(store.fire(11, GADGET, headOf, everyoneBuilds)).toMatchObject({ revision: 1, commitId: commit(1) });
+    expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("changed since revision 1 was saved");
+    expect(() => store.requireCurrentRevision(11, GADGET, headOf)).toThrow("changed since revision 1 was saved");
   });
 
   it("refuses a definition with no publication and allows a published one", () => {

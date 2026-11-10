@@ -15,12 +15,19 @@ so changing their behavior in place would be unsafe.
 
 ## Decision
 
-New trigger definitions default to `follow-latest`: each admitted run resolves the definition's
-current published revision. A trigger can explicitly select `pinned` to retain its revision.
+New trigger definitions default to `follow-latest`: a request records the published revision at
+admission, and its delivery callback runs that revision even if a newer one is published while it
+waits. A trigger can explicitly select `pinned` to retain its revision.
 Existing stored pins without a mode continue to mean `pinned`; they are never migrated silently.
-Each delivery records its starting definition, revision and commit, so a run already admitted stays
-on that version after another publication. Follow-latest refuses to run a definition without a
-publication. Unpublished saves never change the version it runs.
+Each delivery records its starting definition, revision and commit. Follow-latest refuses to run a
+definition without a publication, and also refuses when the gadget head is not the commit of the
+current publication. Unpublished saves never change the version it runs.
+
+Delivery retention is capped at 1,000. Terminal deliveries and runs that never started within the
+10-minute start window may be evicted FIFO. Runs with queued, running, waiting or possibly-applied
+uncertain work remain live. If all retained deliveries need completion or reconciliation, admission
+refuses and reports their count. Requested-run reads fail closed when either stored or current
+company scope is unknown; an explicit no-company marker would be required to support such reads.
 
 ## Consequences
 

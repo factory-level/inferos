@@ -164,13 +164,20 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
 /** Whether a delivery still represents work whose durable record must be retained. */
 export function isLiveWorkflowDelivery(delivery: {
   run?: unknown;
+  at?: Date;
   execution?: Pick<WorkflowRunExecution, "state">;
-  result?: Pick<WorkflowRunResult, "outcome">;
-}): boolean {
+  result?: Pick<WorkflowRunResult, "outcome" | "reason">;
+}, now = Date.now()): boolean {
   let outcome = delivery.result?.outcome;
   if (outcome !== undefined) {
+    if (outcome === "uncertain" && delivery.result?.reason === "not-started") return false;
     return outcome === "queued" || outcome === "running" || outcome === "waiting" || outcome === "uncertain";
   }
+  // An admitted run that never started wrote nothing; once FAC-114's start window expires, its
+  // uncertain/not-started history is terminal for retention. Any execution state remains live
+  // unless it is known terminal; uncertain writes have a result reason and stay live above.
+  if (!delivery.execution && delivery.run !== undefined && delivery.at &&
+      now - delivery.at.getTime() > WORKFLOW_RUN_START_WINDOW_MS) return false;
   // Older runs may predate result records. Keep any run without a known terminal execution state.
   return delivery.run !== undefined && delivery.execution?.state !== "finished" && delivery.execution?.state !== "failed";
 }
