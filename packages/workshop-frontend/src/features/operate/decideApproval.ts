@@ -3,6 +3,9 @@ import { decisionOf } from '../../actionDecision'
 import type { ActionLogEntry, Overseer } from '@gadgets/workshop-shared/api'
 import type { OperateApprovalOutcome } from '@gadgets/workshop-shared/operate-session'
 
+/** An approve that threw when its result couldn't be read back either. */
+export const APPROVE_UNREADABLE_TEXT = "The approval didn't go through, and why couldn't be read. Reload to see the action."
+
 /** The person's decision on a pending action. */
 export type ApprovalDecision = 'approve' | 'reject'
 
@@ -66,7 +69,11 @@ export const decideApproval = async (
   if (refusal !== undefined) {
     // An approve whose apply was refused and recorded: the record's words. Any other refusal is the
     // kernel's own (may not decide, already decided), never provider text.
-    const error = decision === 'approve' && said !== undefined ? said : refusal
+    // An approve that threw and whose record couldn't be read: its thrown message may be the
+    // provider's, so a fixed sentence says only that the reason couldn't be read.
+    const error = decision === 'approve'
+      ? said ?? (unreadable !== undefined ? APPROVE_UNREADABLE_TEXT : refusal)
+      : refusal
     return decision === 'approve' ? { outcome: 'failed', error } : { outcome: null, error }
   }
   return {

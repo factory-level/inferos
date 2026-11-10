@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { ActionLogEntry, ActionState, Overseer } from '@gadgets/workshop-shared/api'
-import { decideApproval } from './decideApproval'
+import { APPROVE_UNREADABLE_TEXT, decideApproval } from './decideApproval'
 
 const logged = (state: ActionState) =>
   ({ id: 4, state, type: 'action', resourceTitle: 'Board', createdAt: new Date() }) as ActionLogEntry
@@ -23,6 +23,14 @@ describe('decideApproval', () => {
   it('never reports applied while the log still shows the action pending', async () => {
     const result = await decideApproval(overseer({ list: async () => ({ entries: [logged('pending')] }) }), 4, 'approve')
     expect(result.outcome).toBeNull()
+  })
+
+  it("says only that it couldn't read why, when an approve threw and its record can't be read", async () => {
+    const result = await decideApproval(overseer({
+      approve: async () => { throw new Error('InferOps said: token expired for acme-bot') },
+      list: async () => { throw new Error('connection lost') },
+    }), 4, 'approve')
+    expect(result).toEqual({ outcome: 'failed', error: APPROVE_UNREADABLE_TEXT })
   })
 
   it('reports a provider refusal as failed, with the reason the log kept', async () => {
