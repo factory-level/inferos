@@ -3,6 +3,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { BindingProps } from "./worker";
+import { parseQueueUrl } from "../src/tickets.js";
 
 /**
  * The message an RPC call was refused with, or null. Never hand an RPC promise to
@@ -62,5 +63,13 @@ describe("status changes", () => {
     // Replayed with the same classification, without reaching the provider.
     expect(await hooks.applyOutcome(props, second!.id)).toEqual(stale);
     expect(await session.readTicket("T-1")).toMatchObject({ status: "pending", revision: "2" });
+  });
+});
+
+// FAC-9: the connector and the host's governed reference share one grammar for a queue's id.
+describe("a queue reference", () => {
+  it("accepts a queue id of 64 characters and refuses one of 65, as the host's governed reference does", () => {
+    expect(parseQueueUrl(`tickets://support/queue/${"q".repeat(64)}`)).toEqual({ workspace: "support", queueId: "q".repeat(64) });
+    expect(() => parseQueueUrl(`tickets://support/queue/${"q".repeat(65)}`)).toThrow("Not a Tickets queue URL");
   });
 });
