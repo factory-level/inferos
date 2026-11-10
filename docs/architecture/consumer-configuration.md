@@ -171,6 +171,8 @@ Capability configuration ([#67](https://github.com/factory-level/inferos/issues/
 
 ## Listing density
 
+`AdminApi.bindAccountSubjects` (FAC-165, [ADR 0019](../adr/0019-account-keyed-on-stable-subject.md), proposed) is the one-off pass that binds email-keyed accounts to the InferOps principal their own connection proves, through the same administrator capability; it creates no account and a rerun binds nothing new. See [Accounts keyed on the principal](inferops-gatekeeper.md#accounts-keyed-on-the-principal).
+
 `displayDensity` is normalized to comfortable for missing/invalid persisted values and published in admin/public configuration. `AdminApi.setDisplayDensity` validates comfortable/compact and supports later administrator changes. Profile initialization treats an existing compact setting as customization, preserving all target settings together. Initialization already consumed by an older version is not reapplied when density support is added; use the explicit setter.
 
 The frontend reads deployment density from its existing server-config context. Compact spacing applies at the `sm` breakpoint and above to workspace rows, Explore rows, grid gaps and card content; mobile spacing is unchanged. Loading rows/grid gaps follow the same density. Font sizes, Kumo colors, keyboard interactions, menus and gadget-owned layouts remain unchanged. This is curated listing spacing, not a global CSS scale or a canvas density implementation. Configuration refresh requires a client reconnect/reload; an admin-panel control remains pending.

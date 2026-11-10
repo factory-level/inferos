@@ -1560,6 +1560,18 @@ export interface DeploymentProfile {
   displayDensity?: DisplayDensity;
 }
 
+/** What one subject pass (`AdminApi.bindAccountSubjects`, ADR 0019) did. */
+export type AccountSubjectPass = {
+  /** Email-keyed accounts looked at. */
+  checked: number;
+  /** Accounts this pass bound to their subject. */
+  bound: number;
+  /** Accounts already bound to the subject their connection names, left as they were. */
+  alreadyBound: number;
+  /** Accounts whose subject the directory sends to another account, or that another subject holds; left unbound. */
+  conflicts: number;
+};
+
 /**
  * Capability for managing deployment-wide admin settings, obtained via
  * AuthenticatedApi.getAdminApi() (which is null for non-admins). The access check happens when the
@@ -1587,6 +1599,13 @@ export interface AdminApi {
 
   /** Enable or disable new account signups. Existing users can still log in while signups are closed. */
   setSignupsEnabled(enabled: boolean): Promise<void>;
+
+  /**
+   * The one-off subject pass (ADR 0019, FAC-165): binds each email-keyed account that holds an
+   * InferOps connection vouching its own address to the InferOps principal behind it, so an email
+   * change later keeps the account. Creates no account; running it again binds nothing new.
+   */
+  bindAccountSubjects(): Promise<AccountSubjectPass>;
 
   /**
    * Enable or disable user directory search. The directory itself is maintained
@@ -2517,6 +2536,22 @@ export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
 export type ActionState = "pending" | "approved" | "rejected" | "failed";
 
 /**
+ * Why a pending action's approved apply was refused before anything was sent (FAC-118): a re-check
+ * at resume found that the authority it was proposed under no longer holds (the person who asked a
+ * run, their role or grant, the run's assignment or company). It stays pending, and can be decided
+ * again once that is fixed; the next apply that passes clears it.
+ */
+/** Why the workspace rejected an action itself (FAC-118; see `ActionLogEntry.rejectedBecause`). */
+export type ActionRejectedBecause = "expired" | "definition-changed";
+
+export type ActionBlocked = {
+  /** The refusal, in the words the re-check gave it. */
+  reason: string;
+  /** When it was refused. */
+  at: Date;
+};
+
+/**
  * An action's most recent unsuccessful apply, as the overseer recorded it from the gatekeeper's
  * answer (see `ActionApplyFailure`). `notApplied` is known absent at the provider; `unknown` may
  * have happened there, so it is never presented as safely undone.
@@ -2603,6 +2638,20 @@ export type ActionLogEntry = {
    * not as waiting for a decision (see `actionOutcome`). Absent otherwise.
    */
   applying?: true;
+
+  /**
+   * Set while the action is pending and its last approved apply was refused at resume, before
+   * anything was sent (FAC-118; see `ActionBlocked`). Absent otherwise.
+   */
+  blocked?: ActionBlocked;
+
+  /**
+   * Set on an action the workspace rejected itself, with no person deciding (FAC-118); `resolvedBy`
+   * is then absent and nothing was sent. `expired`: nobody decided it within its workflow run's wait
+   * (7 days from when the run proposed it). `definition-changed`: approved after the run's workflow
+   * definition changed, which can't be fixed, so a fresh proposal is needed (run it again).
+   */
+  rejectedBecause?: ActionRejectedBecause;
 
   /**
    * What the provider reported the apply produced (`ActionResult`), such as a created issue's key

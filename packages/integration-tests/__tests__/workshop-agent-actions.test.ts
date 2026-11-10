@@ -19,6 +19,9 @@ import {
   withOwnerWorkspace,
 } from "../src/rpc-client.js";
 
+/** The Overseer's refusal while another decision of the same action is under way (FAC-118). */
+const ACTION_IN_PROGRESS_TEXT = "This action is being decided; its outcome is recorded when it finishes.";
+
 let harness: Harness;
 const models = scriptedModelRouter();
 const network = new NetworkInterceptor({ handlers: [models.handler] });
@@ -167,8 +170,8 @@ it.concurrent("approving every held write applies each and resumes the agent onc
   // Positive control for the mid-tool test's "no resume note" check.
   expect(approvalResumeNotes(resumed.history)).toBe(1);
 
-  await withOwnerWorkspace(harness.url, session.username, ws =>
-    expect(ws.approveAction(first.id)).rejects.toThrow("Action is not pending"));
+  // Approving again answers as the first approval did: nothing more is applied (FAC-118).
+  await withOwnerWorkspace(harness.url, session.username, ws => ws.approveAction(first.id));
   expect((await actionState(label)).applyCount).toBe(2);
 });
 
@@ -742,7 +745,7 @@ it.concurrent("approving while a rejection is under way is refused, and the reje
     try {
       await waitFor("the rejection to reach the gatekeeper", async () =>
         (await control<{ attempts: number }>("reject-attempts", { label })).attempts === 1 || null);
-      await expect(ws.approveAction(action.id)).rejects.toThrow(`Action is not pending: ${action.id}`);
+      await expect(ws.approveAction(action.id)).rejects.toThrow(ACTION_IN_PROGRESS_TEXT);
     } finally {
       await control("release-reject", { label });
     }
@@ -771,7 +774,7 @@ it.concurrent("rejecting while an apply is under way is refused, and the apply's
     const approval = ws.approveAction(action.id);
     try {
       await waitFor("the apply to be held", async () => await applyAttempts(label) === 1 || null);
-      await expect(ws.rejectAction(action.id)).rejects.toThrow(`Action is not pending: ${action.id}`);
+      await expect(ws.rejectAction(action.id)).rejects.toThrow(ACTION_IN_PROGRESS_TEXT);
     } finally {
       await control("release-apply", { label });
     }
@@ -801,7 +804,7 @@ it.concurrent("approving one action twice at once applies it once", async () => 
     const first = ws.approveAction(action.id);
     try {
       await waitFor("the first apply to be held", async () => await applyAttempts(label) === 1 || null);
-      await expect(() => ws.approveAction(action.id)).rejects.toThrow(`Action is not pending: ${action.id}`);
+      await expect(() => ws.approveAction(action.id)).rejects.toThrow(ACTION_IN_PROGRESS_TEXT);
     } finally {
       await control("release-apply", { label });
       await Promise.allSettled([first]);

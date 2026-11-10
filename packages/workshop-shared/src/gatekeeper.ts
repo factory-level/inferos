@@ -73,6 +73,14 @@ export type VendorDescription = {
   providesAuth?: boolean;
 
   /**
+   * True if this vendor's sign-in also yields the provider's stable subject for the person
+   * (`GatekeeperUser.getAuthenticatedSubject()`), which the Workshop keys their account on instead of
+   * the email (ADR 0019, FAC-165). Only meaningful with `providesAuth`. Defaults to false: the
+   * vendor's sign-in stays keyed on its verified email.
+   */
+  providesSubject?: boolean;
+
+  /**
    * If set, this vendor can mint a connected account with no OAuth flow (see
    * GatekeeperVendor.createAccount) and recommends the Workshop auto-provision one account per user.
    * The account — not the vendor — declares whether it provides an agent singleton and/or a
@@ -771,6 +779,14 @@ export interface GatekeeperConnectCallback extends WorkerEntrypoint {
   credentialsRestored(expiresAt?: Date): Promise<void>;
 }
 
+/** A provider's stable id for a person (ADR 0019): who issued it, and their id there. */
+export type GatekeeperSubject = {
+  /** The provider deployment that issued the subject, as an origin (InferOps: its auth origin). */
+  issuer: string;
+  /** The provider's own stable id for the person (InferOps: the principal id). */
+  subject: string;
+};
+
 /**
  * RPC interface to an Adapter. This is a privileged interface exposed to the Gadget Workshop UI
  * itself, not to Gadgets nor AI agents.
@@ -866,6 +882,15 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * Returns null when the account has no verified email or the vendor does not support auth.
    */
   getAuthenticatedEmail(): Promise<string | null>;
+
+  /**
+   * For vendors that advertise `providesSubject`, the provider's stable id for the person behind
+   * this account (ADR 0019, FAC-165): `issuer` names the provider deployment, and `subject` is its
+   * id for them, which outlives an email change. The Workshop keys the account on it, so it MUST be
+   * the provider's own identifier for the authenticated person, never something a user chooses.
+   * Null when the account has no person behind it. Called only on vendors that declare it.
+   */
+  getAuthenticatedSubject?(): Promise<GatekeeperSubject | null>;
 
   /** Get a `GatekeeperUserVerifier` representing this user. */
   getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>>;

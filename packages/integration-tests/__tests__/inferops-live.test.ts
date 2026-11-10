@@ -527,13 +527,14 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     const applied = (await ws.listActions({ filter: "action" })).entries
       .filter(a => a.state === "approved");
     expect(applied.length).toBeGreaterThanOrEqual(3);
+    // Approving an applied action again answers as the first approval did (FAC-118): nothing is sent.
     for (const action of applied) {
-      await expect(ws.approveAction(action.id)).rejects.toThrow(/not pending/);
+      await ws.approveAction(action.id);
     }
     const after = await liveIssue(created.id);
     expect(after.revision).toBe(before.revision);
     expect(await liveIssuesTitled(after.title)).toHaveLength(1);
-    note(`f. re-approving ${applied.length} applied actions refused ("not pending"); ` +
+    note(`f. re-approving ${applied.length} applied actions answered as approved, sending nothing; ` +
       `revision stayed ${after.revision}, still one issue`);
   });
 
@@ -685,7 +686,7 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
     const applied = await liveIssue(created.id);
     expect(applied).toMatchObject({ priority });
     expect(applied.revision).not.toBe(before.revision);
-    expect(await failure(ws.approveAction(action.id))).toMatch(/not pending/);
+    await ws.approveAction(action.id);
     expect((await liveIssue(created.id)).revision).toBe(applied.revision);
     session = await (await ws.getGatekeeperById(connectionId)).openSession() as RpcStub<InferOpsProjectSession>;
     note(`h2. across two Worker reloads, the refused actions ${staleRefusal.id} (STALE_REVISION) and ` +

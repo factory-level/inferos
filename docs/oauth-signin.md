@@ -13,9 +13,12 @@ The deployment opts gatekeepers into sign-in via the `AUTH_GATEKEEPERS` allowlis
 vendor ids). Set `DISABLE_PASSWORD_AUTH=true` to hide username/password and offer gatekeeper sign-in
 only (ignored unless the allowlist is non-empty, to avoid locking everyone out).
 
-## Identity: keyed by verified email
+## Identity: keyed by verified email, or by the provider's stable subject
 
-The primary account key is always the user's **verified email**. Signing in with any allowlisted
+A gatekeeper that declares `providesSubject` (InferOps) keys the account on the provider's stable
+subject instead, so an email change keeps the account
+([ADR 0019](adr/0019-account-keyed-on-stable-subject.md), proposed; see the InferOps gatekeeper's
+architecture doc). For every other gatekeeper, the primary account key is the user's **verified email**. Signing in with any allowlisted
 gatekeeper that yields the same verified email resolves to the same account — its `UserDurableObject`
 is addressed by `idFromName(email)` (the same scheme as Cloudflare Access). Each gatekeeper must only
 return an email the provider has verified (Google `email_verified`, a GitHub primary+verified email,
