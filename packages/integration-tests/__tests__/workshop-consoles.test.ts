@@ -178,6 +178,24 @@ it("lets a use-role operator use only the published revision, while a builder pr
     let preview = await builderSession.dispatch({ ...open, source: "draft", revision: "2", viewId: "board" }, 0);
     expect(preview.state.console).toMatchObject({ source: "draft", revision: "2", viewId: "board" });
 
+    // A fresh connection for each person preserves the same draft/published boundary after reload.
+    using operatorReloadApi = connect(url);
+    using reloadedOperator = await logIn(operatorReloadApi, "consolesoperator");
+    using reloadedUseWorkspace = await reloadedOperator.openGadget(workspaceId);
+    // Reopen the published console through the operator's fresh authenticated workspace handle.
+    expect(await reloadedUseWorkspace.getConsole(created.id, "published")).toEqual(operatorView);
+    expect(await reloadedUseWorkspace.getCanvas(board.id)).toEqual(board);
+    await expect(reloadedUseWorkspace.getConsole(created.id, "draft")).rejects.toThrow(denied);
+    await expect(reloadedUseWorkspace.getConsolePage(created.id, board.id, "draft")).rejects.toThrow(denied);
+
+    using builderReloadApi = connect(url);
+    using reloadedBuilder = await logIn(builderReloadApi, "consolesbuilder");
+    using reloadedBuilderWorkspace = await reloadedBuilder.openGadget(workspaceId);
+    // The builder's reopened workspace still has the draft and its published predecessor.
+    expect(await reloadedBuilderWorkspace.getConsole(created.id, "draft")).toEqual(draft);
+    expect(await reloadedBuilderWorkspace.getConsoleScreen(created.id, board.id, "draft")).toEqual(renamed);
+    expect(await reloadedBuilderWorkspace.getConsole(created.id, "published")).toEqual(operatorView);
+
     // Publishing again: two publishes at the same revision can't both win.
     const republished = await workspace.publishConsole(created.id, "2");
     await expect(workspace.publishConsole(created.id, "2")).rejects.toThrow(/reload/);
