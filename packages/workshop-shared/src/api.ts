@@ -5853,17 +5853,17 @@ export type BlueprintScreenshotUpload = {
 };
 
 /**
- * The message the Workshop refuses with when the deployment's shared-configuration authority
- * (`AuthenticatedApi.holdsSharedConfiguration`) doesn't let the caller share, publish or change a
- * shared workspace, so a client can show it as is. It names no role.
- */
-/**
  * `Overseer.reconnectGatekeeper`'s one refusal, whatever the reason, so it reveals nothing of a
  * connection the caller may not reconnect.
  */
 export const GATEKEEPER_RECONNECT_REFUSED =
     "This connection can't be reconnected from here. Reconnect its account in your connections.";
 
+/**
+ * The message the Workshop refuses with when the deployment's shared-configuration authority
+ * (`AuthenticatedApi.holdsSharedConfiguration`) doesn't let the caller share, publish or change a
+ * shared workspace, so a client can show it as is. It names no role.
+ */
 export const SHARED_CONFIGURATION_REFUSED =
     "You don't have permission to share or publish configuration other people use.";
 
