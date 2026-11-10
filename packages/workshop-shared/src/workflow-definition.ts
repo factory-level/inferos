@@ -150,8 +150,11 @@ export type WorkflowRunResult = {
   settledAt: Date;
 };
 
-/** The places a run's result is delivered (FAC-114). Today run history only; others add a key. */
-export type WorkflowRunDestination = "history";
+/**
+ * The places a run's result is delivered: run history (FAC-114), and the requester's open page when
+ * the published page they were shown wires its result to a navigation (FAC-116, `canvas`).
+ */
+export type WorkflowRunDestination = "history" | "canvas";
 
 /** Per destination: not yet, done, or given up on. Separate from the outcome (ADR 0012 §2). */
 export type WorkflowRunDelivery = Partial<Record<WorkflowRunDestination, "pending" | "delivered" | "undelivered">>;

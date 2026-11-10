@@ -707,6 +707,20 @@ const CONSOLE_CUSTOMIZATION_KEYS = Object.keys(DEFAULT_CONSOLE_CUSTOMIZATION) as
  * view `run` shows (a rollup's screens, or a screen view's one), or null. Returns why the event no
  * longer fits, or null when it does or is not a console navigation event.
  */
+/**
+ * How a page showing view `viewId` of published console `saved` reaches screen `screenId` (FAC-94,
+ * FAC-116): `showScreen` when that view holds it, otherwise `openView` of a screen view that shows
+ * it, or null when the console shows it nowhere.
+ */
+export function consoleScreenMove(saved: OperateConsole, viewId: string, screenId: string)
+    : Extract<OperateEvent, { type: "showScreen" | "openView" }> | null {
+  let view = saved.views.find(candidate => candidate.id === viewId);
+  let within = view?.type === "rollup" ? view.screens.includes(screenId) : view?.screen === screenId;
+  if (within) return { type: "showScreen", screenId };
+  let other = saved.views.find(candidate => candidate.type === "screen" && candidate.screen === screenId);
+  return other ? { type: "openView", viewId: other.id } : null;
+}
+
 export function consoleEventMismatch(saved: OperateConsole, run: OperateConsoleRun | null,
     event: OperateEvent): string | null {
   let view = (id: string) => saved.views.find(candidate => candidate.id === id);
