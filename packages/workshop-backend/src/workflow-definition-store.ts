@@ -101,11 +101,12 @@ export class WorkspaceWorkflowDefinitionStore {
     return new Set(Array.from(this.storage.workflowTriggerPins.list(), pin => pin.definitionId));
   }
 
-  // The definitions a live run names (FAC-108's `isLiveWorkflowDelivery`): kept until it ends.
-  #liveIds(): Set<string> {
+  // The definitions a live run names (FAC-108's `isLiveWorkflowDelivery`, at this store's clock):
+  // kept until it ends.
+  #liveIds(now: number): Set<string> {
     let live = new Set<string>();
     for (let delivery of Array.from(this.storage.workflowDeliveries.list())) {
-      if (isLiveWorkflowDelivery(delivery)) live.add(delivery.definitionId);
+      if (isLiveWorkflowDelivery(delivery, now)) live.add(delivery.definitionId);
     }
     return live;
   }
@@ -124,7 +125,7 @@ export class WorkspaceWorkflowDefinitionStore {
   // nothing keeps, and returns how many.
   #sweepAt(now: number): number {
     let pinned = this.#pinnedIds();
-    let live = this.#liveIds();
+    let live = this.#liveIds(now);
     let swept = 0;
     for (let stored of Array.from(this.storage.workflowDefinitions.list())) {
       if (this.#available(stored, now, pinned) || live.has(stored.id)) continue;
@@ -142,7 +143,7 @@ export class WorkspaceWorkflowDefinitionStore {
   nextExpiry(): number | undefined {
     let now = this.retention.now();
     let pinned = this.#pinnedIds();
-    let live = this.#liveIds();
+    let live = this.#liveIds(now);
     let next: number | undefined;
     for (let stored of Array.from(this.storage.workflowDefinitions.list())) {
       let at = stored.expiresAt?.getTime();

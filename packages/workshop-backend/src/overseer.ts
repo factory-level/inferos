@@ -2420,6 +2420,9 @@ class OverseerImpl implements AgentHooks {
 
   // True while alarm() runs (see runAlarmTasks); #updateAlarm defers to its end.
   #inAlarmHandler = false;
+  // A change to what expires (FAC-124) reported while the constructor runs, before the alarm's
+  // inputs (the tool lane) exist: the constructor sets the alarm once they do.
+  #alarmOwed = false;
 
   // Drains of pending agent calls currently in flight, by chat (see drainPendingAgentCalls).
   #pendingCallDrains = new Map<number, Promise<void>>();
@@ -2885,6 +2888,11 @@ class OverseerImpl implements AgentHooks {
     });
     // No call is live in a new instance, so every pending tool facet is abandoned.
     this.toolLane.sweep();
+    // A definition change reported above (#recoverInterruptedApplies settles runs) is woken for now.
+    if (this.#alarmOwed) {
+      this.#alarmOwed = false;
+      this.#updateAlarm();
+    }
     this.defaultGadgetId = this.storage.defaultGadgetId.get();
 
     this.#autoApprovalDrainer = new AutoApprovalDrainer(
@@ -12428,8 +12436,12 @@ class OverseerImpl implements AgentHooks {
     return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage, {
       now: () => Date.now(),
       dynamicTtlMs: () => dynamicDefinitionTtlMs(this.env.WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS),
-      // Wake for the next expiry whenever what expires changes (#416 round 1).
-      onChange: () => this.#updateAlarm(),
+      // Wake for the next expiry whenever what expires changes (#416 round 1); during construction,
+      // once the alarm's inputs exist.
+      onChange: () => {
+        if (this.toolLane) this.#updateAlarm();
+        else this.#alarmOwed = true;
+      },
     });
   }
 

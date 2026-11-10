@@ -15,7 +15,8 @@ const BEN = { type: "user" as const, id: "ben-profile", name: "Ben" };
 const GADGET = 3;
 const HOOK = 7;
 const HOUR = 60 * 60 * 1000;
-const START = Date.UTC(2026, 10, 10, 9, 0, 0);
+// Real time: `fire` stamps a delivery with the wall clock, which FAC-108's live-run rule reads.
+const START = Date.now();
 const commit = (n: number) => n.toString(16).padStart(40, "0");
 const everyoneBuilds = () => true;
 const headOf = (id: number) => (id === GADGET ? commit(1) : undefined);
@@ -149,7 +150,7 @@ describe("expiry blocks new use (acceptance 1)", () => {
 
 describe("a scheduled dynamic definition (acceptance 2)", () => {
   it("is kept, and stays usable, while a trigger is pinned to it; it expires once the pin goes", () => {
-    let { store, clock, temporary } = workspace();
+    let { store, storage, clock, temporary } = workspace();
     let made = temporary();
     store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: made.id, revision: 1, mode: "pinned" });
     clock.now = START + 100 * HOUR;
@@ -159,9 +160,9 @@ describe("a scheduled dynamic definition (acceptance 2)", () => {
     expect(fired).toMatchObject({ definitionId: made.id });
     store.pinTrigger(ADA.id, HOOK, GADGET, null);
     expect(store.get(ADA.id, made.id)).toBeNull();
-    // The scheduled firing's run is live until it settles (FAC-108's rule), and keeps it till then.
-    expect(store.sweepExpired()).toBe(0);
-    store.recordResult(fired.deliveryId, { outcome: "succeeded" });
+    // That firing's run never started within its start window, so by FAC-108's rule it is no
+    // longer live work, and nothing keeps the definition (a live run that does is the test above).
+    expect(isLiveWorkflowDelivery(storage.workflowDeliveries.get(fired.deliveryId)!, clock.now)).toBe(false);
     expect(store.sweepExpired()).toBe(1);
   });
 });
