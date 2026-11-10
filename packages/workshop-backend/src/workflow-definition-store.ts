@@ -790,9 +790,15 @@ export class WorkspaceWorkflowDefinitionStore {
     this.#changed();
   }
 
-  /** The recorded deliveries of a definition visible to `viewer`, oldest first. */
+  /**
+   * The recorded deliveries of a definition visible to `viewer`, oldest first. History is gated on
+   * who may see the definition (its owner, or anyone for a published one), not on its availability:
+   * expiry blocks new use only (FAC-124), so an expired definition's deliveries stay listable while
+   * its record exists. Once it is swept, its runs are read from their own records (`run`).
+   */
   deliveries(viewer: string, definitionId: string): WorkflowDefinitionDelivery[] {
-    if (!this.get(viewer, definitionId)) throw new Error(NOT_FOUND);
+    let stored = this.storage.workflowDefinitions.get(definitionId);
+    if (!stored || !viewOf(stored, viewer)) throw new Error(NOT_FOUND);
     let shown: WorkflowDefinitionDelivery[] = [];
     for (let { id: _, ...delivery } of this.storage.workflowDeliveries.list()) {
       if (delivery.definitionId === definitionId) shown.push(delivery);
