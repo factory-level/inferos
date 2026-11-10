@@ -5,7 +5,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'rea
 import { Switch, useKumoToastManager } from '@cloudflare/kumo'
 import { CaretRight, Check, Eye, Lightning, ShieldCheck } from '@phosphor-icons/react'
 import { RpcStub } from 'capnweb'
-import { ActionLogEntry, Overseer, actionChangeTime } from '@gadgets/workshop-shared/api'
+import { ActionLogEntry, Overseer, actionChangeTime, type ConnectFlowStart } from '@gadgets/workshop-shared/api'
 import { ActionKind } from '@gadgets/workshop-shared/gatekeeper'
 import { GatekeeperIcon } from './components/GatekeeperIcon'
 import { HookToggle } from './components/HookToggle'
@@ -267,6 +267,8 @@ export default function Activity({
                   onToggle={() => toggleExpanded(record.id)}
                   onApprove={() => void resolveAction(record.id, 'approve')}
                   onReject={() => void resolveAction(record.id, 'deny')}
+                  onReconnect={record.type === 'action' && record.gatekeeperId !== undefined
+                    ? () => overseer.reconnectGatekeeper(record.gatekeeperId!) : undefined}
                   onAlwaysApprove={
                     autoApproveTarget &&
                     !isTagAutoApproved(autoApproveTarget.gatekeeperId, autoApproveTarget.actionKind.tag)
@@ -637,6 +639,7 @@ function ReviewRequest({
   onToggle,
   onApprove,
   onReject,
+  onReconnect,
   onAlwaysApprove,
 }: {
   record: ActionLogEntry
@@ -648,6 +651,8 @@ function ReviewRequest({
   onToggle: () => void
   onApprove: () => void
   onReject: () => void
+  /** Reconnects the action's connection for a sign-in to renew (FAC-119 K2). */
+  onReconnect?: () => Promise<ConnectFlowStart>
   onAlwaysApprove?: () => void
 }) {
   const resourceUrl = safeExternalUrl(record.resourceUrl)
@@ -714,7 +719,7 @@ function ReviewRequest({
         </div>
       </div>
 
-      {record.type === 'action' && <ActionDecision entry={record} showOutcome={false} className="mt-1.5 max-w-2xl text-[12px]" />}
+      {record.type === 'action' && <ActionDecision entry={record} showOutcome={false} onReconnect={onReconnect} className="mt-1.5 max-w-2xl text-[12px]" />}
 
       {restricted && <RestrictedApprovalNotice id={noticeId} className="mt-2 max-w-2xl" />}
 

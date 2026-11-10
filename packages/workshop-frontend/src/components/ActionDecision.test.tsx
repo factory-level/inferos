@@ -10,9 +10,17 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ACTION_FAILURE_KINDS } from '@gadgets/workshop-shared/gatekeeper'
-import { ACTION_FAILURE_KIND_TEXT, RECONNECT_GUIDANCE, decisionOf, type ActionEntry } from '../actionDecision'
+import { GATEKEEPER_RECONNECT_NOT_YOURS, type ConnectFlowStart } from '@gadgets/workshop-shared/api'
+import { RUN_DEFINITION_CHANGED } from '@gadgets/workshop-shared/action-outcome'
+import {
+  ACTION_FAILURE_KIND_TEXT, BLOCKED_UNKNOWN_TEXT, RECONNECT_GUIDANCE, RECONNECT_PROMPT, blockedText, contextText, decisionOf,
+  type ActionEntry,
+} from '../actionDecision'
 import { ActionDecision } from './ActionDecision'
 import { ActionReceiptLine } from './ActionReceipt'
+
+const opened = vi.hoisted(() => [] as ConnectFlowStart[])
+vi.mock('../connectHandoff', () => ({ openConnectWindow: (flow: ConnectFlowStart) => { opened.push(flow); return {} } }))
 
 const entry = (patch: Partial<ActionEntry> = {}): ActionEntry => ({
   type: 'action', id: 7, gatekeeperId: 3, resourceTitle: 'ENG board', createdAt: new Date(0), state: 'pending',
@@ -83,8 +91,8 @@ describe('where it stands, in FAC-97 words', () => {
   })
 
   it('says why it is blocked, and why it was rejected without a person', async () => {
-    await render(entry({ blocked: { reason: 'The run that asked for it was revoked.', at: new Date(0) } } as never))
-    expect(container.textContent).toContain("It can't be applied right now: The run that asked for it was revoked.")
+    await render(entry({ blocked: { reason: `Error: ${RUN_DEFINITION_CHANGED}`, at: new Date(0) } } as never))
+    expect(container.textContent).toContain(`It can't be applied right now: ${RUN_DEFINITION_CHANGED}`)
     await render(entry({ state: 'rejected', rejectedBecause: 'expired' }))
     expect(container.textContent).toContain('It expired before it was decided')
   })
@@ -96,5 +104,54 @@ describe("a write receipt", () => {
     expect(container.textContent).toBe('Appliedid:r-1')
     await act(async () => root.render(<ActionReceiptLine outcome="failed" reason="This change isn't permitted." result={{ id: 'r-1' }} />))
     expect(container.textContent).toBe("Failed, not applied: This change isn't permitted.")
+  })
+})
+
+const run = (context: ActionEntry['context']) => entry({ context })
+const signIn = () => entry({ lastAttempt: attempt({ kind: 'sign-in', code: 'UNAUTHORIZED', retryable: true }) })
+const reconnectButton = () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Reconnect')
+
+describe('where a decision came from (FAC-119 K2)', () => {
+  it("names a workflow run's trigger, whether it runs as the trigger's account, and who asked, never by name", () => {
+    expect(contextText(run({ kind: 'workflow-run', hookId: 7, assigned: true, runId: 'r', requestedBy: 'ada', triggerLabel: 'Refund' }), 'ada'))
+      .toBe("From a run of the workflow trigger “Refund”, which you asked for; it runs as the trigger's assigned account")
+    expect(contextText(run({ kind: 'workflow-run', hookId: 7, assigned: false, requestedBy: 'ben' }), 'ada'))
+      .toBe('From a run of a workflow trigger, which another person asked for')
+    expect(contextText(run({ kind: 'workflow-run', hookId: 7, assigned: true, requestedBy: null }), 'ada'))
+      .toBe("From a run of a workflow trigger, which fired by itself; it runs as the trigger's assigned account")
+    expect(contextText(run({ kind: 'agent-turn' }))).toBe("From the agent's turn in a chat")
+    expect(contextText(entry())).toBeNull()
+  })
+
+  it("says a known run refusal in the kernel's words, and anything else in a fixed sentence", () => {
+    expect(blockedText(RUN_DEFINITION_CHANGED)).toBe(RUN_DEFINITION_CHANGED)
+    expect(blockedText(`Error: ${RUN_DEFINITION_CHANGED}`)).toBe(RUN_DEFINITION_CHANGED)
+    expect(blockedText('token expired for acme-bot')).toBe(BLOCKED_UNKNOWN_TEXT)
+  })
+})
+
+describe('Reconnect (FAC-119 K2)', () => {
+
+  it('reconnects the connection through the server, and opens its sign-in', async () => {
+    opened.length = 0
+    const onReconnect = vi.fn<() => Promise<ConnectFlowStart>>(async () => ({ url: 'https://connect.example/again', nonce: 'n' }))
+    await act(async () => root.render(<ActionDecision entry={signIn()} onReconnect={onReconnect} />))
+    expect(container.textContent).toContain(RECONNECT_PROMPT)
+    await act(async () => reconnectButton()!.click())
+    expect(onReconnect).toHaveBeenCalledOnce()
+    expect(opened).toEqual([{ url: 'https://connect.example/again', nonce: 'n' }])
+  })
+
+  it("says why it can't, in the kernel's words, and offers nothing for another failure kind", async () => {
+    const onReconnect = vi.fn<() => Promise<ConnectFlowStart>>(async () => { throw new Error(`Error: ${GATEKEEPER_RECONNECT_NOT_YOURS}`) })
+    await act(async () => root.render(<ActionDecision entry={signIn()} onReconnect={onReconnect} />))
+    await act(async () => reconnectButton()!.click())
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(GATEKEEPER_RECONNECT_NOT_YOURS)
+    await act(async () => root.render(<ActionDecision entry={entry({ lastAttempt: attempt({ kind: 'permission', retryable: true }) })} onReconnect={onReconnect} />))
+    expect(reconnectButton()).toBeUndefined()
+    // Without a way to reconnect here, the guidance says where.
+    await act(async () => root.render(<ActionDecision entry={signIn()} />))
+    expect(reconnectButton()).toBeUndefined()
+    expect(container.textContent).toContain(RECONNECT_GUIDANCE)
   })
 })

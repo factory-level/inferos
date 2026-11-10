@@ -143,6 +143,7 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
   onEvent: (event: OperateEvent) => Promise<void>
 }) => {
   const baseId = useId()
+  const { currentUser } = useAuthenticatedApi()
   const sessionSource: ApprovalSource | null = session
     ? { workspaceId: session.id, label: 'Operate chat', stub: session.stub, restricted: session.restricted }
     : null
@@ -284,7 +285,8 @@ export const SessionApprovals = ({ session, screenWorkspaceId, reviewing, lastOu
                   </div>
                 </div>
                 {/* An earlier attempt, a block or a rejection's reason, shown so a reload doesn't hide it. */}
-                {action.type === 'action' && <ActionDecision entry={action} className="mt-0.5" />}
+                {action.type === 'action' && <ActionDecision entry={action} viewerProfileId={currentUser?.id} className="mt-0.5"
+                  onReconnect={action.gatekeeperId !== undefined ? () => source.stub.reconnectGatekeeper(action.gatekeeperId!) : undefined} />}
                 {(isReviewing || source.restricted) && (
                   <div id={detailsId} className="mt-1.5">
                     <p className="m-0 whitespace-pre-wrap text-[12.5px] leading-[18px] text-kumo-subtle">{action.description.description}</p>
