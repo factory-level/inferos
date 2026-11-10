@@ -128,7 +128,11 @@ import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import type { BoundViewDescription, GadgetExportFormat } from "@gadgets/workshop-shared/api";
+import type { BoundViewDescription, GadgetExportFormat, GovernedSessionHandle } from "@gadgets/workshop-shared/api";
+import {
+  governedResourceOf, type GovernedCommandReceipt, type GovernedDescription, type GovernedListResult, type GovernedRow,
+  type GovernedWriteSession,
+} from "@gadgets/workshop-shared/governed-data";
 import {
   assertChatAttachmentSupportedByProvider,
   isAllowedChatAttachmentImageMimeType,
@@ -15282,6 +15286,17 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
         this.clientUserId, this.#mintedCapabilityKind());
   }
 
+  async openGovernedSession(ref: string): Promise<GovernedSessionHandle | null> {
+    let resource = governedResourceOf(ref);
+    if (resource === null) throw new Error("Not a governed resource reference: expected a custom table or a tickets queue.");
+    // Found as getGatekeeperByResourceUrl finds a connection: the oldest described with that URL.
+    let record = [...this.impl.storage.gatekeepers.list()].find(candidate => candidate.resourceUrl === ref);
+    if (!record) return null;
+    this.impl.assertGatekeeperUsable(record.id);
+    let session = await this.impl.openGatekeeperSession(record.id, this.impl.getGatekeeperFacet(record.id), {from: "user"});
+    return { gatekeeperId: record.id, resource, session: new GovernedSessionImpl(session as RpcStub<GovernedWriteSession>) };
+  }
+
   async getGatekeeperByResourceUrl(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
     // Records list in id order, so the first match is the oldest connection. Only the URL the
     // gatekeeper described itself with is compared -- the vendor's canonical form, never what the
@@ -17328,6 +17343,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async getGatekeeperByResourceUrl(_resourceUrl: string): Promise<GatekeeperClient<any> | null> {
     this.#deny();
   }
+  async openGovernedSession(_ref: string): Promise<GovernedSessionHandle | null> { this.#deny(); }
   async newGatekeeper(_accountId: number, _resourceUrl: string)
       : Promise<GatekeeperClient<any> | null> { this.#deny(); }
   async newAiModelGatekeeper(_modelId: string): Promise<GatekeeperClient<any>> { this.#deny(); }
@@ -17613,6 +17629,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   }
   async getGatekeeperByResourceUrl(resourceUrl: string): Promise<GatekeeperClient<any> | null> {
     this.#live(); return this.owner.getGatekeeperByResourceUrl(resourceUrl);
+  }
+  async openGovernedSession(ref: string): Promise<GovernedSessionHandle | null> {
+    this.#live(); return this.owner.openGovernedSession(ref);
   }
 
   // --- Denied: authoring ---
@@ -18164,6 +18183,45 @@ class UseGadgetClientInterface extends RpcTarget implements GadgetClient {
                         _screenshot?: BlueprintScreenshotUpload,
                         _options?: BlueprintPublishOptions): Promise<BlueprintGadgetSummary> {
     this.#deny();
+  }
+}
+
+/**
+ * A governed resource's session as the host holds it (FAC-9, `openGovernedSession`): only the
+ * governed contract reaches the connector's session, whatever else that session offers.
+ */
+class GovernedSessionImpl extends RpcTarget implements GovernedWriteSession {
+  #session: RpcStub<GovernedWriteSession>;
+
+  constructor(session: RpcStub<GovernedWriteSession>) {
+    super();
+    this.#session = session;
+  }
+
+  [Symbol.dispose]() {
+    this.#session[Symbol.dispose]();
+  }
+
+  describe(): Promise<GovernedDescription> {
+    return this.#session.describe();
+  }
+
+  list(request: unknown): Promise<GovernedListResult> {
+    return this.#session.list(request);
+  }
+
+  get(id: string): Promise<GovernedRow | null> {
+    return this.#session.get(id);
+  }
+
+  async command(request: unknown): Promise<GovernedCommandReceipt> {
+    try {
+      return await this.#session.command(request);
+    } catch (error) {
+      // A connector that declares no commands has no such method at all.
+      if (/does not implement the method "command"/.test(String(error))) throw new Error("This resource takes no commands.", { cause: error });
+      throw error;
+    }
   }
 }
 
