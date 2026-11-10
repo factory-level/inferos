@@ -22,6 +22,8 @@ function makeOverseer(
       // The quarantine gate (see the dedicated pending-restart tests); no connection is blocked
       // in these fixtures.
       assertGatekeeperUsable: () => {},
+      // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
+      requireHookBound: () => {},
       // The workflow-definition pin check (workflow-definition-store.ts): no pin unless a test
       // supplies a store, and a workspace whose one collaborator is the operator who asks (FAC-122).
       getSharingManager: async () => ({ getEffectiveRole: (profileId: string) => (profileId === "operator-profile" ? "use" : undefined) }),

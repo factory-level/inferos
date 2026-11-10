@@ -335,6 +335,8 @@ describe("revocation and records (acceptance 2)", () => {
       getGadgetHead: made.headOf,
       defaultGadgetId: GADGET,
       assertGatekeeperUsable: () => {},
+      // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
+      requireHookBound: () => {},
       visibleBindings: () => [["BOARD", { target: 60 }]],
       getGadgetRecord: () => ({}),
       storage: Object.assign(storage, {

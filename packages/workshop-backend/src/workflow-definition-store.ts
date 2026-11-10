@@ -8,14 +8,20 @@ import {
   type WorkflowTriggerDefinitionRef, isLiveWorkflowDelivery, WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME,
   type WorkflowRunRecord, MAX_WORKFLOW_DEFINITION_SHARES, parseWorkflowDefinitionRights,
   type WorkflowDefinitionRights, type WorkflowDefinitionShare,
+  type WorkflowDefinitionProvenance, type WorkflowRequiredBinding,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 import type { HookOccurrence } from "@gadgets/workshop-shared/gatekeeper";
 
 /** A workflow definition as stored: every saved revision, whoever is looking. */
-export type StoredWorkflowDefinition = Omit<WorkflowDefinition, "revisions"> & {
+export type StoredWorkflowDefinition = Omit<WorkflowDefinition, "revisions" | "duplicatedFrom" | "bindingsNeeded"> & {
   revisions: WorkflowDefinitionRevision[];
+  /** A duplicate's source (FAC-123), in full; each viewer is shown only what they may see of it. */
+  duplicatedFrom?: { definitionId: string; revision: number; at: Date };
 };
+
+/** Which connections a workflow gadget still needs set up (FAC-123), for its definition's owner. */
+export type BindingsNeededOf = (gadgetId: WorkpieceId) => WorkflowRequiredBinding[];
 
 /** New trigger rows record their resolution mode; legacy rows without mode retain explicit pins. */
 export type StoredTriggerPin = { hookId: number; definitionId: string; revision: number; mode?: "pinned" | "follow-latest" };
@@ -134,7 +140,8 @@ export class WorkspaceWorkflowDefinitionStore {
           "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired" |
           "workflowRunQueue" | "workflowDefinitionShares">,
       private retention: DefinitionRetention = DEFAULT_RETENTION,
-      private audience: WorkflowDefinitionAudience = WORKSPACE_AUDIENCE) {}
+      private audience: WorkflowDefinitionAudience = WORKSPACE_AUDIENCE,
+      private bindingsNeededOf: BindingsNeededOf = () => []) {}
 
   // FAC-124: whether `stored` is available for new use at `now`: retained, not yet expired, or
   // scheduled (a trigger is pinned to it, which keeps it while the pin exists).
@@ -248,11 +255,112 @@ export class WorkspaceWorkflowDefinitionStore {
   #viewOf(stored: StoredWorkflowDefinition, viewer: string, role: CollaboratorRole | null): WorkflowDefinition | null {
     let rights = this.#rights(stored, viewer, role);
     let access = { read: rights.read, run: rights.run, edit: rights.edit };
-    let marks = { access, ...(rights.shared ? { sharedWithMe: true } : {}) };
-    if (rights.edit) return { ...stored, revisions: [...stored.revisions], ...marks };
+    let { duplicatedFrom, ...rest } = stored;
+    let marks = {
+      access, ...(rights.shared ? { sharedWithMe: true } : {}),
+      ...(duplicatedFrom ? { duplicatedFrom: this.#provenanceFor(duplicatedFrom, viewer, role) } : {}),
+      ...this.#bindingsNeededFor(stored, viewer),
+    };
+    if (rights.edit) return { ...rest, revisions: [...stored.revisions], ...marks };
     if (!rights.read || !stored.published) return null;
     let revision = stored.revisions.find(r => r.revision === stored.published!.revision);
-    return revision ? { ...stored, revisions: [revision], ...marks } : null;
+    return revision ? { ...rest, revisions: [revision], ...marks } : null;
+  }
+
+  // A duplicate's source as `viewer` may see it (FAC-123): its id and title only when the source is
+  // visible to them now, its revision only when that revision is too; otherwise just when. Read from
+  // the source's own rights, so it never says more than listing the source would.
+  #provenanceFor(from: NonNullable<StoredWorkflowDefinition["duplicatedFrom"]>, viewer: string,
+                 role: CollaboratorRole | null): WorkflowDefinitionProvenance {
+    let source = this.storage.workflowDefinitions.get(from.definitionId);
+    if (!source || !this.#available(source, this.retention.now())) return { at: from.at };
+    let rights = this.#rights(source, viewer, role);
+    let seen = rights.edit
+      ? source.revisions.map(r => r.revision)
+      : rights.read && source.published ? [source.published.revision] : [];
+    if (seen.length === 0) return { at: from.at };
+    return { at: from.at, definitionId: source.id, title: source.title,
+      ...(seen.includes(from.revision) ? { revision: from.revision } : {}) };
+  }
+
+  // The connections the owner still has to set up (FAC-123), from the latest revision's gadget;
+  // nothing for anyone else, and nothing once each is set up.
+  #bindingsNeededFor(stored: StoredWorkflowDefinition, viewer: string): { bindingsNeeded?: WorkflowRequiredBinding[] } {
+    if (stored.owner.id !== viewer) return {};
+    let latest = stored.revisions[stored.revisions.length - 1];
+    let needed = latest ? this.bindingsNeededOf(latest.source.gadgetId) : [];
+    return needed.length > 0 ? { bindingsNeeded: needed } : {};
+  }
+
+  /**
+   * The source of a duplicate `viewer` (role `role` here) asks for (FAC-123): definition `id` at
+   * `revision`, which must be one they may see (any of an editable one's, else its published one),
+   * and the published one (or the latest, when they may edit it) when absent. Refused as not found
+   * when the definition isn't visible to them, and as expired when it is but is past its expiry.
+   * Reads only: `duplicate` checks it again as it writes.
+   */
+  duplicateSource(viewer: string, id: string, revision: number | undefined, role: CollaboratorRole | null)
+      : { source: StoredWorkflowDefinition; revision: WorkflowDefinitionRevision } {
+    if (typeof id !== "string") throw new Error(NOT_FOUND);
+    if (revision !== undefined && !Number.isSafeInteger(revision)) throw new TypeError("A revision is a whole number.");
+    let stored = this.storage.workflowDefinitions.get(id);
+    let view = stored ? this.#viewOf(stored, viewer, role) : null;
+    if (!stored || !view) throw new Error(NOT_FOUND);
+    if (!this.#available(stored, this.retention.now())) throw new Error(WORKFLOW_DEFINITION_EXPIRED);
+    let chosen = revision === undefined
+      ? (view.access?.edit ? view.revisions[view.revisions.length - 1] : view.revisions.find(r => r.revision === stored.published?.revision))
+      : view.revisions.find(r => r.revision === revision);
+    if (!chosen) throw new Error("No such revision.");
+    return { source: stored, revision: chosen };
+  }
+
+  /**
+   * Duplicates `source` at `revision` (as `duplicateSource` chose, checked again here at this clock)
+   * into a new definition owned by `caller` (FAC-123): one revision 1, of the gadget `makeGadget`
+   * creates in this transaction at the same commit, with a record of where it came from. Nothing else
+   * of the source is copied: no share, publication, pin, control, assignment or delivery. A dynamic
+   * source makes a dynamic duplicate with a fresh expiry, unless `retain` is true.
+   */
+  duplicate(caller: AiChatAuthorInfo, chosen: { source: StoredWorkflowDefinition; revision: WorkflowDefinitionRevision },
+            input: { title: unknown; retain?: unknown }, role: CollaboratorRole | null,
+            makeGadget: (commitId: string) => WorkpieceId): WorkflowDefinition {
+    let title = parseWorkflowDefinitionTitle(input.title);
+    if (input.retain !== undefined && typeof input.retain !== "boolean") throw new TypeError("retain is true, false or absent.");
+    let dynamic = chosen.source.expiresAt !== undefined && input.retain !== true;
+    // Read before the transaction, as save does: a misconfigured TTL refuses only a dynamic copy.
+    let ttl = dynamic ? this.retention.dynamicTtlMs() : undefined;
+    let result = this.durableStorage.transactionSync(() => {
+      let now = new Date(this.retention.now());
+      let again = this.duplicateSource(caller.id, chosen.source.id, chosen.revision.revision, role);
+      this.#sweepAt(now.getTime());
+      if (Array.from(this.storage.workflowDefinitions.list({ limit: MAX_WORKSPACE_WORKFLOW_DEFINITIONS })).length
+          >= MAX_WORKSPACE_WORKFLOW_DEFINITIONS) {
+        throw new Error("Workspace workflow definition limit reached.");
+      }
+      let commitId = again.revision.source.commitId;
+      let gadgetId = makeGadget(commitId);
+      let created: StoredWorkflowDefinition = {
+        id: crypto.randomUUID(), title, owner: caller,
+        revisions: [{ revision: 1, source: { kind: "gadget", gadgetId, commitId }, savedAt: now }],
+        published: null,
+        duplicatedFrom: { definitionId: again.source.id, revision: again.revision.revision, at: now },
+        ...(ttl === undefined ? {} : { expiresAt: new Date(now.getTime() + ttl) }),
+      };
+      this.storage.workflowDefinitions.put(created);
+      return created;
+    });
+    this.#changed();
+    return this.#viewOf(result, caller.id, role)!;
+  }
+
+  /**
+   * `caller`'s own definition `id`, available now, and the gadget its latest revision names, for
+   * setting up its connections (FAC-123). The owner only: refused as not found to anyone else.
+   */
+  ownedGadget(caller: string, id: string): WorkpieceId {
+    let stored = this.#owned(caller, id);
+    if (!this.#available(stored, this.retention.now())) throw new Error(WORKFLOW_DEFINITION_EXPIRED);
+    return stored.revisions[stored.revisions.length - 1]!.source.gadgetId;
   }
 
   /**
@@ -399,7 +507,8 @@ export class WorkspaceWorkflowDefinitionStore {
       if (!stored.revisions.some(r => r.revision === revision)) throw new Error("No such revision.");
       let next = { ...stored, published: { revision, at: new Date(), by: caller } };
       this.storage.workflowDefinitions.put(next);
-      return next;
+      // As the caller may see it: a duplicate's source is shown only as far as they may see it (FAC-123).
+      return this.#viewOf(next, caller.id, role)!;
     });
   }
 
