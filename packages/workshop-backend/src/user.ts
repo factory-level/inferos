@@ -8,8 +8,12 @@ import { isCloudflareLimitsEnabled } from './ai-gateway-billing/config.js';
 import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, getOperateSessionErrorCode, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
 import {
   WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, recoverWidgetState, widgetEventsFrom,
-  type WidgetStateMachine, type WidgetStateSnapshot,
+  type WidgetStateMachine, type WidgetStateSnapshot, widgetStateKeyPlacement,
 } from '@gadgets/workshop-shared/widget-state';
+import {
+  WIDGET_PLACEMENT_ERROR_CODES, WIDGET_PLACEMENT_LIMITS, WidgetPlacementError, orderWidgetPlacements, parseWidgetPlacementInput,
+  sameWidgetPlacementRef, type WidgetPlacement, type WidgetPlacementInput, type WidgetPlacements,
+} from '@gadgets/workshop-shared/widget-placements';
 import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
@@ -465,6 +469,10 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // (FAC-86, widget-state.ts), keyed by widgetStateKey(). Apart from the operate page: nothing
       // here is read or written by dispatchOperateEvent(), nor this by it.
       widgetStates: collection<StoredWidgetState>()({ primaryKey: "key" }),
+      // This person's widget placements on the Operate canvas (FAC-13, widget-placements.ts), for
+      // the company in presentationCompany: references, layout and filters only. Dropped with the
+      // rest of the presentation state when the company changes (#resetPresentationState).
+      widgetPlacements: collection<WidgetPlacement>()({ primaryKey: "placementId" }),
       // The requested runs whose result moved this person's page (FAC-116, applyRunNavigation), by
       // invocation and attachment, so a run moves it at most once. Kept across a company change.
       runNavigations: collection<{ key: string; at: number }>()({ primaryKey: "key" }),
@@ -542,6 +550,8 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // The seq of the latest companyChanged entry: entries before it are the former company's, kept
       // in `operateEvents` but never listed again (listOperateEvents, listOperateSubjectEvents).
       presentationFloorSeq: 0,
+      // Raised by one with each change to widgetPlacements, which names it to change them again.
+      widgetPlacementsRevision: 0,
     }
   });
 }
@@ -1404,6 +1414,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   #holdsPresentationState(): boolean {
     return this.storage.operatePage.get().seq > 0 ||
       [...this.storage.widgetStates.list({ limit: 1 })].length > 0 ||
+      [...this.storage.widgetPlacements.list({ limit: 1 })].length > 0 ||
       this.storage.operateSessionWorkspaceId.get() !== null;
   }
 
@@ -1420,6 +1431,11 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     // The keys first, so nothing is deleted while the listing is still being read.
     let widgetKeys = Array.from(this.storage.widgetStates.list(), widget => widget.key);
     for (let key of widgetKeys) this.storage.widgetStates.delete(key);
+    // The former company's placements too (FAC-13); the revision rises, so a client holding them
+    // is refused as a conflict and reads the (empty) placements again.
+    let placementIds = Array.from(this.storage.widgetPlacements.list(), placement => placement.placementId);
+    for (let placementId of placementIds) this.storage.widgetPlacements.delete(placementId);
+    if (placementIds.length > 0) this.storage.widgetPlacementsRevision.put(this.storage.widgetPlacementsRevision.get() + 1);
     let record: OperateEventRecord = {
       seq: this.storage.operatePage.get().seq + 1, event: { type: "companyChanged" }, actor: "person", at: new Date(),
     };
@@ -1555,6 +1571,79 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     this.storage.widgetStates.put(next);
     this.#pruneWidgetStates();
     return { state, seq: next.seq, events: widgetEventsFrom(machine, state) };
+  }
+
+  /**
+   * This person's widget placements on the Operate canvas (FAC-13), for the company they work in
+   * now, in canvas order, with the revision a change must name. References only: opening what a
+   * placement shows is authorized on its own path, every time.
+   */
+  async listWidgetPlacements(): Promise<WidgetPlacements> {
+    await this.#enterPresentationCompany();
+    return this.#widgetPlacements();
+  }
+
+  #widgetPlacements(): WidgetPlacements {
+    return { revision: this.storage.widgetPlacementsRevision.get(),
+      placements: orderWidgetPlacements(this.storage.widgetPlacements.list()) };
+  }
+
+  /**
+   * Saves one placement if `expectedRevision` is current: a new one (the kernel mints its id) when
+   * `input` names none, else a change to that placement's layout and filters, which may not change
+   * the widget it shows. Refused, changing nothing, with WIDGET_PLACEMENTS_CONFLICT,
+   * WIDGET_PLACEMENT_NOT_FOUND, WIDGET_PLACEMENT_REF_CHANGED, WIDGET_PLACEMENTS_FULL or
+   * WIDGET_PLACEMENT_INVALID.
+   */
+  async saveWidgetPlacement(input: WidgetPlacementInput, expectedRevision: number): Promise<WidgetPlacements> {
+    let parsed = parseWidgetPlacementInput(input);
+    await this.#enterPresentationCompany();
+    // One synchronous check and write: no await, so no other change interleaves.
+    this.#requirePlacementsRevision(expectedRevision);
+    let placementId: string;
+    if (parsed.placementId !== undefined) {
+      let current = this.storage.widgetPlacements.get(parsed.placementId);
+      if (!current) throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.notFound, "That placement is no longer on your canvas.");
+      if (!sameWidgetPlacementRef(current.ref, parsed.ref)) {
+        throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.refChanged, "A placement keeps the widget it shows; place the other one instead.");
+      }
+      placementId = parsed.placementId;
+    } else {
+      if ([...this.storage.widgetPlacements.list()].length >= WIDGET_PLACEMENT_LIMITS.placements) {
+        throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.tooMany,
+          `Your canvas holds at most ${WIDGET_PLACEMENT_LIMITS.placements} widgets; remove one first.`);
+      }
+      placementId = crypto.randomUUID();
+    }
+    this.storage.widgetPlacements.put({ placementId, ref: parsed.ref, layout: parsed.layout, filters: parsed.filters ?? {},
+      updatedAt: Date.now() });
+    this.storage.widgetPlacementsRevision.put(expectedRevision + 1);
+    return this.#widgetPlacements();
+  }
+
+  /**
+   * Removes one placement if `expectedRevision` is current, with the widget states kept for it
+   * (see widgetStateKey). Refused with WIDGET_PLACEMENTS_CONFLICT or WIDGET_PLACEMENT_NOT_FOUND.
+   */
+  async removeWidgetPlacement(placementId: string, expectedRevision: number): Promise<WidgetPlacements> {
+    if (typeof placementId !== "string") throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.invalid, "Name the placement.");
+    await this.#enterPresentationCompany();
+    this.#requirePlacementsRevision(expectedRevision);
+    if (!this.storage.widgetPlacements.get(placementId)) {
+      throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.notFound, "That placement is no longer on your canvas.");
+    }
+    this.storage.widgetPlacements.delete(placementId);
+    let stateKeys = Array.from(this.storage.widgetStates.list(), state => state.key)
+      .filter(key => widgetStateKeyPlacement(key) === placementId);
+    for (let key of stateKeys) this.storage.widgetStates.delete(key);
+    this.storage.widgetPlacementsRevision.put(expectedRevision + 1);
+    return this.#widgetPlacements();
+  }
+
+  #requirePlacementsRevision(expectedRevision: number): void {
+    if (expectedRevision !== this.storage.widgetPlacementsRevision.get()) {
+      throw new WidgetPlacementError(WIDGET_PLACEMENT_ERROR_CODES.conflict, "Your canvas changed. Read it again.");
+    }
   }
 
   // Keeps the newest MAX_STORED_WIDGET_STATES; an older widget then starts again at its initial state.

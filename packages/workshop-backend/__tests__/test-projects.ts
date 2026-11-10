@@ -119,6 +119,7 @@ export const BACKEND: readonly string[] = [
   "widget-state.test.ts",
   "widget-event-navigation.test.ts",
   "personal-state-partition.test.ts",
+  "widget-placements.test.ts",
   "workflow-requested-runs.test.ts",
   "run-navigation.test.ts",
   "workflow-run-delivery.test.ts",
