@@ -8,13 +8,16 @@ import type { UserDirectoryDurableObject } from "./user-directory";
 import type { UserDurableObject } from "./user";
 
 /**
- * The account name a subject keys: `subject~<issuer>~<subject>`, each part URI-encoded. It holds no
+ * The account name a subject keys: `subject~<issuer>~<subject>`, each part URI-encoded with `~`
+ * encoded too, so the two parts can't run together and no two subjects share a name. It holds no
  * `@`, so no email names it, no `:`, so the `<name>:<secret>` session token still splits, and a `~`,
  * which no password username (`[a-z][a-z0-9_]*`) holds.
  */
 export function subjectAccountName(subject: GatekeeperSubject): string {
-  return `subject~${encodeURIComponent(subject.issuer)}~${encodeURIComponent(subject.subject)}`;
+  return `subject~${encodePart(subject.issuer)}~${encodePart(subject.subject)}`;
 }
+
+const encodePart = (part: string) => encodeURIComponent(part).replaceAll("~", "%7E");
 
 /** Whether `name` is one `subjectAccountName` gives. */
 export function isSubjectAccountName(name: string): boolean {

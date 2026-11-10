@@ -15,6 +15,9 @@ covers:
   - packages/gatekeeper-kit
   - packages/workshop-shared/src/gatekeeper.ts
   - packages/workshop-backend/src/user.ts
+  - packages/workshop-backend/src/account-subject.ts
+  - packages/workshop-backend/src/user-directory.ts
+  - packages/workshop-backend/__tests__/account-subject.test.ts
   - packages/workshop-backend/src/auth/config.ts
   - packages/integration-tests/__tests__/inferops-isolation.test.ts
   - packages/integration-tests/__tests__/inferops-live.test.ts
@@ -157,12 +160,17 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
     Set but malformed, the code isn't exchanged and sign-in is off. It only refuses.
 
   Then, by purpose:
-  - **Sign-in** requires `emailVerified: true` (InferLab also issues sessions for emails nobody
-    proved, such as invitations and impersonation), signs the session out again with
-    `POST /auth/logout`, and hands `callback.complete` an account carrying only the normalized
-    email. Signing in grants nothing.
+  - **Sign-in** signs the session out again with `POST /auth/logout`, and hands
+    `callback.complete` an account carrying the InferLab principal (`subject`: the auth origin as
+    issuer and `user.id`, `subjectOf`) and the normalized email only when `emailVerified` is
+    `true`. The Workshop keys the account on the principal ([ADR 0018](../adr/0018-account-keyed-on-stable-subject.md),
+    FAC-165), so an email InferLab doesn't vouch for (after an email change) is just not passed on.
+    The exchange only answers for a `kind = 'sso'` root, opened after the provider edge
+    authenticated the browser as that principal; invitations, impersonation and dev logins never
+    reach it. Signing in grants nothing.
   - **Connect** installs the session and identity in the account's `InferOpsCredentials` object
-    together with the callback, then calls `callback.complete` with the connected account; if
+    together with the callback, then calls `callback.complete` with the connected account (its
+    `subject` too); if
     that throws, the session is signed out and the object wiped.
   - **Reconnect** stages the session in the existing account's object and calls the stored
     callback's `reconnectComplete(stageId)`; `commitReconnect(stageId)` makes it live and signs
@@ -808,6 +816,35 @@ so Operate and host boards keep exact board bindings.
 The board, dispatch and Wiki facets build the same bindings from their props: `ProjectBinding` and
 `WikiBinding` take their target and their parts (store, client, observers, an optional observation
 hook) as arguments, and apply, reject and revert are functions over a binding.
+
+### Accounts keyed on the principal
+
+FAC-165, [ADR 0018](../adr/0018-account-keyed-on-stable-subject.md) (proposed). The vendor declares
+`providesSubject`, and every account answers `getAuthenticatedSubject()`: the principal its sign-in
+or connect recorded, else, for an account connected before that, the `userId` its stored identity
+holds. The Workshop (`account-subject.ts`, `auth/login-flow.ts`) keys the person's account on it:
+
+- **The subject index.** The user directory records which account each subject signs in to
+  (`subjects`, written once per subject) and the account each vouched address currently belongs to
+  (`emails`). A new person gets an account named `subject~<issuer>~<subject>` (no `@` or `:`).
+- **Binding an existing account.** A first subject sign-in with a vouched email binds the account
+  that address names (`UserDurableObject.bindSubject`, set-if-unset): never a password account, never
+  one another subject holds. Without a vouched email, the person gets their own account.
+- **A bound account signs in only through its subject.** Gatekeeper email sign-in and Cloudflare
+  Access refuse it (`SIGNS_IN_THROUGH_SUBJECT`), so an address that later belongs to someone else
+  reaches nothing. Profile ids, session tokens and every stored reference keep the account's name.
+- **Finding a person by address** (`collaboratorAccountName`, used by `addCollaborator`) resolves the
+  account whose current vouched address it is, and never a bound account by its old address. A share
+  stores the account, so it never follows an address.
+- **The one-off pass** `AdminApi.bindAccountSubjects()` binds each listed email-keyed account whose
+  own InferOps connection vouches its address, unless the directory already sends that subject to
+  another account (a conflict, left unbound, so nothing is stranded). It creates no account, and a
+  second run binds nothing new. Accounts the directory doesn't list yet bind at their next sign-in.
+- **Admins** (`ADMINS`) are still matched by account name: a bound account keeps its address as its
+  name; a new person's account name is its subject form.
+- **Tests:** `account-subject.test.ts` (the email change, a second person on the old address, the
+  binding rules, finding by address, the pass and its conflict) and the gatekeeper's
+  `inferlab-login.test.ts` and `account.test.ts`.
 
 ### Sign-in proxy
 

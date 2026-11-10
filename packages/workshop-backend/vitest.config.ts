@@ -156,6 +156,9 @@ const backendPlugins = () => [
       bindings: { PUBLIC_BASE_URL: 'https://workshop.example/' },
       // The overseer loads gadget code through this, so a test can run a real gadget facet.
       workerLoaders: { LOADER: {} },
+      // Empty, so the admin config reads its defaults (signups open): the gatekeeper login callback
+      // reads it when it signs a person in (account-subject.test.ts, FAC-165).
+      kvNamespaces: ['BLUEPRINTS'],
       durableObjects: {
         TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
         TEST_AUTHORED_WIDGET_BUILD: { className: 'AuthoredWidgetBuildDurableObject', useSQLite: true },

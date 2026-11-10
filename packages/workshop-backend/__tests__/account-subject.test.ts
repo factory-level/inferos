@@ -18,16 +18,16 @@ declare module "cloudflare:workers" {
   interface ProvidedEnv {
     TEST_PENDING_LOGIN: DurableObjectNamespace<PendingLogin>;
     TEST_USER: DurableObjectNamespace<UserDurableObject>;
+    TEST_USER_DIRECTORY: DurableObjectNamespace<UserDirectoryDurableObject>;
   }
 }
 
 type Exports = {
   FakeSubjectAccount(options: { props: { issuer: string; subject: string | null; email?: string } }): Fetcher<FakeSubjectAccount>;
   TestLoginCallback(options: { props: { pendingId: string; vendorId: string; subject?: boolean } }): Fetcher<LoginConnectCallbackImpl>;
-  UserDurableObject: DurableObjectNamespace<UserDurableObject>;
-  UserDirectoryDurableObject: DurableObjectNamespace<UserDirectoryDurableObject>;
 };
-type Internals = UserDurableObject & {
+// What a test reaches into a user DO for.
+type Internals = {
   ctx: DurableObjectState & { exports: Exports };
   storage: {
     connectedAccounts: { put(record: unknown): void };
@@ -40,14 +40,9 @@ const ISSUER = "https://auth.example.test";
 const fresh = () => crypto.randomUUID().slice(0, 8);
 const subjectName = (subject: string) => subjectAccountName({ issuer: ISSUER, subject });
 
-/** Runs `body` with the worker's own exports, inside a scratch user DO (the only way a test reaches them). */
-async function withExports<T>(body: (exports: Exports) => Promise<T>): Promise<T> {
-  let result!: T;
-  await runInDurableObject(env.TEST_USER.getByName(`host-${fresh()}`), async (instance: UserDurableObject) => {
-    result = await body((instance as Internals).ctx.exports);
-  });
-  return result;
-}
+const internals = (instance: UserDurableObject) => instance as unknown as Internals;
+/** The namespaces the login flow reaches, as the test binds them. */
+const NS = () => ({ users: env.TEST_USER, directory: env.TEST_USER_DIRECTORY });
 
 /**
  * Signs in through the real callback as InferOps would: a vendor that yields a subject. Returns the
@@ -56,18 +51,21 @@ async function withExports<T>(body: (exports: Exports) => Promise<T>): Promise<T
 async function signIn(subject: string | null, email?: string): Promise<string> {
   const pending = env.TEST_PENDING_LOGIN.getByName(`subject-login-${fresh()}`);
   await pending.begin();
-  return withExports(async exports => {
+  // The callback and account entrypoints are reached only through a DO's own exports.
+  let ticket = "";
+  await runInDurableObject(env.TEST_USER.getByName(`host-${fresh()}`), async (instance: UserDurableObject) => {
+    const exports = internals(instance).ctx.exports;
     const callback = exports.TestLoginCallback({ props: { pendingId: pending.id.toString(), vendorId: "inferops", subject: true } });
     const account = exports.FakeSubjectAccount({ props: { issuer: ISSUER, subject, ...(email ? { email } : {}) } });
-    try {
-      const { ticket } = await callback.complete(account as never);
-      await pending.confirm(ticket);
-      const token = await pending.receive();
-      return token!.slice(0, token!.lastIndexOf(":"));
-    } catch (error) {
-      return `error:${(error as Error).message}`;
-    }
+    ({ ticket } = await callback.complete(account as never));
   });
+  try {
+    await pending.confirm(ticket);
+    const token = await pending.receive();
+    return token!.slice(0, token!.lastIndexOf(":"));
+  } catch (error) {
+    return `error:${(error as Error).message}`;
+  }
 }
 
 /** An email-keyed account as gatekeeper sign-in made one before ADR 0018. */
@@ -108,6 +106,17 @@ describe("a sign-in keyed on the stable subject (ADR 0018)", () => {
   });
 });
 
+describe("a subject's account name", () => {
+  it("can't be an email, a username or another subject's, and keeps the token's shape", () => {
+    const name = subjectAccountName({ issuer: "https://a~b.test", subject: "c" });
+    expect(name).not.toBe(subjectAccountName({ issuer: "https://a", subject: "b.test~c" }));
+    for (const forged of [name, subjectAccountName({ issuer: "https://x@y:z", subject: "u:1@v" })]) {
+      expect(forged).not.toMatch(/[@:]/);
+      expect(forged.split("~")).toHaveLength(3);
+    }
+  });
+});
+
 describe("taking over someone's old address (acceptance 2)", () => {
   it("gives the second person a new, empty account, and the old one refuses every email-keyed sign-in", async () => {
     const old = `grace-${fresh()}@example.test`;
@@ -136,7 +145,7 @@ describe("taking over someone's old address (acceptance 2)", () => {
     const withPassword = `pw-${fresh()}@example.test`;
     const passwordAccount = await legacyAccount(withPassword);
     await runInDurableObject(passwordAccount, async (instance: UserDurableObject) => {
-      (instance as Internals).storage.passwordHashHash.put(new Uint8Array(32));
+      internals(instance).storage.passwordHashHash.put(new Uint8Array(32));
     });
     expect(await passwordAccount.bindSubject(subjectName(fresh()))).toBe("password");
     const other = fresh();
@@ -159,7 +168,7 @@ describe("finding a person by address (shares never follow an email)", () => {
   it("finds an address's current, vouched owner, and never a bound account by its old address", async () => {
     const old = `share-${fresh()}@example.test`;
     await legacyAccount(old);
-    const ns = () => withExports(async exports => ({ users: exports.UserDurableObject, directory: exports.UserDirectoryDurableObject }));
+    const ns = async () => NS();
     // Before anyone signs in with a subject, the address names its email-keyed account.
     expect(await collaboratorAccountName(await ns(), old)).toBe(old);
     const [first, second] = [fresh(), fresh()];
@@ -205,7 +214,7 @@ describe("the one-off subject pass (acceptance 3)", () => {
       });
     });
 
-    const ns = await withExports(async exports => ({ users: exports.UserDurableObject, directory: exports.UserDirectoryDurableObject }));
+    const ns = NS();
     const first = await bindAccountSubjects(ns, vendorId);
     expect(first.bound).toBe(1);
     expect(first.conflicts).toBe(0);
@@ -236,7 +245,7 @@ describe("the one-off subject pass (acceptance 3)", () => {
         account: user.ctx.exports.FakeSubjectAccount({ props: { issuer: ISSUER, subject: principal, email } }),
       });
     });
-    const ns = await withExports(async exports => ({ users: exports.UserDurableObject, directory: exports.UserDirectoryDurableObject }));
+    const ns = NS();
     const result = await bindAccountSubjects(ns, vendorId);
     expect(result.conflicts).toBeGreaterThanOrEqual(1);
     // Not stranded: still unbound, so its own email-keyed sign-in still reaches it.

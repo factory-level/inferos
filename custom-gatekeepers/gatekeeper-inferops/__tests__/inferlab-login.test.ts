@@ -11,7 +11,7 @@ import {
   verifiedEmail,
 } from "../src/inferlab-login.js";
 import { companyAdmits, deploymentCompany } from "../src/deployment-company.js";
-import { signIns, type InferLabLogin, type SignInExports } from "./worker.js";
+import { signIns, signInSubjects, type InferLabLogin, type SignInExports } from "./worker.js";
 
 const LOGIN_ENV = {
   INFERLAB_AUTH_ORIGIN: "http://localhost:8080",
@@ -185,6 +185,8 @@ describe("sign-in flow", () => {
     expect(response?.status).toBe(200);
     expect(await response!.text()).toContain("ticket-ok");
     expect(signIns).toContainEqual({ label: "ok", email: "ada@example.com" });
+    // The Workshop keys the account on the principal behind it (ADR 0018).
+    expect(signInSubjects).toContainEqual({ label: "ok", subject: { issuer: "http://localhost:8080", subject: "u1" } });
     expect(requests).toHaveLength(1);
     expect(requests[0].url).toBe("http://localhost:8080/auth/token");
     expect(requests[0].body).toMatchObject(
@@ -247,7 +249,10 @@ describe("sign-in flow", () => {
     expect(signIns.some(s => s.label === "rejected")).toBe(false);
   });
 
-  it("refuses an account InferLab has not verified", async () => {
+  // ADR 0018: the account is keyed on the principal, and the exchange only ever answers for a
+  // browser the provider edge authenticated as it (a `kind = 'sso'` root). An email InferLab doesn't
+  // vouch for (after an email change, say) is simply not passed on: never a key, never an address.
+  it("signs in an account whose email InferLab doesn't vouch for by its principal, passing no email", async () => {
     const params = await authorize("unverified");
     tokenEndpoint(() => Response.json({
       token: "access", refreshToken: "refresh", user: user("ada@example.com", false),
@@ -255,9 +260,9 @@ describe("sign-in flow", () => {
 
     const response = await get(`${REDIRECT_URI}?code=c&state=${params.get("state")}`);
 
-    expect(response?.status).toBe(502);
-    expect(await response!.text()).toContain("no verified email");
-    expect(signIns.some(s => s.label === "unverified")).toBe(false);
+    expect(response?.status).toBe(200);
+    expect(signIns).toContainEqual({ label: "unverified", email: null });
+    expect(signInSubjects).toContainEqual({ label: "unverified", subject: { issuer: "http://localhost:8080", subject: "u1" } });
   });
 
   it("sends the browser to the authorize origin but exchanges the code at the InferLab origin", async () => {

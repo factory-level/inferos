@@ -345,6 +345,8 @@ class TestVerifier extends RpcTarget {
 
 /** The emails sign-in and connect flows reported to each `TestConnectCallback`, by label. */
 export const signIns: Array<{ label: string; email: string | null }> = [];
+/** The principal each sign-in's account names (ADR 0018), by label. */
+export const signInSubjects: Array<{ label: string; subject: { issuer: string; subject: string } | null }> = [];
 /** The stage ids reconnects reported, by label. */
 export const reconnects: Array<{ label: string; stageId: string }> = [];
 /** The labels whose credentials the gatekeeper reported expired, in order. */
@@ -357,6 +359,8 @@ export type AccountProps = { accountId: string; email?: string; connected?: bool
 export class TestConnectCallback extends WorkerEntrypoint<Cloudflare.Env, { label: string }> {
   async complete(user: Fetcher<GatekeeperUser>): Promise<ConnectHandoff> {
     signIns.push({ label: this.ctx.props.label, email: await user.getAuthenticatedEmail() });
+    const subject = await (user as unknown as Required<Pick<GatekeeperUser, "getAuthenticatedSubject">>).getAuthenticatedSubject();
+    signInSubjects.push({ label: this.ctx.props.label, subject: subject && { issuer: subject.issuer, subject: subject.subject } });
     return { targetOrigin: "http://localhost:3000", ticket: `ticket-${this.ctx.props.label}` };
   }
 
@@ -493,6 +497,13 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
 
   async authenticatedEmail(props: AccountProps): Promise<string | null> {
     return this.#account(props).getAuthenticatedEmail();
+  }
+
+  /** The principal an account names (ADR 0018), as plain data. */
+  async authenticatedSubject(props: AccountProps): Promise<{ issuer: string; subject: string } | null> {
+    const found = await (this.#account(props) as unknown as Required<Pick<GatekeeperUser, "getAuthenticatedSubject">>)
+      .getAuthenticatedSubject();
+    return found && { issuer: found.issuer, subject: found.subject };
   }
 
   async revokeAccount(props: AccountProps): Promise<void> {
