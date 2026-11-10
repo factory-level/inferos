@@ -14,6 +14,7 @@
 // imports nothing itself); it is re-exported here unchanged.
 export { governedResourceOf, parseTicketsQueueRef, TICKETS_QUEUE_ID_MAX, type GovernedResource } from "./canvas";
 import type { GovernedResource } from "./canvas";
+import type { ActionReceipt } from "./gatekeeper";
 
 /**
  * The filter operators a request may use: `eq`, equality with a value of the field's own type (or
@@ -132,19 +133,22 @@ export interface GovernedCommandRequest {
 }
 
 /**
- * What running a command returns: it was proposed, never done. A person or a rule decides it, and
- * the connector applies it; the row is read again to see the outcome.
+ * What running a command returns: it was proposed, never done. `status` is the FAC-97 receipt
+ * capability issued for that same ApprovalQueue action; it reads the action journal's current
+ * projection through the originating workspace connection. It is deliberately not an action-log
+ * id lookup, and creates no second receipt store or authority path.
  */
-export interface GovernedCommandReceipt {
+export type GovernedCommandReceipt = ActionReceipt & {
+  /** Immediate acknowledgment only; consult `status()` for the authoritative lifecycle. */
   outcome: "proposed";
-}
+};
 
 /**
  * A governed resource session that also takes its declared commands (FAC-9; ADR 0013 W4–W6). A
  * command is validated against `describe()` before anything is read or proposed.
  */
 export interface GovernedWriteSession extends GovernedReadSession {
-  /** Propose one declared command on one row. */
+  /** Propose one declared command on one row and return its caller-bound FAC-97 receipt. */
   command(request: unknown): Promise<GovernedCommandReceipt>;
 }
 
