@@ -11,6 +11,7 @@
     "clean": "rm -rf dist src/generated"
   },
   "dependencies": {
+    "@ag-ui/core": "1.0.2",
     "@gadgets/configurator-ui": "workspace:*",
     "@gadgets/gatekeeper-kit": "workspace:*",
     "@gadgets/observability": "workspace:*",

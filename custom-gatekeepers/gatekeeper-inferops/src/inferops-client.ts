@@ -10,6 +10,10 @@ import type {
   WikiSearchHit, WikiStructure,
 } from "./types";
 import type { WorkflowHeadRecord } from "./workflow-policy";
+import type { Event as DotEvent } from "@ag-ui/core";
+
+/** One validated AG-UI event of a Dot run (`@ag-ui/core` 1.0.2, the version InferOps emits). */
+export type { DotEvent };
 
 /** Error codes a data source reports. Callers branch on these, never on message text. */
 export type InferOpsErrorCode =
@@ -36,11 +40,13 @@ export type InferOpsErrorCode =
   /** InferOps could not be reached, or its response was not usable. */
   | "UNAVAILABLE"
   /** The deployment has the InferOps integration turned off (`INFEROPS_ENABLED`, enablement.ts). */
-  | "DISABLED";
+  | "DISABLED"
+  /** A Dot proposal that wasn't decided before it expired; it can't be confirmed now (FAC-133). */
+  | "EXPIRED";
 
 const ERROR_CODES: ReadonlySet<string> = new Set<InferOpsErrorCode>([
   "NOT_FOUND", "STALE_REVISION", "WORKFLOW_MISMATCH", "INVALID_STATE", "IDEMPOTENCY_CONFLICT",
-  "INVALID_REQUEST", "CONFLICT", "RUN_ACTIVE", "UNAUTHORIZED", "FORBIDDEN", "UNAVAILABLE", "DISABLED",
+  "INVALID_REQUEST", "CONFLICT", "RUN_ACTIVE", "UNAUTHORIZED", "FORBIDDEN", "UNAVAILABLE", "DISABLED", "EXPIRED",
 ]);
 
 /**
@@ -283,6 +289,57 @@ export type WorkspaceMembersRead = {
 /** One custom table an account can open, as listed for the resource picker. */
 export type TableSummary = { id: string; label: string };
 
+/** A Dot proposal as InferOps reads it (`chatbot.proposal_list`), its status derived at read time. */
+export type DotProposalWire = {
+  id: string;
+  tool: string;
+  input: Record<string, unknown>;
+  status: "proposed" | "confirming" | "confirmed" | "declined" | "failed" | "expired" | "unknown";
+  /** The capability's answer once confirmed, or its refusal in InferOps' words once failed. */
+  outcome: unknown;
+  createdAt: string;
+  expiresAt: string;
+  decidedAt: string | null;
+};
+
+/** One message of a Dot conversation, as InferOps stores it. */
+export type DotMessageWire = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  status: "running" | "complete" | "error" | "interrupted";
+  createdAt: string;
+};
+
+/** A Dot conversation as `chatbot.conversation_get` reads it. */
+export type DotConversationWire = {
+  id: string;
+  title: string;
+  messages: DotMessageWire[];
+  nextCursor: string | null;
+  activeRunId: string | null;
+  proposals: DotProposalWire[];
+};
+
+/** One Dot turn to start: its run id is the caller's, unique per conversation. */
+export type DotRunRequest = {
+  runId: string;
+  prompt: string;
+  /** References only (`inferops://` links), never entity data; InferOps reads each as the person. */
+  selection?: { page?: string; record?: string };
+};
+
+/**
+ * How a relayed Dot run ended, as the relay saw its stream. `finished` and `error` are the run's
+ * own ends (`RUN_FINISHED`, `RUN_ERROR`); the others are the relay's: the stream ended without
+ * either (`cut`), an event that isn't valid AG-UI (`malformed`), one over a size cap (`oversized`),
+ * the run's deadline (`deadline`), or no bytes for too long (`silent`).
+ */
+export type DotRunEnd =
+  | { kind: "finished" | "cut" | "deadline" | "silent" }
+  | { kind: "error"; message: string }
+  | { kind: "malformed" | "oversized" };
+
 /** One project an account can reach, as listed for the resource picker. */
 export type ProjectSummary = Pick<Project, "identifier" | "name">;
 
@@ -292,6 +349,29 @@ export type ProjectSummary = Pick<Project, "identifier" | "name">;
  * props, so a caller can never widen scope through it.
  */
 export interface InferOpsClient {
+  /** Start a new, empty conversation of the person's own Dot (`chatbot.conversation_create`). */
+  createDotConversation(): Promise<{ id: string }>;
+  /** One of the person's Dot conversations (`chatbot.conversation_get`); NOT_FOUND for any other. */
+  readDotConversation(conversationId: string, before?: string): Promise<DotConversationWire>;
+  /**
+   * Run one Dot turn through InferOps' streaming run route, handing each validated AG-UI event to
+   * `onEvent` in order, and resolve with how the stream ended. A refusal before the stream starts
+   * (another person's conversation, a selection the person can't read, a turn already running,
+   * the Dot unavailable) throws.
+   */
+  runDot(conversationId: string, run: DotRunRequest, onEvent: (event: DotEvent) => void,
+         signal?: AbortSignal): Promise<DotRunEnd>;
+  /** Stop a running turn (`chatbot.conversation_cancel`); one that already ended is left as it is. */
+  cancelDotRun(conversationId: string, runId: string): Promise<void>;
+  /** A conversation's proposals, newest first (`chatbot.proposal_list`). */
+  listDotProposals(conversationId: string): Promise<DotProposalWire[]>;
+  /**
+   * Confirm one proposal (`chatbot.proposal_confirm`) under the person's own token; InferOps keys
+   * the write by the proposal id. EXPIRED once it expired, CONFLICT once it was decided.
+   */
+  confirmDotProposal(conversationId: string, proposalId: string, idempotencyKey: string): Promise<DotProposalWire>;
+  /** Decline one proposal (`chatbot.proposal_decline`); nothing is written. */
+  declineDotProposal(conversationId: string, proposalId: string): Promise<DotProposalWire>;
   /** Add a comment to an issue in the bound project, with a replayable key and exact head. */
   commentIssue(projectKey: string, issueId: string, body: string, expectedRevision: Revision, idempotencyKey: string): Promise<void>;
   /** Published joined reads, narrowed to the bound project by the HTTP adapter. */

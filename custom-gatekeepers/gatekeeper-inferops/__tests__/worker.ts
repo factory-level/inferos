@@ -9,6 +9,8 @@ import type {
   ActionApplied, ActionApplyFailure, ActionDescription, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
+import { dotBindingOver } from "../src/inferops.js";
+import { openHttpInferOpsClient } from "../src/http-inferops.js";
 import {
   InferOpsAccountGatekeeper, InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper, InferOpsWorkflowPolicyGatekeeper,
@@ -22,6 +24,7 @@ import {
 import type { MockTables } from "../src/mock-inferops.js";
 import type { Issue, Revision } from "../src/types.js";
 import type {
+  InferOpsDotSession, WriteStatus,
   InferOpsAccountSession, InferOpsDispatchSession, InferOpsMembersSession, InferOpsProjectSession, InferOpsTableSession,
   InferOpsWikiSession, InferOpsWorkflowPolicySession,
 } from "../src/types.js";
@@ -404,6 +407,102 @@ const failureOf = (outcome: void | { failed: ActionApplyFailure } | ActionApplie
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+// --- A fake InferOps Dot (FAC-133), for the Dot facet's session, relay and apply over the real
+// HTTP client. It writes the run stream exactly as InferOps' `streamAguiEvents` does: one
+// `data: <json>\n\n` frame per event and `: ping\n\n` heartbeats.
+
+/** What the fake Dot answers: the run's frames (or a refusal), and how its proposal routes answer. */
+export type DotScript = {
+  /** The run stream's raw frames, each written as given, in order; or a refusal before any stream. */
+  run: { frames: string[] } | { status: number; code: string };
+  /** The proposals `chatbot.proposal_list` and `conversation_get` answer. */
+  proposals: Record<string, unknown>[];
+  /** How a confirm answers: the proposal confirmed with `outcome`, or a refusal. */
+  confirm: { outcome: unknown } | { status: number; code: string; settlesAs?: string };
+};
+
+/** One request the fake Dot took. */
+export type DotCall = { method: string; path: string; body: string | null; key: string | null };
+
+const DOT_CONVERSATION = "70000000-0000-4000-8000-000000000001";
+const sse = (event: Record<string, unknown>) => `data: ${JSON.stringify(event)}\n\n`;
+export const DOT_FRAMES = { sse, ping: ": ping\n\n" };
+
+/** InferOps' error envelope, with detail text a caller must never be shown. */
+const refuse = (status: number, code: string) =>
+  Response.json({ success: false, error: { code, message: `InferOps detail for ${code}` } }, { status });
+
+class FakeDot {
+  calls: DotCall[] = [];
+  constructor(public script: DotScript) {}
+
+  fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url = new URL(String(input));
+    const path = url.pathname.replace(/^\/api/, "");
+    const headers = new Headers(init?.headers);
+    const body = typeof init?.body === "string" ? init.body : null;
+    const method = init?.method ?? "GET";
+    this.calls.push({ method, path, body, key: headers.get("x-idempotency-key") });
+    const base = `/chatbot/conversations/${DOT_CONVERSATION}`;
+    if (method === "POST" && path === "/chatbot/conversations") return Response.json({ id: DOT_CONVERSATION, title: "New conversation" });
+    if (method === "GET" && path === base) {
+      return Response.json({
+        id: DOT_CONVERSATION, title: "New conversation", panel: {}, updatedAt: "2026-11-10T12:00:00.000Z",
+        messages: [], nextCursor: null, activeRunId: null, proposals: this.script.proposals,
+      });
+    }
+    if (method === "POST" && path === `${base}/runs`) {
+      const run = this.script.run;
+      if ("status" in run) return refuse(run.status, run.code);
+      const encoder = new TextEncoder();
+      const frames = run.frames;
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const frame of frames) controller.enqueue(encoder.encode(frame));
+          controller.close();
+        },
+      }), { headers: { "content-type": "text/event-stream" } });
+    }
+    if (method === "POST" && /\/runs\/[0-9a-f-]+\/cancel$/.test(path)) return Response.json({ ok: true });
+    if (method === "GET" && path === `${base}/proposals`) return Response.json({ proposals: this.script.proposals });
+    const decided = /\/proposals\/([0-9a-f-]+)\/(confirm|decline)$/.exec(path);
+    if (method === "POST" && decided) {
+      const proposal = this.script.proposals.find(p => p.id === decided[1]);
+      if (!proposal) return refuse(404, "PROPOSAL_NOT_FOUND");
+      if (decided[2] === "decline") {
+        Object.assign(proposal, { status: "declined", decidedAt: "2026-11-10T12:01:00.000Z" });
+        return Response.json({ proposal });
+      }
+      const confirm = this.script.confirm;
+      if ("status" in confirm) {
+        if (confirm.settlesAs) Object.assign(proposal, { status: confirm.settlesAs, decidedAt: "2026-11-10T12:01:00.000Z" });
+        return refuse(confirm.status, confirm.code);
+      }
+      Object.assign(proposal, { status: "confirmed", outcome: confirm.outcome, decidedAt: "2026-11-10T12:01:00.000Z" });
+      return Response.json({ proposal });
+    }
+    return refuse(404, "NOT_FOUND");
+  };
+}
+
+/** A write receipt as the overseer hands one back: its status, read when asked. */
+class TestReceipt extends RpcTarget {
+  constructor(readonly actionId: string) {
+    super();
+  }
+  async status(): Promise<WriteStatus> {
+    return { outcome: "waiting" };
+  }
+}
+
+/** The approval queue for a Dot binding: records as the others do, and returns each write's receipt. */
+class TestDotQueue extends TestApprovalQueue {
+  override async submitAction(id: number, description: ActionDescription): Promise<void> {
+    await super.submitAction(id, description);
+    return new TestReceipt(String(id)) as never;
+  }
 }
 
 export class TestHooks extends DurableObject<Cloudflare.Env> {
@@ -1173,5 +1272,46 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return messageOf(error);
     }
+  }
+
+  // --- The Dot (FAC-133): the facet's own session, apply and reject, over the real HTTP client
+  // and a scripted fake InferOps.
+  #dot: FakeDot | null = null;
+
+  #dotBinding() {
+    if (!this.#dot) throw new Error("dotScript() first");
+    const client = openHttpInferOpsClient({
+      baseUrl: "https://ops.example/api", host: "acme.operations", token: "iex_test-dot-token",
+      workspaceId: "90000000-0000-4000-8000-000000000001", workspaceSlug: "operations",
+    }, this.#dot.fetch as typeof fetch);
+    return dotBindingOver(
+      { accountId: "dot-account", connected: true, host: "acme.operations", workspaceId: "90000000-0000-4000-8000-000000000001" },
+      this.ctx.storage.kv, client);
+  }
+
+  /** What the fake InferOps answers from now on. */
+  async dotScript(script: DotScript): Promise<void> {
+    if (this.#dot) this.#dot.script = script;
+    else this.#dot = new FakeDot(script);
+  }
+
+  /** Every request the fake InferOps took. */
+  async dotCalls(): Promise<DotCall[]> {
+    return this.#dot?.calls ?? [];
+  }
+
+  async startDotSession(): Promise<InferOpsDotSession> {
+    return this.#dotBinding().startSession(new RpcStub(new TestDotQueue(this.#log)) as never);
+  }
+
+  /** Apply a Dot action: its failure, or its result once applied. */
+  async applyDot(actionId: number): Promise<{ failure: ActionApplyFailure | null; result: ActionResult | null }> {
+    const outcome = await this.#dotBinding().applyAction(actionId);
+    if (outcome && "failed" in outcome) return { failure: outcome.failed, result: null };
+    return { failure: null, result: outcome && "applied" in outcome ? outcome.applied.result ?? null : null };
+  }
+
+  async rejectDot(actionId: number): Promise<void> {
+    await this.#dotBinding().rejectAction(actionId);
   }
 }

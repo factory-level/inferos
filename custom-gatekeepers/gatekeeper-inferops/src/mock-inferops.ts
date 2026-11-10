@@ -1063,7 +1063,18 @@ export function openInferOpsClient(
     write.catch(error => {
       throw inferOpsErrorCode(error) === "UNAVAILABLE" ? error : atStage(error, "refused");
     });
+  // The demo has no Dot: a Dot runs only on a live InferOps, with its model (FAC-133).
+  const noDot = async (): Promise<never> => {
+    throw new InferOpsError("UNAVAILABLE", "The Dot runs only on a live InferOps, not on the demo board.");
+  };
   return {
+    createDotConversation: noDot,
+    readDotConversation: noDot,
+    runDot: noDot,
+    cancelDotRun: noDot,
+    listDotProposals: noDot,
+    confirmDotProposal: noDot,
+    declineDotProposal: noDot,
     listProjects: () => stub.listProjects(),
     readProject: projectKey => stub.readProject(projectKey),
     commentIssue: async () => { throw new InferOpsError("UNAVAILABLE", "Governed comments require a live company data plane."); },

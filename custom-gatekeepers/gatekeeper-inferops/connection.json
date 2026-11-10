@@ -18,6 +18,7 @@
       "InferOpsTableGatekeeper",
       "InferOpsMembersGatekeeper",
       "InferOpsWorkflowPolicyGatekeeper",
+      "InferOpsDotGatekeeper",
       "InferOpsAccountGatekeeper",
       "InferLabLogin",
       "InferOpsCredentials"
@@ -129,6 +130,25 @@
       "writes": []
     },
     {
+      "kind": "chatbot/dot",
+      "urlPattern": "inferops://*/chatbot/dot",
+      "gatekeeper": "InferOpsDotGatekeeper",
+      "session": "InferOpsDotSession",
+      "scope": "The signed-in person's own Dot in one InferOps workspace they hold; per-person sign-in only (no stopgap connection, no demo). InferOps runs the Dot as the person (its chatbot domain and shared-agentic), re-authorizing every tool call and only ever proposing a write; a page or record the person names is read there as them, and one they can't open refuses the turn. InferOS keeps conversation ids and its decision on each proposal, never messages.",
+      "enabledBy": ["INFEROPS_ENABLED", "INFEROPS_DOT_ENABLED"],
+      "observers": "admission",
+      "reads": [
+        { "method": "ask", "notes": "One turn through InferOps' streaming run route (POST /chatbot/conversations/:id/runs, AG-UI 1.0.2 over SSE), relayed event by event once @ag-ui/core's schema accepts it, under a 130 s deadline, a 35 s silence limit and size caps; a malformed or oversized event, a cut stream and the deadline each end the turn visibly. Logged as one observation, \"Asked your Dot: <prompt>\"." },
+        { "method": "read", "notes": "chatbot.conversation_get: the conversation's newest messages and its proposals, with InferOps' derived expired and unknown statuses." },
+        { "method": "startConversation", "notes": "chatbot.conversation_create; returns a session, no data." },
+        { "method": "openConversation", "notes": "chatbot.conversation_get, to prove it is the person's own; returns a session, no data." },
+        { "method": "cancel", "notes": "chatbot.conversation_cancel on the running turn; what was said is kept, marked interrupted." }
+      ],
+      "writes": [
+        { "method": "ask", "concurrency": "none", "idempotency": "provider-key", "revert": "never", "notes": "Each proposal a turn (or a later read) shows is staged once and submitted as an ordinary write, never auto-approvable. Approving it calls chatbot.proposal_confirm under the person's own token, keyed by the proposal id, which InferOps applies at most once; a confirm InferOps answers as already decided is read back and settled to its real status. Rejecting it calls chatbot.proposal_decline. Not revertible here." }
+      ]
+    },
+    {
       "kind": "account",
       "urlPattern": "inferops://*/account",
       "gatekeeper": "InferOpsAccountGatekeeper",
@@ -186,6 +206,7 @@
     { "name": "CODING_WORKBENCH_ENABLED", "kind": "var", "purpose": "Capability switch for project/dispatch.", "default": "Unset counts as off." },
     { "name": "INFEROPS_TABLES_ENABLED", "kind": "var", "purpose": "Capability switch for object/table, checked on every call.", "default": "Unset counts as off." },
     { "name": "INFEROPS_MEMBERS_ENABLED", "kind": "var", "purpose": "Capability switch for portal/members, checked on every call.", "default": "Unset counts as off." },
+    { "name": "INFEROPS_DOT_ENABLED", "kind": "var", "purpose": "Capability switch for chatbot/dot, checked on every call.", "default": "Unset counts as off." },
     { "name": "INFEROPS_WORKFLOW_POLICY_ENABLED", "kind": "var", "purpose": "Capability switch for project/workflow, checked on every call.", "default": "Unset counts as off." },
     { "name": "INFEROPS_HOST_BOARDS", "kind": "var", "purpose": "Proposed switch for the board facet's kernel-only host-board read (project.board_snapshot), checked on every call. Adds no resource kind.", "default": "Unset counts as off." },
     { "name": "CODING_WORKBENCH_REPOS", "kind": "var", "purpose": "Comma-separated InferOps repository ids a dispatch may target.", "default": "Unset allows no repository." }
@@ -194,9 +215,9 @@
     "provider": {
       "name": "InferOps",
       "repository": "https://github.com/factory-level/inferops",
-      "revision": "b850dd5afa33ae88ef1422c69e6c801c28d70b89",
+      "revision": "21df4e75bd6c3a258b4d2cf657d29b2122625105",
       "apiVersion": null,
-      "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract. The Wiki structure read, page body/version/masterRole and the strict page-body write need InferOps at or after c536b63718478842a1b163b473eb03b16dd7f9b7 (factory-level/inferops#2345); the revision above stays the board-schema pin. Wiki proposal reads and approval need InferOps at or after 5483e7cd (factory-level/inferops#2368) with knowledge.wikiPublish.enabled on; otherwise those calls are NOT_FOUND. Wiki search (searchWiki) needs InferOps at or after a2f27606 (factory-level/inferops#2563, knowledge.search); against an earlier one every search is UNAVAILABLE, never an empty list. The console widget index (`PUT` and `DELETE /knowledge/widget-definitions`, `widget.publish` and `widget.withdraw`) needs InferOps at or after 1d68de3591900c44212db8a05239241f9819b1b1 (factory-level/inferops#2573). Admitting a workflow run on request (`holdsWorkflowInvoke`, `workflow:invoke`) needs InferOps at or after b850dd5afa33ae88ef1422c69e6c801c28d70b89 (factory-level/inferops#2586); against an earlier one nobody holds it, so every run on request is refused where SHARED_CONFIGURATION_GATEKEEPER names InferOps. Named service queries (`GET /object/queries/:name?queryVersion=1`) and the service dashboard's governed comment (`POST /project/issues/:issueId/comments` with `expectedIssueHeadSeq`) require InferOps at or after c3261767bf0dfeaf555fe0e364da74b1c91a20c9 (factory-level/inferops#2596), with objects enabled and an explicitly configured nonproduction company data plane. The query names are service-jobs, service-job-status-counts and service-job-recent-activities. Earlier or unsupported providers return unavailable; widgets do not treat that as an empty result. The revision above remains the generated board-schema pin."
+      "notes": "The InferOps HTTP API is unversioned; compatibility is pinned by the generated board DTO schema below. Endpoints this client calls beyond the board (issues, runs, repos, knowledge) are not yet covered by a generated contract. The Wiki structure read, page body/version/masterRole and the strict page-body write need InferOps at or after c536b63718478842a1b163b473eb03b16dd7f9b7 (factory-level/inferops#2345); the revision above stays the board-schema pin. Wiki proposal reads and approval need InferOps at or after 5483e7cd (factory-level/inferops#2368) with knowledge.wikiPublish.enabled on; otherwise those calls are NOT_FOUND. Wiki search (searchWiki) needs InferOps at or after a2f27606 (factory-level/inferops#2563, knowledge.search); against an earlier one every search is UNAVAILABLE, never an empty list. The console widget index (`PUT` and `DELETE /knowledge/widget-definitions`, `widget.publish` and `widget.withdraw`) needs InferOps at or after 1d68de3591900c44212db8a05239241f9819b1b1 (factory-level/inferops#2573). Admitting a workflow run on request (`holdsWorkflowInvoke`, `workflow:invoke`) needs InferOps at or after b850dd5afa33ae88ef1422c69e6c801c28d70b89 (factory-level/inferops#2586); against an earlier one nobody holds it, so every run on request is refused where SHARED_CONFIGURATION_GATEKEEPER names InferOps. Named service queries (`GET /object/queries/:name?queryVersion=1`) and the service dashboard's governed comment (`POST /project/issues/:issueId/comments` with `expectedIssueHeadSeq`) require InferOps at or after c3261767bf0dfeaf555fe0e364da74b1c91a20c9 (factory-level/inferops#2596), with objects enabled and an explicitly configured nonproduction company data plane. The query names are service-jobs, service-job-status-counts and service-job-recent-activities. Earlier or unsupported providers return unavailable; widgets do not treat that as an empty result. The revision above remains the generated board-schema pin. The Dot (chatbot/dot) needs InferOps with the FAC-133 conversation and proposal capabilities (factory-level/inferops#2618 and #2619: chatbot.conversation_create, _get, _run and _cancel, chatbot.proposal_list, _confirm and _decline, the server-checked selection, the keyed confirm and the derived expired and unknown statuses)."
     },
     "inferos": { "gatekeeperApi": [1] },
     "contracts": [

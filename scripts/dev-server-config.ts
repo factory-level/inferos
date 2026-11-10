@@ -295,6 +295,15 @@ export function resolveInferOpsMembersEnabled(options: InferOpsSwitchOptions): "
 }
 
 /**
+ * The `INFEROPS_DOT_ENABLED` var the InferOps gatekeeper gets, which it checks on every Dot binding
+ * and call (`dot.ts`, FAC-133). Resolved exactly as `INFEROPS_TABLES_ENABLED`: off by default, never
+ * on while the InferOps integration is off.
+ */
+export function resolveInferOpsDotEnabled(options: InferOpsSwitchOptions): "true" | "false" {
+  return resolveInferOpsSwitch("INFEROPS_DOT_ENABLED", options);
+}
+
+/**
  * The `INFEROPS_WORKFLOW_POLICY_ENABLED` var the InferOps gatekeeper gets, which it checks on every
  * workflow-policy binding and call (`workflow-policy.ts`). Resolved exactly as `INFEROPS_TABLES_ENABLED`:
  * off by default, never on while the InferOps integration is off.
@@ -345,7 +354,7 @@ export type InferOpsSwitchOptions = {
 
 function resolveInferOpsSwitch(
   name: "CODING_WORKBENCH_ENABLED" | "INFEROPS_TABLES_ENABLED" | "INFEROPS_MEMBERS_ENABLED" |
-    "INFEROPS_WORKFLOW_POLICY_ENABLED" | "INFEROPS_HOST_BOARDS",
+    "INFEROPS_WORKFLOW_POLICY_ENABLED" | "INFEROPS_DOT_ENABLED" | "INFEROPS_HOST_BOARDS",
   options: InferOpsSwitchOptions,
 ): "true" | "false" {
   return resolveSwitch(name, options, options.inferOpsEnabled, "the InferOps integration (INFEROPS_ENABLED) is");

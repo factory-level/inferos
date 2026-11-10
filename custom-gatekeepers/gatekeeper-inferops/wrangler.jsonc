@@ -84,6 +84,12 @@
       "new_sqlite_classes": [
         "InferOpsSystemCredentials"
       ]
+    },
+    {
+      "tag": "v9",
+      "new_sqlite_classes": [
+        "InferOpsDotGatekeeper"
+      ]
     }
   ]
 }
