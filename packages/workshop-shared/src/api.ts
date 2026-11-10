@@ -34,6 +34,7 @@ import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
+  WorkflowDefinitionRights, WorkflowDefinitionShare,
   WorkflowTriggerDefinitionRef,
   WorkflowDefinitionSave, WorkflowInvocation, RequestedRun,
 } from "./workflow-definition.js";
@@ -2865,6 +2866,18 @@ export interface Overseer extends RpcTarget {
    * they pinned.
    */
   publishWorkflowDefinition(id: string, revision: number): Promise<WorkflowDefinition>;
+  /**
+   * Share the caller's own definition `id` with the account `profileId` (FAC-122; its profile id,
+   * never an email) to read, run or edit it, or stop sharing it with null. The recipient must be a
+   * collaborator of this workspace, and editing needs their build role. A share concerns the
+   * definition only: running still needs the trigger's run control, and every record a run reads or
+   * writes still goes through its own authority and approvals. Returns who it is shared with now.
+   * Build only; in a shared workspace it also takes the deployment's `build` authority.
+   */
+  shareWorkflowDefinition(id: string, profileId: string, rights: WorkflowDefinitionRights | null)
+    : Promise<WorkflowDefinitionShare[]>;
+  /** Who the caller's own definition `id` is shared with by name, and how (FAC-122). Build only. */
+  listWorkflowDefinitionShares(id: string): Promise<WorkflowDefinitionShare[]>;
   /**
    * Pin bound hook `hookId` to one revision the caller may see (published, or their own saved one)
    * of a definition for the gadget the hook wakes, or clear its pin with null. A pinned hook fires

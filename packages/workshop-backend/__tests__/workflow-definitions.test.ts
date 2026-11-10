@@ -31,7 +31,7 @@ function workspace() {
   return { store, storage, heads, headOf };
 }
 
-const everyoneBuilds = () => true;
+const everyoneBuilds = () => "build" as const;
 
 /** Fill the retained-delivery cap with copies of one valid delivery, without exercising fire in a loop. */
 function fillRetainedDeliveries(storage: ReturnType<typeof makeOverseerStorage>, template: WorkflowDefinitionDelivery) {
@@ -62,79 +62,79 @@ describe("workflow delivery retention", () => {
 describe("saving a workflow definition", () => {
   it("keeps a revision of the gadget's current code for its owner, and publishes nothing", () => {
     let { store, headOf } = workspace();
-    let saved = store.save(ADA, { title: " Intake ", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: " Intake ", gadgetId: GADGET }, headOf, "build");
     expect(saved).toMatchObject({
       title: "Intake", owner: ADA, published: null,
       revisions: [{ revision: 1, source: { kind: "gadget", gadgetId: GADGET, commitId: commit(1) } }],
     });
-    expect(store.list(ADA.id).map(d => d.id)).toEqual([saved.id]);
+    expect(store.list(ADA.id, "build").map(d => d.id)).toEqual([saved.id]);
   });
 
   it("is visible only to its owner until published, and then only at the published revision", () => {
     let { store, heads, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
-    expect(store.list(BEN.id)).toEqual([]);
-    expect(store.get(BEN.id, saved.id)).toBeNull();
-    expect(() => store.deliveries(BEN.id, saved.id)).toThrow("Workflow definition not found.");
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
+    expect(store.list(BEN.id, "build")).toEqual([]);
+    expect(store.get(BEN.id, saved.id, "build")).toBeNull();
+    expect(() => store.deliveries(BEN.id, saved.id, "build")).toThrow("Workflow definition not found.");
 
     store.publish(ADA, saved.id, 1);
     heads.set(GADGET, commit(2));
-    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
-    expect(store.get(ADA.id, saved.id)?.revisions.map(r => r.revision)).toEqual([1, 2]);
+    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf, "build");
+    expect(store.get(ADA.id, saved.id, "build")?.revisions.map(r => r.revision)).toEqual([1, 2]);
     // Ben sees the published revision only, never Ada's newer draft.
-    expect(store.get(BEN.id, saved.id)?.revisions.map(r => r.revision)).toEqual([1]);
+    expect(store.get(BEN.id, saved.id, "build")?.revisions.map(r => r.revision)).toEqual([1]);
   });
 
   it("adds a revision only when the code changed; saving again with the same commit renames", () => {
     let { store, heads, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
-    let renamed = store.save(ADA, { id: saved.id, title: "Intake v1", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
+    let renamed = store.save(ADA, { id: saved.id, title: "Intake v1", gadgetId: GADGET }, headOf, "build");
     expect(renamed.revisions).toHaveLength(1);
     expect(renamed.title).toBe("Intake v1");
     heads.set(GADGET, commit(2));
-    expect(store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf).revisions)
+    expect(store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf, "build").revisions)
       .toHaveLength(2);
   });
 
   it("refuses another person's definition at save and publish as if it didn't exist", () => {
     let { store, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
-    expect(() => store.save(BEN, { id: saved.id, title: "Mine now", gadgetId: GADGET }, headOf))
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
+    expect(() => store.save(BEN, { id: saved.id, title: "Mine now", gadgetId: GADGET }, headOf, "build"))
       .toThrow("Workflow definition not found.");
     expect(() => store.publish(BEN, saved.id, 1)).toThrow("Workflow definition not found.");
     store.publish(ADA, saved.id, 1);
     // Published doesn't make it Ben's to change.
     expect(() => store.publish(BEN, saved.id, 1)).toThrow("Workflow definition not found.");
-    expect(store.get(ADA.id, saved.id)?.title).toBe("Intake");
+    expect(store.get(ADA.id, saved.id, "build")?.title).toBe("Intake");
   });
 
   it("doesn't exist in another workspace", () => {
     let a = workspace();
     let b = workspace();
-    let saved = a.store.save(ADA, { title: "Intake", gadgetId: GADGET }, a.headOf);
+    let saved = a.store.save(ADA, { title: "Intake", gadgetId: GADGET }, a.headOf, "build");
     a.store.publish(ADA, saved.id, 1);
-    expect(b.store.get(ADA.id, saved.id)).toBeNull();
+    expect(b.store.get(ADA.id, saved.id, "build")).toBeNull();
     expect(() => b.store.publish(ADA, saved.id, 1)).toThrow("Workflow definition not found.");
   });
 
   it("refuses a gadget with no committed code, a bad title, and past the limits", () => {
     let { store, heads, headOf } = workspace();
-    expect(() => store.save(ADA, { title: "Pending", gadgetId: 99 }, headOf)).toThrow("committed code");
-    expect(() => store.save(ADA, { title: " ", gadgetId: GADGET }, headOf)).toThrow(TypeError);
+    expect(() => store.save(ADA, { title: "Pending", gadgetId: 99 }, headOf, "build")).toThrow("committed code");
+    expect(() => store.save(ADA, { title: " ", gadgetId: GADGET }, headOf, "build")).toThrow(TypeError);
     for (let i = 0; i < MAX_WORKSPACE_WORKFLOW_DEFINITIONS; i++) {
-      store.save(ADA, { title: `Definition ${i}`, gadgetId: GADGET }, headOf);
+      store.save(ADA, { title: `Definition ${i}`, gadgetId: GADGET }, headOf, "build");
     }
-    expect(() => store.save(BEN, { title: "One more", gadgetId: GADGET }, headOf))
+    expect(() => store.save(BEN, { title: "One more", gadgetId: GADGET }, headOf, "build"))
       .toThrow("Workspace workflow definition limit reached.");
 
     let fresh = workspace();
-    let saved = fresh.store.save(ADA, { title: "Busy", gadgetId: GADGET }, fresh.headOf);
+    let saved = fresh.store.save(ADA, { title: "Busy", gadgetId: GADGET }, fresh.headOf, "build");
     for (let n = 2; n <= MAX_WORKFLOW_DEFINITION_REVISIONS; n++) {
       fresh.heads.set(GADGET, commit(n));
-      fresh.store.save(ADA, { id: saved.id, title: "Busy", gadgetId: GADGET }, fresh.headOf);
+      fresh.store.save(ADA, { id: saved.id, title: "Busy", gadgetId: GADGET }, fresh.headOf, "build");
     }
     fresh.heads.set(GADGET, commit(999));
-    expect(() => fresh.store.save(ADA, { id: saved.id, title: "Busy", gadgetId: GADGET }, fresh.headOf))
+    expect(() => fresh.store.save(ADA, { id: saved.id, title: "Busy", gadgetId: GADGET }, fresh.headOf, "build"))
       .toThrow("revision limit");
     void heads;
   });
@@ -143,52 +143,52 @@ describe("saving a workflow definition", () => {
 describe("triggers and runs", () => {
   it("lets two triggers reference one definition revision, storing a reference, not a copy", () => {
     let { store, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     store.pinTrigger(ADA.id, 12, GADGET, { definitionId: saved.id, revision: 1 });
     expect(store.pinOf(11)).toEqual({ definitionId: saved.id, revision: 1, mode: "follow-latest" });
     expect(store.pinOf(12)).toEqual({ definitionId: saved.id, revision: 1, mode: "follow-latest" });
-    expect(store.list(ADA.id)).toHaveLength(1);
+    expect(store.list(ADA.id, "build")).toHaveLength(1);
   });
 
   it("records the revision and commit each firing ran", () => {
     let { store, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     store.pinTrigger(ADA.id, 12, GADGET, { definitionId: saved.id, revision: 1 });
     expect(store.fire(11, GADGET, headOf, everyoneBuilds))
       .toMatchObject({ hookId: 11, definitionId: saved.id, revision: 1, commitId: commit(1) });
     store.fire(12, GADGET, headOf, everyoneBuilds);
-    expect(store.deliveries(ADA.id, saved.id).map(d => [d.hookId, d.revision])).toEqual([[11, 1], [12, 1]]);
+    expect(store.deliveries(ADA.id, saved.id, "build").map(d => [d.hookId, d.revision])).toEqual([[11, 1], [12, 1]]);
   });
 
   it("keeps an explicit revision pin and requires an explicit move", () => {
     let { store, heads, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 1);
-    store.pinTrigger(BEN.id, 11, GADGET, { definitionId: saved.id, revision: 1, mode: "pinned" });
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1, mode: "pinned" });
     heads.set(GADGET, commit(2));
-    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
+    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 2);
     expect(store.pinOf(11)).toEqual({ definitionId: saved.id, revision: 1, mode: "pinned" });
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("changed since revision 1");
-    store.pinTrigger(BEN.id, 11, GADGET, { definitionId: saved.id, revision: 2, mode: "pinned" });
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 2, mode: "pinned" });
     expect(store.fire(11, GADGET, headOf, everyoneBuilds)).toMatchObject({ revision: 2, commitId: commit(2) });
     heads.set(GADGET, commit(3));
-    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
+    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf, "build");
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("changed since revision 2");
   });
 
   it("keeps a stored legacy pin explicit when it has no mode field", () => {
     let { store, storage, heads, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 1);
-    store.pinTrigger(BEN.id, 11, GADGET, { definitionId: saved.id, revision: 1, mode: "pinned" });
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1, mode: "pinned" });
     let { mode: _mode, ...legacyPin } = storage.workflowTriggerPins.get(11)!;
     storage.workflowTriggerPins.put(legacyPin);
     heads.set(GADGET, commit(2));
-    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
+    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 2);
     expect(store.pinOf(11)).toEqual({ definitionId: saved.id, revision: 1, mode: "pinned" });
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("changed since revision 1");
@@ -196,17 +196,17 @@ describe("triggers and runs", () => {
 
   it("refuses an admitted revision after the gadget head moves; new admissions follow latest", () => {
     let { store, heads, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 1);
-    store.pinTrigger(BEN.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     store.setControl(ADA, 11, { label: "Run", invokers: [BEN.id] });
     let invocation = store.beginInvocation(BEN.id, 11);
     heads.set(GADGET, commit(2));
-    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
+    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 2);
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds, invocation.id))
       .toThrow("The workflow changed; ask again");
-    expect(store.deliveries(ADA.id, saved.id)).toEqual([]);
+    expect(store.deliveries(ADA.id, saved.id, "build")).toEqual([]);
     let nextInvocation = store.beginInvocation(BEN.id, 11);
     expect(store.fire(11, GADGET, headOf, everyoneBuilds, nextInvocation.id))
       .toMatchObject({ revision: 2, commitId: commit(2) });
@@ -215,15 +215,15 @@ describe("triggers and runs", () => {
 
   it("refuses to fire a definition that has never been published", () => {
     let { store, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Draft", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Draft", gadgetId: GADGET }, headOf, "build");
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("This workflow has no published revision.");
-    expect(store.deliveries(ADA.id, saved.id)).toEqual([]);
+    expect(store.deliveries(ADA.id, saved.id, "build")).toEqual([]);
   });
 
   it("does not evict a queued run when later deliveries fill the retention window", () => {
     let { store, storage, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     store.setControl(ADA, 11, { label: "Run", invokers: [BEN.id] });
@@ -237,7 +237,7 @@ describe("triggers and runs", () => {
 
   it("refuses admission when every retained delivery is uncertain and reports the reconciliation count", () => {
     let { store, storage, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
@@ -245,12 +245,12 @@ describe("triggers and runs", () => {
     fillRetainedDeliveries(storage, { ...first, result: { outcome: "uncertain", reason: "lost-after-write" } });
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds))
       .toThrow(`Too many workflow runs are in progress; ${MAX_WORKFLOW_DELIVERIES} are waiting for reconciliation.`);
-    expect(store.deliveries(ADA.id, saved.id)).toHaveLength(MAX_WORKFLOW_DELIVERIES);
+    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(MAX_WORKFLOW_DELIVERIES);
   });
 
   it("evicts a not-started run after its start window", () => {
     let { store, storage, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
@@ -262,12 +262,12 @@ describe("triggers and runs", () => {
     });
     store.fire(11, GADGET, headOf, everyoneBuilds);
     expect(store.run(first.run!.runId)).toBeNull();
-    expect(store.deliveries(ADA.id, saved.id)).toHaveLength(MAX_WORKFLOW_DELIVERIES);
+    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(MAX_WORKFLOW_DELIVERIES);
   });
 
   it("evicts the oldest terminal delivery before admitting another run", () => {
     let { store, storage, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     let first = store.fire(11, GADGET, headOf, everyoneBuilds)!;
@@ -275,25 +275,25 @@ describe("triggers and runs", () => {
     fillRetainedDeliveries(storage, template);
     store.recordResult(first.deliveryId, { outcome: "failed", reason: "runtime-error" });
     store.fire(11, GADGET, headOf, everyoneBuilds);
-    expect(store.deliveries(ADA.id, saved.id)).toHaveLength(MAX_WORKFLOW_DELIVERIES);
-    expect(store.deliveries(ADA.id, saved.id).some(delivery => delivery.result?.outcome === "failed")).toBe(false);
+    expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(MAX_WORKFLOW_DELIVERIES);
+    expect(store.deliveries(ADA.id, saved.id, "build").some(delivery => delivery.result?.outcome === "failed")).toBe(false);
   });
 
   it("refuses follow-latest when the gadget head is newer than the published commit", () => {
     let { store, heads, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, saved.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
     heads.set(GADGET, commit(7));
-    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf);
+    store.save(ADA, { id: saved.id, title: "Intake", gadgetId: GADGET }, headOf, "build");
     expect(() => store.fire(11, GADGET, headOf, everyoneBuilds)).toThrow("changed since revision 1 was saved");
     expect(() => store.requireCurrentRevision(11, GADGET, headOf)).toThrow("changed since revision 1 was saved");
   });
 
   it("refuses a definition with no publication and allows a published one", () => {
     let { store, headOf } = workspace();
-    let draft = store.save(ADA, { title: "Draft", gadgetId: GADGET }, headOf);
-    let live = store.save(ADA, { title: "Live", gadgetId: GADGET }, headOf);
+    let draft = store.save(ADA, { title: "Draft", gadgetId: GADGET }, headOf, "build");
+    let live = store.save(ADA, { title: "Live", gadgetId: GADGET }, headOf, "build");
     store.publish(ADA, live.id, 1);
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: draft.id, revision: 1, mode: "follow-latest" });
     store.pinTrigger(ADA.id, 12, GADGET, { definitionId: live.id, revision: 1 });
@@ -303,7 +303,7 @@ describe("triggers and runs", () => {
 
   it("refuses to pin another person's unpublished revision, or one for another gadget", () => {
     let { store, headOf } = workspace();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
     expect(() => store.pinTrigger(BEN.id, 11, GADGET, { definitionId: saved.id, revision: 1 }))
       .toThrow("Workflow definition not found.");
     expect(() => store.pinTrigger(ADA.id, 11, OTHER_GADGET, { definitionId: saved.id, revision: 1 }))
@@ -318,7 +318,7 @@ describe("triggers and runs", () => {
   it("leaves an unpinned trigger as it was, and clears a pin with null", () => {
     let { store, headOf } = workspace();
     expect(store.fire(11, GADGET, headOf, everyoneBuilds)).toBeNull();
-    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf);
+    let saved = store.save(ADA, { title: "Intake", gadgetId: GADGET }, headOf, "build");
     store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1, mode: "pinned" });
     store.pinTrigger(ADA.id, 11, GADGET, null);
     expect(store.fire(11, GADGET, headOf, everyoneBuilds)).toBeNull();
@@ -340,7 +340,7 @@ describe("through the Overseer", () => {
       impl: {
         env: opts.answers ? GATED : {},
         isSharedConfiguration: async () => opts.shared ?? true,
-        workflowDefinitionStore: () => store,
+        workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const,
         getGadgetHead: (id: number) => (id === GADGET ? commit(1) : undefined),
         defaultGadgetId: GADGET,
         storage: Object.assign(storage, {
@@ -396,8 +396,8 @@ describe("through the Overseer", () => {
   it("gives a use session published definitions only, and nothing to change", async () => {
     let { overseer, store } = await session({ role: "use" });
     let headOf = (id: number) => (id === GADGET ? commit(1) : undefined);
-    let draft = store.save(BEN, { title: "Draft", gadgetId: GADGET }, headOf);
-    let live = store.save(BEN, { title: "Live", gadgetId: GADGET }, headOf);
+    let draft = store.save(BEN, { title: "Draft", gadgetId: GADGET }, headOf, "build");
+    let live = store.save(BEN, { title: "Live", gadgetId: GADGET }, headOf, "build");
     store.publish(BEN, live.id, 1);
     expect((await overseer.listWorkflowDefinitions()).map(d => d.id)).toEqual([live.id]);
     void draft;

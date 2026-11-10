@@ -66,6 +66,8 @@ export type WorkflowDefinitionRevision = {
   revision: number;
   source: WorkflowDefinitionSource;
   savedAt: Date;
+  /** Who saved it, when it wasn't the owner: an editor the definition is shared with (FAC-122). */
+  savedBy?: AiChatAuthorInfo;
 };
 
 /** The revision a definition's owner made available to others, and when. */
@@ -84,17 +86,62 @@ export type WorkflowDefinition = {
   /** Server-minted id, stable for the definition's life. */
   id: string;
   title: string;
-  /** The person who first saved it. Only they save new revisions or publish. */
+  /**
+   * The person who first saved it. They save new revisions and publish, and so may anyone they
+   * share it with for editing (FAC-122; see `WorkflowDefinitionRights`).
+   */
   owner: AiChatAuthorInfo;
   /** Saved revisions visible to this viewer, oldest first. */
   revisions: WorkflowDefinitionRevision[];
   published: WorkflowDefinitionPublication | null;
+  /** What this viewer may do with it (FAC-122): all three for its owner. */
+  access?: WorkflowDefinitionRights;
+  /** True when its owner shared it with this viewer by name ("Shared with me", FAC-122). */
+  sharedWithMe?: boolean;
   /**
    * Present only on a dynamic, unsaved definition (FAC-124): when it stops being available for new
    * use, unless saved first or kept by a trigger pinned to it. Saving removes it.
    */
   expiresAt?: Date;
 };
+
+/**
+ * What a person may do with one owner-maintained definition (FAC-122). `read`: see its published
+ * revision. `run`: run triggers pinned to it, as the trigger's run control also allows. `edit`: save
+ * new revisions of it, which stay unpublished until published (the owner, or whoever holds the
+ * deployment's publish authority in a shared workspace). `run` and `edit` each include `read`.
+ * A right concerns the definition only: it never reaches a record, which a run still reads and
+ * writes only through its own authority and approvals.
+ */
+export type WorkflowDefinitionRights = { read: boolean; run: boolean; edit: boolean };
+
+/** A definition shared with one InferOS account (FAC-122): never an email address. */
+export type WorkflowDefinitionShare = {
+  definitionId: string;
+  /** The account's profile id, which an email change keeps (FAC-165). */
+  profileId: string;
+  rights: WorkflowDefinitionRights;
+  sharedBy: AiChatAuthorInfo;
+  sharedAt: Date;
+};
+
+/** Most people one definition is shared with by name. */
+export const MAX_WORKFLOW_DEFINITION_SHARES = 100;
+
+/**
+ * Checks rights from a client: three booleans, at least one true, with `read` added when `run` or
+ * `edit` is given. To stop sharing, pass null instead.
+ */
+export function parseWorkflowDefinitionRights(input: unknown): WorkflowDefinitionRights {
+  if (typeof input !== "object" || input === null) throw new TypeError("Share a workflow to read, run or edit it.");
+  let { read, run, edit } = input as Record<string, unknown>;
+  for (let value of [read, run, edit]) {
+    if (value !== undefined && typeof value !== "boolean") throw new TypeError("Share a workflow to read, run or edit it.");
+  }
+  let rights = { read: read === true || run === true || edit === true, run: run === true, edit: edit === true };
+  if (!rights.read) throw new TypeError("Share a workflow to read, run or edit it, or stop sharing it.");
+  return rights;
+}
 
 /** What a person saves: a title and the workflow gadget whose current code becomes a revision. */
 export type WorkflowDefinitionSave = {
