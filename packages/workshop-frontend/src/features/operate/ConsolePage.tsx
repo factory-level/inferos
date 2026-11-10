@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { resolveWorkspaceSetting } from '@gadgets/workshop-shared/workspace-settings'
 import { chatWidgetsKey, type ResolvedChatWidgets } from './chatPaneWidgets'
 import { Banner, Button } from '@cloudflare/kumo'
@@ -14,7 +14,8 @@ import { CanvasView, type CanvasResourceScope } from '../canvas/CanvasView'
 import { BoardConnectPrompt } from './BoardConnectPrompt'
 import { ConsoleFlows } from './ConsoleFlows'
 import { ConsoleRollup } from './ConsoleRollup'
-import { openConsoleEvent, type ConsoleEntry } from './consoles'
+import { openConsoleEvent, viewScreens, type ConsoleEntry } from './consoles'
+import { useOperateSession } from './OperateSessionContext'
 import { SessionBoard } from './SessionBoard'
 import type { SessionWorkspace } from './useSessionWorkspace'
 
@@ -30,9 +31,14 @@ const ignore = () => {}
  *
  * The published revision the session opened offers the flows frozen into it (`ConsoleFlows`).
  *
- * A draft opened as a preview says so, and offers publishing it. When the revision the session
- * opened is no longer the latest (a newer one was published, or the previewed draft was saved
- * again), the kernel refuses the next move, so the page offers to reopen it on the latest one.
+ * A draft opened as a preview says so, and offers publishing it.
+ *
+ * A newer revision is never shown under the run that opened an older one (FAC-109): once the listed
+ * console is newer than the run, nothing of either revision renders (no view, screen, flows or
+ * resolved settings), only its status. A published console then reopens on the latest revision by
+ * itself, once per revision, through the session's checked `openConsole` (keeping the view, and the
+ * screen if that view still shows it), so the page moves from one revision to the other in one
+ * step. A previewed draft saved again is offered to reopen instead: its builder may be mid-edit.
  */
 export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEvent, onPublish, onChatPaneWidgets }: {
   run: OperateConsoleRun
@@ -64,30 +70,34 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
   const gadgets = new Map<WorkpieceId, GadgetSummary>()
   for (const workpiece of workpieces.values()) if (workpiece.type === 'gadget') gadgets.set(workpiece.id, workpiece)
 
-  const view = entry?.console.views.find(candidate => candidate.id === run.viewId)
+  // The listed console, only while it is the revision the session opened: everything the page
+  // renders reads `shown`, so a value resolved for one revision never renders under another.
+  const outdated = !!entry && entry.console.revision !== run.revision
+  const shown = outdated ? undefined : entry
+  const view = shown?.console.views.find(candidate => candidate.id === run.viewId)
   const screenId = run.screenId ?? (view?.type === 'screen' ? view.screen : null)
 
   const onChatPaneWidgetsRef = useRef(onChatPaneWidgets)
   onChatPaneWidgetsRef.current = onChatPaneWidgets
-  const frozenSettings = entry?.console.published?.settings
-  const widgetsKey = chatWidgetsKey(run, entry)
+  const frozenSettings = shown?.console.published?.settings
+  const widgetsKey = chatWidgetsKey(run, shown)
   useEffect(() => {
     const listener = onChatPaneWidgetsRef.current
     if (!listener) return
     const report = (value: ResolvedChatWidgets['value']) => listener({ key: widgetsKey, value })
     report(null)
-    if (!overseer) return
+    if (!overseer || outdated) return
     let current = true
     const stub = overseer.stub
     const workspace = run.source === 'published' ? Promise.resolve(frozenSettings ?? {})
       : stub.getWorkspaceConfiguration().then(configuration => configuration.settings)
     const page = screenId === null ? Promise.resolve(null) : stub.getConsolePage(run.consoleId, screenId, run.source)
     Promise.all([workspace, page]).then(
-      ([settings, shown]) => { if (current) report(resolveWorkspaceSetting('chatPane.widgets', settings, shown?.settings).value) },
+      ([settings, pageRead]) => { if (current) report(resolveWorkspaceSetting('chatPane.widgets', settings, pageRead?.settings).value) },
       () => { if (current) report(null) })
     return () => { current = false; report(null) }
-  }, [overseer, run.consoleId, run.source, run.revision, screenId, frozenSettings, widgetsKey])
-  const screen = screenId === null ? undefined : entry?.screens.find(candidate => candidate.id === screenId)
+  }, [overseer, outdated, run.consoleId, run.source, run.revision, screenId, frozenSettings, widgetsKey])
+  const screen = screenId === null ? undefined : shown?.screens.find(candidate => candidate.id === screenId)
   const boardWidgets = (screen?.sections.flatMap(section => section.widgets) ?? [])
     .filter((widget): widget is CanvasProjectBoardWidget => widget.kind === 'inferops.project-board')
 
@@ -126,8 +136,43 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
     main.current?.focus()
   }, [boardKey])
 
+  // Reopens on the latest revision: its view if it still has it, then the screen if that view still
+  // shows it, in order (the screen is checked against the reopened console, so it waits for it).
+  // The kernel checks each event against the console as stored; a refusal stops there and says so.
+  const operate = useOperateSession()
+  const [reopenFailed, setReopenFailed] = useState(false)
+  const reopen = () => {
+    if (!entry || !operate) return
+    const event = openConsoleEvent(entry, run.source)
+    if (event?.type !== 'openConsole') return
+    const kept = entry.console.views.find(candidate => candidate.id === run.viewId)
+    const screen = kept && run.screenId !== null && viewScreens(kept).includes(run.screenId) ? run.screenId : null
+    setReopenFailed(false)
+    operate.dispatch({ ...event, viewId: kept ? kept.id : event.viewId })
+      .then(() => screen === null ? undefined : operate.dispatch({ type: 'showScreen', screenId: screen }))
+      .catch(caught => { console.error('Failed to reopen the console:', caught); setReopenFailed(true) })
+  }
+  // A published console adopts a newer publication by itself, once per (run, revision): a refused
+  // reopen is not repeated, and leaves the banner's Reopen. Synchronizes the session with the
+  // publication the kernel announced, so it is an Effect.
+  const autoReopen = run.source === 'published' && outdated && !loading && entry
+    ? `${run.workspaceId}/${run.consoleId}/${run.revision}>${entry.console.revision}` : null
+  const reopened = useRef<string | null>(null)
+  const reopenRef = useRef(reopen)
+  reopenRef.current = reopen
+  useEffect(() => {
+    if (autoReopen === null || reopened.current === autoReopen) return
+    reopened.current = autoReopen
+    reopenRef.current()
+  }, [autoReopen])
+
   let body: ReactNode
   if (loading) body = <p role="status" className="text-sm text-kumo-subtle">Loading…</p>
+  else if (outdated) {
+    body = <p role="status" className="text-sm text-kumo-subtle">
+      {run.source === 'published' ? 'Opening the latest version of this console…' : 'This draft changed since you opened it.'}
+    </p>
+  }
   else if (error) body = <Notice>This console's workspace can't be opened. You may no longer have access to it.</Notice>
   else if (!entry) body = <Notice>This console is unavailable. It may have been removed.</Notice>
   else if (!view) body = <Notice>This view is no longer part of the console.</Notice>
@@ -148,21 +193,13 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
           offeredBy={run.source === 'published' ? { consoleId: run.consoleId, revision: run.revision, workspaceId: run.workspaceId } : undefined}
           onOpenWidget={openBoard} />
   } else if (view.type === 'rollup') {
-    body = <ConsoleRollup screenIds={view.screens} screens={entry.screens} gadgets={gadgets}
+    body = <ConsoleRollup screenIds={view.screens} screens={shown?.screens ?? []} gadgets={gadgets}
       onShowScreen={id => onEvent({ type: 'showScreen', screenId: id })} />
   }
 
-  const outdated = !!entry && entry.console.revision !== run.revision
   // Only the published revision the session opened: its frozen flows are the ones the kernel
   // accepts a start of while it is open, and a newer one's are offered after reopening it.
-  const flows = run.source === 'published' && !outdated && !board ? entry?.console.published?.flows ?? [] : []
-  const reopen = () => {
-    if (!entry) return
-    const event = openConsoleEvent(entry, run.source)
-    if (event?.type !== 'openConsole') return
-    const keep = entry.console.views.some(candidate => candidate.id === run.viewId)
-    onEvent({ ...event, viewId: keep ? run.viewId : event.viewId })
-  }
+  const flows = run.source === 'published' && !board ? shown?.console.published?.flows ?? [] : []
 
   const crumbs = [run.title, view?.title, run.screenId !== null ? screen?.title : undefined,
     board ? `Board ${board.boardRef.split('/').at(-1) ?? ''}` : undefined].filter((crumb): crumb is string => !!crumb)
@@ -187,7 +224,8 @@ export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEv
           </span>} />}
         {outdated && <Banner variant="alert"
           title={run.source === 'draft' ? 'This draft has been saved since you opened it' : 'A newer version of this console was published'}
-          description="Reopen it to continue on the latest version."
+          description={reopenFailed ? "It couldn't be reopened on the latest version. Try again, or return to All consoles."
+            : run.source === 'draft' ? 'Reopen it to continue on the latest version.' : 'Opening it on the latest version.'}
           action={<Button size="sm" onClick={reopen}>Reopen</Button>} />}
       </div>}
       <main ref={main} tabIndex={-1} aria-label={crumbs.at(-1)} className="min-h-0 min-w-0 flex-1 overflow-auto focus:outline-none">
