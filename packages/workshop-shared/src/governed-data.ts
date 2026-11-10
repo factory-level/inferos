@@ -10,39 +10,10 @@
  * session was opened; a request can only narrow what that session already returns.
  */
 
-/** The resources a governed session serves (FAC-9): custom tables, and ticket queues. */
-export type GovernedResource = "object/table" | "tickets/queue";
-
-// A tenant or workspace slug InferOps could have issued (gatekeeper-inferops `isSlug`).
-const SLUG = "[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?";
-// A custom table's reference, exactly as gatekeeper-inferops `parseTableUrl` accepts it.
-const TABLE_REF = new RegExp(
-  `^inferops://${SLUG}\\.${SLUG}/object/table/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`);
-
-/** The longest tickets queue id a reference may name (FAC-9). */
-export const TICKETS_QUEUE_ID_MAX = 64;
-const QUEUE_REF = new RegExp(`^tickets://([a-z0-9-]+)/queue/([A-Za-z0-9_-]{1,${TICKETS_QUEUE_ID_MAX}})$`);
-
-/**
- * The workspace and queue a tickets queue reference, `tickets://<workspace>/queue/<id>`, names, or
- * null for anything else. The one grammar for it: the tickets connector binds by it, and the host's
- * governed reference (`governedResourceOf`) names a queue by it, so the two never disagree.
- */
-export function parseTicketsQueueRef(ref: string): { workspace: string; queueId: string } | null {
-  const match = QUEUE_REF.exec(ref);
-  return match ? { workspace: match[1]!, queueId: match[2]! } : null;
-}
-
-/**
- * The governed resource reference `ref` names (FAC-9): a custom table,
- * `inferops://<tenant>.<workspace>/object/table/<tableId>`, or a tickets queue,
- * `tickets://<workspace>/queue/<id>`, each exactly as its connector accepts it. Null for anything
- * else. It names a resource; it grants nothing.
- */
-export function governedResourceOf(ref: string): GovernedResource | null {
-  if (TABLE_REF.test(ref)) return "object/table";
-  return parseTicketsQueueRef(ref) ? "tickets/queue" : null;
-}
+// The reference grammar lives in `canvas.ts`, which a Node-run script imports directly (and so
+// imports nothing itself); it is re-exported here unchanged.
+export { governedResourceOf, parseTicketsQueueRef, TICKETS_QUEUE_ID_MAX, type GovernedResource } from "./canvas";
+import type { GovernedResource } from "./canvas";
 
 /**
  * The filter operators a request may use: `eq`, equality with a value of the field's own type (or
