@@ -197,3 +197,52 @@ describe("a published console's widget embedded in a Wiki page", () => {
     await expect(own.getEmbeddedWidget(s.created.id, s.published.revision, s.frozen)).rejects.toThrow(/Unauthorized|denied|not/i);
   });
 });
+
+// FAC-13: from a definition the widget search found (its blueprint id and version) to the instances
+// a person may open, named as an embed names them and opened only through the embed's own path.
+describe("the instances of a published widget definition", () => {
+  it("lists what the publications offer, to the use and build roles alike, and opens only that", async () => {
+    const s = await publishedSpace("instances");
+    const expected = [{ consoleId: s.created.id, consoleTitle: "Floor", revision: s.published.revision,
+      sourceGadgetId: s.installed, gadgetId: s.frozen, label: "Counter", blueprintId: s.blueprintId, version: 1 }];
+    using used = await s.operator.openGadget(s.spaceId);
+    expect(await used.listWidgetInstances(s.blueprintId, 1)).toEqual(expected);
+    expect(await s.space.listWidgetInstances(s.blueprintId, 1)).toEqual(expected);
+
+    // A console only drafted lists nothing more; nor does another version or definition.
+    await s.space.createConsole(consoleOf(s.screen.id, [s.entry]));
+    expect(await used.listWidgetInstances(s.blueprintId, 1)).toEqual(expected);
+    expect(await used.listWidgetInstances(s.blueprintId, 2)).toEqual([]);
+    expect(await used.listWidgetInstances("no-such-blueprint", 1)).toEqual([]);
+    await expect(used.listWidgetInstances("", 1)).rejects.toThrow(/Name a widget definition/);
+    await expect(used.listWidgetInstances(s.blueprintId, 0)).rejects.toThrow(/Name a widget definition/);
+
+    // What it lists opens through the embed's path; an id it doesn't list, such as the draft install, doesn't.
+    using opened = await used.getEmbeddedWidget(s.created.id, s.published.revision, s.frozen);
+    expect(await opened.getUiBundle()).toEqual({ jsCode: widgetFiles("v1")["client.js"] });
+    await expect(used.getEmbeddedWidget(s.created.id, s.published.revision, s.installed)).rejects.toThrow(/does not offer/);
+    await expect(used.getEmbeddedWidget(s.created.id, s.published.revision, (s.frozen + 1000) as WorkpieceId))
+      .rejects.toThrow(/does not offer/);
+  });
+
+  it("follows a republish, and lists nothing once the console is gone", async () => {
+    const s = await publishedSpace("instancesgone");
+    using used = await s.operator.openGadget(s.spaceId);
+    const republished = await s.space.publishConsole(s.created.id, s.published.revision);
+    const [after] = await used.listWidgetInstances(s.blueprintId, 1);
+    expect(after).toMatchObject({ revision: republished.revision, sourceGadgetId: s.installed });
+    expect(after!.gadgetId).not.toBe(s.frozen);
+    const current = (await s.space.listConsoles()).find(c => c.id === s.created.id)!;
+    await s.space.deleteConsole(current.id, current.revision);
+    expect(await used.listWidgetInstances(s.blueprintId, 1)).toEqual([]);
+  });
+
+  it("reaches nothing for a person with no access, and is refused to the operate session's own workspace", async () => {
+    using api = connect(harness.url);
+    const s = await publishedSpace("instancesaccess", api);
+    await expect(s.stranger.openGadget(s.spaceId)).rejects.toThrow();
+    using session = await s.operator.getOperateSession();
+    using own = await session.getWorkspace();
+    await expect(own.listWidgetInstances(s.blueprintId, 1)).rejects.toThrow(/Unauthorized|denied|not/i);
+  });
+});

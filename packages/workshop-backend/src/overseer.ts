@@ -58,7 +58,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreenMove, consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type ConsoleDraftProblem, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreenMove, consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type ConsoleDraftProblem, type ConsoleWidgetInstance, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -14320,6 +14320,18 @@ function joinSessionPresence(
 
 // FAC-12: that console `consoleId`'s published revision `revision` offers frozen install `gadgetId`
 // as a widget with a UI, which an embed shows; throws otherwise, in getConsoleWidget's words.
+/**
+ * The instances of widget `blueprintId` version `version` the workspace's published consoles offer
+ * (FAC-13, `WorkspaceConsoleStore.widgetInstances`), after checking the reference's shape.
+ */
+function listWidgetInstances(store: WorkspaceConsoleStore, blueprintId: string, version: number): ConsoleWidgetInstance[] {
+  if (typeof blueprintId !== "string" || blueprintId.length === 0 || blueprintId.length > 128 ||
+      !Number.isSafeInteger(version) || version < 1) {
+    throw new Error("Name a widget definition: its blueprint id and a version from 1.");
+  }
+  return store.widgetInstances(blueprintId, version);
+}
+
 function embeddedWidgetOffered(store: WorkspaceConsoleStore, consoleId: string, revision: string, gadgetId: WorkpieceId): void {
   if (store.offeredWidget(consoleId, revision, gadgetId).frozen?.ui === false) {
     throw new Error(`Widget ${gadgetId} has no UI; its console offers only its tools.`);
@@ -14763,6 +14775,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async getEmbeddedWidget(consoleId: string, revision: string, gadgetId: WorkpieceId): Promise<RpcStub<GadgetClient>> {
     embeddedWidgetOffered(this.#consoleStore(), consoleId, revision, gadgetId);
     return this.getGadget(gadgetId);
+  }
+  // FAC-13: what the publications offer, as an operator would see it (see listWidgetInstances).
+  async listWidgetInstances(blueprintId: string, version: number): Promise<ConsoleWidgetInstance[]> {
+    return listWidgetInstances(this.#consoleStore(), blueprintId, version);
   }
   // Build access opens the app's mainline, as getGadget does; only the placement is checked, so a
   // builder previewing a published console after changing the app still sees what they built.
@@ -17556,6 +17572,10 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     //     type system doesn't know this.
     return new UseGadgetClientInterface(this.impl, gadgetId, this.clientUserId, check);
   }
+  // FAC-13: like resolveEmbeddedWidget, only what this role already reads, the published consoles.
+  async listWidgetInstances(blueprintId: string, version: number): Promise<ConsoleWidgetInstance[]> {
+    return listWidgetInstances(this.#consoleStore(), blueprintId, version);
+  }
 
   // --- Denied methods (build-only) ---
 
@@ -17955,6 +17975,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
       : Promise<EmbeddedConsoleWidget> { this.#deny(); }
   async getEmbeddedWidget(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
+  async listWidgetInstances(_blueprintId: string, _version: number)
+      : Promise<ConsoleWidgetInstance[]> { this.#deny(); }
   async getConsoleApp(_consoleId: string, _revision: string, _gadgetId: WorkpieceId)
       : Promise<RpcStub<GadgetClient>> { this.#deny(); }
   // The widget index is written by a builder's own publication only (FAC-11).
