@@ -151,7 +151,8 @@ async function interrupted(f: Awaited<ReturnType<typeof fixture>>) {
   expect(first.interrupt).toMatchObject({reason: EXPECTED_INTERRUPT.reason,
     responseSchema: {required: EXPECTED_INTERRUPT.required}, metadata: {actionId: f.action.id}});
   expect(first.snapshot).toMatchObject({status: EXPECTED_INTERRUPT.status, actionId: f.action.id});
-  expect(Date.parse(first.interrupt!.expiresAt!) - Date.now()).toBeGreaterThan(EXPECTED_INTERRUPT.minimumRemainingMs);
+  expect(first.interrupt!.expiresAt).toBeUndefined();
+  expect(first.snapshot.expiresAt).toBe(EXPECTED_INTERRUPT.expiresAt);
   expect(fake.issue(SCENARIO_ISSUE)).toEqual(f.before);
   expect(f.writes()).toBe(0);
   return first;
@@ -242,7 +243,8 @@ it("refuses another person's answer and a conflicting answer without any effect"
   // The approver decides; a later different answer to the same interrupt is refused and changes nothing.
   expect((await f.run({interrupt: first.interrupt!, payload: {approved: true}})).snapshot.status).toBe("applied");
   const conflicting = await f.raw({resume: resume(false)});
-  expect({status: conflicting.status}).toEqual(EXPECTED_REFUSALS.conflictingAnswer);
+  const conflictingBody = await conflicting.json() as {error: string};
+  expect({status: conflicting.status, error: conflictingBody.error}).toEqual(EXPECTED_REFUSALS.conflictingAnswer);
   expect(f.writes()).toBe(1);
   expect((await f.run(undefined, true)).snapshot.status).toBe("applied");
   return {wrongCaller: {status: wrongCaller.status, error: wrongBody.error, providerWrites: 0, actionStatus: "pending"},

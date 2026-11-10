@@ -23,4 +23,6 @@ export const migrations: DurableObjectMigration[] = [
   { tag: "v7", new_sqlite_classes: ["InferOpsAccountGatekeeper"] },
   // FAC-102: the service-account keys of configured system workflows, one per assignment reference.
   { tag: "v8", new_sqlite_classes: ["InferOpsSystemCredentials"] },
+  // FAC-133: the person's own Dot in one workspace, one facet per Dot binding.
+  { tag: "v9", new_sqlite_classes: ["InferOpsDotGatekeeper"] },
 ];

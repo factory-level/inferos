@@ -27,6 +27,10 @@
       "types": "./src/widget-state.ts",
       "import": "./src/widget-state.ts"
     },
+    "./widget-placements": {
+      "types": "./src/widget-placements.ts",
+      "import": "./src/widget-placements.ts"
+    },
     "./feature-flags": {
       "types": "./src/feature-flags.ts",
       "import": "./src/feature-flags.ts"

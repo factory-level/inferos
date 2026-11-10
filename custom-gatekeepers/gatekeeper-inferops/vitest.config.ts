@@ -64,6 +64,8 @@ export default defineConfig({
           MEMBERS_GATEKEEPER: { className: "InferOpsMembersGatekeeper", useSQLite: true },
           // The workflow-policy gatekeeper, the same way.
           WORKFLOW_POLICY_GATEKEEPER: { className: "InferOpsWorkflowPolicyGatekeeper", useSQLite: true },
+          // The Dot gatekeeper, the same way (FAC-133).
+          DOT_GATEKEEPER: { className: "InferOpsDotGatekeeper", useSQLite: true },
           // The account gatekeeper, the same way, with raw storage access through `TestHooks`.
           ACCOUNT_GATEKEEPER: { className: "InferOpsAccountGatekeeper", useSQLite: true },
           TEST_ACCOUNT_GATEKEEPER: { className: "TestAccountGatekeeper", useSQLite: true },

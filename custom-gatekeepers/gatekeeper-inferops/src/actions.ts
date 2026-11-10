@@ -1,3 +1,4 @@
+import type { ActionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
 // The actions a binding records between proposal and decision: on a board binding a transition, an
 // issue create or an issue update; on a coding-dispatch binding a dispatch or a run cancel; on a
 // Wiki binding a section update, a page body update or a proposal approval. Each is
@@ -34,6 +35,11 @@ export type StoredFailure = {
   message: string;
   /** The data-source code, when there was one. */
   code?: string;
+  /**
+   * What kind of reason it was (FAC-119), so a replay answers as the first attempt did. Absent on
+   * failures stored before kinds were kept: those read as `unavailable`.
+   */
+  kind?: ActionFailureKind;
 };
 
 /**
@@ -202,10 +208,28 @@ export type ProposalApproveAction = ActionBase & {
   approvedState?: string;
 };
 
+/**
+ * A change the person's Dot proposed in InferOps (FAC-133), staged so the person decides it here
+ * like any other write. InferOps holds the proposal and its arguments; applying confirms it there
+ * under the person's own token, keyed by the proposal id, and rejecting declines it.
+ */
+export type DotConfirmAction = ActionBase & {
+  kind: "dot-confirm";
+  conversationId: string;
+  proposalId: string;
+  /** For messages and the approval card only; InferOps runs the arguments it stored. */
+  tool: string;
+  input: Record<string, unknown>;
+  /** After this InferOps refuses to confirm it (EXPIRED). */
+  expiresAt: string;
+  /** What InferOps' confirm answered, bounded for the receipt's result. */
+  confirmedOutcome?: Record<string, string | number | boolean | null>;
+};
+
 /** Any recorded action. */
 export type ActionRecord =
   | TransitionAction | CreateAction | UpdateAction | CommentAction | DispatchAction | CancelRunAction
-  | SectionUpdateAction | DocumentUpdateAction | ProposalApproveAction;
+  | SectionUpdateAction | DocumentUpdateAction | ProposalApproveAction | DotConfirmAction;
 
 /** An action a board binding records. */
 export type BoardAction = TransitionAction | CreateAction | UpdateAction | CommentAction;
@@ -232,7 +256,8 @@ export type StagedAction =
   | Omit<CancelRunAction, "actionId" | "status">
   | Omit<SectionUpdateAction, "actionId" | "status">
   | Omit<DocumentUpdateAction, "actionId" | "status">
-  | Omit<ProposalApproveAction, "actionId" | "status">;
+  | Omit<ProposalApproveAction, "actionId" | "status">
+  | Omit<DotConfirmAction, "actionId" | "status">;
 
 /** A stored record, with legacy records (no `kind`) read as the transitions they are. */
 export function readAction(raw: unknown): ActionRecord | undefined {
@@ -273,7 +298,14 @@ export function requestOf(record: StagedAction | ActionRecord): unknown {
     case "proposal-approve":
       return { kind: record.kind, proposalId: record.proposalId, proposalHash: record.proposalHash,
                sources: sortedSources(record.sources) };
+    case "dot-confirm":
+      return { kind: record.kind, conversationId: record.conversationId, proposalId: record.proposalId };
   }
+}
+
+/** Whether an action is a Dot proposal's confirmation. */
+export function isDotAction(record: ActionRecord): record is DotConfirmAction {
+  return record.kind === "dot-confirm";
 }
 
 /** Whether an action belongs to a coding-dispatch binding. */
@@ -348,6 +380,11 @@ export function appliedResult(record: ActionRecord): ActionResult {
   for (const key of ["createdIdentifier", "appliedRevision", "runId", "appliedVersion", "approvedState"] as const) {
     const value = fields[key];
     if (typeof value === "string" || typeof value === "number") result[key] = value;
+  }
+  // A Dot proposal: which one, and the bounded summary of what InferOps' confirm answered.
+  if (record.kind === "dot-confirm") {
+    result.proposalId = record.proposalId;
+    for (const [key, value] of Object.entries(record.confirmedOutcome ?? {})) result[key] = value;
   }
   return result;
 }

@@ -46,8 +46,8 @@ Read at OpenDots `8091324942b86789ed0da7facbee855145d933b0` (MIT), inferos `03d6
 | # | Decision | Status |
 | --- | --- | --- |
 | 1 | **Dot's threads and run state live in InferOps' chatbot tables, in Postgres under RLS.** A conversation belongs to one person in one workspace. InferOS stores a conversation reference at most, never messages | Proposed. Proven locally (below) |
-| 2 | **InferOps' `shared-agentic` runs the loop:** Mastra, with tools only through the run-token broker, so every call is the person's own grant at the server. Write tools land live or as proposals according to the server, never the agent | Proposed. The loop and broker are proven. Write tools aren't built (the current set is read-only) |
-| 3 | **InferOS reaches Dot through the gatekeeper,** with new InferOps capabilities for creating, reading and running a Dot conversation (`defineCapability`). That's an inferops pull request first, then the gatekeeper. The browser never talks to the model or to `shared-agentic` | Proposed. Not built |
+| 2 | **InferOps' `shared-agentic` runs the loop:** Mastra, with tools only through the run-token broker, so every call is the person's own grant at the server. Write tools land live or as proposals according to the server, never the agent | Proposed. The loop and broker are proven. Since FAC-132 (inferops), every write tool is only ever proposed, and its owner confirms it |
+| 3 | **InferOS reaches Dot through the gatekeeper,** with new InferOps capabilities for creating, reading and running a Dot conversation (`defineCapability`). That's an inferops pull request first, then the gatekeeper. The browser never talks to the model or to `shared-agentic` | Proposed. Being built for FAC-133: the capabilities in inferops [#2618](https://github.com/factory-level/inferops/pull/2618) and [#2619](https://github.com/factory-level/inferops/pull/2619), as `chatbot.conversation_create`, `_get`, `_run` and `_cancel` and `chatbot.proposal_list`, `_confirm` and `_decline` (the capability library names verbs `<resource>.<verb>`); the gatekeeper's `chatbot/dot` resource ([inferops-gatekeeper.md](../architecture/inferops-gatekeeper.md)); the Dot screen next. A proposal is decided in InferOS' approval queue, not a second one |
 | 4 | **OpenDots is a reference only.** Nothing is vendored, copied or installed. The pin stays recorded as the revision read. Its ideas are design input: spaces and pages, leased background tasks, approval handoff for connection tools. Without a copy, there's no notice to keep | Proposed |
 | 5 | **No CopilotKit package.** None is installed in InferOps: `@ag-ui/mastra` 1.1.6 lists `@copilotkit/runtime` only as an optional peer, and `bun.lock` doesn't resolve it. So there's no hosted gateway to reach and no CopilotKit telemetry. If one is ever added, it needs its own record, with telemetry off and no key without local URLs | Proposed. Checked in the lockfile and `node_modules` |
 | 6 | **The model is Claude Haiku 5.5 by default,** matching FAC-152 (#305). `agentic.chatModel` moves from `anthropic/claude-haiku-4-5` to it in an inferops pull request | Proposed. Not changed yet. Whether Mastra's model router knows the id is untested |
@@ -134,15 +134,15 @@ What crossed the `kill -9`, and what didn't:
 - One store for Dot's conversations: they're backed up, exported and deleted with the company's other InferOps data, and the anonymizer covers them.
 - **To build, in inferops first, each its own pull request:**
   1. a Dot lane for the run route, which today requires a Knowledge workspace (`live-routes.ts:79`);
-  2. the gatekeeper capabilities in rule 3;
-  3. write tools through the server's live-or-proposed decision, using the existing `requiresApproval` interrupt;
+  2. the gatekeeper capabilities in rule 3 (FAC-133, being built);
+  3. write tools through the server's live-or-proposed decision (FAC-132 built them as proposals the owner confirms, as a `chatbot_proposal` record rather than the `requiresApproval` interrupt);
   4. the bounds and ledger, with the Haiku 5.5 default;
   5. background runs as `defineJob`, which needs a decision on whose authority a run uses when the person isn't present.
 - **Found in the proof, for inferops:**
   - "Conversation not found" and "A response is already running" come back as 500, not 404 and 409. The chatbot's own error handler doesn't take effect.
   - The usage event names the configured model, not the one that ran.
 - OpenDots' AG-UI version gap (`@ag-ui/core` 0.0.59 against InferOps' 1.0.2) no longer matters, because OpenDots doesn't run.
-- FAC-127, FAC-128, FAC-132, FAC-133, FAC-135 and FAC-139 were written around OpenDots and Intelligence, and need rewording against this record.
+- FAC-127, FAC-128, FAC-132, FAC-133, FAC-135 and FAC-139 were written around OpenDots and Intelligence, and need rewording against this record. FAC-133 is built against this record, not OpenDots. The design's own words still name CopilotKit/OpenDots (inferops `docs/human/journeys/operator/dot/ask-dot.md`, its Interfaces line): that change belongs in a proposal there.
 
 ## Alternatives Considered
 

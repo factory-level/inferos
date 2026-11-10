@@ -1,7 +1,7 @@
 {
   "source": {
     "repository": "https://github.com/factory-level/inferops",
-    "revision": "4e913afefffcabd5175442050c9dc0f7d3c75e86",
+    "revision": "0c09fa9b648150257e745e22c2032bc5d57d46fc",
     "path": "domain/ts/project/shared/board.dto.ts",
     "export": "BoardResponseSchema"
   },

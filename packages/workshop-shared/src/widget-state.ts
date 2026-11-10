@@ -56,23 +56,45 @@ export type WidgetStateMachine = {
  * A widget a published console offers, as an operate session names it: the console's workspace,
  * the console, its published revision and that revision's frozen install of the widget. Each
  * revision runs its own frozen install, so a republished console starts every widget afresh.
+ * `placementId` names one of the person's placements of it on the canvas (FAC-13,
+ * widget-placements.ts): each placement keeps a state of its own, so two placements of one widget
+ * filter independently. Without it the state is the widget's own, as a console and a Wiki embed
+ * share it.
  */
-export type OperateWidgetRef = { workspaceId: string; consoleId: string; revision: string; gadgetId: number };
+export type OperateWidgetRef = { workspaceId: string; consoleId: string; revision: string; gadgetId: number; placementId?: string };
 
-/** Checks an `OperateWidgetRef` from a client: four bounded fields, nothing else read. */
+/** Checks an `OperateWidgetRef` from a client: four bounded fields and an optional placement, nothing else read. */
 export function parseOperateWidgetRef(ref: unknown): OperateWidgetRef {
   if (typeof ref !== "object" || ref === null) throw new TypeError("A widget is named by its console and install.");
-  let { workspaceId, consoleId, revision, gadgetId } = ref as Record<string, unknown>;
+  let { workspaceId, consoleId, revision, gadgetId, placementId } = ref as Record<string, unknown>;
   for (let value of [workspaceId, consoleId, revision]) {
     if (typeof value !== "string" || !value || value.length > 128) throw new TypeError("A widget is named by its console and install.");
   }
   if (!Number.isSafeInteger(gadgetId) || (gadgetId as number) < 0) throw new TypeError("A widget is named by its console and install.");
-  return { workspaceId: workspaceId as string, consoleId: consoleId as string, revision: revision as string, gadgetId: gadgetId as number };
+  if (placementId !== undefined && (typeof placementId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(placementId))) {
+    throw new TypeError("A placement is named by its id.");
+  }
+  return { workspaceId: workspaceId as string, consoleId: consoleId as string, revision: revision as string, gadgetId: gadgetId as number,
+    ...(placementId === undefined ? {} : { placementId: placementId as string }) };
 }
 
-/** The storage key of one person's state of the widget `ref` names. */
+/**
+ * The storage key of one person's state of the widget `ref` names: the widget's own without a
+ * placement (unchanged since FAC-86, so stored states still match), one of its own with one.
+ */
 export function widgetStateKey(ref: OperateWidgetRef): string {
-  return JSON.stringify([ref.workspaceId, ref.consoleId, ref.revision, ref.gadgetId]);
+  let key = [ref.workspaceId, ref.consoleId, ref.revision, ref.gadgetId];
+  return JSON.stringify(ref.placementId === undefined ? key : [...key, ref.placementId]);
+}
+
+/** The placement a widget state key names, if any (see `widgetStateKey`). */
+export function widgetStateKeyPlacement(key: string): string | undefined {
+  try {
+    let parsed: unknown = JSON.parse(key);
+    return Array.isArray(parsed) && parsed.length === 5 && typeof parsed[4] === "string" ? parsed[4] : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** One person's running state of one placed widget. */

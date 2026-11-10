@@ -884,7 +884,7 @@ describe("Wiki proposal approval", () => {
     for (const role of ["viewer", "member"] as const) {
       await mock.setProposalRole(role);
       expect(await hooks.applyOutcome(props, id, "wiki")).toEqual({
-        outcome: "notApplied", retryable: true, code: "FORBIDDEN",
+        outcome: "notApplied", retryable: true, kind: "permission", code: "FORBIDDEN",
         message: 'The approval of Wiki proposal "Release process" (revision 1) was not applied: ' +
           "Approving for publication needs knowledge:publish (Owner or Admin).",
       });
@@ -901,7 +901,7 @@ describe("Wiki proposal approval", () => {
   it("A4: the requester's own approval is refused for good by InferOps, and nothing is approved", async () => {
     const { props, hooks, mock, id } = await staged(P_SELF);
     const refused = {
-      outcome: "notApplied", retryable: false, code: "CONFLICT",
+      outcome: "notApplied", retryable: false, kind: "conflict", code: "CONFLICT",
       message: 'The approval of Wiki proposal "Incident response" (revision 1) was not applied: ' +
         "You requested this draft or wrote this revision; another person must approve it.",
     };
@@ -947,7 +947,7 @@ describe("Wiki proposal approval", () => {
     const { props, hooks, mock, id } = await staged();
     await mock.reviseProposal(P_EDIT);
     expect(await hooks.applyOutcome(props, id, "wiki")).toEqual({
-      outcome: "notApplied", retryable: false, code: "STALE_REVISION",
+      outcome: "notApplied", retryable: false, kind: "conflict", code: "STALE_REVISION",
       message: 'The approval of Wiki proposal "Release process" (revision 1) was not applied: ' +
         "The proposal changed since it was approved here; read it again.",
     });
@@ -1051,7 +1051,7 @@ describe("Wiki proposal approval", () => {
     };
     await hooks.putWikiRaw(props, "action:99", { ...parentless, fingerprint: await fingerprintOf("knowledge/wiki", parentless as never) });
     expect(await hooks.applyOutcome(props, 99, "wiki")).toEqual({
-      outcome: "notApplied", retryable: false, code: "INVALID_REQUEST",
+      outcome: "notApplied", retryable: false, kind: "invalid", code: "INVALID_REQUEST",
       message: 'The approval of Wiki proposal "Postmortems" (revision 1) was not applied: ' +
         "A new page needs a parent; set one in InferMind.",
     });
@@ -1203,7 +1203,7 @@ describe("Wiki proposal approval", () => {
     const { props, hooks, mock, id } = await staged();
     expect(await hooks.addWikiObserver(props, true)).toBeNull();
     expect(await hooks.applyOutcome(props, id, "wiki")).toEqual({
-      outcome: "notApplied", retryable: true, code: "FORBIDDEN", message: SHARED,
+      outcome: "notApplied", retryable: true, kind: "permission", code: "FORBIDDEN", message: SHARED,
     });
     const stored = await hooks.getWikiRaw(props, `action:${id}`) as { status: string; attempts: Record<string, unknown> };
     expect(stored).toMatchObject({ status: "pending", attempts: {} });

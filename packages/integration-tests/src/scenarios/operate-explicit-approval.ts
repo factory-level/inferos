@@ -35,8 +35,11 @@ export const EXPECTED_INTERRUPT = {
   reason: "inferos.gatekeeper.approval.v1",
   required: ["approved"],
   status: "pending",
-  /** The deadline is ten minutes out; at least this many milliseconds must remain. */
-  minimumRemainingMs: 500_000,
+  /**
+   * The interrupt has no deadline of its own (FAC-119): it waits as long as the action is pending,
+   * and only a workflow run's write expires, by FAC-118's deadline.
+   */
+  expiresAt: null,
 } as const;
 
 /** An explicit approval: applied once, by the person, and an identical answer changes nothing. */
@@ -45,10 +48,13 @@ export const EXPECTED_APPROVE = { status: "applied", providerWrites: 1, retrySta
 /** An explicit denial: rejected, with no provider write, and an identical answer changes nothing. */
 export const EXPECTED_DENY = { status: "rejected", providerWrites: 0, retryStatus: "rejected" } as const;
 
-/** Refusals, each before any effect: a caller who is not the approver, and a conflicting answer. */
+/**
+ * Refusals, each before any effect, each by its own code (FAC-119): a caller who is not the
+ * approver is refused; a later different answer to the same interrupt is a conflict.
+ */
 export const EXPECTED_REFUSALS = {
   wrongCaller: { status: 403, error: "APPROVAL_REFUSED" },
-  conflictingAnswer: { status: 403 },
+  conflictingAnswer: { status: 409, error: "APPROVAL_CONFLICT" },
 } as const;
 
 /** Refuse any target that is not a plain-HTTP loopback Workshop. */
