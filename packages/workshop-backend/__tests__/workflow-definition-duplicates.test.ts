@@ -18,6 +18,7 @@ import {
 import {
   DUPLICATE_UNSUPPORTED_BINDING, checkAssignments, fills, requireBound, requirementsOf, unmetBindings,
 } from "../src/workflow-duplicate.js";
+import { WORKFLOW_BINDINGS_NOT_OWNERS, WORKFLOW_BINDINGS_UNATTRIBUTED } from "@gadgets/workshop-shared/workflow-definition";
 import { openFakeOverseer } from "./fixtures.js";
 import { makeMockStorage } from "./mock-storage.js";
 
@@ -55,11 +56,12 @@ function workspace(opts: { audience?: WorkflowDefinitionAudience; now?: () => nu
     [MODEL_CONNECTION, { id: MODEL_CONNECTION, creationSpec: { type: "aiModel", modelId: "ada-model", provider: "anthropic", modelName: "m" } }],
   ]);
   let specOf = (target: number) => gatekeepers.get(target)?.creationSpec;
+  let madeByOf = (target: number) => gatekeepers.get(target)?.connectedBy?.userId ?? gatekeepers.get(target)?.modelOf;
   let clock = { now: opts.now ?? (() => Date.now()) };
   let store = new WorkspaceWorkflowDefinitionStore(durable, storage,
     { now: () => clock.now(), dynamicTtlMs: () => 24 * HOUR },
     opts.audience ?? WORKSPACE_AUDIENCE,
-    gadgetId => (gadgets.has(gadgetId) ? unmetBindings(gadgets.get(gadgetId), specOf) : []));
+    gadgetId => (gadgets.has(gadgetId) ? unmetBindings(gadgets.get(gadgetId), specOf, madeByOf) : []));
   let headOf = (id: number) => gadgets.get(id)?.commitId;
   let saved = store.save(ADA, { title: "Refund", gadgetId: SOURCE_GADGET }, headOf, "build");
   store.publish(ADA, saved.id, 1);
@@ -97,18 +99,40 @@ describe("what a duplicate's gadget must have set up", () => {
     expect(fills(BOARD_REQUIRED, spec("inferops", "inferops://*/chatbot/dot"))).toBe(false);
     expect(fills(BOARD_REQUIRED, { type: "aiModel", modelId: "m", provider: "p", modelName: "n" })).toBe(false);
     expect(fills(MODEL_REQUIRED, spec("inferops"))).toBe(false);
-    let specs = new Map<number, any>([[1, spec("inferops")], [2, spec("google")]]);
-    let gadget = (bindings: Record<string, any>) => ({ requiredBindings: [BOARD_REQUIRED], bindings });
+    let specs = new Map<number, any>([[1, spec("inferops")], [2, spec("google")], [3, spec("inferops")], [4, spec("inferops")]]);
+    // Who made each: 1 the owner, 3 someone else, 4 not recorded (an older connection).
+    let madeBy = new Map<number, string>([[1, "ben-user"], [2, "ben-user"], [3, "ada-user"]]);
+    let gadget = (bindings: Record<string, any>) => ({ requiredBindings: [BOARD_REQUIRED], requiredBindingsOwner: "ben-user", bindings });
     let specOf = (t: number) => specs.get(t);
-    expect(unmetBindings(gadget({}), specOf)).toEqual([BOARD_REQUIRED]);
-    expect(unmetBindings(gadget({ BOARD: { target: 1, pending: { chatId: 4 } } }), specOf)).toEqual([BOARD_REQUIRED]);
-    expect(unmetBindings(gadget({ BOARD: { target: 2 } }), specOf)).toEqual([BOARD_REQUIRED]);
-    expect(unmetBindings(gadget({ BOARD: { target: 404 } }), specOf)).toEqual([BOARD_REQUIRED]);
-    expect(unmetBindings(gadget({ BOARD: { target: 1 } }), specOf)).toEqual([]);
-    expect(() => requireBound(gadget({}), specOf)).toThrow(WORKFLOW_BINDINGS_NEEDED);
+    let madeByOf = (t: number) => madeBy.get(t);
+    let missing = [{ ...BOARD_REQUIRED, unmet: "missing" }];
+    expect(unmetBindings(gadget({}), specOf, madeByOf)).toEqual(missing);
+    expect(unmetBindings(gadget({ BOARD: { target: 1, pending: { chatId: 4 } } }), specOf, madeByOf)).toEqual(missing);
+    expect(unmetBindings(gadget({ BOARD: { target: 2 } }), specOf, madeByOf)).toEqual(missing);
+    expect(unmetBindings(gadget({ BOARD: { target: 404 } }), specOf, madeByOf)).toEqual(missing);
+    expect(unmetBindings(gadget({ BOARD: { target: 1 } }), specOf, madeByOf)).toEqual([]);
+    expect(() => requireBound(gadget({}), specOf, madeByOf)).toThrow(WORKFLOW_BINDINGS_NEEDED);
     // Any gadget that isn't a duplicate's has nothing to set up.
-    expect(() => requireBound({ bindings: {} }, specOf)).not.toThrow();
-    expect(() => requireBound(undefined, specOf)).not.toThrow();
+    expect(() => requireBound({ bindings: {} }, specOf, madeByOf)).not.toThrow();
+    expect(() => requireBound(undefined, specOf, madeByOf)).not.toThrow();
+  });
+
+  it("is filled only by the owner's own connection: another person's, or one that doesn't record whose it is, fills nothing", () => {
+    let spec = { type: "gatekeeper" as const, vendorId: "inferops", resourceUrl: "x", typeUrlPattern: BOARD_PATTERN };
+    let madeBy = new Map<number, string>([[1, "ben-user"], [3, "ada-user"]]);
+    let gadget = (bindings: Record<string, any>, owner: string | null = "ben-user") =>
+      ({ requiredBindings: [BOARD_REQUIRED], ...(owner ? { requiredBindingsOwner: owner } : {}), bindings });
+    let specOf = () => spec;
+    let madeByOf = (t: number) => madeBy.get(t);
+    // Ada's connection, bound by any route (a chat's accepted edge is just an edge): not Ben's.
+    expect(unmetBindings(gadget({ BOARD: { target: 3 } }), specOf, madeByOf)).toEqual([{ ...BOARD_REQUIRED, unmet: "not-owners" }]);
+    expect(() => requireBound(gadget({ BOARD: { target: 3 } }), specOf, madeByOf)).toThrow(WORKFLOW_BINDINGS_NOT_OWNERS);
+    // Made before whose account a connection uses was recorded: it fills nothing, and says so.
+    expect(unmetBindings(gadget({ BOARD: { target: 4 } }), specOf, madeByOf)).toEqual([{ ...BOARD_REQUIRED, unmet: "unattributed" }]);
+    expect(() => requireBound(gadget({ BOARD: { target: 4 } }), specOf, madeByOf)).toThrow(WORKFLOW_BINDINGS_UNATTRIBUTED);
+    // A duplicate that doesn't record its owner fills from nobody's.
+    expect(unmetBindings(gadget({ BOARD: { target: 1 } }, null), specOf, madeByOf)).toEqual([{ ...BOARD_REQUIRED, unmet: "unattributed" }]);
+    expect(unmetBindings(gadget({ BOARD: { target: 1 } }), specOf, madeByOf)).toEqual([]);
   });
 
   it("takes only named requirements, each of its kind, and never an agent spawner", () => {
@@ -253,17 +277,19 @@ describe("where a duplicate came from, as each viewer may see it", () => {
     let copy = store.duplicate(BEN, store.duplicateSource(BEN.id, sourceId, undefined, "build"), { title: "Mine" }, "build", gadgetId => {
       let id = makeGadget(gadgetId);
       gadgets.get(id).requiredBindings = [BOARD_REQUIRED, MODEL_REQUIRED];
+      gadgets.get(id).requiredBindingsOwner = "ben-user";
       return id;
     });
-    expect(copy.bindingsNeeded).toEqual([BOARD_REQUIRED, MODEL_REQUIRED]);
+    expect(copy.bindingsNeeded).toEqual([{ ...BOARD_REQUIRED, unmet: "missing" }, { ...MODEL_REQUIRED, unmet: "missing" }]);
     store.publish(BEN, copy.id, 1);
     expect(store.get(CARA.id, copy.id, "use")!.bindingsNeeded).toBeUndefined();
     let board = nextId();
-    gatekeepers.set(board, { id: board, creationSpec: { type: "gatekeeper", vendorId: "inferops", resourceUrl: ACME_BOARD, typeUrlPattern: BOARD_PATTERN } });
+    gatekeepers.set(board, { id: board, connectedBy: { userId: "ben-user", accountId: 1 },
+      creationSpec: { type: "gatekeeper", vendorId: "inferops", resourceUrl: ACME_BOARD, typeUrlPattern: BOARD_PATTERN } });
     gadgets.get(100).bindings.BOARD = { target: board };
-    expect(store.get(BEN.id, copy.id, "build")!.bindingsNeeded).toEqual([MODEL_REQUIRED]);
+    expect(store.get(BEN.id, copy.id, "build")!.bindingsNeeded).toEqual([{ ...MODEL_REQUIRED, unmet: "missing" }]);
     let model = nextId();
-    gatekeepers.set(model, { id: model, creationSpec: { type: "aiModel", modelId: "ben-model", provider: "p", modelName: "n" } });
+    gatekeepers.set(model, { id: model, modelOf: "ben-user", creationSpec: { type: "aiModel", modelId: "ben-model", provider: "p", modelName: "n" } });
     gadgets.get(100).bindings.MODEL = { target: model };
     expect(store.get(BEN.id, copy.id, "build")!.bindingsNeeded).toBeUndefined();
   });
@@ -332,9 +358,10 @@ async function session(opts: { role?: "build" | "use"; operate?: boolean; refuse
       created.gadgets.push(record.id);
       return record;
     },
-    addGatekeeper: async (_cls: unknown, creationSpec: unknown) => {
+    addGatekeeper: async (_cls: unknown, creationSpec: unknown, ..._rest: unknown[]) => {
       let id = nextId++;
-      gatekeepers.set(id, { id, creationSpec });
+      let connectedBy = _rest[5];
+      gatekeepers.set(id, { id, creationSpec, ...(connectedBy ? { connectedBy } : {}) });
       created.gatekeepers.push(id);
       return { getId: async () => id };
     },
@@ -352,7 +379,7 @@ async function session(opts: { role?: "build" | "use"; operate?: boolean; refuse
       operateSession: { get: () => opts.operate === true },
       gadgets: { get: (id: number) => gadgets.get(id), put: (record: any) => { gadgets.set(record.id, record); },
         byBindingName: { get: (name: string) => [...gadgets.values()].find(g => g.bindingName === name) } },
-      gatekeepers: { get: (id: number) => gatekeepers.get(id) },
+      gatekeepers: { get: (id: number) => gatekeepers.get(id), put: (record: any) => { gatekeepers.set(record.id, record); } },
     }),
     users: {
       idFromString: (value: string) => value,
@@ -411,7 +438,7 @@ describe("duplicating through a build session", () => {
   it("starts unbound when no connection is given, saying what to set up", async () => {
     let { overseer, sourceId, gadgets, created } = await session();
     let copy = await overseer.duplicateWorkflowDefinition({ sourceId, title: "Mine" });
-    expect(copy.bindingsNeeded).toEqual([{ ...BOARD_REQUIRED, title: "Board" }, MODEL_REQUIRED]);
+    expect(copy.bindingsNeeded).toEqual([{ ...BOARD_REQUIRED, title: "Board", unmet: "missing" }, { ...MODEL_REQUIRED, unmet: "missing" }]);
     expect(gadgets.get(copy.revisions[0]!.source.gadgetId).bindings).toEqual({});
     expect(created.gatekeepers).toEqual([]);
   });
@@ -475,7 +502,7 @@ describe("setting up a duplicate's connections", () => {
     expect(gadgets.get(gadgetId).bindings).toEqual({});
     await expect(overseer.rebindWorkflowDefinition(copy.id, {})).rejects.toThrow("Choose a connection");
     let half = await overseer.rebindWorkflowDefinition(copy.id, { BOARD: BOARD_AT(ACME_BOARD) });
-    expect(half.bindingsNeeded).toEqual([MODEL_REQUIRED]);
+    expect(half.bindingsNeeded).toEqual([{ ...MODEL_REQUIRED, unmet: "missing" }]);
     let first = gadgets.get(gadgetId).bindings.BOARD.target;
     let done = await overseer.rebindWorkflowDefinition(copy.id, { BOARD: BOARD_AT(ACME_BOARD), MODEL: BEN_MODEL });
     expect(done.bindingsNeeded).toBeUndefined();

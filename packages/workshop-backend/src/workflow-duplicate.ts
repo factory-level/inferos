@@ -4,7 +4,9 @@
 // connection from the duplicator's own account or model fills (Overseer.duplicateWorkflowDefinition,
 // rebindWorkflowDefinition). Nothing here grants anything; it only names what is missing.
 import type { BlueprintBindingAssignment, GatekeeperCreationSpec, WorkpieceId } from "@gadgets/workshop-shared/api";
-import { WORKFLOW_BINDINGS_NEEDED, type WorkflowRequiredBinding } from "@gadgets/workshop-shared/workflow-definition";
+import {
+  WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS, WORKFLOW_BINDINGS_UNATTRIBUTED, type WorkflowRequiredBinding,
+} from "@gadgets/workshop-shared/workflow-definition";
 
 /** The refusal of duplicating a workflow whose gadget binds a kind of connection a duplicate can't set up yet. */
 export const DUPLICATE_UNSUPPORTED_BINDING =
@@ -14,7 +16,18 @@ export const DUPLICATE_UNSUPPORTED_BINDING =
 type Edge = { target: WorkpieceId; pending?: unknown; blueprintAnnotation?: { title: string } };
 
 /** The parts of a gadget record read here (overseer.ts `GadgetRecord`). */
-export type RequiringGadget = { bindings: Record<string, Edge>; requiredBindings?: WorkflowRequiredBinding[] };
+export type RequiringGadget = {
+  bindings: Record<string, Edge>;
+  requiredBindings?: WorkflowRequiredBinding[];
+  /** The User whose own connections alone fill them: the duplicate's owner (FAC-123). */
+  requiredBindingsOwner?: string;
+};
+
+/**
+ * Whose account or model connection `target` uses (FAC-123): its `connectedBy` user for a vendor
+ * connection, the person whose model it is for a model one; undefined when that wasn't recorded.
+ */
+export type MadeByOf = (target: WorkpieceId) => string | undefined;
 
 /** Looks up a connection's creation spec by id (overseer.ts `GatekeeperRecord.creationSpec`). */
 export type SpecOf = (target: WorkpieceId) => GatekeeperCreationSpec | undefined;
@@ -54,20 +67,37 @@ export function fills(requirement: WorkflowRequiredBinding, spec: GatekeeperCrea
  * not yet accepted), a missing connection, or one that doesn't fill it. Empty for any gadget that
  * isn't a duplicate's.
  */
-export function unmetBindings(gadget: RequiringGadget, specOf: SpecOf): WorkflowRequiredBinding[] {
-  return (gadget.requiredBindings ?? []).filter(requirement => {
+export function unmetBindings(gadget: RequiringGadget, specOf: SpecOf, madeByOf: MadeByOf = () => undefined)
+    : WorkflowRequiredBinding[] {
+  let unmet: WorkflowRequiredBinding[] = [];
+  for (let requirement of gadget.requiredBindings ?? []) {
     let edge = gadget.bindings[requirement.name];
-    return !edge || edge.pending !== undefined || !fills(requirement, specOf(edge.target));
-  });
+    if (!edge || edge.pending !== undefined || !fills(requirement, specOf(edge.target))) {
+      unmet.push({ ...requirement, unmet: "missing" });
+      continue;
+    }
+    // Filled only from the duplicate's owner's own account or model, by whatever route (a chat
+    // included); a connection that doesn't record whose it is fills nothing.
+    let madeBy = madeByOf(edge.target);
+    if (madeBy === undefined || gadget.requiredBindingsOwner === undefined) {
+      unmet.push({ ...requirement, unmet: "unattributed" });
+    } else if (madeBy !== gadget.requiredBindingsOwner) {
+      unmet.push({ ...requirement, unmet: "not-owners" });
+    }
+  }
+  return unmet;
 }
 
-/**
- * Refuses with `WORKFLOW_BINDINGS_NEEDED` while `gadget` (absent: nothing to check) has a requirement
- * not set up: checked at a run's admission, at its firing, as it starts and before each of its
- * writes, so a connection removed later stops the next one.
- */
-export function requireBound(gadget: RequiringGadget | undefined, specOf: SpecOf): void {
-  if (gadget && unmetBindings(gadget, specOf).length > 0) throw new Error(WORKFLOW_BINDINGS_NEEDED);
+/** The refusal for `unmet`, in the words that say why: older connections first, then others'. */
+export function bindingsRefusal(unmet: readonly WorkflowRequiredBinding[]): string {
+  if (unmet.some(r => r.unmet === "unattributed")) return WORKFLOW_BINDINGS_UNATTRIBUTED;
+  if (unmet.some(r => r.unmet === "not-owners")) return WORKFLOW_BINDINGS_NOT_OWNERS;
+  return WORKFLOW_BINDINGS_NEEDED;
+}
+
+export function requireBound(gadget: RequiringGadget | undefined, specOf: SpecOf, madeByOf?: MadeByOf): void {
+  let unmet = gadget ? unmetBindings(gadget, specOf, madeByOf) : [];
+  if (unmet.length > 0) throw new Error(bindingsRefusal(unmet));
 }
 
 /**

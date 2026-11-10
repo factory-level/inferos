@@ -133,12 +133,28 @@ export type WorkflowDefinitionProvenance = { at: Date; definitionId?: string; ti
  * type, made from the person's own connected account; a model binding needs one of their own models.
  * Never the source's connection, account or resource.
  */
-export type WorkflowRequiredBinding = { name: string; title?: string } & (
+export type WorkflowRequiredBinding = {
+  name: string;
+  title?: string;
+  /**
+   * Why it isn't set up, where `bindingsNeeded` lists it (FAC-123): no connection yet, one made from
+   * another person's account or model, or one made before InferOS recorded whose account it uses.
+   */
+  unmet?: "missing" | "not-owners" | "unattributed";
+} & (
   | { type: "gatekeeper"; vendorId: string; typeUrlPattern: string }
   | { type: "aiModel" });
 
 /** Refused at a run's start and at each of its writes while a required connection isn't set up (FAC-123). */
 export const WORKFLOW_BINDINGS_NEEDED = "This workflow needs its connections set up before it can run.";
+
+/** Refused when a duplicate's connection was made from another person's account or model (FAC-123). */
+export const WORKFLOW_BINDINGS_NOT_OWNERS =
+  "This workflow's connections must be set up from its owner's own accounts and models before it can run.";
+
+/** Refused when a duplicate's connection predates recording whose account it uses (FAC-123). */
+export const WORKFLOW_BINDINGS_UNATTRIBUTED =
+  "One of this workflow's connections was made before InferOS recorded whose account it uses. Set it up again from your own account before it can run.";
 
 /**
  * Duplicating a definition (FAC-123): which one, which of its revisions (the published one unless
