@@ -129,3 +129,30 @@ describe("a console draft's problems (FAC-96)", () => {
     expect(t.consoles.get(draft.id, "draft")?.revision).toBe(draft.revision);
   });
 });
+
+// QA on #401: a page stored outside the editor that doesn't parse (here a loop of raised events)
+// is one problem, at that page, and the rest are still listed; it never makes validation throw.
+describe("a draft page that doesn't parse", () => {
+  it("is one problem with the parser's words and a repair, beside the others, and publication refuses with it", () => {
+    let t = setUp();
+    let draft = t.consoles.create(content(), read(t.consoles.sourceCommitIds(content())));
+    let row = t.storage.canvases.get("floor")!;
+    let page = canvasPageFromDefinition(row);
+    // Two attachments raising each other's events, which the editor would refuse (reference-cycle).
+    let looped = { ...page, attachments: [{ id: "l1", version: 1, on: "ping", effect: { kind: "raise-event", target: page.id, event: "pong" } },
+      { id: "l2", version: 1, on: "pong", effect: { kind: "raise-event", target: page.id, event: "ping" } }] };
+    t.storage.canvasPages.put({ page: looped, basedOnRevision: row.revision } as never);
+    let stored = t.storage.consoles.get(draft.id)!;
+    t.storage.consoles.put({ ...stored, flows: ["gone"] });
+
+    let capture = t.consoles.capture(draft.id, draft.revision);
+    let problems = t.consoles.draftProblems(draft.id, draft.revision, read(capture.commitIds));
+    expect(problems.map(problem => [problem.code, problem.target])).toEqual([
+      ["invalid-page", "page:floor"],
+      ["flow-missing", `console:${draft.id}/flow:gone`],
+    ]);
+    expect(problems[0]!.message).toContain("reference-cycle");
+    expect(problems[0]!.repair).toContain("loop");
+    expect(() => t.consoles.publish(draft.id, draft.revision, capture, read(capture.commitIds))).toThrow(problems[0]!.message);
+  });
+});

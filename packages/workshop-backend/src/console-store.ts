@@ -2,7 +2,7 @@ import type { WorkspaceSettings } from "@gadgets/workshop-shared/workspace-setti
 import type { BlueprintInstall, BoundViewDescription, ConsoleWidgetFrozenFor, WorkpieceId } from "@gadgets/workshop-shared/api";
 import { parseBoundViewSpec } from "@gadgets/workshop-shared/bound-view";
 import { CANVAS_GADGET_REF, CanvasConflictError, parseCanvasWidget, type CanvasDefinition } from "@gadgets/workshop-shared/canvas";
-import { canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasWidgetEventsHeard, formatCanvasTarget, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
+import { CanvasModelError, canvasDefinitionProjection, canvasPageEffects, canvasPageFromDefinition, canvasWidgetEventsHeard, formatCanvasTarget, type CanvasPage } from "@gadgets/workshop-shared/canvas-model";
 import { joinPageSettings, nestedPage, readCanvasDefinition, splitPageSettings } from "./canvas-store";
 import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleDraftProblem, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
@@ -226,11 +226,30 @@ function viewRefusal(entry: BoundViewEntry, commit: SourceCommit): string | null
 }
 
 /**
+ * Screen `row`'s current nested page, null when it has none, or the model's refusal of a page stored
+ * outside the editor that doesn't parse (FAC-96). What lists a draft's problems reads pages through
+ * this, so one bad page is one problem rather than a throw; publication still parses each page and
+ * refuses with the same words (`publishedPages`).
+ */
+function readNestedPage(storage: Pick<ConsoleStorage, "canvasPages">, row: CanvasDefinition): { page: CanvasPage | null } | { error: CanvasModelError } {
+  try {
+    return { page: nestedPage(storage, row) };
+  } catch (error) {
+    if (error instanceof CanvasModelError) return { error };
+    throw error;
+  }
+}
+
+/**
  * The gadget ids the `inferos.gadget` widgets of screen `row` reference: its nested page's, at any
- * depth, while one is current, otherwise its sections'. A row is read unparsed, as stored.
+ * depth, while one is current, otherwise its sections'. A row is read unparsed, as stored. A page
+ * that doesn't parse places nothing here: it is that screen's own problem (`consoleDraftProblems`),
+ * and publication refuses it when it reaches that screen.
  */
 function placedGadgets(storage: Pick<ConsoleStorage, "canvasPages">, row: CanvasDefinition): WorkpieceId[] {
-  let nested = nestedPage(storage, row);
+  let read = readNestedPage(storage, row);
+  if ("error" in read) return [];
+  let nested = read.page;
   let widgets = nested ? nested.nodes.flatMap(node => node.nodeType === "widget" ? [node] : [])
     : row.sections.flatMap(section => section.widgets);
   return widgets.flatMap(widget => {
@@ -297,7 +316,13 @@ function withFrozenNodes(page: CanvasPage, frozen: Map<WorkpieceId, WorkpieceId>
  */
 function screenRevision(storage: Pick<ConsoleStorage, "canvases" | "canvasPages">, screenId: string): string | null {
   let row = storage.canvases.get(screenId);
-  return row ? (nestedPage(storage, row) ?? row).revision : null;
+  if (!row) return null;
+  let read = readNestedPage(storage, row);
+  if ("page" in read) return (read.page ?? row).revision;
+  // A page that doesn't parse is still captured by the revision it was stored at, so a draft with
+  // one can be checked; publication refuses it when it parses each page.
+  let stored = storage.canvasPages.get(screenId)?.page as { revision?: unknown } | undefined;
+  return typeof stored?.revision === "string" ? stored.revision : row.revision;
 }
 
 /** `screen` with each placed gadget the map names replaced by its frozen install. */
@@ -619,7 +644,8 @@ function screenProblems(storage: Pick<ConsoleStorage, "gadgets">, content: Opera
 /**
  * Every problem that would stop console draft `stored` being published (FAC-96), in the order
  * publication checks them: its widget registry and placements, then each screen it shows, its
- * flows, and its bound views. The same checks publication runs and throws the first of, so a
+ * flows, and its bound views. A page that doesn't parse is one problem at that screen, and the
+ * rest are still listed. The same checks publication runs and throws the first of, so a
  * builder sees every refusal publication would give, in its words, with a target and a repair.
  * Reads only this workspace's storage and `commits`; writes nothing. Throws `CONSOLE_CHANGED` when a
  * gadget's commit moved since `commits` was read, as publication does. The console's size once
@@ -630,7 +656,16 @@ export function consoleDraftProblems(storage: ConsoleStorage, stored: OperateCon
   let problems = consoleWidgetProblems(storage, content, id, commits);
   for (let screenId of consoleScreens(content)) {
     let row = storage.canvases.get(screenId);
-    if (row) problems.push(...screenProblems(storage, content, screenId, row, nestedPage(storage, row), true, commits));
+    if (!row) continue;
+    let read = readNestedPage(storage, row);
+    if ("error" in read) {
+      problems.push({ code: "invalid-page", target: formatCanvasTarget({ kind: "page", pageId: screenId }), message: read.error.message,
+        repair: read.error.code === "reference-cycle"
+          ? `Remove the loop: attachments on this page raise each other's events, through ${read.error.at}. Delete one of them.`
+          : `It was saved outside the editor and isn't a valid page. Fix or remove ${read.error.at}, then check again.` });
+      continue;
+    }
+    problems.push(...screenProblems(storage, content, screenId, row, read.page, true, commits));
   }
   problems.push(...flowProblems(storage, content, id));
   for (let entry of content.boundViews ?? []) {

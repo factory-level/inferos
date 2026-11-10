@@ -203,7 +203,9 @@ export type ConsoleDraftProblem = {
 export type ConsoleDraftProblemCode =
   | "widget-refused" | "widget-not-registered" | "widget-no-ui" | "invalid-widget"
   | "navigation-outside-console" | "undeclared-event" | "event-leads-to-action"
-  | "flow-missing" | "flow-step-outside-console" | "bound-view-refused" | "bound-view-too-large";
+  | "flow-missing" | "flow-step-outside-console" | "bound-view-refused" | "bound-view-too-large"
+  /** A screen's page, stored outside the editor, isn't a valid page (`CanvasModelError`). */
+  | "invalid-page";
 
 /**
  * A published console's widget as a Wiki page embeds it (FAC-12): named by its source gadget, which
