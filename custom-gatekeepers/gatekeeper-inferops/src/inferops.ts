@@ -1993,6 +1993,24 @@ export class InferOpsProjectGatekeeper
     return [];
   }
 
+  /**
+   * The company this connection acts in (FAC-14 K2): its connected account's tenant, read from the
+   * identity stored at connect as `InferOpsAccount.presentationCompany` reads a person's, so the
+   * Workshop can refuse a person of another company before a command is requested on it. Null for
+   * a connection without a connected account (the demo board, the stopgap connection, a system
+   * run's) and for one in a company `INFEROPS_COMPANY` doesn't admit; a malformed
+   * `INFEROPS_COMPANY` throws, so the Workshop refuses rather than guess.
+   */
+  async connectionCompany(): Promise<string | null> {
+    const { connected, accountId, systemCredentialRef } = this.ctx.props;
+    if (!connected || systemCredentialRef !== undefined) return null;
+    const company = deploymentCompany(this.env);
+    if (!company) throw new InferOpsError("UNAVAILABLE", COMPANY_MISCONFIGURED);
+    const identity = await credentialsOf(this.ctx.exports, accountId).identity();
+    if (!identity?.tenantId || !companyAdmits(company, identity.tenantId)) return null;
+    return identity.tenantId.toLowerCase();
+  }
+
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsProjectSession> {
     return new ProjectSessionImpl(this.#binding(), approvalQueue.dup());
   }

@@ -43,14 +43,16 @@ export function enablerHasBuild(rule: AutoApproveTagRecord, roleOf: EffectiveRol
 }
 
 /**
- * Whether no auto-approval rule may approve `record` (FAC-102, FAC-112): a write an assigned run
- * proposed, one a requested run proposed on a later attempt, after a restart ran it again, or a
- * replay's copy of a write shown to a person to reject.
+ * Whether no auto-approval rule may approve `record` (FAC-102, FAC-112, FAC-14): a write an assigned
+ * run proposed, one a requested run proposed on a later attempt, after a restart ran it again, a
+ * replay's copy of a write shown to a person to reject, or a command the operate agent requested
+ * for a person, which a person always decides.
  */
 export function manualOnly(record: {
   caller: { from: string }; workflowRun?: { attempt: number }; replayDuplicateOf?: number;
 }): boolean {
-  return record.caller.from === "systemRun" || record.replayDuplicateOf !== undefined ||
+  return record.caller.from === "systemRun" || record.caller.from === "operateAgent" ||
+      record.replayDuplicateOf !== undefined ||
       (record.workflowRun !== undefined && record.workflowRun.attempt > 1);
 }
 
