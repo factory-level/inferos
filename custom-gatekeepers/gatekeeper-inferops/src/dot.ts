@@ -122,8 +122,11 @@ export const DOT_UNREADABLE = "The Dot's reply couldn't be read. Ask again.";
  */
 export const DOT_KNOWLEDGE_WRITE_TOOLS = new Set(["knowledge_page_edit", "knowledge_page_create"]);
 
-/** What a knowledge write's card says the change does (FAC-136), word for word. */
+/** What a page edit's card says the change does (FAC-136), word for word. */
 export const DOT_KNOWLEDGE_WRITE_WORDS = "Your Dot will change this page as you, and readers see it right away.";
+
+/** What a new page's card says instead: the page doesn't exist until the change is made. */
+export const DOT_KNOWLEDGE_CREATE_WORDS = "Your Dot will create this page as you, and readers see it right away.";
 
 /**
  * The page (an edit) or the workspace (a create) a knowledge write proposal names by its link, or

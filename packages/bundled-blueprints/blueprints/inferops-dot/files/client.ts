@@ -7,9 +7,9 @@
 // is, under Needs your approval: nothing here approves or declines.
 // ---------------------------------------------------------------------------
 
-import { DECIDE_WHERE, failureWords, proposalWords } from "./lib/dot.ts";
+import { DECIDE_WHERE, failureWords, proposalHeading, proposalWords, stepWords } from "./lib/dot.ts";
 import type {
-  AskResult, DotProgress, Failure, GadgetStub, OpenResult, ShownConversation,
+  AskResult, Failure, GadgetStub, OpenResult, ShownConversation, ShownProgress, ShownProposal,
 } from "./lib/protocol.ts";
 
 // Defined by the Workshop's iframe bootstrap before this module runs: the stub of this gadget's
@@ -54,7 +54,8 @@ ol.messages { list-style: none; margin: 0; padding: 0; display: flex; flex-direc
 section.proposals h2 { font-size: 14px; margin: 0 0 6px; }
 section.proposals ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 section.proposals li { padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
-section.proposals .tool { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+section.proposals .tool, section.proposals .target { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+section.proposals .target { display: block; color: var(--muted); margin-top: 2px; }
 section.proposals .label { font-weight: 600; margin-right: 6px; }
 section.proposals .label.uncertain { color: var(--warn); }
 section.proposals .detail { color: var(--muted); }
@@ -121,14 +122,29 @@ function notice(failure: Failure, retry: () => void): HTMLElement {
     el("h2", {}, heading), el("p", {}, body), failure.reason === "not-connected" ? null : again);
 }
 
+/**
+ * A knowledge write's target (FAC-136), as text: the page's link for an edit (the proposal carries
+ * no current title), the workspace's for a create. A link names the target and grants nothing.
+ */
+function renderTarget(proposal: ShownProposal): HTMLElement | null {
+  const knowledge = proposal.knowledge;
+  if (!knowledge) return null;
+  if (knowledge.kind === "edit") {
+    return el("span", { class: "target" }, `Page: ${knowledge.page}`,
+      knowledge.newTitle ? ` · renamed to ${knowledge.newTitle}` : "");
+  }
+  return el("span", { class: "target" }, `In: ${knowledge.workspace}`);
+}
+
 function renderProposals(conversation: ShownConversation): HTMLElement | null {
   if (conversation.proposals.length === 0) return null;
   const list = el("ul", {});
   for (const proposal of conversation.proposals) {
-    const words = proposalWords(proposal.status);
+    const words = proposalWords(proposal.status, proposal.knowledge);
     list.append(el("li", {},
       el("span", { class: `label${proposal.status.outcome === "unknown" ? " uncertain" : ""}` }, words.label),
-      el("span", { class: "tool" }, proposal.tool),
+      el("span", { class: proposal.knowledge ? "heading" : "tool" }, proposalHeading(proposal)),
+      renderTarget(proposal),
       words.detail ? el("div", { class: "detail" }, words.detail) : null));
   }
   return el("section", { class: "proposals", "aria-label": "Changes your Dot proposed" },
@@ -144,8 +160,8 @@ function renderConversation(conversation: ShownConversation | null): void {
   main.replaceChildren();
   if (!conversation || conversation.messages.length === 0) {
     main.append(el("p", { class: "empty" },
-      "Ask your Dot about your work in this workspace. Any change it proposes waits for your decision. ",
-      DECIDE_WHERE));
+      "Ask your Dot about your work in this workspace, or about your company's knowledge: reading it changes nothing. ",
+      "Any change it proposes waits for your decision. ", DECIDE_WHERE));
     return;
   }
   const list = el("ol", { class: "messages" });
@@ -202,12 +218,15 @@ async function ask(text: string): Promise<void> {
   list.append(question, live);
   main.append(steps);
   const target = new (class extends RpcTarget {
-    progress(event: DotProgress): void {
+    progress(event: ShownProgress): void {
       if (mine !== generation) return;
       if (event.type === "text") live.append(event.delta);
-      else if (event.type === "tool") steps.textContent = event.status === "started" ? `Using ${event.name}…` : "";
-      else if (event.type === "proposal") steps.textContent = `Proposed a change (${event.proposal.tool}). ${DECIDE_WHERE}`;
-      else steps.textContent = event.message;
+      else if (event.type === "tool") steps.textContent = event.status === "started" ? stepWords(event.name) : "";
+      else if (event.type === "proposal") {
+        steps.textContent = event.proposal.knowledge
+          ? `Proposed ${proposalHeading(event.proposal).replace(/^A /, "a ")}. ${DECIDE_WHERE}`
+          : `Proposed a change (${event.proposal.tool}). ${DECIDE_WHERE}`;
+      } else steps.textContent = event.message;
     }
   })();
   let result: AskResult;

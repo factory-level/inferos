@@ -48,6 +48,10 @@ must be on. Without the binding, the gadget shows a "No Dot connected" notice.
   - uncertain: it may or may not have been made, so check in InferOps before asking for it again.
 
   Nothing here approves or declines.
+- **Company knowledge:**
+  - asking the Dot about your company's knowledge, and its reading it, changes nothing. While it reads, it says so;
+  - a change to a wiki page is listed as *A change to a wiki page*, with the page's link. A new page is listed as *A new wiki page* with its title, and the workspace's link. Either way the listing says your Dot will change or create the page as you, and that readers see it right away. Once made, it says readers see it now;
+  - nothing here publishes a page.
 - **Notices for each state:**
   - no Dot connected;
   - refused: your access, or a connection with no Dot;
