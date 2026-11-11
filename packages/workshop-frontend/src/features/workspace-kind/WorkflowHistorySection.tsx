@@ -6,6 +6,18 @@ import { WorkshopButton } from '../../components/WorkshopControls'
 
 type Load<T> = { status: 'loading' } | { status: 'error' } | { status: 'ready'; value: T }
 
+const overseerKeys = new WeakMap<object, number>()
+let nextOverseerKey = 0
+
+const keyForOverseer = (overseer: RpcStub<Overseer>) => {
+  let key = overseerKeys.get(overseer)
+  if (key === undefined) {
+    key = ++nextOverseerKey
+    overseerKeys.set(overseer, key)
+  }
+  return key
+}
+
 const outcome = (delivery: WorkflowDefinitionDelivery) => {
   if (delivery.result) return ({
     queued: 'Queued', running: 'Running', waiting: 'Waiting for approval', succeeded: 'Finished',
@@ -62,7 +74,7 @@ const DefinitionHistory = ({ overseer, definitionId }: {
 }
 
 /** Server-authorized discovery also finds retained history after a temporary definition is swept. */
-export const WorkflowHistorySection = ({ overseer }: { overseer: RpcStub<Overseer> }) => {
+const WorkflowHistoryForOverseer = ({ overseer }: { overseer: RpcStub<Overseer> }) => {
   const [retry, setRetry] = useState(0)
   const [definitions, setDefinitions] = useState<Load<WorkflowDefinitionHistoryRef[]>>({ status: 'loading' })
 
@@ -98,3 +110,7 @@ export const WorkflowHistorySection = ({ overseer }: { overseer: RpcStub<Oversee
     </section>
   )
 }
+
+export const WorkflowHistorySection = ({ overseer }: { overseer: RpcStub<Overseer> }) => (
+  <WorkflowHistoryForOverseer key={keyForOverseer(overseer)} overseer={overseer} />
+)

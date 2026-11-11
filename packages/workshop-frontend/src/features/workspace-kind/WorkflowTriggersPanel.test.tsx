@@ -147,6 +147,52 @@ describe('WorkflowTriggersPanel', () => {
     expect(container.querySelector('[role="status"]')).toBeNull()
   })
 
+  it("never renders the previous overseer's history after an identity switch in the same workspace", async () => {
+    const previousOverseer: Partial<Overseer> = {
+      listHooks: async () => [],
+      listReadableWorkflowHistories: async () => [{ definitionId: 'previous-person-definition' }],
+      listWorkflowDeliveries: async () => [
+        { hookId: 3, definitionId: 'previous-person-definition', revision: 4, commitId: 'a'.repeat(40), at: new Date(0), result: { outcome: 'succeeded', settledAt: new Date(1) } },
+      ],
+    }
+    await render(previousOverseer)
+    expect(container.textContent).toContain('previous-person-definition')
+    expect(container.textContent).toContain('Finished')
+
+    let resolveNextHistories!: (rows: Awaited<ReturnType<Overseer['listReadableWorkflowHistories']>>) => void
+    const nextOverseer: Partial<Overseer> = {
+      listHooks: async () => [],
+      listReadableWorkflowHistories: () => new Promise(resolve => { resolveNextHistories = resolve }),
+    }
+    const withDefaults: Partial<Overseer> = {
+      listWorkflowDefinitions: async () => [],
+      listReadableWorkflowHistories: async () => [],
+      getTriggerDefinition: async () => null,
+      listWorkflowDeliveries: async () => [],
+      listTriggerControls: async () => [],
+      listCollaborators: async () => [],
+      getTriggerAssignment: async () => ({ enabled: true, assignment: null }),
+      getGadget: (() => ({ listBindings: async () => [], [Symbol.dispose]: () => {} })) as unknown as Overseer['getGadget'],
+      ...nextOverseer,
+    }
+    await act(async () => {
+      root.render(
+        <WorkflowTriggersPanel
+          overseer={withDefaults as unknown as RpcStub<Overseer>}
+          gadgets={[]}
+          refreshKey=""
+          pendingActionCount={0}
+          onOpenActivity={() => {}}
+        />,
+      )
+    })
+
+    expect(container.textContent).not.toContain('previous-person-definition')
+    expect(container.textContent).not.toContain('Finished')
+    expect(container.querySelector('[role="status"]')?.textContent).toBe('Loading available run histories…')
+    await act(async () => { resolveNextHistories([]) })
+  })
+
   it('keeps discovery and per-definition failures distinct from empty, with retry', async () => {
     const listReadableWorkflowHistories = vi.fn<Overseer['listReadableWorkflowHistories']>()
       .mockRejectedValueOnce(new Error('hidden server detail'))
