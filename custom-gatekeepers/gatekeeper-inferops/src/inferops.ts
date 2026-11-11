@@ -156,6 +156,7 @@ import {
 import {
   DOT_ERROR_MAX, DOT_NEEDS_OWN_SIGN_IN, DOT_PROMPT_MAX, DOT_REF_MAX, DOT_UNREADABLE, assertDotEnabled,
   dotConversationNotFound, dotEnabled, dotProposalStatus, summarizeDotOutcome, whileDotEnabled,
+  DOT_KNOWLEDGE_WRITE_WORDS, dotKnowledgeTarget,
 } from "./dot";
 import { proposedIdOf } from "./dot-relay";
 import {
@@ -4521,12 +4522,22 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
       throw error;
     });
     if (joined) return;
+    // A knowledge write (FAC-136) is the person's own edit, live once made: its card says so, and
+    // names the page or workspace its link points at. No Dot tool publishes, so it never says that.
+    const knowledge = dotKnowledgeTarget(proposal.tool, proposal.input);
+    const describe = knowledge
+      ? this.binding.description(
+          `${DOT_KNOWLEDGE_WRITE_WORDS} Approving it makes the change once, with your InferOps ` +
+          `knowledge access checked again now in that page's workspace; declining it changes nothing. ` +
+          `It can't be approved after ${proposal.expiresAt}.`)
+          .inline(knowledge.label, knowledge.link)
+      : this.binding.description(
+          `Your Dot proposes this change in the InferOps workspace ${this.binding.host}. Approving it ` +
+          `makes it there once, as you, with your InferOps access checked again now; declining it ` +
+          `makes nothing. It can't be approved after ${proposal.expiresAt}.`);
     const receipt = await this.binding.submit(this.queue, actionId, {
-      title: sanitizeTitle(`Your Dot proposes: ${proposal.tool}`),
-      ...this.binding.description(
-        `Your Dot proposes this change in the InferOps workspace ${this.binding.host}. Approving it ` +
-        `makes it there once, as you, with your InferOps access checked again now; declining it ` +
-        `makes nothing. It can't be approved after ${proposal.expiresAt}.`)
+      title: sanitizeTitle(knowledge ? "Your Dot proposes a change to a wiki page" : `Your Dot proposes: ${proposal.tool}`),
+      ...describe
         .inline("Operation", proposal.tool)
         .verbatim("Arguments", JSON.stringify(proposal.input, null, 2))
         .finish(),
