@@ -28,9 +28,11 @@ function formatSuggestedResource(resourceUrl: string): string {
   }
 }
 
-// Renders the connection-wizard-style UI for a single gatekeeper binding: an account chooser
-// scoped to the binding's required resource type, plus the vendor-supplied resource configurator
-// iframe. The URL is collected from the iframe at submit time via `collectResourceUrl()`.
+/**
+ * Renders the connection-wizard-style UI for a single gatekeeper binding: an account chooser
+ * scoped to the binding's required resource type, plus the vendor-supplied resource configurator
+ * iframe. The URL is collected from the iframe at submit time via `collectResourceUrl()`.
+ */
 export const GatekeeperBindingField = ({
   title,
   binding,

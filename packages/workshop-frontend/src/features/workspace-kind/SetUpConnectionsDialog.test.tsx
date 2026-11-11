@@ -68,7 +68,7 @@ const api = vi.hoisted(() => ({
 }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: api, currentUser: { id: 'ada', name: 'Ada' } }) }))
 vi.mock('./useConnectedAccounts', () => ({ useConnectedAccounts: () => [] }))
-vi.mock('../../connectHandoff', () => ({ openConnectWindow: vi.fn() }))
+vi.mock('../../connectHandoff', () => ({ openConnectWindow: vi.fn<(flow: unknown) => Window>() }))
 
 const ADA = { type: 'user' as const, id: 'ada', name: 'Ada' }
 const revision = { revision: 1, source: { kind: 'gadget' as const, gadgetId: 3, commitId: 'a'.repeat(40) }, savedAt: new Date(0) }
