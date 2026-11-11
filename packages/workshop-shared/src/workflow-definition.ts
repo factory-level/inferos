@@ -10,6 +10,9 @@ import type { AiChatAuthorInfo, BlueprintBindingAssignment, WorkpieceId } from "
 /** Most workflow definitions one workspace stores. */
 export const MAX_WORKSPACE_WORKFLOW_DEFINITIONS = 32;
 
+/** ID-only discovery result for a workflow whose retained run history the viewer may read. */
+export type WorkflowDefinitionHistoryRef = { definitionId: string };
+
 /** Most saved revisions one workflow definition keeps. */
 export const MAX_WORKFLOW_DEFINITION_REVISIONS = 50;
 
@@ -288,6 +291,12 @@ export type WorkflowDefinitionDelivery = WorkflowDefinitionRef & {
   /** The commit named by the published revision at admission. */
   commitId: string;
   at: Date;
+  /**
+   * When this record is eligible for history expiry, computed by the server's configured retention
+   * policy. Null means it is still retained while live or its legacy expiry cannot be determined.
+   * Present on `listWorkflowDeliveries` responses; omitted on stored legacy records.
+   */
+  historyExpiresAt?: Date | null;
   /**
    * Present when a person asked for this run through the trigger's control (`invokeTrigger`): the
    * invocation and who asked. Who asked is a record of the request, never authority: the run is

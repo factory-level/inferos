@@ -12,7 +12,7 @@ import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
-  WorkflowDefinitionRights, WorkflowDefinitionShare,
+  WorkflowDefinitionRights, WorkflowDefinitionShare, WorkflowDefinitionHistoryRef,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
   WorkflowTriggerDefinitionRef, WorkflowDefinitionDuplicate, WorkflowRequiredBinding,
 } from "@gadgets/workshop-shared/workflow-definition";
@@ -44,7 +44,7 @@ import type { UserDirectoryDurableObject } from "./user-directory";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
-import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
+import { commandInputProblem, isReservedToolMethod, parseToolEnvelope, parseWidgetToolFile, plainJsonProblem, WIDGET_COMMANDS, WIDGET_TOOL_LIMITS, widgetToolValueProblem, type WidgetCommandName } from "@gadgets/workshop-shared/widget-tools";
 import { parseWorkflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
 import { WIDGET_STATES_FILE, parseWidgetStates, widgetEventsFrom, widgetStateKey, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
 import {
@@ -59,8 +59,8 @@ import {
 import { WorkspaceFlowStore } from "./flow-store";
 import { runIsolatedTool, ToolLane, type PendingToolFacetRecord, type ToolFacetTombstoneRecord, type ToolLaneSlot } from "./tool-lane";
 import {
-  beforeDeadline, CONSOLE_CHANGED_DURING_CALL, CONSOLE_TOOL_AUDIT_KEPT, CONSOLE_TOOL_DEADLINE_MS,
-  CONSOLE_TOOL_FAILED, ConsoleNotOpenError, framedToolListing, LISTING_TIMED_OUT, NO_CONSOLE_TOOL_ACCESS,
+  beforeDeadline, COMMAND_OTHER_COMPANY, CONSOLE_CHANGED_DURING_CALL, CONSOLE_TOOL_AUDIT_KEPT, CONSOLE_TOOL_DEADLINE_MS,
+  CONSOLE_TOOL_FAILED, ConsoleNotOpenError, ConsoleToolDeadlineError, framedToolListing, LISTING_TIMED_OUT, NO_CONSOLE_TOOL_ACCESS,
   thrownConsoleToolFailure, TOOL_SLOT_REFUSALS, TOOL_TIMED_OUT, UNVERIFIED_CONSOLE_TOOL_CALLER, untrustedFrame,
   type ConsoleToolAuditRecord, type ConsoleToolAuditStatus, type ConsoleToolCaller, type ConsoleToolCallRequest,
   type ConsoleToolListRequest, type ConsoleToolOutcome,
@@ -77,7 +77,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleEventMismatch, consoleScreenMove, consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type ConsoleDraftProblem, type ConsoleWidgetInstance, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { canonicalHostBoardTarget, consoleEventMismatch, consoleScreenMove, type ConsoleFrozenCommand, type ConsoleWidgetEntry, consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type ConsoleDraftProblem, type ConsoleWidgetInstance, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -1274,6 +1274,9 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
       return {type: "system", id: "hook"};
     case "systemRun":
       return {type: "system", id: `systemRun:${caller.hookId}`};
+    case "operateAgent":
+      // FAC-14 K2: the operate agent, for the person, who is named only as an opaque id.
+      return {type: "agent", id: await opaqueExportActorId(`operateAgent:${caller.profileId}`, exportSalt, true)};
   }
 }
 
@@ -1708,7 +1711,13 @@ function actionOriginOf(record: ActionRecord & {type: "action"},
       ...(run.requestedBy !== undefined ? {requestedBy: run.requestedBy} : {}),
       ...(triggerLabel ? {triggerLabel} : {})};
   }
-  return (record.caller as GatekeeperCaller | undefined)?.from === "agent" ? {kind: "agent-turn"} : undefined;
+  // An agent's turn proposed it: a chat's agent here, or the operate agent's request for a person
+  // (FAC-14 K2), which names that person for the decider.
+  let caller = record.caller as GatekeeperCaller | undefined;
+  if (caller?.from === "operateAgent") {
+    return {kind: "agent-turn", onBehalfOf: {profileId: caller.profileId, name: caller.name ?? caller.profileId}};
+  }
+  return caller?.from === "agent" ? {kind: "agent-turn"} : undefined;
 }
 
 /**
@@ -1729,7 +1738,9 @@ export function actionRecordToLog(record: ActionRecord,
   // before callers were tracked have no `caller`, so their entries carry no `requestedBy`.
   const from = (record.caller as GatekeeperCaller | undefined)?.from;
   // A trigger's assigned run (FAC-102) is the trigger's automation, like any other hook firing.
-  const requestedBy = from === "user" ? "person" : from === "systemRun" ? "hook" : from;
+  // The operate agent's request for a person (FAC-14 K2) is the agent's, as any agent's write is.
+  const requestedBy = from === "user" ? "person" : from === "systemRun" ? "hook"
+      : from === "operateAgent" ? "agent" : from;
 
   switch (record.type) {
     case "observation":
@@ -2490,6 +2501,15 @@ type SessionKind = CollaboratorRole | "owner";
 // whether the caller checked out (only then is it recorded), whether the tool's code ran, and the
 // frozen commit and declared tool it found.
 type ConsoleToolAttempt = {verified: boolean, ran: boolean, commitId: string | null, tool: string | null};
+
+// What a requested command (FAC-14 K2) asks of an InferOps board connection's session: its issue's
+// transition, which stages the write and submits it pending. Structural, so the kernel names only
+// the two calls it makes.
+type InferOpsBoardCommandSession = {
+  openIssue(issueId: string): Promise<{
+    transition(toStateId: string, expectedRevision: string): Promise<unknown>;
+  } & Disposable>;
+} & Disposable;
 
 // A console tool refusal or failure, with kernel text only.
 function consoleToolFailure(reason: string): ConsoleToolOutcome {
@@ -4010,7 +4030,8 @@ class OverseerImpl implements AgentHooks {
       }
       commits.set(commitId, { classification,
         viewText: classification.class === "viewOnly" ? files.get(GADGET_VIEW_FILE) ?? null : null,
-        tools: callable ? parseWidgetTools(files.get(GADGET_TOOLS_FILE)!) : null, states, statesProblem });
+        ...(callable ? parseWidgetToolFile(files.get(GADGET_TOOLS_FILE)!) : {tools: null, commands: null}),
+        states, statesProblem });
     }
     return commits;
   }
@@ -7872,6 +7893,8 @@ class OverseerImpl implements AgentHooks {
   startGatekeeperSession(target: BindingLoopbackTarget, caller: GatekeeperCaller): Promise<any> {
     // A run-scoped worker's binding: only the assigned connection's system session (FAC-102).
     if (caller.from === "systemRun") return openSystemRunSession(this.#systemRunHost(), target, caller);
+    // The operate agent's request (FAC-14 K2) opens its one session directly, never a binding.
+    if (caller.from === "operateAgent") throw new Error("No binding acts for the operate agent.");
     // An unassigned requested run's binding: its gadget's own session, live only while the run runs (FAC-112).
     if (caller.from === "gadget" && caller.run) {
       return openGadgetRunSession(this.#systemRunHost(), target, caller as GadgetRunCaller);
@@ -8034,7 +8057,8 @@ class OverseerImpl implements AgentHooks {
     try {
       if (caller.from === "agent") {
         this.#getOrCreateCapturedActions(caller.chatId).actions.push(actionId);
-      } else if (caller.from !== "hook" && caller.from !== "systemRun" && caller.chatId !== undefined &&
+      } else if (caller.from !== "hook" && caller.from !== "systemRun" && caller.from !== "operateAgent" &&
+                 caller.chatId !== undefined &&
                  this.ownerId) {
         let owner = this.users.get(this.users.idFromString(this.ownerId));
         let userMeta = await owner.getChatContext(null);
@@ -12992,6 +13016,24 @@ class OverseerImpl implements AgentHooks {
     return open;
   }
 
+  /**
+   * Why a builder may not bind a widget's command of template `command` to connection
+   * `gatekeeperId` (FAC-14 K2), or null when they may: it must be one of this workspace's own
+   * connections, of the kind the template needs. For the transition, that is an InferOps board:
+   * the `inferops` vendor's connection whose resource is a project board. Publication checks it;
+   * a request checks the frozen binding again (#requestConsoleCommand).
+   */
+  consoleCommandRefusal(gatekeeperId: WorkpieceId, command: WidgetCommandName): string | null {
+    let record = Number.isSafeInteger(gatekeeperId) ? this.storage.gatekeepers.get(gatekeeperId) : undefined;
+    if (!record) return `Connection ${gatekeeperId} is not one of this workspace's.`;
+    if (WIDGET_COMMANDS[command]?.connection !== "inferops.project-board" ||
+        gatekeeperVendorId(record) !== "inferops" ||
+        canonicalHostBoardTarget(gatekeeperResourceUrl(record) ?? "") === null) {
+      return `Connection ${gatekeeperId} is not an InferOps board, which this command needs.`;
+    }
+    return null;
+  }
+
   #consoleStore(): WorkspaceConsoleStore {
     if (!this.ownerId) throw new Error("Workspace has been deleted.");
     return new WorkspaceConsoleStore(this.ctx.storage, this.storage, this.env, this.frozenInstalls());
@@ -13168,8 +13210,16 @@ class OverseerImpl implements AgentHooks {
           return [];
         }
       });
-      return tools.length > 0 ? [{widgetId: entry.gadgetId, gateway: "callConsoleTool" as const,
-        untrusted: framedToolListing(entry, tools), tools: tools.map(({name, input}) => ({name, input}))}] : [];
+      // Bound commands (FAC-14 K2), each still offered as its publication froze it.
+      let commands = (entry.frozen?.commands ?? []).flatMap(bound => {
+        try {
+          return [store.offeredCommand(consoleId, revision, entry.gadgetId, bound.name).command];
+        } catch {
+          return [];
+        }
+      });
+      return tools.length + commands.length > 0 ? [{widgetId: entry.gadgetId, gateway: "callConsoleTool" as const,
+        untrusted: framedToolListing(entry, tools, commands), tools: tools.map(({name, input}) => ({name, input}))}] : [];
     });
     let view = shown.views.find(view => view.id === open.viewId);
     let screenId = open.screenId ?? (view?.type === "screen" ? view.screen : null);
@@ -13247,7 +13297,15 @@ class OverseerImpl implements AgentHooks {
     try {
       offered = store.offeredTool(consoleId, revision, gadgetId, request.tool);
     } catch (error) {
-      return consoleToolFailure((error as Error).message);
+      // Not a read tool: a command the builder bound (FAC-14 K2) is requested, never run.
+      let command;
+      try {
+        command = store.offeredCommand(consoleId, revision, gadgetId, request.tool);
+      } catch {
+        return consoleToolFailure((error as Error).message);
+      }
+      return await this.#requestConsoleCommand(caller, user, request, deadlineAt, generation, sharing,
+          command.entry, command.command, attempt);
     }
     try {
       await beforeDeadline(this.consoleSessionCheck(user, consoleId, revision), deadlineAt);
@@ -13319,6 +13377,100 @@ class OverseerImpl implements AgentHooks {
     return envelope.t === "ok"
         ? {status: "ok", text: untrustedFrame(entry, {...payload, output: envelope.v})}
         : {status: "error", text: untrustedFrame(entry, {...payload, error: envelope.m})};
+  }
+
+  /**
+   * Requests one command the published console offers (FAC-14 K2), for `caller`, once
+   * #invokeConsoleTool has verified them, found their role here and pinned the generation: no
+   * authored code runs. The input must match the command's template (`commandInputProblem`); the
+   * frozen connection must still be one this command may use (`consoleCommandRefusal`); the
+   * person's company, read from their own accounts, must be the connection's own; and the caller's
+   * page must still show this revision. Then, with no await, the generation, role and offer are
+   * checked again before the connection's gatekeeper is asked, in a session of its own whose caller
+   * is the operate agent for this person (`{from: "operateAgent"}`). The gatekeeper stages the write
+   * and submits it pending: never applied here and never auto-approved (`manualOnly`), it is decided
+   * by this workspace's deciders as any other approval. The result is framed as untrusted.
+   */
+  async #requestConsoleCommand(caller: ConsoleToolCaller, user: DurableObjectStub<UserDurableObject>,
+      request: ConsoleToolCallRequest, deadlineAt: number, generation: number, sharing: SharingManager,
+      entry: ConsoleWidgetEntry, command: ConsoleFrozenCommand, attempt: ConsoleToolAttempt)
+      : Promise<ConsoleToolOutcome> {
+    let {consoleId, revision, gadgetId} = request;
+    attempt.commitId = entry.frozen!.commitId;
+    attempt.tool = command.name;
+    if (new TextEncoder().encode(request.inputJson).byteLength > WIDGET_TOOL_LIMITS.inputBytes) {
+      return consoleToolFailure(`The tool input is over ${WIDGET_TOOL_LIMITS.inputBytes} bytes.`);
+    }
+    let input: unknown;
+    try {
+      input = JSON.parse(request.inputJson);
+    } catch {
+      return consoleToolFailure("The tool input is not JSON.");
+    }
+    let problem = commandInputProblem(command.command, input);
+    if (problem !== null) return consoleToolFailure(`The tool input does not match tool ${command.name}: ${problem}.`);
+    let {issueId, toStateId, expectedRevision} = input as {issueId: string, toStateId: string, expectedRevision: string};
+    // The person's display name, for the decider (ActionContext.onBehalfOf): their own profile's.
+    let personName = (await beforeDeadline(user.whoami(), deadlineAt)).name;
+    let refusal = this.consoleCommandRefusal(command.gatekeeperId, command.command);
+    if (refusal) return consoleToolFailure(`Tool ${command.name} cannot be requested now: ${refusal}`);
+
+    // The person's company, from their own accounts, and the connection's own: equal, or nothing is
+    // asked. With no shared-configuration vendor the deployment is one company (FAC-160).
+    let facet = this.getGatekeeperFacet(command.gatekeeperId) as unknown as
+        Fetcher<Gatekeeper<InferOpsBoardCommandSession>> & {connectionCompany(): Promise<string | null>};
+    if (getSharedConfigurationGatekeeper(this.env)) {
+      let [personCompany, connectionCompany] = await beforeDeadline(
+          Promise.all([user.currentPresentationCompany(), facet.connectionCompany()]), deadlineAt);
+      if (!personCompany || !connectionCompany || personCompany !== connectionCompany) {
+        return consoleToolFailure(COMMAND_OTHER_COMPANY);
+      }
+    }
+    try {
+      await beforeDeadline(this.consoleSessionCheck(user, consoleId, revision), deadlineAt);
+    } catch (error) {
+      // Nothing has been asked yet, so the check's own refusal is passed on, as before a tool runs.
+      if (error instanceof ConsoleNotOpenError) return consoleToolFailure(error.message);
+      throw error;
+    }
+    // The final check, with no await before the gatekeeper is asked.
+    let current = sharing.getEffectiveRole(caller.profileId);
+    let stillOffered = () => {
+      try {
+        let found = this.#consoleStore().offeredCommand(consoleId, revision, gadgetId, command.name).command;
+        return found.gatekeeperId === command.gatekeeperId && found.command === command.command;
+      } catch {
+        return false;
+      }
+    };
+    if (this.authzGeneration() !== generation || !current || roleRank(current) < roleRank("use") ||
+        !stillOffered()) {
+      return consoleToolFailure(CONSOLE_CHANGED_DURING_CALL);
+    }
+    if (Date.now() >= deadlineAt) return consoleToolFailure(TOOL_TIMED_OUT);
+
+    attempt.ran = true;
+    let requester: GatekeeperCaller = {from: "operateAgent", userId: caller.userId, profileId: caller.profileId,
+      sessionWorkspaceId: caller.sessionWorkspaceId, name: personName};
+    let payload = {widgetId: entry.gadgetId, tool: command.name};
+    let receipt;
+    try {
+      using session = await beforeDeadline(
+          this.openGatekeeperSession(command.gatekeeperId, facet, requester), deadlineAt) as unknown as
+          InferOpsBoardCommandSession;
+      using issue = await beforeDeadline(session.openIssue(issueId), deadlineAt);
+      receipt = await beforeDeadline(issue.transition(toStateId, expectedRevision), deadlineAt);
+    } catch (error) {
+      if (error instanceof ConsoleToolDeadlineError) throw error;
+      // The board's answer (a stale revision, an unknown state), written by its gatekeeper; still
+      // framed as untrusted, since it may quote what the board holds.
+      let message = error instanceof Error ? error.message.slice(0, WIDGET_TOOL_LIMITS.errorLength) : "";
+      return {status: "error", text: untrustedFrame(entry, {...payload, error: message || "The board refused the request."})};
+    }
+    let output = receipt == null
+        ? {requested: false, reason: "The issue is already in that state; nothing was requested."}
+        : {requested: true, decision: "pending", note: "A person decides it in Needs your approval."};
+    return {status: "ok", text: untrustedFrame(entry, {...payload, output})};
   }
 
   #recordConsoleToolAudit(record: Omit<ConsoleToolAuditRecord, "seq">): void {
@@ -14674,6 +14826,23 @@ type GatekeeperCaller = {
   from: "systemRun";
   hookId: number;
   deliveryId: number;
+} | {
+  // A command the operate agent requested on a person's behalf (FAC-14 K2): set only by the
+  // console's workspace, in #requestConsoleCommand, once the person checked out there. Never a chat
+  // of this workspace's (the agent's chat lives in the operate session workspace), so nothing here
+  // reads a chat for it; and never auto-approved (manualOnly).
+  from: "operateAgent";
+  /** The person's user Durable Object id, verified as their profile's. */
+  userId: string;
+  /** The person's profile id. */
+  profileId: string;
+  /** Their operate session workspace, where the agent asked. */
+  sessionWorkspaceId: string;
+  /**
+   * Their profile's display name when they asked, as `whoami` gave it: shown to the decider
+   * (`ActionContext.onBehalfOf`), never authority. Absent on no record written before it was kept.
+   */
+  name?: string;
 };
 
 type GatekeeperLoopbackProps = {
@@ -15391,6 +15560,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]> {
     return this.impl.workflowDefinitionStore().deliveries((await this.#getClientProfile()).id, definitionId, "build");
   }
+  /** Discover only history IDs this build caller may read, including definitions already swept. */
+  async listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]> {
+    let viewer = await this.#getClientProfile();
+    return this.impl.workflowDefinitionStore().listReadableWorkflowHistories(viewer.id, "build");
+  }
   // A control lets named people run a pinned trigger now; setting one is building. Running one is
   // the listed person's own request, checked against the authenticated session's profile.
   async setTriggerControl(hookId: number, settings: TriggerControlSettings | null): Promise<TriggerControl | null> {
@@ -15480,7 +15654,8 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let commits = await this.impl.readSourceCommits(capture.commitIds);
     // Who publishes is recorded with the publication (FAC-99), by id and name only.
     let profile = await this.#getClientProfile();
-    let published = store.publish(id, expectedRevision, capture, commits, { id: profile.id, name: profile.name });
+    let published = store.publish(id, expectedRevision, capture, commits, { id: profile.id, name: profile.name },
+        (gatekeeperId, command) => this.impl.consoleCommandRefusal(gatekeeperId, command));
     this.impl.announceConsoleRevision(id, published.revision);
     await this.#indexConsoleWidgets(id, published);
     return published;
@@ -18187,6 +18362,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
+  async listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]> { this.#deny(); }
   // An operator listed on a trigger's control may ask it to run, and sees only those controls; it
   // configures nothing (FAC-102, inferops ADR 0011 S6).
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
@@ -18865,6 +19041,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
+  async listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]> { this.#deny(); }
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
   async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
   async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }

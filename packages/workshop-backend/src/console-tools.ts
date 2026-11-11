@@ -10,8 +10,8 @@
 // as parseWidgetTools admits them), and never any other authored text or an exception's text.
 
 import type { WorkpieceId } from "@gadgets/workshop-shared/api";
-import type { ConsoleWidgetEntry, OperateConsoleRead } from "@gadgets/workshop-shared/operate-console";
-import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
+import type { ConsoleFrozenCommand, ConsoleWidgetEntry, OperateConsoleRead } from "@gadgets/workshop-shared/operate-console";
+import { WIDGET_COMMANDS, type WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { ToolLaneRefusal } from "./tool-lane";
 
 /** The absolute deadline of one listing or call, counted from when the operate session starts it. */
@@ -97,6 +97,12 @@ export type ConsoleToolAuditRecord = {
 export const CONSOLE_CHANGED_DURING_CALL = "The console changed or your access ended during the call.";
 
 /**
+ * The kernel's answer when a requested command's connection is another company's than the person's
+ * (FAC-14 K2), or either company can't be told: nothing is asked of the connection.
+ */
+export const COMMAND_OTHER_COMPANY = "This command's connection is not in the company you work in now.";
+
+/**
  * `payload` as the agent receives it: the fixed line marking it as untrusted output of the widget
  * `entry` names, then the payload as JSON (§4.8.1).
  */
@@ -107,13 +113,20 @@ export function untrustedFrame(entry: Pick<ConsoleWidgetEntry, "label" | "versio
 
 /**
  * One widget's tools, framed: its id, label, blueprint, version and frozen commit, and each tool's
- * name, description and input schema. Methods and output schemas are not listed.
+ * name, description and input schema. Methods and output schemas are not listed. Its bound
+ * commands (FAC-14 K2), when it has some, follow: each command's name, description, the input its
+ * template takes, and that it is only a request a person approves. Connections are not listed.
  */
-export function framedToolListing(entry: ConsoleWidgetEntry, tools: readonly WidgetToolDeclaration[]): string {
+export function framedToolListing(entry: ConsoleWidgetEntry, tools: readonly WidgetToolDeclaration[],
+    commands: readonly ConsoleFrozenCommand[] = []): string {
   return untrustedFrame(entry, {
     widgetId: entry.gadgetId, label: entry.label, blueprintId: entry.blueprintId, version: entry.version,
     commitId: entry.frozen?.commitId ?? null,
     tools: tools.map(({ name, description, input }) => ({ name, description, input })),
+    ...(commands.length === 0 ? {} : { commands: commands.map(({ name, description, command }) => ({
+      name, description, effect: "request", input: WIDGET_COMMANDS[command].input,
+      note: "Calling it only asks: a person approves or rejects it, and nothing changes until then.",
+    })) }),
   });
 }
 

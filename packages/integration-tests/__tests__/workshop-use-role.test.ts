@@ -129,6 +129,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
+  // Run-history discovery is a build-only read; use collaborators cannot enumerate definitions.
+  listReadableWorkflowHistories: ws => ws.listReadableWorkflowHistories(),
   setTriggerControl: ws => ws.setTriggerControl(1, null),
   // Choosing what a trigger's runs execute as is building, and Admin-only (FAC-102).
   setTriggerAssignment: ws => ws.setTriggerAssignment(1, null),

@@ -1,7 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
   RESERVED_TOOL_METHODS, RESERVED_TOOL_MODULES, WIDGET_TOOL_LIMITS, WIDGET_TOOLS_FILE, isReservedToolMethod,
-  parseToolEnvelope, parseWidgetTools, plainJsonProblem, widgetToolValueProblem, type WidgetToolSchema,
+  WIDGET_COMMANDS, commandInputProblem, parseToolEnvelope, parseWidgetToolFile, parseWidgetTools,
+  plainJsonProblem, widgetToolValueProblem, type WidgetToolSchema,
 } from "./widget-tools";
 
 const NO_INPUT = { type: "object", properties: {} };
@@ -57,7 +58,7 @@ describe("parseWidgetTools: the file", () => {
     ["an unknown field", file(tool({ trigger: "daily" })), /tool 1 has "trigger", which is not supported/],
     ["a bad name", file(tool({ name: "Open count" })), /tool 1's name must be/],
     ["a name over 48 characters", file(tool({ name: `a${"b".repeat(48)}` })), /tool 1's name must be/],
-    ["a write effect", file(tool({ effect: "write" })), /effect must be "read"/],
+    ["an unknown effect", file(tool({ effect: "delete" })), /effect must be "read" or "write"/],
     ["a bad method", file(tool({ method: "open-count" })), /method must be/],
   ])("refuses %s", (_name, text, message) => {
     expect(() => parseWidgetTools(text)).toThrow(message);
@@ -443,5 +444,64 @@ describe("parseToolEnvelope", () => {
     expect(parseToolEnvelope(envelope({ t: "ok", v: full }), rows)).toEqual({ t: "ok", v: full });
     const wide = Array.from({ length: 64 }, () => "\u3000".repeat(256));
     expect(() => parseToolEnvelope(envelope({ t: "ok", v: wide }), rows)).toThrow(/^the result is over 16384 bytes$/);
+  });
+});
+
+// FAC-14 K2: a declared command. It names a kernel command template and nothing else: no method
+// (no authored code runs), and no input or output (the template owns both).
+const command = (overrides: Record<string, unknown> = {}) => ({
+  name: "moveIssue", description: "Ask to move an issue on the board.", effect: "write",
+  command: "inferops.issue.transition", ...overrides,
+});
+
+describe("parseWidgetToolFile: declared commands (FAC-14)", () => {
+  test("reads a command beside a read tool; parseWidgetTools returns the read tools only", () => {
+    const text = file(tool(), command());
+    expect(parseWidgetToolFile(text)).toEqual({
+      tools: [parseWidgetTools(file(tool()))[0]],
+      commands: [{ name: "moveIssue", description: "Ask to move an issue on the board.", effect: "write",
+        command: "inferops.issue.transition" }],
+    });
+    expect(parseWidgetTools(text)).toEqual(parseWidgetTools(file(tool())));
+  });
+
+  test("names the one command template K2 offers", () => {
+    expect(Object.keys(WIDGET_COMMANDS)).toEqual(["inferops.issue.transition"]);
+  });
+
+  test.each([
+    ["an unknown template", file(command({ command: "inferops.issue.delete" })), /command must be one of/],
+    ["a method", file(command({ method: "move" })), /has "method", which is not supported/],
+    ["an input", file(command({ input: NO_INPUT })), /has "input", which is not supported/],
+    ["an output", file(command({ output: OUTPUT })), /has "output", which is not supported/],
+    ["no template", file({ ...command(), command: undefined }), /has no "command"/],
+    ["a name a read tool has", file(tool({ name: "moveIssue", method: "moveIssue" }), command()), /two tools are named "moveIssue"/],
+    ["a bad name", file(command({ name: "Move issue" })), /name must be/],
+    ["a description with a control character", file(command({ description: "a\u0007b" })), /description/],
+  ])("refuses a command with %s", (_name, text, message) => {
+    expect(() => parseWidgetToolFile(text)).toThrow(message);
+  });
+});
+
+describe("commandInputProblem: the transition's input (FAC-14)", () => {
+  const input = { issueId: "0d9a4b1e-2c3f-4a5b-8c6d-7e8f9a0b1c2d", toStateId: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+    expectedRevision: "42" };
+
+  test("accepts an issue, a state and a decimal revision", () => {
+    expect(commandInputProblem("inferops.issue.transition", input)).toBeNull();
+  });
+
+  test.each([
+    ["a missing field", { issueId: input.issueId, toStateId: input.toStateId }],
+    ["an extra field", { ...input, title: "x" }],
+    ["a non-decimal revision", { ...input, expectedRevision: "4.2" }],
+    ["a revision with a leading zero", { ...input, expectedRevision: "042" }],
+    ["a number for the revision", { ...input, expectedRevision: 42 }],
+    ["an issue id with a slash", { ...input, issueId: "a/../b" }],
+    ["an issue id over 64 characters", { ...input, issueId: "a".repeat(65) }],
+    ["an empty state", { ...input, toStateId: "" }],
+    ["not an object", ["x"]],
+  ])("refuses %s", (_name, value) => {
+    expect(commandInputProblem("inferops.issue.transition", value)).not.toBeNull();
   });
 });

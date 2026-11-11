@@ -7,9 +7,9 @@ import {
   canvasWidgetEventsHeard, formatCanvasTarget, type CanvasPage,
 } from "@gadgets/workshop-shared/canvas-model";
 import { CANVAS_READ, joinStoredPage, nestedPage, readCanvasDefinition, splitStoredPage, type StoredPagePrompt } from "./canvas-store";
-import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleDraftProblem, type ConsoleWidgetFreeze, type EmbeddedConsoleWidget, type ConsoleWidgetInstance, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleScreens, consoleWidgetVersionId, MAX_WORKSPACE_CONSOLES, parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleRef, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetEntry, type ConsolePublishedApp, type ConsoleDraftProblem, type ConsoleWidgetFreeze, type ConsoleFrozenCommand, type EmbeddedConsoleWidget, type ConsoleWidgetInstance, type ConsolePublisher, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow } from "@gadgets/workshop-shared/operate-flow";
-import type { WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
+import type { WidgetCommandDeclaration, WidgetCommandName, WidgetToolDeclaration } from "@gadgets/workshop-shared/widget-tools";
 import type { WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
 import type { GadgetFileClassification } from "@gadgets/workshop-shared/workspace-kind";
 import { readWorkspaceConfiguration } from "./workspace-configuration";
@@ -42,6 +42,8 @@ export type SourceCommit = {
   viewText: string | null;
   /** The parsed `tools.json`, for a `callableTools` or `callableCombined` commit; otherwise null. */
   tools: WidgetToolDeclaration[] | null;
+  /** The commands that `tools.json` declares (FAC-14 K2), when it parses; otherwise null. */
+  commands: WidgetCommandDeclaration[] | null;
   /** The parsed `states.json` of a widget that declares one; otherwise null. */
   states: WidgetStateMachine | null;
   /** Why a present `states.json` doesn't parse, which refuses the widget; otherwise null. */
@@ -492,11 +494,31 @@ function captureConsole(storage: Pick<ConsoleStorage, "gadgets" | "canvases" | "
     commitIds: [...new Set(registered.filter(commitId => commitId !== null))], screens, apps: placedApps(storage, stored) };
 }
 
-// The surfaces a published widget entry freezes from its source commit: whether it has a UI, and
-// its declared tools when it has some (`commits` holds none while console tools are off).
-function frozenSurfaces(commit: SourceCommit): Pick<ConsoleWidgetFreeze, "ui" | "tools" | "states"> {
+/**
+ * Why a builder may not bind a command of template `command` to connection `gatekeeperId` of this
+ * workspace (FAC-14 K2), or null when they may. The workspace supplies it at publication.
+ */
+export type CommandBindingRefusal = (gatekeeperId: WorkpieceId, command: WidgetCommandName) => string | null;
+
+// The surfaces a published widget entry freezes from its source commit: whether it has a UI, its
+// declared tools when it has some (`commits` holds none while console tools are off), and the
+// commands its builder bound (FAC-14 K2), each checked by `commandRefusal`. A binding of a command
+// the commit doesn't declare, or one the check refuses, refuses the publication.
+function frozenSurfaces(commit: SourceCommit, entry: ConsoleWidgetEntry, commandRefusal?: CommandBindingRefusal)
+    : Pick<ConsoleWidgetFreeze, "ui" | "tools" | "states" | "commands"> {
+  let commands = (entry.commands ?? []).map((binding): ConsoleFrozenCommand => {
+    let declared = commit.commands?.find(command => command.name === binding.name);
+    if (!declared) {
+      throw new Error(`Console widget "${entry.label}": command ${binding.name} is not one its widget declares.`);
+    }
+    let refusal = commandRefusal ? commandRefusal(binding.gatekeeperId, declared.command)
+        : "Commands cannot be bound here.";
+    if (refusal) throw new Error(`Console widget "${entry.label}": command ${binding.name}: ${refusal}`);
+    return { ...declared, gatekeeperId: binding.gatekeeperId };
+  });
   return { ui: !hasNoUi(commit), ...(commit.tools === null ? {} : { tools: commit.tools }),
-    ...(commit.states === null ? {} : { states: commit.states }) };
+    ...(commit.states === null ? {} : { states: commit.states }),
+    ...(commands.length === 0 ? {} : { commands }) };
 }
 
 /**
@@ -519,8 +541,9 @@ function frozenSurfaces(commit: SourceCommit): Pick<ConsoleWidgetFreeze, "ui" | 
  */
 export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateConsole, publishedAt: string,
     frozen?: FrozenInstalls, commits?: SourceCommits,
-    options: { publishedBy?: ConsolePublisher; checkWidgets?: boolean } = {}): OperateConsole {
-  let { publishedBy, checkWidgets = false } = options;
+    options: { publishedBy?: ConsolePublisher; checkWidgets?: boolean; commandRefusal?: CommandBindingRefusal } = {})
+    : OperateConsole {
+  let { publishedBy, checkWidgets = false, commandRefusal } = options;
   let { id, revision, published: _, ...content } = stored;
   checkConsoleWidgets(storage, content, commits);
   let screens = publishedPages(storage, content, checkWidgets, commits);
@@ -545,7 +568,7 @@ export function publishConsoleRecord(storage: ConsoleStorage, stored: OperateCon
   let frozenIds = new Map<WorkpieceId, WorkpieceId>();
   let widgets = entries.map((entry): ConsoleWidgetEntry => {
     let source = storage.gadgets.get(entry.gadgetId) as GadgetRecord;
-    let surfaces = frozenSurfaces(commits!.get(source.commitId!)!);
+    let surfaces = frozenSurfaces(commits!.get(source.commitId!)!, entry, commandRefusal);
     let made = frozen!.create(source, { consoleId: id, revision, sourceGadgetId: source.id });
     frozenIds.set(source.id, made.id);
     return { ...entry, gadgetId: made.id, frozen: { sourceGadgetId: source.id, commitId: made.commitId!, ...surfaces } };
@@ -1174,6 +1197,22 @@ export class WorkspaceConsoleStore {
   }
 
   /**
+   * The command named `name` of the widget `gadgetId` (FAC-14 K2), as console `consoleId`'s
+   * published revision `revision` froze it: declared by the widget and bound by the builder, with
+   * the connection it was bound to. Throws while console tools are off, or if the widget is not
+   * offered or offers no such bound command, a declared but unbound one included. The name is the
+   * caller's, so no message repeats it.
+   */
+  offeredCommand(consoleId: string, revision: string, gadgetId: WorkpieceId, name: string)
+      : { entry: ConsoleWidgetEntry; command: ConsoleFrozenCommand } {
+    if (!consoleToolsEnabled(this.env)) throw new Error(CONSOLE_TOOLS_OFF);
+    let entry = this.offeredWidget(consoleId, revision, gadgetId);
+    let bound = entry.frozen?.commands?.find(candidate => candidate.name === name);
+    if (!bound) throw new Error(`Widget ${gadgetId} of console ${consoleId} offers no tool by that name.`);
+    return { entry, command: bound };
+  }
+
+  /**
    * What publishing console `id` at `expectedRevision` would freeze, as it is now (see
    * `ConsoleCapture`). The caller reads `commitIds` (see `SourceCommits`) and passes both to
    * `publish`.
@@ -1205,7 +1244,7 @@ export class WorkspaceConsoleStore {
    * recorded as who published it (FAC-99); every screen must still parse (see `publishedPages`).
    */
   publish(id: string, expectedRevision: string, capture?: ConsoleCapture, commits?: SourceCommits,
-      publishedBy?: ConsolePublisher): OperateConsole {
+      publishedBy?: ConsolePublisher, commandRefusal?: CommandBindingRefusal): OperateConsole {
     this.#requireEnabled();
     return this.durableStorage.transactionSync(() => {
       let current = this.#current(id, expectedRevision);
@@ -1225,7 +1264,7 @@ export class WorkspaceConsoleStore {
       let raised = { ...current, revision: String(BigInt(current.revision) + 1n) };
       let surfaces = commits && (consoleToolsEnabled(this.env) ? commits : withoutTools(commits));
       return publishConsoleRecord(this.storage, raised, new Date().toISOString(), this.frozen, capture && surfaces,
-          { checkWidgets: true, ...(publishedBy ? { publishedBy } : {}) });
+          { checkWidgets: true, ...(publishedBy ? { publishedBy } : {}), ...(commandRefusal ? { commandRefusal } : {}) });
     });
   }
 
@@ -1282,5 +1321,5 @@ export class WorkspaceConsoleStore {
 
 // `commits` with no tools: what publication freezes while console tools are off.
 function withoutTools(commits: SourceCommits): SourceCommits {
-  return new Map([...commits].map(([commitId, commit]) => [commitId, { ...commit, tools: null }]));
+  return new Map([...commits].map(([commitId, commit]) => [commitId, { ...commit, tools: null, commands: null }]));
 }

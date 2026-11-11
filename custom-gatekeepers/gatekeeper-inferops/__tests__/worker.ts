@@ -687,6 +687,15 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     }
   }
 
+  /** The company of a binding `bindAccount` or `bindSystem` made under `name` (FAC-14 K2), or its failure. */
+  async boundConnectionCompany(name: string): Promise<string | null | { failed: string }> {
+    try {
+      return await this.#bound(name).connectionCompany();
+    } catch (error) {
+      return { failed: messageOf(error) };
+    }
+  }
+
   #bound(name: string) {
     const cls = this.#minted.get(name);
     if (!cls) throw new Error(`No binding named ${name}.`);

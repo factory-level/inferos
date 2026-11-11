@@ -248,6 +248,13 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
   connected person or for a session `INFEROPS_COMPANY` doesn't admit, and a malformed
   `INFEROPS_COMPANY` throws. `__tests__/account.test.ts` ("the company the person works in")
   covers it.
+- **Connection company (FAC-14 K2).** `InferOpsProjectGatekeeper.connectionCompany()` names the
+  company a board connection acts in: its connected account's stored tenant id, lowercased, read the
+  same way and without a request to InferOps. The Workshop compares it with the person's before a
+  widget's declared command is requested on the connection (see
+  [Operate mode](operate-mode.md#declared-commands)). It is null for a connection without a connected
+  account (the demo board, the stopgap connection, a system run's) or one `INFEROPS_COMPANY` doesn't
+  admit, and a malformed `INFEROPS_COMPANY` throws. `__tests__/account.test.ts` covers it.
 - **Widget index (FAC-11 slice 2).** `InferOpsAccount.widgetIndexWorkspaces()` lists the
   connected person's workspaces where `configuration:publish` holds, asked as
   `holdsSharedConfiguration` asks, in identity order. `registerWidget(workspaceId, entry)` and
