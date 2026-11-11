@@ -413,11 +413,11 @@ describe("publication against real commits", () => {
       }) as GitStore["readCommitBlob"];
       impl.gitStore.readCommitFiles = () => { throw new Error("readCommitFiles decodes every file"); };
       let commits = await impl.readSourceCommits([commit, mixed.commit, callable.commit]);
-      expect(commits.get(commit)).toEqual({ classification: { class: "visualWidget", violations: [] }, viewText: null, tools: null, states: null, statesProblem: null });
+      expect(commits.get(commit)).toEqual({ classification: { class: "visualWidget", violations: [] }, viewText: null, tools: null, commands: null, states: null, statesProblem: null });
       expect(commits.get(mixed.commit)!.classification.violations.map(violation => violation.code)).toEqual(["mixedView"]);
       // The callable widget's tools come from the same read that classified it (C4's surfaces).
       expect(commits.get(callable.commit)).toEqual({ classification: { class: "callableTools", violations: [] },
-        viewText: null, tools: parseWidgetTools(TOOLS), states: null, statesProblem: null });
+        viewText: null, tools: parseWidgetTools(TOOLS), commands: [], states: null, statesProblem: null });
       expect(read).toEqual(["view.json", "tools.json"]);
     });
   });
