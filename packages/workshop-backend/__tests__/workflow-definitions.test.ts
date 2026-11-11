@@ -522,6 +522,24 @@ describe("triggers and runs", () => {
     expect(() => store.deliveries(BEN.id, saved.id, null)).toThrow("Workflow definition not found.");
   });
 
+  it('returns the server-computed retention date for terminal history and no date for live history', () => {
+    let { store, headOf } = workspace({ ttlMs: 90 * 24 * 60 * 60_000 });
+    let saved = store.save(ADA, { title: 'Refund', gadgetId: GADGET }, headOf, 'build');
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    let settled = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    store.recordResult(settled.deliveryId, { outcome: 'succeeded' });
+    let live = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+
+    let rows = store.deliveries(ADA.id, saved.id, 'build');
+    let terminal = rows.find(delivery => delivery.result?.outcome === 'succeeded')!;
+    let waiting = rows.find(delivery => delivery.run?.runId === live.run?.runId)!;
+    expect(terminal.historyExpiresAt).toEqual(
+      new Date(terminal.result!.settledAt!.getTime() + 90 * 24 * 60 * 60_000),
+    );
+    expect(waiting.historyExpiresAt).toBeNull();
+  });
+
   it("builds the legacy history index from the former 1,000-delivery cap on first admission", () => {
     let { store, storage, headOf } = workspace({ max: 10_000 });
     let saved = store.save(ADA, { title: "Legacy", gadgetId: GADGET }, headOf, "build");
@@ -674,5 +692,48 @@ describe("through the Overseer", () => {
     await expect(overseer.exportWorkspaceRecords()).rejects.toThrow();
     await expect(overseer.publishWorkflowDefinition(live.id, 1)).rejects.toThrow();
     await expect(overseer.pinTriggerDefinition(11, null)).rejects.toThrow();
+    await expect(overseer.listReadableWorkflowHistories()).rejects.toThrow();
+  });
+});
+
+describe("readable workflow-history discovery", () => {
+  it("lists owned and edit-shared histories after a definition is swept, but not a stranger's", () => {
+    let now = Date.now();
+    let { store, headOf } = workspace({ now: () => now });
+    let saved = store.save(ADA, { title: "Temporary", gadgetId: GADGET, retain: false }, headOf, "build");
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    let delivery = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    store.recordResult(delivery.deliveryId, { outcome: "succeeded" });
+    store.pinTrigger(ADA.id, 11, GADGET, null);
+    now += 25 * 60 * 60_000;
+    expect(store.sweepExpired()).toBe(1);
+
+    expect(store.listReadableWorkflowHistories(ADA.id, "build")).toEqual([{ definitionId: saved.id }]);
+    expect(store.listReadableWorkflowHistories(BEN.id, "use")).toEqual([]);
+    expect(store.listReadableWorkflowHistories("stranger-profile", "build")).toEqual([]);
+  });
+
+  it("lists an existing history shared with an editor, using the delivery-read rule", () => {
+    let { store, headOf } = workspace();
+    let saved = store.save(ADA, { title: "Retained", gadgetId: GADGET, retain: true }, headOf, "build");
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    store.fire(11, GADGET, headOf, everyoneBuilds);
+    store.share(ADA, saved.id, BEN.id, { edit: true }, "build");
+
+    expect(store.listReadableWorkflowHistories(BEN.id, "build")).toEqual([{ definitionId: saved.id }]);
+    expect(store.listReadableWorkflowHistories(BEN.id, "use")).toEqual([]);
+  });
+
+  it("does not discover a different workspace's histories", () => {
+    let first = workspace();
+    let second = workspace();
+    let saved = second.store.save(BEN, { title: "Other workspace", gadgetId: GADGET }, second.headOf, "build");
+    second.store.publish(BEN, saved.id, 1);
+    second.store.pinTrigger(BEN.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    second.store.fire(11, GADGET, second.headOf, everyoneBuilds);
+
+    expect(first.store.listReadableWorkflowHistories(ADA.id, "build")).toEqual([]);
   });
 });
