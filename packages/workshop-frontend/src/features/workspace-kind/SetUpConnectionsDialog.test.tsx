@@ -62,9 +62,10 @@ vi.mock('../../components/GatekeeperBindingField', () => ({
     }}>Pick for {title}</button>
   ),
 }))
+const MY_MODEL = { type: 'model', id: 'm1', name: 'My model' }
 const api = vi.hoisted(() => ({
-  listGatekeeperVendors: async () => [],
-  listModels: async () => [{ type: 'model', id: 'm1', name: 'My model' }],
+  listGatekeeperVendors: vi.fn<() => Promise<unknown[]>>(),
+  listModels: vi.fn<() => Promise<unknown[]>>(),
 }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: api, currentUser: { id: 'ada', name: 'Ada' } }) }))
 vi.mock('./useConnectedAccounts', () => ({ useConnectedAccounts: () => [] }))
@@ -78,7 +79,11 @@ const COPY: WorkflowDefinition = { id: 'c', title: 'Refunds (copy)', owner: ADA,
 
 let container: HTMLDivElement
 let root: Root
-beforeEach(() => { toast.mockReset(); container = document.createElement('div'); document.body.append(container); root = createRoot(container) })
+beforeEach(() => {
+  api.listGatekeeperVendors.mockReset().mockResolvedValue([])
+  api.listModels.mockReset().mockResolvedValue([MY_MODEL])
+  toast.mockReset(); container = document.createElement('div'); document.body.append(container); root = createRoot(container)
+})
 afterEach(() => { act(() => root.unmount()); container.remove() })
 
 const button = (label: string) => [...container.querySelectorAll('button')].find(b => b.textContent === label)
@@ -141,4 +146,39 @@ it('says when there is nothing left to set up', async () => {
   await render({}, { ...COPY, bindingsNeeded: [] })
   expect(container.textContent).toContain('Its connections are all set up.')
   expect(button('Set up connections')).toBeUndefined()
+})
+
+it("says a list it couldn't read failed, never that there is none, and reads it again on request", async () => {
+  api.listModels.mockRejectedValueOnce(new Error('The models could not be read right now'))
+  api.listGatekeeperVendors.mockRejectedValueOnce(new Error('The connection types could not be read right now'))
+  await render({})
+  const board = container.querySelector('section[aria-label="Board"]')!
+  const model = container.querySelector('section[aria-label="MODEL"]')!
+  expect(board.textContent).toContain('The connection types could not be read right now')
+  expect(button('Pick for Board')).toBeUndefined()
+  expect(model.textContent).toContain('The models could not be read right now')
+  expect(model.textContent).not.toContain('You have no models yet')
+  expect(container.querySelector('select[aria-label="Model for MODEL"]')).toBeNull()
+
+  await act(async () => [...model.querySelectorAll('button')].find(b => b.textContent === 'Try again')!.click())
+  expect(api.listModels).toHaveBeenCalledTimes(2)
+  expect(api.listGatekeeperVendors).toHaveBeenCalledTimes(2)
+  expect(button('Pick for Board')).toBeDefined()
+  await pickModel()
+  expect(button('Set up 1 of 2')!.disabled).toBe(false)
+})
+
+it('says it is reading the lists until they arrive', async () => {
+  api.listModels.mockReturnValueOnce(new Promise(() => {}))
+  api.listGatekeeperVendors.mockReturnValueOnce(new Promise(() => {}))
+  await render({})
+  expect(container.querySelector('section[aria-label="Board"]')?.textContent).toContain('Reading the connection types…')
+  expect(container.querySelector('section[aria-label="MODEL"]')?.textContent).toContain('Reading your models…')
+  expect(button('Pick for Board')).toBeUndefined()
+})
+
+it('says the person has no models only once their models were read and there are none', async () => {
+  api.listModels.mockResolvedValueOnce([])
+  await render({})
+  expect(container.querySelector('section[aria-label="MODEL"]')?.textContent).toContain('You have no models yet')
 })

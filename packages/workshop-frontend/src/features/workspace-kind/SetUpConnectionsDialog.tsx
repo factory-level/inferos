@@ -25,6 +25,13 @@ type Props = {
 /** What this person has chosen for one connection so far. */
 type Choice = { accountId?: number; modelId?: string }
 
+/**
+ * One list this dialog reads (the gatekeeper vendors, the person's models): still loading, failed
+ * with what went wrong, or read. An empty list is only ever one that was read, so a failed request
+ * never reads as "you have none".
+ */
+type ListState<T> = { status: 'loading' } | { status: 'error'; message: string } | { status: 'ready'; items: T[] }
+
 /** The server's refusal as it words it, when it has one. */
 const refusalOf = (err: unknown, fallback: string) =>
   err instanceof Error && err.message ? err.message : fallback
@@ -42,8 +49,10 @@ export const SetUpConnectionsDialog = ({ overseer, definition, onClose, onSetUp 
   const toasts = useKumoToastManager()
   const { authenticatedApi } = useAuthenticatedApi()
   const accounts = useConnectedAccounts(authenticatedApi)
-  const [vendors, setVendors] = useState<GatekeeperVendorInfo[]>([])
-  const [models, setModels] = useState<AiChatAuthorInfo[]>([])
+  const [vendors, setVendors] = useState<ListState<GatekeeperVendorInfo>>({ status: 'loading' })
+  const [models, setModels] = useState<ListState<AiChatAuthorInfo>>({ status: 'loading' })
+  // Bumped to read the lists again after a failure.
+  const [attempt, setAttempt] = useState(0)
   const [choices, setChoices] = useState<Readonly<Record<string, Choice>>>({})
   const [ready, setReady] = useState<Readonly<Record<string, boolean>>>({})
   const [connecting, setConnecting] = useState<string | null>(null)
@@ -55,10 +64,20 @@ export const SetUpConnectionsDialog = ({ overseer, definition, onClose, onSetUp 
 
   useEffect(() => {
     let cancelled = false
-    authenticatedApi.listGatekeeperVendors().then(list => { if (!cancelled) setVendors(list) }, () => {})
-    authenticatedApi.listModels().then(list => { if (!cancelled) setModels(list) }, () => {})
+    setVendors(prev => prev.status === 'ready' ? prev : { status: 'loading' })
+    setModels(prev => prev.status === 'ready' ? prev : { status: 'loading' })
+    authenticatedApi.listGatekeeperVendors().then(
+      items => { if (!cancelled) setVendors({ status: 'ready', items }) },
+      err => { if (!cancelled) setVendors({ status: 'error', message: refusalOf(err, "Couldn't read the connection types.") }) },
+    )
+    authenticatedApi.listModels().then(
+      items => { if (!cancelled) setModels({ status: 'ready', items }) },
+      err => { if (!cancelled) setModels({ status: 'error', message: refusalOf(err, "Couldn't read your models.") }) },
+    )
     return () => { cancelled = true }
-  }, [authenticatedApi])
+  }, [authenticatedApi, attempt])
+
+  const retry = () => setAttempt(n => n + 1)
 
   // A reconnect is over once the account reads as valid again.
   const reconnectingAccountId =
@@ -145,13 +164,15 @@ export const SetUpConnectionsDialog = ({ overseer, definition, onClose, onSetUp 
                 <h3 className="m-0 text-[13px] leading-[18px] font-medium text-kumo-default">{nameOf(binding)}</h3>
                 <p className="m-0 text-[12px] leading-4 text-kumo-subtle">{unmetText(binding)}</p>
               </div>
-              {binding.type === 'gatekeeper' ? (
+              {binding.type === 'gatekeeper' ? (vendors.status !== 'ready' ? (
+                <ListNotReady state={vendors} loading="Reading the connection types…" onRetry={retry} />
+              ) : (
                 <GatekeeperBindingField
                   title={nameOf(binding)}
                   binding={{ gatekeeperName: binding.vendorId, typeUrlPattern: binding.typeUrlPattern }}
                   value={{ accountId: choices[binding.name]?.accountId } as Partial<BlueprintBindingAssignment>}
                   authenticatedApi={authenticatedApi}
-                  vendors={vendors}
+                  vendors={vendors.items}
                   accounts={accounts}
                   connectingVendor={connecting}
                   reconnectingAccountId={reconnectingAccountId}
@@ -164,6 +185,8 @@ export const SetUpConnectionsDialog = ({ overseer, definition, onClose, onSetUp 
                     else collectors.current.delete(binding.name)
                   }}
                 />
+              )) : models.status !== 'ready' ? (
+                <ListNotReady state={models} loading="Reading your models…" onRetry={retry} />
               ) : (
                 <>
                   <Select
@@ -172,11 +195,11 @@ export const SetUpConnectionsDialog = ({ overseer, definition, onClose, onSetUp 
                     placeholder="Choose one of your models"
                     value={choices[binding.name]?.modelId}
                     onValueChange={(modelId) => choose(binding.name, { modelId: String(modelId) })}
-                    disabled={models.length === 0}
+                    disabled={models.items.length === 0}
                   >
-                    {models.map(model => <Select.Option key={model.id} value={model.id}>{model.name}</Select.Option>)}
+                    {models.items.map(model => <Select.Option key={model.id} value={model.id}>{model.name}</Select.Option>)}
                   </Select>
-                  {models.length === 0 && (
+                  {models.items.length === 0 && (
                     <p className="m-0 text-[12px] text-kumo-subtle">You have no models yet. Add one from AI Providers first.</p>
                   )}
                 </>
@@ -200,3 +223,17 @@ export const SetUpConnectionsDialog = ({ overseer, definition, onClose, onSetUp 
     </Dialog.Root>
   )
 }
+
+/** A list still loading, or one that failed: said in words, with a way to read it again. */
+const ListNotReady = ({ state, loading, onRetry }: {
+  state: { status: 'loading' } | { status: 'error'; message: string }
+  loading: string
+  onRetry: () => void
+}) => state.status === 'loading' ? (
+  <p className="m-0 text-[12px] text-kumo-subtle" role="status">{loading}</p>
+) : (
+  <div className="flex flex-wrap items-center gap-2" role="alert">
+    <p className="m-0 text-[12px] text-kumo-danger">{state.message}</p>
+    <WorkshopButton onClick={onRetry}>Try again</WorkshopButton>
+  </div>
+)
