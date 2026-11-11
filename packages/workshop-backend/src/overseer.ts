@@ -1277,6 +1277,14 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
   }
 }
 
+/**
+ * The label of the field the kernel appends to an action that declares a workflow run (FAC-120,
+ * `ActionDescription.workflowRun`), whose value is the declared trigger reference: how every
+ * approver is shown the run their approval would start, in the kernel's words, whatever gatekeeper
+ * declared it.
+ */
+export const WORKFLOW_RUN_FIELD_LABEL = "Workflow run this approval starts (shown by InferOS)";
+
 /** Which requested run proposed a write, and where (FAC-112; `ActionRecord.workflowRun`). */
 export type WorkflowRunWrite = { runId: string; hookId: number; deliveryId: number; writeKey?: string; attempt: number };
 
@@ -7067,8 +7075,9 @@ class OverseerImpl implements AgentHooks {
     let result: void | {failed: ActionApplyFailure} | ActionApplied;
     // FAC-120: what the kernel does as the person approving (ApprovedEffects), for a person's own
     // approval only: never an automatic one, never an assigned run's write. Revoked below.
-    // Only for an action that declared the run at submit (ActionDescription.workflowRun, shown to
-    // the approver), and bound to that reference and this action: nothing at apply names another.
+    // Only for an action that declared the run at submit (ActionDescription.workflowRun, which the
+    // kernel's own field shows the approver, see submitActionNow), and bound to that reference and
+    // this action: nothing at apply names another.
     let declaredRun = record.description.workflowRun?.reference;
     let effects = declaredRun !== undefined && !autoApproved && resolvedBy.type === "user" && !record.executedAs
         ? new ApprovedEffectsImpl(() => this.#invokeApprovedWorkflow(resolvedBy.id, declaredRun, record.id))
@@ -8341,10 +8350,17 @@ class OverseerImpl implements AgentHooks {
           "reviewed as of yet.");
     }
 
-    // A declared workflow run (FAC-120, ActionDescription.workflowRun) is a trigger reference the
-    // approver is shown and approval binds: one that isn't well formed is refused before queueing.
-    if (description.workflowRun !== undefined && !parseWorkflowTriggerRef(description.workflowRun?.reference)) {
-      throw new Error("A declared workflow run must name an InferOS workflow trigger reference.");
+    // A declared workflow run (FAC-120, ActionDescription.workflowRun) is a trigger reference that
+    // approval binds: one that isn't well formed is refused before queueing. Any gatekeeper may
+    // declare one, so the kernel itself shows it to every approver: it appends its own field naming
+    // the reference (WORKFLOW_RUN_FIELD_LABEL), last, whatever the gatekeeper's title, prose and
+    // fields say, and that stored description is what every surface shows.
+    if (description.workflowRun !== undefined) {
+      if (!parseWorkflowTriggerRef(description.workflowRun?.reference)) {
+        throw new Error("A declared workflow run must name an InferOS workflow trigger reference.");
+      }
+      description = {...description, fields: [...description.fields ?? [],
+        {label: WORKFLOW_RUN_FIELD_LABEL, kind: "inline", value: description.workflowRun.reference}]};
     }
 
     // Push authorization (see ActionDescription.pushedCommits): before anything is queued,

@@ -1769,7 +1769,8 @@ export type ActionDescription = {
    * If present (FAC-120), approving this action asks the kernel to start the workflow run this
    * InferOS trigger reference names (`inferops://<company>.<workspace>/inferos/workflow-trigger/...`,
    * workflow-trigger-ref.ts), as the person approving it. The kernel checks its form when the action
-   * is submitted, shows it to the approver, and, only for that person's own approval of this action,
+   * is submitted, shows it to every approver in its own words (it appends a last field naming the
+   * reference, whatever this description says), and, only for that person's own approval of this action,
    * hands `applyAction()` the `ApprovedEffects` that start exactly this run. It is fixed at submit:
    * nothing at apply time can name another.
    */

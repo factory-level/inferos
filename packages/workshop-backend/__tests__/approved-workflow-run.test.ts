@@ -14,7 +14,7 @@ import { runInDurableObject } from "cloudflare:test";
 import type { ApprovedEffects, ApprovedWorkflowRun } from "@gadgets/workshop-shared/gatekeeper";
 import { workflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
 import type { ConsoleToolCaller } from "../src/console-tools";
-import type { OverseerDurableObject } from "../src/overseer.js";
+import { WORKFLOW_RUN_FIELD_LABEL, type OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -208,8 +208,10 @@ describe("the approved effects a gatekeeper's apply receives", () => {
       await impl.submitAction(41, 1, options.description ?? RUN, { from: "agent", chatId: 1 });
       let record = Array.from(impl.storage.actions.list()).find((a: any) => a.type === "action") as any;
       if (options.executedAs) record.executedAs = options.executedAs;
+      // The description as submission stored it, before anything applies.
+      let stored = structuredClone(record.description);
       try { await impl.applyPendingAction(record, options.resolvedBy ?? ADA, options.autoApproved ?? false); } catch { /* recorded */ }
-      return { seen, impl };
+      return { seen, impl, stored };
     });
   }
 
@@ -244,6 +246,20 @@ describe("the approved effects a gatekeeper's apply receives", () => {
     expect(asked[0]).toEqual(asked[1]);
     expect(await seen.effects!.invokeWorkflow()).toEqual(
       { status: "refused", kind: "policy", reason: "Starting a workflow run needs a person's approval." });
+  });
+
+  it("shows a declared run on the stored description in the kernel's words, whatever gatekeeper declared it", async () => {
+    // r1: a non-Dot gatekeeper's write (vendor github, "Create an issue") that declares a run. The
+    // gatekeeper's own title, prose and fields say nothing of it; the kernel's last field does.
+    let declared = { ...ISSUE, fields: [{ label: "Repository", kind: "inline", value: "acme/app" }],
+      workflowRun: { reference: REFERENCE } };
+    let { stored } = await applying("shown-github", { description: declared, vendorId: "github" });
+    expect(stored.fields).toEqual([
+      { label: "Repository", kind: "inline", value: "acme/app" },
+      { label: WORKFLOW_RUN_FIELD_LABEL, kind: "inline", value: REFERENCE },
+    ]);
+    // An action that declares no run gets no such field.
+    expect((await applying("shown-none", { description: ISSUE, vendorId: "github" })).stored.fields ?? []).toEqual([]);
   });
 
   it("refuses at submit a declared run that isn't a workflow trigger reference", () =>
