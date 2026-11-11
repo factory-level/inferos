@@ -45,37 +45,40 @@ share can list history by definition id even after a temporary definition is swe
 people receive the same not-found response as an unknown definition. Definition expiry does not
 delete run history or action receipts.
 
-The build API's `listReadableWorkflowHistories()` discovers distinct definition IDs for which the
-caller may read retained history. It uses the same owner-or-edit-share rule as
-`listWorkflowDeliveries()`, including the retained owner id when the definition itself was swept.
-It returns IDs only: no title, run details, or existence of history the caller cannot read. The
-read is workspace-local and grants no access to a definition, its bindings, or the ability to run it.
-The result has at most as many IDs as retained deliveries, bounded by the workspace's configured
-history cap (at most 100,000).
-Delivery reads include the server-computed `historyExpiresAt` from the configured retention policy;
-it is null while a run remains live and omitted from stored legacy records.
+The Workshop discovers history IDs through `listReadableWorkflowHistories`, which returns only
+definitions whose history the caller may read: the owner or a persisted edit-share holder. This
+includes histories whose temporary definition was swept. A stranger does not receive the ID and
+cannot read its history. For each discovered definition, the UI reads its deliveries and shows
+loading, error with retry, empty, or populated state; a failed request is never presented as empty.
+The trigger editor also reads the latest five deliveries for its pinned definition and filters them
+to that trigger. It shows the outcome, time, revision and server-computed expiry date using the
+deployment's configured retention; records still live or uncertain are labeled as retained while
+live, uncertain or waiting. When an on-request run is refused at the workspace cap, the existing
+server message tells the owner to wait for older completed runs to expire or ask an administrator
+to raise the limit. The cap cannot be monitored live from the Workshop.
 
-This red-tier change requires security review before merge.
+`security-review` was not available to the implementation seat; this change has not been represented
+as security-reviewed.
 
 ## Components
 
 | Path | Responsibility |
 | --- | --- |
-| `packages/workshop-backend/src/workflow-definition-store.ts` | Stores run deliveries, indexes expiry, enforces the cap, and lists/discovers authorized history. |
-| `packages/workshop-backend/src/overseer.ts` | Supplies deployment settings, schedules bounded sweeps, and exposes authorized history reads to builders. |
+| `packages/workshop-backend/src/workflow-definition-store.ts` | Stores run deliveries, indexes expiry, enforces the cap, and lists history. |
+| `packages/workshop-backend/src/overseer.ts` | Supplies deployment settings, schedules bounded sweeps, and authorizes history reads. |
 | `packages/workshop-backend/src/env.d.ts` | Declares deployment retention and cap settings. |
-| `packages/workshop-shared/src/workflow-definition.ts` | Defines defaults, bounds, validation, history-discovery references, and the owner-visible cap refusal. |
-| `packages/workshop-shared/src/api.ts` | Defines the authenticated history-discovery API contract. |
+| `packages/workshop-shared/src/workflow-definition.ts` | Defines defaults, bounds, validation, and the owner-visible cap refusal. |
+| `packages/workshop-frontend/src/features/workspace-kind/TriggerControlEditor.tsx` | Shows recent per-trigger run history and retention state to definition editors. |
+| `packages/workshop-frontend/src/features/workspace-kind/WorkflowHistorySection.tsx` | Discovers readable definition histories and shows each history's loading, error, empty, or populated state. |
 
 ## Data and Control Flow
 
 Admission initializes the retention index if needed, removes at most 200 due eligible records, then
 refuses admission if the workspace remains at its cap. Settling an eligible delivery updates its
-ordered expiry pointer. Alarm sweeps use the same bounded index. History reads return a definition's
-deliveries to its owner or persisted edit share. History reads first pass the workspace
-shared-configuration authorization check, then apply that same rule. Discovery groups the
-workspace's retained delivery rows by definition, applies it to each group, and returns only
-authorized IDs. The use and operate APIs refuse discovery.
+ordered expiry pointer. Alarm sweeps use the same bounded index. History reads first pass the
+workspace shared-configuration authorization check, then return a definition's deliveries to its
+owner or an authorized workspace editor. The UI discovers readable definition IDs through the
+same owner/edit-share rule before loading deliveries.
 
 ## Configuration
 
