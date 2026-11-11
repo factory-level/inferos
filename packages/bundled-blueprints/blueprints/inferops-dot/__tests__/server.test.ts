@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { Gadget } from "../files/server.ts";
 import type {
-  DotConversation, DotConversationSession, DotProgress, InferOpsDotSession, ProgressTarget,
+  DotConversation, DotConversationSession, DotProgress, InferOpsDotSession, ProgressTarget, ShownProgress,
 } from "../files/lib/protocol.ts";
 
 const PROPOSAL = {
@@ -62,7 +62,7 @@ function state() {
 }
 
 const collect = () => {
-  const events: DotProgress[] = [];
+  const events: ShownProgress[] = [];
   const target: ProgressTarget = { progress: event => { events.push(event); } };
   return { events, target };
 };
@@ -83,6 +83,8 @@ describe("InferOps Dot server", () => {
     const { events, target } = collect();
     const result = await gadget.ask("What changed today?", target);
     expect(events.map(e => e.type)).toEqual(["text", "text", "proposal"]);
+    // A proposal relayed as it comes is the shown one too: no receipt, no raw arguments.
+    expect(events[2]).toEqual({ type: "proposal", proposal: { id: "p1", tool: "issue_create", status: { outcome: "waiting" } } });
     expect(result).toMatchObject({ ok: true, status: "complete" });
     expect(kept).toEqual(new Map([["conversation", "c1"]]));
     // What the client sees: messages and each change's status, never a receipt or raw arguments.
