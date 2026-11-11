@@ -12,7 +12,7 @@ import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
-  WorkflowDefinitionRights, WorkflowDefinitionShare,
+  WorkflowDefinitionRights, WorkflowDefinitionShare, WorkflowDefinitionHistoryRef,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
   WorkflowTriggerDefinitionRef, WorkflowDefinitionDuplicate, WorkflowRequiredBinding,
 } from "@gadgets/workshop-shared/workflow-definition";
@@ -15222,6 +15222,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]> {
     return this.impl.workflowDefinitionStore().deliveries((await this.#getClientProfile()).id, definitionId, "build");
   }
+  /** Discover only history IDs this build caller may read, including definitions already swept. */
+  async listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]> {
+    let viewer = await this.#getClientProfile();
+    return this.impl.workflowDefinitionStore().listReadableWorkflowHistories(viewer.id, "build");
+  }
   // A control lets named people run a pinned trigger now; setting one is building. Running one is
   // the listed person's own request, checked against the authenticated session's profile.
   async setTriggerControl(hookId: number, settings: TriggerControlSettings | null): Promise<TriggerControl | null> {
@@ -18018,6 +18023,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
+  async listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]> { this.#deny(); }
   // An operator listed on a trigger's control may ask it to run, and sees only those controls; it
   // configures nothing (FAC-102, inferops ADR 0011 S6).
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
@@ -18696,6 +18702,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async pinTriggerDefinition(_hookId: number, _ref: WorkflowTriggerDefinitionRef | null): Promise<void> { this.#deny(); }
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
+  async listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]> { this.#deny(); }
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
   async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
   async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }
