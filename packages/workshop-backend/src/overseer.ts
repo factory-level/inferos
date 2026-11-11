@@ -18,6 +18,7 @@ import type {
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
+  maxWorkflowDeliveries, workflowRunHistoryRetentionMs,
   WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS, WORKFLOW_BINDINGS_UNATTRIBUTED, parseWorkflowDefinitionTitle,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { checkAssignments, requireBound, requirementsOf, unmetBindings } from "./workflow-duplicate.js";
@@ -32,6 +33,7 @@ import {
   CANNOT_RUN, WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
   type StoredWorkflowDefinitionShare, type WorkflowDefinitionAudience, WORKSPACE_AUDIENCE,
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
+  type StoredWorkflowDeliveryExpiry,
   type StoredWorkflowOccurrence,
   type StoredWorkflowOccurrenceExpiry,
   type StoredWorkflowOccurrenceCount,
@@ -44,7 +46,12 @@ import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryD
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { isReservedToolMethod, parseToolEnvelope, parseWidgetTools, plainJsonProblem, WIDGET_TOOL_LIMITS, widgetToolValueProblem } from "@gadgets/workshop-shared/widget-tools";
 import { parseWorkflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
-import { WIDGET_STATES_FILE, parseWidgetStates, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
+import { WIDGET_STATES_FILE, parseWidgetStates, widgetEventsFrom, widgetStateKey, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
+import {
+  AGENT_WIDGET_SEARCH, AGENT_WIDGET_UNAVAILABLE, parseAgentConsoleWidgetRef, parseAgentPlacementProposal, parseAgentWidgetView,
+  type AgentConsoleWidgetRef, type AgentViewOverlay, type AgentWidgetDescriptionOutcome, type AgentWidgetInstance,
+  type AgentWidgetSearch, type AgentWidgetStateRead,
+} from "@gadgets/workshop-shared/agent-widgets";
 import {
   GADGET_TOOLS_FILE, GADGET_VIEW_FILE, blueprintPublishRefusals, classifyGadgetFiles,
   isGadgetModule,
@@ -70,7 +77,7 @@ import {
   type ArtifactManifest, type ArtifactModelRequirement, type ArtifactPin, type ArtifactPublishResult,
   type ArtifactQualification, type ArtifactRef, type ArtifactRefusal, type ArtifactRevision,
 } from "@gadgets/workshop-shared/agent-artifact";
-import { consoleScreenMove, consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type ConsoleDraftProblem, type ConsoleWidgetInstance, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
+import { consoleEventMismatch, consoleScreenMove, consoleScreens, consoleWidgetVersionId, type ConsoleSource, type ConsoleWidgetCandidate, type ConsoleWidgetIndexReport, type ConsoleDraftProblem, type ConsoleWidgetInstance, type EmbeddedConsoleWidget, type HostBoardReadAudit, type HostBoardSelection, type HostBoardView, type OperateConsole, type OperateConsoleRead, type OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateFlow, OperateFlowContent } from "@gadgets/workshop-shared/operate-flow";
 import { RpcCompatible, RpcStub, RpcTarget } from "capnweb";
 import { validateRpc } from "capnweb-validate";
@@ -144,7 +151,7 @@ import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import type { BoundViewDescription, GadgetExportFormat, GovernedSessionHandle } from "@gadgets/workshop-shared/api";
+import { createOperateSessionError, OPERATE_SESSION_ERROR_CODES, WIDGET_SEARCH_LIMIT, type BoundViewDescription, type GadgetExportFormat, type GovernedSessionHandle } from "@gadgets/workshop-shared/api";
 import {
   governedResourceOf, type GovernedCommandReceipt, type GovernedDescription, type GovernedListResult, type GovernedRow,
   type GovernedWriteSession,
@@ -1908,6 +1915,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
 
       // The next workflow-definition delivery number (see workflow-definition-store.ts).
       nextWorkflowDeliveryId: 0,
+      // Run-history cap/count migration state, maintained with workflowDeliveries.
+      workflowDeliveryCount: singleton<{ count: number; indexed: boolean } | null>(null),
       // The next on-request run record number (see workflow-definition-store.ts).
       nextWorkflowInvocationLogId: 0,
       nextChatId: 0,
@@ -1955,6 +1964,8 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       workflowDefinitionShares: collection<StoredWorkflowDefinitionShare>()({ primaryKey: "key" }),
       workflowTriggerPins: collection<StoredTriggerPin>()({ primaryKey: "hookId" }),
       workflowDeliveries: collection<StoredWorkflowDelivery>()({ primaryKey: "id" }),
+      // Ordered retention pointers; routine history cleanup reads only a bounded due prefix.
+      workflowDeliveryExpiries: collection<StoredWorkflowDeliveryExpiry>()({ primaryKey: "key" }),
       // Seven-day idempotency tombstones for server-verified trigger occurrences (FAC-113).
       workflowOccurrences: collection<StoredWorkflowOccurrence>()({ primaryKey: "key" }),
       // Ordered expiry pointers and per-trigger counts keep admission bounded (FAC-113).
@@ -2785,6 +2796,8 @@ class OverseerImpl implements AgentHooks {
     // The next dynamic workflow definition to expire (FAC-124), so it is swept on time.
     let nextExpiry = this.workflowDefinitionStore().nextExpiry();
     if (nextExpiry !== undefined) times.push(nextExpiry);
+    let nextRunHistorySweep = this.workflowDefinitionStore().nextRunHistorySweep();
+    if (nextRunHistorySweep !== undefined) times.push(nextRunHistorySweep);
 
     // A replay's staged copies still to withdraw (FAC-112), each at its next try.
     for (let entry of this.storage.replayWithdrawals.list()) times.push(entry.nextAttemptAt);
@@ -2857,7 +2870,9 @@ class OverseerImpl implements AgentHooks {
    */
   #sweepTemporary(): void {
     try {
-      let swept = this.workflowDefinitionStore().sweepExpired();
+      let store = this.workflowDefinitionStore();
+      let swept = store.sweepExpired();
+      store.sweepExpiredRunHistory();
       if (swept > 0) this.logger.info("swept expired workflow definitions", { event: "workflow.definitions.expired", definitionCount: swept });
     } catch (error) {
       this.logger.error("temporary sweep failed", { event: "workflow.definitions.expire.failed", error });
@@ -11771,9 +11786,36 @@ class OverseerImpl implements AgentHooks {
     }
     let owner = wrapDoStubForTelemetry(
         this.users.get(this.users.idFromString(this.ownerId)), this.logger);
+    if (event?.type === "openView" || event?.type === "showScreen") {
+      return await this.#agentConsoleMove(owner, event);
+    }
+    if (event && AGENT_REFUSED_OPERATE_EVENTS.has(event.type)) {
+      // The user DO's own refusal of these, coded, so callers tell it from a failure (N-6).
+      throw createOperateSessionError(OPERATE_SESSION_ERROR_CODES.invalidEvent);
+    }
     return event
         ? await owner.dispatchOperateEvent(event, null, "agent")
         : await owner.getOperatePage();
+  }
+
+  // FAC-14: the agent moves within the published console open on the page only through the checks
+  // a person's move goes through (OperateSessionImpl.#checkConsoleEvent): the console read, with the
+  // owner's identity and role in its workspace, must still be published at the revision the page
+  // opened and hold the view or screen. It is applied at the sequence the check read, so a page
+  // that changed in between is refused, never moved on unchecked.
+  async #agentConsoleMove(owner: DurableObjectStub<UserDurableObject>,
+      event: Extract<OperateEvent, {type: "openView" | "showScreen"}>): Promise<OperateSessionSnapshot> {
+    let {caller} = await this.#sessionPerson();
+    let page = await owner.getOperatePage();
+    let run = page.state.console;
+    if (!run || run.source !== "published") throw new Error("No published console is open on the user's page.");
+    let saved = await this.#workspaceStub(run.workspaceId)?.getPublishedConsoleFor(caller, run.consoleId)
+        .catch(() => null);
+    let mismatch = saved ? consoleEventMismatch(saved, run, event) : null;
+    if (!saved || mismatch !== null) {
+      throw new Error(`${mismatch ?? "The open console is no longer one the user can open."} Read the page again.`);
+    }
+    return await owner.dispatchOperateEvent(event, page.seq, "agent");
   }
 
   async getInstanceInstructions(): Promise<string> {
@@ -12777,6 +12819,8 @@ class OverseerImpl implements AgentHooks {
     return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage, {
       now: () => Date.now(),
       dynamicTtlMs: () => dynamicDefinitionTtlMs(this.env.WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS),
+      runHistoryTtlMs: () => workflowRunHistoryRetentionMs(this.env.WORKFLOW_RUN_HISTORY_RETENTION_DAYS),
+      maxWorkflowDeliveries: () => maxWorkflowDeliveries(this.env.WORKFLOW_MAX_RUN_HISTORY),
       // Wake for the next expiry whenever what expires changes (#416 round 1); during construction,
       // once the alarm's inputs exist.
       onChange: () => {
@@ -13229,6 +13273,82 @@ class OverseerImpl implements AgentHooks {
     return own;
   }
 
+  // FAC-14: the caller's user Durable Object when `caller` checks out as for a console tool call
+  // (#consoleToolUser) and holds at least `use` here, in a workspace that exists and isn't an
+  // operate session; otherwise null. The operate agent reaches a console widget only this way: with
+  // the person's identity and role in the widget's own workspace, never the operate workspace's.
+  async #widgetCaller(caller: ConsoleToolCaller): Promise<DurableObjectStub<UserDurableObject> | null> {
+    if (!this.ownerId || this.storage.operateSession.get()) return null;
+    let user = await this.#consoleToolUser(caller);
+    if (!user) return null;
+    return await this.#consoleToolRole(caller, user) ? user : null;
+  }
+
+  /**
+   * The instances of each widget definition in `definitions` (at most 8) that this workspace's
+   * published consoles offer, for `caller` (FAC-14, the operate agent's discovery): as
+   * `listWidgetInstances` answers an operator, once `caller` checks out with at least `use` here.
+   * Null when they don't, so a workspace the person can't open answers nothing at all.
+   */
+  async listWidgetInstancesFor(caller: ConsoleToolCaller, definitions: {blueprintId: string, version: number}[])
+      : Promise<ConsoleWidgetInstance[][] | null> {
+    if (!Array.isArray(definitions) || definitions.length > 8) {
+      throw new Error("Name at most 8 widget definitions.");
+    }
+    if (!await this.#widgetCaller(caller)) return null;
+    let store = this.#consoleStore();
+    return definitions.map(({blueprintId, version}) => listWidgetInstances(store, blueprintId, version));
+  }
+
+  /**
+   * The published console `consoleId` as `caller` (FAC-14) may see it, with at least `use` here, or
+   * null: what the operate agent's console navigation is checked against (`consoleEventMismatch`),
+   * as a person's is through their own access. Never a draft.
+   */
+  async getPublishedConsoleFor(caller: ConsoleToolCaller, consoleId: string): Promise<OperateConsole | null> {
+    if (typeof consoleId !== "string" || !await this.#widgetCaller(caller)) return null;
+    return this.#consoleStore().get(consoleId, "published");
+  }
+
+  /**
+   * What console widget `ref` is, for `caller` (FAC-14, the operate agent's describe and read): its
+   * entry, the frozen commit and revision it runs, its declared local states, and the names of the
+   * tools its revision still offers. `unavailable`, in the one set of words, for a widget that
+   * isn't offered at that revision as much as for a caller without `use` here. Tool descriptions
+   * stay with `listConsoleTools`: only kernel-checked names are returned here.
+   */
+  async describeWidgetFor(caller: ConsoleToolCaller, ref: AgentConsoleWidgetRef): Promise<AgentWidgetDescriptionOutcome> {
+    let unavailable = {status: "unavailable", reason: AGENT_WIDGET_UNAVAILABLE} as const;
+    let checked;
+    try {
+      checked = parseAgentConsoleWidgetRef(ref);
+    } catch {
+      return unavailable;
+    }
+    if (checked.workspaceId !== this.ctx.id.toString() || !await this.#widgetCaller(caller)) return unavailable;
+    let store = this.#consoleStore();
+    let shown = store.get(checked.consoleId, "published");
+    let entry;
+    try {
+      if (shown?.revision !== checked.revision) return unavailable;
+      entry = store.offeredWidget(checked.consoleId, checked.revision, checked.gadgetId);
+    } catch {
+      return unavailable;
+    }
+    let tools = (entry.frozen?.tools ?? []).flatMap(declared => {
+      try {
+        return [store.offeredTool(checked.consoleId, checked.revision, entry.gadgetId, declared.name).tool.name];
+      } catch {
+        return [];
+      }
+    });
+    return {status: "ok", description: {
+      ref: checked, consoleTitle: shown.title, label: entry.label, blueprintId: entry.blueprintId,
+      version: entry.version, sourceGadgetId: entry.frozen?.sourceGadgetId ?? null,
+      commitId: entry.frozen?.commitId ?? null, states: entry.frozen?.states ?? null, toolNames: tools,
+    }};
+  }
+
   // The operate session's side (S): the published console the owner's page has open, the owner's
   // identity as this workspace stores it, and that console's workspace; or why there is none.
   async #sessionConsole(): Promise<{owner: DurableObjectStub<UserDurableObject>, open: OperateConsoleRun,
@@ -13303,6 +13423,171 @@ class OverseerImpl implements AgentHooks {
       // As in listSessionConsoleTools.
       return consoleToolFailure(CONSOLE_TOOL_FAILED);
     }
+  }
+
+  // FAC-14: the operate session's owner, and their identity as a widget's workspace checks it
+  // (#widgetCaller there). Throws in an agent-readable way outside an operate session.
+  async #sessionPerson(): Promise<{owner: DurableObjectStub<UserDurableObject>, caller: ConsoleToolCaller}> {
+    if (!this.storage.operateSession.get() || !this.ownerId) {
+      throw new Error("This chat is not part of an operate session.");
+    }
+    let owner = wrapDoStubForTelemetry(this.users.get(this.users.idFromString(this.ownerId)), this.logger);
+    return {owner, caller: {userId: this.ownerId, profileId: await this.getOwnerProfileId(),
+      sessionWorkspaceId: this.ctx.id.toString()}};
+  }
+
+  // A workspace's Durable Object by id, or null for an id that names none.
+  #workspaceStub(workspaceId: string): DurableObjectStub<OverseerDurableObject> | null {
+    let ns = this.ctx.exports.OverseerDurableObject;
+    try {
+      return ns.get(ns.idFromString(workspaceId));
+    } catch {
+      return null;
+    }
+  }
+
+  // FAC-14: the built-in kinds the owner's own widget search has returned in this session, which
+  // InferOps returns only to someone holding each kind's declared permission, and the owner's
+  // presentation epoch they were found in. A built-in suggestion must name one of them, found in the
+  // epoch the owner is in now: a company change raises it (#resetPresentationState), so nothing
+  // found for one company is suggested in another. In memory only: after a restart the agent finds
+  // again, never more.
+  #foundBuiltinKinds = new Set<string>();
+  #foundBuiltinEpoch: number | null = null;
+
+  // The found kinds for the owner's epoch now, dropped first when it has moved.
+  async #foundKindsNow(owner: DurableObjectStub<UserDurableObject>): Promise<Set<string>> {
+    let epoch = await owner.presentationEpoch();
+    if (epoch !== this.#foundBuiltinEpoch) {
+      this.#foundBuiltinKinds = new Set();
+      this.#foundBuiltinEpoch = epoch;
+    }
+    return this.#foundBuiltinKinds;
+  }
+
+  /**
+   * The widgets the operate session's owner may use that match `query` (FAC-14, the agent's
+   * `findWidgets`): their own widget search, through their own InferOps accounts (built-in kinds,
+   * which InferOps returns only when they hold each kind's declared permission, and published
+   * definitions), and for the best definitions the console instances their workspaces offer, each
+   * workspace asked with the owner's identity and role there. A workspace that doesn't answer for
+   * them adds nothing; one that fails is counted in `unreached`.
+   */
+  async findSessionWidgets(query: string): Promise<AgentWidgetSearch> {
+    let {owner, caller} = await this.#sessionPerson();
+    if (typeof query !== "string" || query.trim() === "" || query.length > 500) {
+      throw new Error("Say what to find, in at most 500 characters.");
+    }
+    let answer = await owner.searchWidgets(query.trim(), WIDGET_SEARCH_LIMIT);
+    if (answer.status === "unavailable") return {status: "unavailable", reason: answer.reason};
+    let definitions = answer.definitions.slice(0, AGENT_WIDGET_SEARCH.definitions);
+    let instances = definitions.map((): AgentWidgetInstance[] => []);
+    let unreached = 0;
+    if (definitions.length > 0) {
+      let workspaces = (await owner.listGadgets())
+          .toSorted((a, b) => new Date(b.lastActive).getTime() - new Date(a.lastActive).getTime())
+          .slice(0, AGENT_WIDGET_SEARCH.workspaces);
+      let asked = definitions.map(({sourceId, sourceVersion}) => ({blueprintId: sourceId, version: sourceVersion}));
+      await Promise.all(workspaces.map(async workspace => {
+        let stub = this.#workspaceStub(workspace.id);
+        if (!stub) return;
+        try {
+          let found = await stub.listWidgetInstancesFor(caller, asked);
+          found?.forEach((list, index) => instances[index]!.push(...list.map(instance =>
+            ({...instance, workspaceId: workspace.id, workspaceTitle: workspace.title}))));
+        } catch {
+          unreached++;
+        }
+      }));
+    }
+    let found = await this.#foundKindsNow(owner);
+    for (let {kind} of answer.hits) found.add(kind);
+    return {
+      status: "searched", ranking: answer.ranking, denied: answer.denied, unsearched: answer.unsearched, unreached,
+      builtins: answer.hits.map(({kind, description, metadata}) => ({kind, description, ...(metadata ? {metadata} : {})})),
+      definitions: definitions.map(({sourceId, sourceVersion, title, purpose}, index) =>
+        ({blueprintId: sourceId, version: sourceVersion, title, purpose, instances: instances[index]!})),
+    };
+  }
+
+  /**
+   * Console widget `ref`, as its own workspace describes it to the operate session's owner (FAC-14,
+   * the agent's `describeWidget`), or `unavailable` in the one set of words.
+   */
+  async describeSessionWidget(ref: AgentConsoleWidgetRef): Promise<AgentWidgetDescriptionOutcome> {
+    let {caller} = await this.#sessionPerson();
+    let checked = parseAgentConsoleWidgetRef(ref);
+    let stub = this.#workspaceStub(checked.workspaceId);
+    if (!stub) return {status: "unavailable", reason: AGENT_WIDGET_UNAVAILABLE};
+    return await stub.describeWidgetFor(caller, checked);
+  }
+
+  /**
+   * The owner's state of console widget `ref` (FAC-14, the agent's `readWidgetState`), with when it
+   * was read and what from. The declaration comes from the widget's own workspace, read with the
+   * owner's role there; a `person` widget's state from the owner's user Durable Object, under
+   * `placementId`'s key when it names one of their placements of that widget; a `session` one is
+   * reported at its initial state, since its running state lives on the person's connection only.
+   * Reading changes nothing.
+   */
+  async readSessionWidgetState(ref: AgentConsoleWidgetRef, placementId?: string): Promise<AgentWidgetStateRead> {
+    let readAt = Date.now();
+    let {owner} = await this.#sessionPerson();
+    let described = await this.describeSessionWidget(ref);
+    if (described.status !== "ok") throw new Error(described.reason);
+    let {description} = described;
+    let machine = description.states;
+    if (!machine) throw new Error("This widget declares no local states.");
+    if (placementId !== undefined) {
+      let {placements} = await owner.listWidgetPlacements();
+      let placed = placements.find(placement => placement.placementId === placementId)?.ref;
+      if (placed?.type !== "console-widget" || placed.workspaceId !== description.ref.workspaceId ||
+          placed.consoleId !== description.ref.consoleId || placed.sourceGadgetId !== description.sourceGadgetId) {
+        throw new Error("That placement is not one of the person's placements of this widget.");
+      }
+    }
+    let key = widgetStateKey({...description.ref, ...(placementId === undefined ? {} : {placementId})});
+    let snapshot = machine.persistence === "person"
+        ? await owner.readWidgetState(key, machine)
+        : {state: machine.initial, events: widgetEventsFrom(machine, machine.initial)};
+    return {ref: description.ref, state: snapshot.state, events: snapshot.events, readAt,
+      provenance: {revision: description.ref.revision, commitId: description.commitId, persistence: machine.persistence}};
+  }
+
+  /**
+   * Shows the owner's placement `placementId` with `filters` instead of its saved ones (FAC-14, the
+   * agent's `setWidgetView`), in their agent overlay only: nothing is saved, and the placement
+   * itself is unchanged until the owner keeps it. Returns the overlay.
+   */
+  async setSessionWidgetView(placementId: string, filters: Record<string, string>): Promise<AgentViewOverlay> {
+    let {owner} = await this.#sessionPerson();
+    let checked = parseAgentWidgetView(placementId, filters);
+    return await owner.setAgentWidgetView(checked.placementId, checked.filters);
+  }
+
+  /**
+   * Suggests a placement to the owner (FAC-14, the agent's `proposePlacement`): held in their agent
+   * overlay and placed only if they place it. A console widget is suggested only when its own
+   * workspace offers it to them now (`listWidgetInstancesFor`); a built-in widget only by a kind
+   * the owner's own `findSessionWidgets` returned in this session (InferOps' permission filter).
+   * Its `inferops://` reference authorizes nothing: like any placement, what it shows is opened on
+   * its own checked path every time.
+   */
+  async proposeSessionPlacement(input: unknown): Promise<AgentViewOverlay> {
+    let {owner, caller} = await this.#sessionPerson();
+    let proposal = parseAgentPlacementProposal(input);
+    let {ref} = proposal;
+    if (ref.type === "console-widget") {
+      let stub = this.#workspaceStub(ref.workspaceId);
+      let found = await stub?.listWidgetInstancesFor(caller, [{blueprintId: ref.blueprintId, version: ref.version}])
+          .catch(() => null);
+      if (!found?.[0]?.some(instance => instance.consoleId === ref.consoleId && instance.sourceGadgetId === ref.sourceGadgetId)) {
+        throw new Error(AGENT_WIDGET_UNAVAILABLE);
+      }
+    } else if (!(await this.#foundKindsNow(owner)).has(ref.kind)) {
+      throw new Error(AGENT_WIDGET_UNAVAILABLE);
+    }
+    return await owner.proposeAgentPlacement(proposal);
   }
 
   #codeIdMap = new Map<string, WorkerLoaderWorkerCode>;
@@ -13569,6 +13854,22 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   async invokeTriggerAs(caller: ConsoleToolCaller, request: {hookId: number, definitionId: string, revision: number})
       : Promise<ApprovedWorkflowRun> {
     return this.impl.invokeTriggerAs(caller, request);
+  }
+
+  /** See `OverseerImpl.listWidgetInstancesFor`. Worker-only: an operate session asks it for its owner. */
+  async listWidgetInstancesFor(caller: ConsoleToolCaller, definitions: {blueprintId: string, version: number}[])
+      : Promise<ConsoleWidgetInstance[][] | null> {
+    return this.impl.listWidgetInstancesFor(caller, definitions);
+  }
+
+  /** See `OverseerImpl.describeWidgetFor`. Worker-only, like `listWidgetInstancesFor`. */
+  async describeWidgetFor(caller: ConsoleToolCaller, ref: AgentConsoleWidgetRef): Promise<AgentWidgetDescriptionOutcome> {
+    return this.impl.describeWidgetFor(caller, ref);
+  }
+
+  /** See `OverseerImpl.getPublishedConsoleFor`. Worker-only, like `listWidgetInstancesFor`. */
+  async getPublishedConsoleFor(caller: ConsoleToolCaller, consoleId: string): Promise<OperateConsole | null> {
+    return this.impl.getPublishedConsoleFor(caller, consoleId);
   }
 
   /** See `OverseerImpl.listConsoleToolAudit`. Worker-only, like `invokeConsoleTool`. */
@@ -14607,6 +14908,14 @@ const WORKFLOW_REFERENCE_UNKNOWN = "That isn't a workflow trigger this workspace
 const WORKFLOW_REVISION_CHANGED =
   "The workflow changed since it was proposed: its trigger no longer runs that revision. Ask the Dot again.";
 const WORKFLOW_NEEDS_APPROVAL = "Starting a workflow run needs a person's approval.";
+
+// FAC-14: operate events the agent's operatePage never applies, whatever builds them: each needs a
+// check only a person's own session runs (opening a console or a flow, moving a flow) or is the
+// kernel's alone to record. The operatePage tool builds none of them; this holds if one ever does.
+const AGENT_REFUSED_OPERATE_EVENTS: ReadonlySet<OperateEvent["type"]> = new Set<OperateEvent["type"]>([
+  "openConsole", "startFlow", "navigateFlow", "backFlow", "handoverReceived", "handoverSent", "companyChanged",
+  "approvalResolved",
+]);
 
 // FAC-12: that console `consoleId`'s published revision `revision` offers frozen install `gadgetId`
 // as a widget with a UI, which an embed shows; throws otherwise, in getConsoleWidget's words.

@@ -284,8 +284,14 @@ gatekeeper-kit's shared conformance suite against a `project/board` binding.
     mock has no index and throws.
   - Scores from workspaces ranked differently (one `semantic`, one `keyword`) are merged on one
     scale, and the answer reads `semantic`. A deployment has one embedder, so this only orders.
+  - **What a built-in kind declares (FAC-14).** Since inferops#2626 a hit may carry `metadata`
+    (`defineWidget`'s permission, `freshnessSeconds`, `supportedSizes` and actions' id, label,
+    reversibility and permission). `parseWidgetMetadata` keeps it when every field is well formed
+    (`resource:action` permissions, bounded lists) and otherwise leaves it out rather than fail the
+    search: the field is new, and it grants or refuses nothing either way. The operate agent shows
+    it in `findWidgets` ([Agent widget verbs](operate-mode.md#agent-widget-verbs)).
   - `__tests__/http-inferops.test.ts` ("widget search by intent (FAC-13)") covers the request, its
-    parsing, and which 403 reads as denied.
+    parsing (the metadata kept and a malformed one left out), and which 403 reads as denied.
 - **Binding.** `InferOpsAccount.getGatekeeperClassFor(url)` parses
   `inferops://<tenant>.<workspace>/project/board/<KEY>` (exactly two lowercase slug labels, no
   port; anything else is not a board URL), resolves the workspace, checks the project exists there

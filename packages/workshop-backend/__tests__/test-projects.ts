@@ -137,6 +137,7 @@ export const BACKEND: readonly string[] = [
   "chat-changes.test.ts",
   "chat-taint.test.ts",
   "connect-handoff.test.ts",
+  "agent-widgets.test.ts",
   "console-agent-tools.test.ts",
   "console-bound-views.test.ts",
   "console-revision-notice.test.ts",
