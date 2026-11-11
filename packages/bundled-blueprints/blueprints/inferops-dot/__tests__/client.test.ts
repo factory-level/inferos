@@ -57,7 +57,7 @@ afterEach(() => {
 describe("InferOps Dot client", () => {
   it("shows an empty conversation, pointing at where changes are decided", async () => {
     await start({ ok: true, conversation: null });
-    expect(main().textContent).toContain("Ask your Dot about your work in this workspace.");
+    expect(main().textContent).toContain("Ask your Dot about your work in this workspace, or about your company's knowledge");
     expect(main().textContent).toContain("Decide it under Needs your approval.");
   });
 
@@ -91,6 +91,40 @@ describe("InferOps Dot client", () => {
     expect(section.textContent).toContain("may or may not have been made");
     expect(section.textContent).toContain("Expired");
     expect([...section.querySelectorAll("button")]).toEqual([]);
+  });
+
+  // FAC-136: a knowledge write reads as what it changes, with its target's link as text.
+  it("lists a knowledge write by what it changes, its target as text, and what approving it does", async () => {
+    const page = "inferops://acme.handbook/knowledge/page/00000000-0000-4000-8000-0000000000aa";
+    await start({ ok: true, conversation: conversation({
+      proposals: [
+        { id: "p1", tool: "knowledge_page_edit", status: { outcome: "waiting" }, knowledge: { kind: "edit", page } },
+        { id: "p2", tool: "knowledge_page_create", status: { outcome: "succeeded" },
+          knowledge: { kind: "create", workspace: "inferops://acme.handbook/knowledge/page", title: MARKUP } },
+      ],
+    }) });
+    const section = document.querySelector('section[aria-label="Changes your Dot proposed"]')!;
+    expect(section.textContent).toContain("A change to a wiki page");
+    expect(section.textContent).toContain(`Page: ${page}`);
+    expect(section.textContent).toContain("Your Dot will change this page as you, and readers see it right away.");
+    expect(section.textContent).toContain(`A new wiki page: ${MARKUP}`);
+    expect(section.textContent).toContain("Readers see it now.");
+    expect(section.textContent).not.toMatch(/publish/i);
+    expect(section.querySelector("a, img, button")).toBeNull();
+  });
+
+  it("says a knowledge read changes nothing, and names a proposed knowledge write as it comes", async () => {
+    const { asked } = await start({ ok: true, conversation: null });
+    expect(main().textContent).toContain("reading it changes nothing");
+    submit("Fix the typo on the refunds page");
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+    asked[0]!.progress.progress({ type: "tool", name: "knowledge_company_search", status: "started" });
+    expect(main().textContent).toContain("Reading your company's knowledge… Reading changes nothing.");
+    asked[0]!.progress.progress({ type: "proposal", proposal: {
+      id: "p1", tool: "knowledge_page_edit", status: { outcome: "waiting" },
+      knowledge: { kind: "edit", page: "inferops://acme.handbook/knowledge/page/1" },
+    } });
+    expect(main().textContent).toContain("Proposed a change to a wiki page. Decide it under Needs your approval.");
   });
 
   it("draws names and messages as text, never markup", async () => {

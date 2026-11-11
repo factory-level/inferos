@@ -1,7 +1,10 @@
 // The Dot gadget's pure rules: what a refusal means, what the client may see of a conversation, and
 // the words for each state. No DOM and no I/O, so both sides and the tests share them.
 
-import type { DotConversation, Failure, FailureReason, ShownConversation, WriteStatus } from "./protocol.ts";
+import type {
+  DotConversation, DotProgress, DotProposal, Failure, FailureReason, KnowledgeWrite, ShownConversation, ShownProgress,
+  ShownProposal, WriteStatus,
+} from "./protocol.ts";
 
 const CODES: ReadonlyArray<[string, FailureReason]> = [
   ["FORBIDDEN", "refused"], ["UNAUTHORIZED", "refused"],
@@ -22,31 +25,101 @@ export function classify(error: unknown): Failure {
   return { ok: false, reason, message: text.replace(/^(?:\w*Error: )?[A-Z_]+: /, "") };
 }
 
+/** The Dot's company knowledge reads (inferops FAC-136): reading makes no change anywhere. */
+export const KNOWLEDGE_READ_TOOLS: ReadonlySet<string> = new Set([
+  "knowledge_company_search", "knowledge_company_list", "knowledge_company_read",
+]);
+
+/** The longest title shown for a knowledge write; a longer one is cut. */
+const TITLE_MAX = 200;
+
+const LINK = /^inferops:\/\/[^\s]+$/;
+
+/**
+ * What knowledge write `tool` with arguments `input` (the JSON the gatekeeper reports) targets, or
+ * undefined for any other tool, unreadable arguments, or a target that isn't a canonical
+ * `inferops://` link. Only the link and a title are kept, never the body.
+ */
+export function knowledgeWrite(tool: string, input: string): KnowledgeWrite | undefined {
+  if (tool !== "knowledge_page_edit" && tool !== "knowledge_page_create") return undefined;
+  let fields: unknown;
+  try {
+    fields = JSON.parse(input);
+  } catch {
+    return undefined;
+  }
+  if (typeof fields !== "object" || fields === null) return undefined;
+  const { page, workspace, title } = fields as Record<string, unknown>;
+  const titled = typeof title === "string" && title.trim() !== "" ? title.trim().slice(0, TITLE_MAX) : undefined;
+  if (tool === "knowledge_page_edit") {
+    if (typeof page !== "string" || !LINK.test(page)) return undefined;
+    return { kind: "edit", page, ...(titled ? { newTitle: titled } : {}) };
+  }
+  if (typeof workspace !== "string" || !LINK.test(workspace)) return undefined;
+  return { kind: "create", workspace, ...(titled ? { title: titled } : {}) };
+}
+
+/** A change as the client may see it: its id, tool and status, and a knowledge write's target. */
+export function shownProposal({ id, tool, status, input }: DotProposal): ShownProposal {
+  const knowledge = knowledgeWrite(tool, input);
+  return { id, tool, status, ...(knowledge ? { knowledge } : {}) };
+}
+
+/** A step of the answer as the client may hear it: a proposed change only as shown. */
+export function shownProgress(event: DotProgress): ShownProgress {
+  return event.type === "proposal" ? { type: "proposal", proposal: shownProposal(event.proposal) } : event;
+}
+
 /** What the client may see of a conversation: its messages and each change's status, nothing else. */
 export function shown(conversation: DotConversation): ShownConversation {
   return {
     title: conversation.title,
     messages: conversation.messages.map(({ id, role, content, status }) => ({ id, role, content, status })),
     running: conversation.running,
-    proposals: conversation.proposals.map(({ id, tool, status }) => ({ id, tool, status })),
+    proposals: conversation.proposals.map(shownProposal),
   };
+}
+
+/** How a change is named: a knowledge write in words, any other by its tool. */
+export function proposalHeading(proposal: Pick<ShownProposal, "tool" | "knowledge">): string {
+  switch (proposal.knowledge?.kind) {
+    case "edit":
+      return "A change to a wiki page";
+    case "create":
+      return proposal.knowledge.title ? `A new wiki page: ${proposal.knowledge.title}` : "A new wiki page";
+    default:
+      return proposal.tool;
+  }
+}
+
+/** A step while the Dot answers: a knowledge read says it changes nothing. */
+export function stepWords(name: string): string {
+  return KNOWLEDGE_READ_TOOLS.has(name) ? "Reading your company's knowledge… Reading changes nothing." : `Using ${name}…`;
 }
 
 /** Where to decide a change: the one decision list, never a second one here. */
 export const DECIDE_WHERE = "Decide it under Needs your approval.";
 
+/** What a knowledge write does once approved (FAC-136): the person's own edit, live at once. */
+export function knowledgeWords(knowledge: KnowledgeWrite): string {
+  return knowledge.kind === "edit"
+    ? "Your Dot will change this page as you, and readers see it right away."
+    : "Your Dot will create this page as you, and readers see it right away.";
+}
+
 /**
  * A change's status as the person reads it. Waiting points at the one place changes are decided;
- * an uncertain outcome says so and never reads as done or not done.
+ * an uncertain outcome says so and never reads as done or not done. A knowledge write says, while
+ * it waits, what approving it does, and once made that readers see it now.
  */
-export function proposalWords(status: WriteStatus): { label: string; detail?: string } {
+export function proposalWords(status: WriteStatus, knowledge?: KnowledgeWrite): { label: string; detail?: string } {
   switch (status.outcome) {
     case "waiting":
-      return { label: "Waiting for your decision", detail: DECIDE_WHERE };
+      return { label: "Waiting for your decision", detail: knowledge ? `${knowledgeWords(knowledge)} ${DECIDE_WHERE}` : DECIDE_WHERE };
     case "running":
       return { label: "Being made" };
     case "succeeded":
-      return { label: "Made" };
+      return knowledge ? { label: "Made", detail: "Readers see it now." } : { label: "Made" };
     case "rejected":
       return { label: "Declined", detail: "Nothing was made." };
     case "failed":
