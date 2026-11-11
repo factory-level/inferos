@@ -31,6 +31,10 @@
       "types": "./src/widget-placements.ts",
       "import": "./src/widget-placements.ts"
     },
+    "./agent-widgets": {
+      "types": "./src/agent-widgets.ts",
+      "import": "./src/agent-widgets.ts"
+    },
     "./feature-flags": {
       "types": "./src/feature-flags.ts",
       "import": "./src/feature-flags.ts"

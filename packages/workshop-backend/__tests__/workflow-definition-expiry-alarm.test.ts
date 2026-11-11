@@ -54,4 +54,31 @@ describe("the alarm for dynamic definitions (FAC-124)", () => {
       expect(impl.storage.workflowDefinitions.get("gone")).toBeUndefined();
     });
   });
+
+  it("builds the legacy history index on the first alarm sweep", async () => {
+    await withImpl(async impl => {
+      let old = new Date(0);
+      for (let id = 0; id < 1_000; id++) {
+        impl.storage.workflowDeliveries.put({
+          id,
+          hookId: HOOK,
+          definitionId: "legacy-definition",
+          revision: 1,
+          commitId: head(GADGET),
+          at: old,
+          historyOwnerProfileId: ADA.id,
+          result: { outcome: "succeeded", settledAt: old },
+        });
+      }
+      impl.storage.nextWorkflowDeliveryId.put(1_000);
+      impl.storage.workflowDeliveryCount.put(null);
+
+      await impl.runAlarmTasks();
+
+      // The alarm runs the regular and final temporary sweeps; both use the same built index and
+      // each removes at most one 100-record batch from the legacy backlog.
+      expect(impl.storage.workflowDeliveryCount.get()).toEqual({ count: 800, indexed: true });
+      expect([...impl.storage.workflowDeliveryExpiries.list()]).toHaveLength(800);
+    });
+  });
 });

@@ -133,13 +133,29 @@ export type WidgetIndexEntry = {
 };
 
 /**
+ * What a built-in widget declares about itself (FAC-14; InferOps' `defineWidget`, through
+ * `widget.search`): the permission a reader must hold to find it, how often its data is refreshed,
+ * the sizes it renders at, and its actions' metadata. Code-catalog words, the same for every company;
+ * it grants nothing, and each action is still taken through its own permission.
+ */
+export type WidgetMetadata = {
+  permission: string;
+  freshnessSeconds: number;
+  supportedSizes: Array<"small" | "half" | "large">;
+  actions: Array<{ id: string; label: string; reversibility: "reversible" | "irreversible"; permission: string }>;
+};
+
+/**
  * A widget the person may use, found by intent (FAC-13; InferOps' `widget.search`): one of the
  * service's built-in widget kinds, or a published widget definition (a pointer to a Blueprint
  * version, with its words). Definitions only: no instance, record or live data.
  */
 export type WidgetSearchResult = {
-  /** Built-in widget kinds, best first: the kind and what it shows. */
-  hits: Array<{ kind: string; description: string; score: number }>;
+  /**
+   * Built-in widget kinds, best first: the kind, what it shows, and what it declares about itself
+   * when the service says (`metadata`, FAC-14).
+   */
+  hits: Array<{ kind: string; description: string; score: number; metadata?: WidgetMetadata }>;
   /** Published widget definitions, best first (see `WidgetIndexEntry`). */
   definitions: Array<WidgetIndexEntry & { score: number }>;
   /** How they were matched: by meaning, or by the query's words. */
