@@ -127,6 +127,20 @@ describe("a Dot turn", () => {
     expect(card!.fields.Operation).toBe("knowledge_page_edit");
   });
 
+  it("says a new page is created as the person, live, in the workspace it names, and never that it publishes (FAC-136)", async () => {
+    const workspace = "inferops://acme.handbook/knowledge/page";
+    const { hooks, conversation } = await setup(script({
+      proposals: [proposal({ tool: "knowledge_page_create", input: { workspace, title: "Refunds", body: "Take 5 days." } })],
+    }));
+    await conversation.read();
+    const [card] = (await hooks.log()).actions;
+    expect(card).toMatchObject({ kind: "inferops.dot-confirm", title: "Your Dot proposes a new wiki page" });
+    expect(card!.description).toContain("Your Dot will create this page as you, and readers see it right away.");
+    expect(card!.description).toContain("checked again now in that workspace");
+    expect(card!.description).not.toMatch(/change this page|that page's workspace|publish/i);
+    expect(card!.fields["New page in"]).toBe(workspace);
+  });
+
   it("stages on reading a proposal no relay saw, so a cut turn's change is still decided here", async () => {
     const { hooks, conversation } = await setup(script({ proposals: [proposal()] }));
     const read = await conversation.read();
