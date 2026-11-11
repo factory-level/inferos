@@ -50,6 +50,8 @@ caller may read retained history. It uses the same owner-or-edit-share rule as
 `listWorkflowDeliveries()`, including the retained owner id when the definition itself was swept.
 It returns IDs only: no title, run details, or existence of history the caller cannot read. The
 read is workspace-local and grants no access to a definition, its bindings, or the ability to run it.
+The result has at most as many IDs as retained deliveries, bounded by the workspace's configured
+history cap (at most 100,000).
 Delivery reads include the server-computed `historyExpiresAt` from the configured retention policy;
 it is null while a run remains live and omitted from stored legacy records.
 
@@ -70,9 +72,10 @@ This red-tier change requires security review before merge.
 Admission initializes the retention index if needed, removes at most 200 due eligible records, then
 refuses admission if the workspace remains at its cap. Settling an eligible delivery updates its
 ordered expiry pointer. Alarm sweeps use the same bounded index. History reads return a definition's
-deliveries to its owner or persisted edit share. Discovery groups the workspace's retained delivery
-rows by definition, applies that same rule to each group, and returns only authorized IDs. The use
-and operate APIs refuse discovery.
+deliveries to its owner or persisted edit share. History reads first pass the workspace
+shared-configuration authorization check, then apply that same rule. Discovery groups the
+workspace's retained delivery rows by definition, applies it to each group, and returns only
+authorized IDs. The use and operate APIs refuse discovery.
 
 ## Configuration
 

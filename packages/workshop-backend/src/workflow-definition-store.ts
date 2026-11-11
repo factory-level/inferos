@@ -1309,7 +1309,7 @@ export class WorkspaceWorkflowDefinitionStore {
    */
   deliveries(viewer: string, definitionId: string, role: CollaboratorRole | null): WorkflowDefinitionDelivery[] {
     let matches = Array.from(this.storage.workflowDeliveries.list()).filter(delivery => delivery.definitionId === definitionId);
-    let sweptOwner = matches.find(delivery => delivery.historyOwnerProfileId)?.historyOwnerProfileId;
+    let sweptOwner = this.#sweptHistoryOwner(matches);
     if (!this.#canReadHistory(viewer, definitionId, role, sweptOwner)) throw new Error(NOT_FOUND);
     let shown: WorkflowDefinitionDelivery[] = [];
     for (let { id: _, historyOwnerProfileId: __, ...delivery } of matches) {
@@ -1328,16 +1328,26 @@ export class WorkspaceWorkflowDefinitionStore {
 
   /** Discover only histories the caller can already read; swept definitions use retained owner IDs. */
   listReadableWorkflowHistories(viewer: string, role: CollaboratorRole | null): WorkflowDefinitionHistoryRef[] {
-    let histories = new Map<string, string | undefined>();
+    let deliveriesByDefinition = new Map<string, StoredWorkflowDelivery[]>();
     for (let delivery of this.storage.workflowDeliveries.list()) {
-      if (!histories.has(delivery.definitionId) || histories.get(delivery.definitionId) === undefined) {
-        histories.set(delivery.definitionId, delivery.historyOwnerProfileId);
-      }
+      let deliveries = deliveriesByDefinition.get(delivery.definitionId);
+      if (deliveries) deliveries.push(delivery);
+      else deliveriesByDefinition.set(delivery.definitionId, [delivery]);
     }
-    return Array.from(histories, ([definitionId, owner]) =>
-      this.#canReadHistory(viewer, definitionId, role, owner) ? { definitionId } : null)
-      .filter((history): history is { definitionId: string } => history !== null)
+    return Array.from(deliveriesByDefinition, ([definitionId, deliveries]) =>
+      this.#canReadHistory(viewer, definitionId, role, this.#sweptHistoryOwner(deliveries))
+        ? { definitionId }
+        : null)
+      .filter((history): history is WorkflowDefinitionHistoryRef => history !== null)
       .toSorted((left, right) => left.definitionId.localeCompare(right.definitionId));
+  }
+
+  /** Use one owner selection rule for direct reads and swept-history discovery. */
+  #sweptHistoryOwner(deliveries: Iterable<StoredWorkflowDelivery>): string | undefined {
+    for (let delivery of deliveries) {
+      if (delivery.historyOwnerProfileId) return delivery.historyOwnerProfileId;
+    }
+    return undefined;
   }
 
   #canReadHistory(viewer: string, definitionId: string, role: CollaboratorRole | null,
