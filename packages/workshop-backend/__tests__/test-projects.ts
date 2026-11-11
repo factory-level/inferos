@@ -13,6 +13,7 @@
 export const UNIT_NODE: readonly string[] = [
   "admin-config.test.ts",
   "agent-catalog.test.ts",
+  "rpc-target-validation.test.ts",
   "agent-compaction.test.ts",
   "agent-tool-results.test.ts",
   "ai-gateway.test.ts",

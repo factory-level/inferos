@@ -4103,6 +4103,11 @@ const DOT_SCOPE = "chatbot/dot";
 
 /** Confirming a Dot proposal: InferOps refuses before anything changes, and keys it by the proposal. */
 const DOT_CONFIRM: ApplyPolicy = { refusalsProven: true, replayable: true };
+/**
+ * A workflow-run proposal (FAC-120): a refusal is proven (the kernel said nothing started), but a run
+ * that may have started is never sent again from here, so its outcome stays unknown, not retryable.
+ */
+const DOT_WORKFLOW_RUN: ApplyPolicy = { refusalsProven: true, replayable: false };
 
 /** A Dot binding: the person's own Dot in one workspace, and the decisions staged on its proposals. */
 class DotBinding extends ActionBinding {
@@ -4263,12 +4268,15 @@ async function applyDotWorkflowRun(binding: DotBinding, record: DotConfirmAction
     return { failed: { outcome: "notApplied", retryable: false, message: DOT_WORKFLOW_NEEDS_APPROVAL, kind: "policy" } };
   }
   return binding.applyOnce(record, {
-    policy: DOT_CONFIRM, fields,
+    policy: DOT_WORKFLOW_RUN, fields,
     check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
     send: async marked => {
-      const reference = typeof record.input.reference === "string" ? record.input.reference : "";
-      const run = await effects.invokeWorkflow(reference);
-      if (run.status !== "started") {
+      // The run the action declared at submit, which the person approved: no reference is passed here.
+      const run = await effects.invokeWorkflow();
+      // It may have started: uncertain, never a refusal to retry or decline (the kernel's start is
+      // idempotent per action, so a retry can only return the same run).
+      if (run.status === "unknown") throw new InferOpsError("UNAVAILABLE", run.reason);
+      if (run.status === "refused") {
         await binding.client.declineDotProposal(record.conversationId, record.proposalId).catch(() => undefined);
         throw new CheckRefused(RUN_REFUSAL_CODES[run.kind] ?? "UNAVAILABLE", run.reason);
       }
@@ -4585,6 +4593,8 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
           .verbatim("Reference", typeof proposal.input.reference === "string" ? proposal.input.reference : "")
           .finish(),
         implementsRevert: false,
+        // Declared to the kernel, which shows it and binds this approval's run to exactly it.
+        ...(ref ? { workflowRun: { reference: proposal.input.reference as string } } : {}),
         actionKind: { tag: "inferops.dot-workflow-invoke", label: "Approve a workflow run your Dot proposed" },
       }));
       return;

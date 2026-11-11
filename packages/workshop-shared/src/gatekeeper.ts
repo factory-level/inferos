@@ -1049,27 +1049,33 @@ export interface GatekeeperUserVerifier extends WorkerEntrypoint {}
 export type ActionApplied = { applied: { result: ActionResult } };
 
 /**
- * What the kernel does for a gatekeeper as the person approving one of its actions (FAC-120), passed
- * to `applyAction()` only for that person's approval and revoked when it returns. Each effect runs
- * as that person, with every check of the same request made by them directly, and its answer is
- * kernel text; nothing a gatekeeper sends can make it run outside such an approval.
+ * What the kernel does for a gatekeeper as the person approving one of its actions (FAC-120): passed
+ * to `applyAction()` only for that person's own approval of an action that declared
+ * `ActionDescription.workflowRun`, never for an automatic approval or an assigned run's write, and
+ * revoked when it returns. It runs as that person, with every check of the same request made by
+ * them directly, on the run the action declared and nothing else; its answer is kernel text.
  */
 export interface ApprovedEffects extends RpcTarget {
   /**
-   * Starts the workflow run InferOS trigger reference `reference` names
-   * (`inferops://<company>.<workspace>/inferos/workflow-trigger/...`, workflow-trigger-ref.ts), as
-   * the approving person: in the trigger's own workspace, verified and with at least `use` there,
-   * only while its definition and published revision are the ones named, and then through the
-   * workspace's on-request admission (its run control's invokers, `workflow:invoke` asked with the
-   * person's own account, the run right and the rate caps). At most once per apply.
+   * Starts the run the action's `workflowRun.reference` names, as the approving person: in the
+   * trigger's own workspace, verified and with at least `use` there, only while its definition and
+   * published revision are the ones named, then through the workspace's on-request admission (its
+   * run control's invokers, `workflow:invoke` asked with the person's own account, the run right
+   * and the rate caps). Idempotent per approved action: asking again, in this apply or a retry of it,
+   * returns the run it started.
    */
-  invokeWorkflow(reference: string): Promise<ApprovedWorkflowRun>;
+  invokeWorkflow(): Promise<ApprovedWorkflowRun>;
 }
 
-/** An `ApprovedEffects.invokeWorkflow` answer: the run admitted, or why not, in a FAC-119 kind. */
+/**
+ * An `ApprovedEffects.invokeWorkflow` answer: the run admitted; refused, so known not started, in a
+ * FAC-119 kind; or `unknown`, when the run may have started (an answer lost after the request), which
+ * a gatekeeper records as uncertain, never as a refusal it may retry or decline.
+ */
 export type ApprovedWorkflowRun =
   | { status: "started"; runId: string }
-  | { status: "refused"; kind: ActionFailureKind; reason: string };
+  | { status: "refused"; kind: ActionFailureKind; reason: string }
+  | { status: "unknown"; reason: string };
 
 /**
  * An apply that did not succeed, as `applyAction` reports it when it knows more than a thrown error
@@ -1758,6 +1764,16 @@ export type ActionDescription = {
    * this is absent; an incomplete description is never refused for that reason.
    */
   descriptionIsComplete?: boolean;
+
+  /**
+   * If present (FAC-120), approving this action asks the kernel to start the workflow run this
+   * InferOS trigger reference names (`inferops://<company>.<workspace>/inferos/workflow-trigger/...`,
+   * workflow-trigger-ref.ts), as the person approving it. The kernel checks its form when the action
+   * is submitted, shows it to the approver, and, only for that person's own approval of this action,
+   * hands `applyAction()` the `ApprovedEffects` that start exactly this run. It is fixed at submit:
+   * nothing at apply time can name another.
+   */
+  workflowRun?: { reference: string };
 
   /**
    * If present, applying this action will push the named commits to the remote resource this

@@ -233,6 +233,8 @@ describe("deciding a workflow-run proposal", () => {
     const { hooks } = await staged(script({ proposals: [workflow()] }));
     const [action] = (await hooks.log()).actions;
     expect(action).toMatchObject({ kind: "inferops.dot-workflow-invoke", title: "Your Dot proposes running a workflow", implementsRevert: false });
+    // Declared to the kernel at submit, which binds the approval's run to exactly this reference.
+    expect(action).toMatchObject({ workflowRun: { reference: REFERENCE } });
     expect(JSON.stringify(action)).toContain("trigger 7 of InferOS workspace ws-1, revision 2");
   });
 
@@ -249,11 +251,20 @@ describe("deciding a workflow-run proposal", () => {
     const applied = await hooks.applyDot(actionId, { status: "started", runId: "run-1" });
     expect(applied.failure).toBeNull();
     expect(applied.result).toMatchObject({ kind: "dot-confirm", proposalId: PROPOSAL, runId: "run-1" });
-    expect(await hooks.dotEffectsAsked()).toEqual([REFERENCE]);
+    expect(await hooks.dotEffectsAsked()).toEqual(["invoked"]);
     expect((await hooks.dotCalls()).find(c => c.path.endsWith("/confirm"))?.key).toBe(PROPOSAL);
     // Applied once: approving again starts nothing more.
     await hooks.applyDot(actionId, { status: "started", runId: "run-2" });
-    expect(await hooks.dotEffectsAsked()).toEqual([REFERENCE]);
+    expect(await hooks.dotEffectsAsked()).toEqual(["invoked"]);
+  });
+
+  it("a run that may have started is uncertain: never retried as a refusal, never declined, never confirmed", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [workflow()] }));
+    const { failure } = await hooks.applyDot(actionId, { status: "unknown", reason: "It isn't known whether the workflow run started." });
+    expect(failure).toMatchObject({ outcome: "unknown", retryable: false });
+    const calls = await hooks.dotCalls();
+    expect(calls.some(c => c.path.endsWith("/decline"))).toBe(false);
+    expect(calls.some(c => c.path.endsWith("/confirm"))).toBe(false);
   });
 
   it("refused by the kernel, it is not applied, in the refusal's kind, and is declined in InferOps, never confirmed", async () => {

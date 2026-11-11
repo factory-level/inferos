@@ -73,7 +73,8 @@ function person(h: Harness, profileId: string, role?: "use" | "build", session =
   return { userId: uid(profileId), profileId, sessionWorkspaceId: session };
 }
 
-const request = (overrides: Record<string, unknown> = {}) => ({ hookId: HOOK, definitionId: DEFINITION, revision: 2, ...overrides });
+const request = (overrides: Record<string, unknown> = {}) =>
+  ({ hookId: HOOK, definitionId: DEFINITION, revision: 2, actionId: 5, ...overrides });
 
 describe("the trigger's own workspace", () => {
   it("admits the run for a verified person with use there, through their own on-request path", () =>
@@ -96,7 +97,7 @@ describe("the trigger's own workspace", () => {
       expect(h.invoked).toEqual([]);
     }));
 
-  it("starts nothing for an unknown or disabled hook, another definition, or a revision it no longer runs", () =>
+  it("starts nothing for an unknown or disabled hook, another definition, a revision it no longer runs, or no action", () =>
     withTrigger(async h => {
       let p1 = person(h, "p1", "use");
       expect(await h.instance.invokeTriggerAs(p1, request({ hookId: 12 }))).toMatchObject({ status: "refused", kind: "permission" });
@@ -104,61 +105,121 @@ describe("the trigger's own workspace", () => {
       expect(await h.instance.invokeTriggerAs(p1, request({ revision: 1 })))
         .toMatchObject({ status: "refused", kind: "policy", reason: expect.stringMatching(/changed since it was proposed/) });
       expect(await h.instance.invokeTriggerAs(p1, request({ hookId: "11" }))).toMatchObject({ status: "refused", kind: "invalid" });
+      expect(await h.instance.invokeTriggerAs(p1, request({ actionId: undefined }))).toMatchObject({ status: "refused", kind: "invalid" });
       h.impl.storage.boundHooks.put({ id: HOOK, gadgetId: 3, gatekeeperId: 50, enabled: false } as never);
       expect(await h.instance.invokeTriggerAs(p1, request())).toMatchObject({ status: "refused", kind: "permission" });
       expect(h.invoked).toEqual([]);
     }));
 
-  it("passes on the on-request path's own refusal (not an invoker, no workflow:invoke) without starting anything", () =>
+  it("answers a refusal before anything is minted in a fixed sentence, and lets the same action try again", () =>
     withTrigger(async h => {
       let p1 = person(h, "p1", "use");
+      h.impl.invokeTrigger = async () => { throw new Error("internal detail: workflow:invoke for workspace 123 denied"); };
+      expect(await h.instance.invokeTriggerAs(p1, request()))
+        .toEqual({ status: "refused", kind: "unavailable", reason: "This trigger couldn't be run just now." });
       h.impl.invokeTrigger = async () => { throw new Error("You can't run this trigger."); };
       expect(await h.instance.invokeTriggerAs(p1, request()))
         .toEqual({ status: "refused", kind: "permission", reason: "You can't run this trigger." });
+    }));
+
+  it("returns the same run for the same approved action, and starts no second one", () =>
+    withTrigger(async h => {
+      let p1 = person(h, "p1", "use");
+      expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "started", runId: "run-1" });
+      expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "started", runId: "run-1" });
+      expect(h.invoked).toHaveLength(1);
+      // Another action is its own approval.
+      await h.instance.invokeTriggerAs(p1, request({ actionId: 6 }));
+      expect(h.invoked).toHaveLength(2);
+    }));
+
+  it("answers a start that may have happened as unknown, never a refusal, and never starts it again", () =>
+    withTrigger(async h => {
+      let p1 = person(h, "p1", "use");
+      // An invocation was minted, then the answer was lost: the run may exist.
+      h.impl.invokeTrigger = async () => {
+        h.invoked.push(["minted"]);
+        h.impl.storage.nextWorkflowInvocationLogId.put(h.impl.storage.nextWorkflowInvocationLogId.get() + 1);
+        throw new Error("the run's own failure after it was taken");
+      };
+      expect(await h.instance.invokeTriggerAs(p1, request())).toMatchObject({ status: "unknown" });
+      expect(await h.instance.invokeTriggerAs(p1, request())).toMatchObject({ status: "unknown" });
+      expect(h.invoked).toHaveLength(1);
     }));
 });
 
 describe("the approved effects a gatekeeper's apply receives", () => {
   const ADA = { type: "user" as const, id: "ada-profile", name: "Ada" };
-  const DESCRIPTION = { title: "Run it", description: "Runs it.", implementsRevert: false, descriptionIsComplete: true };
+  const REFERENCE = workflowTriggerRef({ company: "acme", workspace: "operations",
+    inferosWorkspaceId: "a".repeat(64), hookId: HOOK, definitionId: DEFINITION, revision: 2 });
+  const RUN = { title: "Run it", description: "Runs it.", implementsRevert: false, descriptionIsComplete: true,
+    workflowRun: { reference: REFERENCE } };
+  const ISSUE = { title: "Create an issue", description: "Creates an issue.", implementsRevert: false, descriptionIsComplete: true };
 
-  // Applies one pending action of a gatekeeper that records the effects it was handed, and what
-  // they answer during the apply.
-  async function applying(name: string, autoApproved: boolean, during: (effects: ApprovedEffects) => Promise<ApprovedWorkflowRun>) {
+  // Applies one pending action of a gatekeeper (vendor `vendorId`) that records the effects it was
+  // handed, and what they answer during the apply; `invoked` records each run the kernel asked for.
+  async function applying(name: string, options: {
+    description?: object; resolvedBy?: object; autoApproved?: boolean; executedAs?: object; vendorId?: string;
+    during?: (effects: ApprovedEffects) => Promise<ApprovedWorkflowRun>;
+  } = {}) {
     return runInDurableObject(env.TEST_OVERSEER.getByName(name), async (instance: OverseerDurableObject) => {
       let impl = (instance as unknown as { impl: any }).impl;
-      impl.storage.gatekeepers.put({ id: 41, resourceTitle: "Dot", class: {} as any,
-        creationSpec: { type: "gatekeeper", vendorId: "test", resourceUrl: "test://dot", typeUrlPattern: "test://*" } });
-      let seen: { effects?: ApprovedEffects; answer?: ApprovedWorkflowRun } = {};
+      impl.storage.gatekeepers.put({ id: 41, resourceTitle: "Connection", class: {} as any,
+        creationSpec: { type: "gatekeeper", vendorId: options.vendorId ?? "inferops", resourceUrl: "test://x", typeUrlPattern: "test://*" } });
+      let seen: { effects?: ApprovedEffects; answers: ApprovedWorkflowRun[] } = { answers: [] };
       impl.getGatekeeperFacet = () => ({
         applyAction: async (_action: number, _cache: unknown, effects?: ApprovedEffects) => {
           seen.effects = effects;
-          if (effects) seen.answer = await during(effects);
+          if (effects && options.during) seen.answers.push(await options.during(effects));
         },
       });
-      await impl.submitAction(41, 1, DESCRIPTION, { from: "agent", chatId: 1 });
+      await impl.submitAction(41, 1, options.description ?? RUN, { from: "agent", chatId: 1 });
       let record = Array.from(impl.storage.actions.list()).find((a: any) => a.type === "action") as any;
-      try { await impl.applyPendingAction(record, ADA, autoApproved); } catch { /* recorded */ }
-      return seen;
+      if (options.executedAs) record.executedAs = options.executedAs;
+      try { await impl.applyPendingAction(record, options.resolvedBy ?? ADA, options.autoApproved ?? false); } catch { /* recorded */ }
+      return { seen, impl };
     });
   }
 
-  it("are absent from an automatic approval, so nothing a gatekeeper sends can start a run", async () => {
-    let seen = await applying("approved-run-auto", true, async () => ({ status: "started", runId: "x" }));
-    expect(seen.effects).toBeUndefined();
+  it("are minted only for a person's own approval of an action that declared its run", async () => {
+    expect((await applying("effects-declared")).seen.effects).toBeDefined();
+    // QA: a non-Dot gatekeeper's ordinary write (vendor github, "Create an issue") gets none.
+    expect((await applying("effects-github", { description: ISSUE, vendorId: "github" })).seen.effects).toBeUndefined();
+    expect((await applying("effects-undeclared", { description: ISSUE })).seen.effects).toBeUndefined();
+    expect((await applying("effects-auto", { autoApproved: true })).seen.effects).toBeUndefined();
+    // QA: an agent or system resolver gets none.
+    for (let [n, resolvedBy] of [["agent", { type: "agent", id: "a", name: "Agent" }], ["system", { type: "system", id: "s", name: "System" }]] as const) {
+      expect((await applying(`effects-${n}`, { resolvedBy })).seen.effects).toBeUndefined();
+    }
+    // QA: an assigned run's write gets none.
+    expect((await applying("effects-executed-as", { executedAs: { hookId: HOOK, deliveryId: 1 } })).seen.effects).toBeUndefined();
   });
 
-  it("start at most one run per approval, refuse a reference that isn't one, and are revoked once the apply returns", async () => {
-    let seen = await applying("approved-run-manual", false, async effects => {
-      let unreadable = await effects.invokeWorkflow("https://example.com/not-a-trigger");
-      expect(unreadable).toMatchObject({ status: "refused", kind: "invalid" });
-      return effects.invokeWorkflow(workflowTriggerRef({ company: "acme", workspace: "operations",
-        inferosWorkspaceId: "a".repeat(64), hookId: HOOK, definitionId: DEFINITION, revision: 2 }));
+  it("start the run the action declared, which nothing at apply can swap, give repeats the first answer, and are revoked after", async () => {
+    let asked: unknown[] = [];
+    let { seen } = await applying("effects-bound", {
+      during: async effects => {
+        // A gatekeeper can pass nothing: the declared reference is the run (extra arguments are ignored).
+        let first = await (effects.invokeWorkflow as (...args: unknown[]) => Promise<ApprovedWorkflowRun>)("inferops://evil.co/inferos/workflow-trigger/x/1?definition=\"d\"&revision=\"1\"");
+        let again = await effects.invokeWorkflow();
+        asked.push(first, again);
+        return first;
+      },
     });
     expect(seen.effects).toBeDefined();
-    // The first call, however it ended, was the approval's one call.
-    expect(seen.answer).toEqual({ status: "refused", kind: "policy", reason: "This approval has already started a run." });
-    expect(await seen.effects!.invokeWorkflow("anything")).toEqual(
+    // The trigger's workspace (a fresh id here) isn't reachable as the approver, so the run is
+    // refused or unknown; either way the same answer twice, from one call.
+    expect(asked[0]).toEqual(asked[1]);
+    expect(await seen.effects!.invokeWorkflow()).toEqual(
       { status: "refused", kind: "policy", reason: "Starting a workflow run needs a person's approval." });
   });
+
+  it("refuses at submit a declared run that isn't a workflow trigger reference", () =>
+    runInDurableObject(env.TEST_OVERSEER.getByName("effects-malformed"), async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      impl.storage.gatekeepers.put({ id: 41, resourceTitle: "Connection", class: {} as any,
+        creationSpec: { type: "gatekeeper", vendorId: "inferops", resourceUrl: "test://x", typeUrlPattern: "test://*" } });
+      await expect(impl.submitAction(41, 1, { ...RUN, workflowRun: { reference: "https://example.com" } }, { from: "agent", chatId: 1 }))
+        .rejects.toThrow(/must name an InferOS workflow trigger reference/);
+    }));
 });

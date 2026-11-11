@@ -7067,8 +7067,11 @@ class OverseerImpl implements AgentHooks {
     let result: void | {failed: ActionApplyFailure} | ActionApplied;
     // FAC-120: what the kernel does as the person approving (ApprovedEffects), for a person's own
     // approval only: never an automatic one, never an assigned run's write. Revoked below.
-    let effects = !autoApproved && resolvedBy.type === "user" && !record.executedAs
-        ? new ApprovedEffectsImpl(reference => this.#invokeApprovedWorkflow(resolvedBy.id, reference))
+    // Only for an action that declared the run at submit (ActionDescription.workflowRun, shown to
+    // the approver), and bound to that reference and this action: nothing at apply names another.
+    let declaredRun = record.description.workflowRun?.reference;
+    let effects = declaredRun !== undefined && !autoApproved && resolvedBy.type === "user" && !record.executedAs
+        ? new ApprovedEffectsImpl(() => this.#invokeApprovedWorkflow(resolvedBy.id, declaredRun, record.id))
         : undefined;
     try {
       result = await gatekeeper.applyAction(record.action,
@@ -8336,6 +8339,12 @@ class OverseerImpl implements AgentHooks {
           "This workspace has observed sensitive data. To prevent leaks, an action is only accepted " +
           "when the approver can review everything it will send, and a git push cannot be " +
           "reviewed as of yet.");
+    }
+
+    // A declared workflow run (FAC-120, ActionDescription.workflowRun) is a trigger reference the
+    // approver is shown and approval binds: one that isn't well formed is refused before queueing.
+    if (description.workflowRun !== undefined && !parseWorkflowTriggerRef(description.workflowRun?.reference)) {
+      throw new Error("A declared workflow run must name an InferOS workflow trigger reference.");
     }
 
     // Push authorization (see ActionDescription.pushedCommits): before anything is queued,
@@ -12975,12 +12984,14 @@ class OverseerImpl implements AgentHooks {
   }
 
   /**
-   * FAC-120: starts the run trigger reference `reference` names, as `profileId`, who is approving an
-   * action here now (ApprovedEffects.invokeWorkflow; only applyPendingAction mints one). The
-   * trigger's own workspace decides (`invokeTriggerAs`), with this workspace as the person's
-   * operate session, which it checks. Every answer is kernel text.
+   * FAC-120: starts the run `reference` names, as `profileId`, who is approving action `actionId`
+   * here now (ApprovedEffects.invokeWorkflow; applyPendingAction mints one only for an action that
+   * declared it). The trigger's own workspace decides (`invokeTriggerAs`), with this workspace as
+   * the person's operate session, which it checks, keyed by this workspace and action so a retry
+   * returns the same run. A call that may have reached it but didn't answer is `unknown`, never a
+   * refusal. Every answer is kernel text.
    */
-  async #invokeApprovedWorkflow(profileId: string, reference: string): Promise<ApprovedWorkflowRun> {
+  async #invokeApprovedWorkflow(profileId: string, reference: string, actionId: number): Promise<ApprovedWorkflowRun> {
     let ref = parseWorkflowTriggerRef(reference);
     if (!ref) return {status: "refused", kind: "invalid", reason: WORKFLOW_REFERENCE_UNKNOWN};
     let ns = this.ctx.exports.OverseerDurableObject;
@@ -12994,32 +13005,40 @@ class OverseerImpl implements AgentHooks {
       sessionWorkspaceId: this.ctx.id.toString()};
     try {
       return await workspace.invokeTriggerAs(caller,
-          {hookId: ref.hookId, definitionId: ref.definitionId, revision: ref.revision});
+          {hookId: ref.hookId, definitionId: ref.definitionId, revision: ref.revision, actionId});
     } catch {
-      return {status: "refused", kind: "unavailable", reason: RUN_NOT_STARTED};
+      return {status: "unknown", reason: WORKFLOW_RUN_UNKNOWN};
     }
   }
 
   /**
-   * Starts trigger `request.hookId` for `caller` (FAC-120), the person approving the run in their
-   * operate session (`caller.sessionWorkspaceId`): verified as a console tool caller is
-   * (#consoleToolUser; never this workspace), with at least `use` here, and only while the
-   * trigger runs definition `request.definitionId` at published revision `request.revision`. Then
-   * `invokeWorkflowTrigger` admits it as for the person's own request: the live hook,
-   * `workflow:invoke` asked with their own account, the company, the run right, the control's
-   * invokers and the rate caps. A trigger that doesn't exist and one the caller may not reach read
-   * alike.
+   * Starts trigger `request.hookId` for `caller` (FAC-120), the person approving action
+   * `request.actionId` in their operate session (`caller.sessionWorkspaceId`): verified as a console
+   * tool caller is (#consoleToolUser; never this workspace), with at least `use` here, and only while
+   * the trigger runs definition `request.definitionId` at published revision `request.revision`.
+   * Then `invokeTrigger` admits it as for the person's own request: the live hook, `workflow:invoke`
+   * asked with their own account, the company, the run right, the control's invokers and the rate
+   * caps. Idempotent per (session workspace, action): a repeat returns the run the first started, or
+   * `unknown` while the first's outcome is. A trigger that doesn't exist and one the caller may not
+   * reach read alike; every answer is a fixed sentence.
    */
-  async invokeTriggerAs(caller: ConsoleToolCaller, request: {hookId: number, definitionId: string, revision: number})
+  async invokeTriggerAs(caller: ConsoleToolCaller,
+      request: {hookId: number, definitionId: string, revision: number, actionId: number})
       : Promise<ApprovedWorkflowRun> {
     let refuse = (kind: ActionFailureKind, reason: string): ApprovedWorkflowRun => ({status: "refused", kind, reason});
-    let {hookId, definitionId, revision} = request ?? {};
-    if (!Number.isSafeInteger(hookId) || typeof definitionId !== "string" || !Number.isSafeInteger(revision)) {
+    let {hookId, definitionId, revision, actionId} = request ?? {};
+    if (!Number.isSafeInteger(hookId) || typeof definitionId !== "string" || !Number.isSafeInteger(revision) ||
+        !Number.isSafeInteger(actionId)) {
       return refuse("invalid", WORKFLOW_REFERENCE_UNKNOWN);
     }
     if (!this.ownerId || this.storage.operateSession.get()) return refuse("permission", CANNOT_RUN);
     let user = await this.#consoleToolUser(caller);
     if (!user || !await this.#consoleToolRole(caller, user)) return refuse("permission", CANNOT_RUN);
+    // One run per approved action, whatever retries: the first's answer is the only one.
+    let key = `fac120:approvedRun:${caller.sessionWorkspaceId}:${actionId}`;
+    let earlier = this.ctx.storage.kv.get<{state: "starting"} | {state: "started", runId: string}>(key);
+    if (earlier?.state === "started") return {status: "started", runId: earlier.runId};
+    if (earlier) return {status: "unknown", reason: WORKFLOW_RUN_UNKNOWN};
     let pin = this.storage.workflowTriggerPins.get(hookId);
     if (!pin || pin.definitionId !== definitionId || !this.storage.boundHooks.get(hookId)?.enabled) {
       return refuse("permission", CANNOT_RUN);
@@ -13029,16 +13048,27 @@ class OverseerImpl implements AgentHooks {
         ? this.storage.workflowDefinitions.get(definitionId)?.published?.revision ?? null
         : pin.revision;
     if (current !== revision) return refuse("policy", WORKFLOW_REVISION_CHANGED);
+    // Whether an invocation was minted is what tells "not started" from "may have started":
+    // beginInvocation advances the invocation log, and nothing before it can start a run.
+    let mintedBefore = this.storage.nextWorkflowInvocationLogId.get();
+    this.ctx.storage.kv.put(key, {state: "starting"});
     try {
       // The person's own on-request path (invokeTrigger -> invokeWorkflowTrigger), unchanged.
       let invocation = await this.invokeTrigger(caller.userId, caller.profileId, hookId);
+      this.ctx.storage.kv.put(key, {state: "started", runId: invocation.id});
       return {status: "started", runId: invocation.id};
     } catch (error) {
       let message = error instanceof Error ? error.message : String(error);
-      // The workspace's own refusals carry its words; anything else is the fixed one.
-      return message === CANNOT_RUN || /workflow:invoke|permission/i.test(message)
-          ? refuse("permission", message.length <= 300 ? message : CANNOT_RUN)
-          : refuse("unavailable", message.length <= 300 ? message : RUN_NOT_STARTED);
+      let minted = this.storage.nextWorkflowInvocationLogId.get() !== mintedBefore;
+      // Not started: refused before an invocation was minted, or in invokeWorkflowTrigger's own
+      // fixed words for one its gatekeeper never took. Anything else may have started.
+      if (!minted || NOT_TAKEN_REFUSALS.has(message)) {
+        this.ctx.storage.kv.delete(key);
+        return message === CANNOT_RUN || message === WORKFLOW_INVOKE_REFUSED
+            ? refuse("permission", CANNOT_RUN)
+            : refuse("unavailable", RUN_NOT_STARTED);
+      }
+      return {status: "unknown", reason: WORKFLOW_RUN_UNKNOWN};
     }
   }
 
@@ -13851,7 +13881,8 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * See `OverseerImpl.invokeTriggerAs`. Worker-only: the workspace applying a person's approval
    * calls it for them (ApprovedEffects.invokeWorkflow); no client interface reaches it.
    */
-  async invokeTriggerAs(caller: ConsoleToolCaller, request: {hookId: number, definitionId: string, revision: number})
+  async invokeTriggerAs(caller: ConsoleToolCaller,
+      request: {hookId: number, definitionId: string, revision: number, actionId: number})
       : Promise<ApprovedWorkflowRun> {
     return this.impl.invokeTriggerAs(caller, request);
   }
@@ -14908,6 +14939,11 @@ const WORKFLOW_REFERENCE_UNKNOWN = "That isn't a workflow trigger this workspace
 const WORKFLOW_REVISION_CHANGED =
   "The workflow changed since it was proposed: its trigger no longer runs that revision. Ask the Dot again.";
 const WORKFLOW_NEEDS_APPROVAL = "Starting a workflow run needs a person's approval.";
+const WORKFLOW_RUN_UNKNOWN =
+  "It isn't known whether the workflow run started: check the trigger's runs before approving it again.";
+// invokeWorkflowTrigger's own words for an invocation its gatekeeper never took: nothing started.
+const NOT_TAKEN_REFUSALS: ReadonlySet<string> = new Set([RUN_NOT_STARTED, "This trigger can't be run on request.",
+  WORKFLOW_ASSIGNMENTS_DISABLED, TRIGGER_AUTO_RETIRED]);
 
 // FAC-14: operate events the agent's operatePage never applies, whatever builds them: each needs a
 // check only a person's own session runs (opening a console or a flow, moving a flow) or is the
@@ -19809,14 +19845,15 @@ function actionReceipt(impl: OverseerImpl, gatekeeperId: number, id: number): Ac
   };
 }
 
-@validateRpc()
 // FAC-120: the effects a gatekeeper may ask while a person's approval of its action is applied
-// (ApprovedEffects), handed to applyAction and revoked once it returns. One run at most per apply.
+// (ApprovedEffects), handed to applyAction only for an action that declared its run, bound to that
+// run, and revoked once it returns. Repeats inside one apply get the first answer.
+@validateRpc()
 class ApprovedEffectsImpl extends RpcTarget implements ApprovedEffects {
-  #invoke: ((reference: string) => Promise<ApprovedWorkflowRun>) | null;
-  #used = false;
+  #invoke: (() => Promise<ApprovedWorkflowRun>) | null;
+  #answer: Promise<ApprovedWorkflowRun> | null = null;
 
-  constructor(invoke: (reference: string) => Promise<ApprovedWorkflowRun>) {
+  constructor(invoke: () => Promise<ApprovedWorkflowRun>) {
     super();
     this.#invoke = invoke;
   }
@@ -19826,15 +19863,15 @@ class ApprovedEffectsImpl extends RpcTarget implements ApprovedEffects {
     this.#invoke = null;
   }
 
-  async invokeWorkflow(reference: string): Promise<ApprovedWorkflowRun> {
+  async invokeWorkflow(): Promise<ApprovedWorkflowRun> {
     let invoke = this.#invoke;
     if (!invoke) return {status: "refused", kind: "policy", reason: WORKFLOW_NEEDS_APPROVAL};
-    if (this.#used) return {status: "refused", kind: "policy", reason: "This approval has already started a run."};
-    this.#used = true;
-    return await invoke(typeof reference === "string" ? reference : "");
+    this.#answer ??= invoke();
+    return await this.#answer;
   }
 }
 
+@validateRpc()
 class ApprovalQueueImpl extends RpcTarget implements ApprovalQueue {
   // `hookId` is set only on the queue startHook returns with each firing: that queue is held by
   // the gatekeeper across awaits (even other DOs), so like the firing's callback it revalidates

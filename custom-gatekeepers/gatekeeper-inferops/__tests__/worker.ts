@@ -243,6 +243,8 @@ export type QueueLog = {
   excluded: string[][];
   actions: Array<{
     id: number; title: string; description: string; implementsRevert: boolean;
+    /** The run the action declared to the kernel (FAC-120), if any. */
+    workflowRun?: { reference: string };
     /** Each field's label and shown value. */
     fields: Record<string, string>;
     /** Each list field's label and shown items. */
@@ -281,6 +283,7 @@ class TestApprovalQueue extends RpcTarget {
       implementsRevert: description.implementsRevert ?? false, fields, lists,
       labels: (description.fields ?? []).map(field => field.label),
       ...(description.actionKind ? { kind: description.actionKind.tag } : {}),
+      ...(description.workflowRun ? { workflowRun: description.workflowRun } : {}),
       complete: description.descriptionIsComplete === true,
       truncated: (description.fields ?? []).filter(field => "truncated" in field && field.truncated !== undefined)
         .map(field => field.label),
@@ -1326,7 +1329,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     return this.#dotBinding().startSession(new RpcStub(new TestDotQueue(this.#log)) as never);
   }
 
-  /** The references the kernel's approved effects were asked to run (FAC-120), in order. */
+  /** Each time the kernel's approved effects were asked to start the declared run (FAC-120). */
   #effectsAsked: string[] = [];
 
   async dotEffectsAsked(): Promise<string[]> {
@@ -1338,9 +1341,11 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
    * approval: the kernel's approved effects answer each run with it (FAC-120); without, as an
    * automatic approval or an older kernel, there are none.
    */
-  async applyDot(actionId: number, run?: { status: "started"; runId: string } | { status: "refused"; kind: ActionFailureKind; reason: string })
+  async applyDot(actionId: number, run?: { status: "started"; runId: string } | { status: "refused"; kind: ActionFailureKind; reason: string }
+      | { status: "unknown"; reason: string })
       : Promise<{ failure: ActionApplyFailure | null; result: ActionResult | null }> {
-    const effects = run ? { invokeWorkflow: async (reference: string) => { this.#effectsAsked.push(reference); return run; } } : undefined;
+    // The kernel's effects take no reference: the run is the one the action declared at submit.
+    const effects = run ? { invokeWorkflow: async () => { this.#effectsAsked.push("invoked"); return run; } } : undefined;
     const outcome = await this.#dotBinding().applyAction(actionId, effects);
     if (outcome && "failed" in outcome) return { failure: outcome.failed, result: null };
     return { failure: null, result: outcome && "applied" in outcome ? outcome.applied.result ?? null : null };
