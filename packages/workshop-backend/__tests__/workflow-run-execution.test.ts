@@ -925,30 +925,38 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
     let name = `life-concurrency-${crypto.randomUUID()}`;
     let seenWhileFirstRan: unknown[] = [];
     let ran = 0;
-    let second = await withImpl(name, async impl => {
+    let active = 0;
+    let mostActive = 0;
+    let first = 0;
+    let second = await withImpl(name, impl => {
       let waiting: number | undefined;
       // While the first run's code runs, the second waits queued: the trigger's limit is one. Only
-      // this workspace's runs count (a run another test left queued may be started meanwhile).
+      // this workspace's runs count (a run another test left queued may be started meanwhile). The
+      // workspace's own alarm runs both, so no pass of the test's own races it.
       workflowRun = async workerEnv => {
         if (workerEnv.BOARD.workspace.ctx.id.toString() !== impl.ctx.id.toString()) return "done";
-        ran++;
-        if (waiting !== undefined) seenWhileFirstRan.push(deliveryOf(workerEnv.BOARD.workspace, waiting).execution.state);
+        let mine = ++ran;
+        active++;
+        mostActive = Math.max(mostActive, active);
+        // Looked at once the first has been running a while: by then a second start would have happened.
+        await scheduler.wait(50);
+        if (mine === 1 && waiting !== undefined) {
+          seenWhileFirstRan.push(deliveryOf(workerEnv.BOARD.workspace, waiting).execution.state);
+        }
+        active--;
         return "done";
       };
-      queuedFirst(impl);
+      first = queuedFirst(impl).deliveryId;
       waiting = another(impl).deliveryId;
-      // This one pass only: the alarm queuing armed would otherwise race it.
-      await impl.ctx.storage.deleteAlarm();
-      await impl.runQueuedWorkflowRuns();
-      expect(ran).toBe(1);
-      expect(seenWhileFirstRan).toEqual(["queued"]);
-      expect(deliveryOf(impl, waiting).execution.state).toBe("queued");
       return waiting;
     });
-    // The workspace's own alarm, from the test's context, starts the run that waited.
     let done = await settled(name, second);
     expect(done.execution.state).toBe("finished");
+    expect((await settled(name, first)).execution.state).toBe("finished");
     expect(ran).toBe(2);
+    // Never both at once, and the second was still queued while the first ran.
+    expect(mostActive).toBe(1);
+    expect(seenWhileFirstRan).toEqual(["queued"]);
   });
 
   it("stops a run past its time limit, as timed out", async () => {

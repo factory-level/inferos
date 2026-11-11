@@ -7496,7 +7496,7 @@ class OverseerImpl implements AgentHooks {
         logger.warn("workflow run attempts exhausted", { event: "workflow.run.attempts_exhausted", ...exhausted });
         continue;
       }
-      let due = this.#queuedRunDue(queued.deliveryId, limits);
+      let due = this.#queuedRunDue(queued.deliveryId, limits, now);
       if (due > now) continue;
       // Concurrency (FAC-117): per trigger and per workspace; the rest wait queued for a later pass.
       let running = [...this.#runningWorkflowRunHooks.values()];
@@ -7515,11 +7515,12 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
-  // When queued run `deliveryId` may start (FAC-117): now, unless an earlier attempt of it was
-  // interrupted, which waits backoff·2^(attempts−1) from that attempt's start.
-  #queuedRunDue(deliveryId: number, limits: WorkflowRunLimits): number {
+  // When queued run `deliveryId` may start (FAC-117): `now`, unless an earlier attempt of it was
+  // interrupted, which waits backoff·2^(attempts−1) from that attempt's start. A pass gives its own
+  // `now`, so a run never tried isn't put off because the clock moved while the pass ran.
+  #queuedRunDue(deliveryId: number, limits: WorkflowRunLimits, now = Date.now()): number {
     let execution = this.workflowDefinitionStore().delivery(deliveryId)?.execution;
-    if (!execution || execution.attempts < 1) return Date.now();
+    if (!execution || execution.attempts < 1) return now;
     let from = (execution.startedAt ?? execution.queuedAt).getTime();
     return from + limits.backoffSeconds * 1000 * 2 ** (execution.attempts - 1);
   }
