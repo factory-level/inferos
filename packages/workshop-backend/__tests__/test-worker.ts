@@ -39,6 +39,23 @@ const overseerTestFile = new Map<string, number>();
 /** Called as each test file starts (see `workerd/backend-file-boundary.ts`). */
 export function beginTestFile(): void {
   currentTestFile++;
+  explicitAlarmsFile = undefined;
+}
+
+/** The test file, if any, whose overseers run their alarm only when a test asks for it. */
+let explicitAlarmsFile: number | undefined;
+
+/**
+ * For the test file now running: an overseer's alarm handler runs only when a test calls it
+ * (`instance.alarm()`), never when workerd fires it on its own schedule. A file whose tests drive
+ * each alarm themselves calls this, so that an alarm a test left armed (a queued run, a withdrawal
+ * due now) neither races the test's own calls nor fires during a later test, through the stand-ins
+ * that test put on the shared prototype. workerd's firing is then spent, so such a file runs the
+ * handler directly rather than through `runDurableObjectAlarm`, which runs only an armed alarm.
+ * Reset as the next file starts.
+ */
+export function onlyExplicitAlarms(): void {
+  explicitAlarmsFile = currentTestFile;
 }
 
 /**
@@ -54,8 +71,10 @@ export class OverseerDurableObject extends RealOverseerDurableObject {
     if (!overseerTestFile.has(id)) overseerTestFile.set(id, currentTestFile);
   }
 
-  override async alarm(): Promise<void> {
+  /** workerd passes its own firing an `AlarmInvocationInfo`; a test calling `alarm()` passes nothing. */
+  override async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
     if (overseerTestFile.get(this.ctx.id.toString()) !== currentTestFile) return;
+    if (alarmInfo !== undefined && explicitAlarmsFile === currentTestFile) return;
     await super.alarm();
   }
 }

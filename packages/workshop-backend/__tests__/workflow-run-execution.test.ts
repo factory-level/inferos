@@ -10,9 +10,10 @@
 // prototype, so a restarted instance reaches the same stand-ins: a real dynamic worker and git
 // commit can't be made from a test. Everything the run is checked and executed from is the
 // workspace's own storage.
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
+import { onlyExplicitAlarms } from "./test-worker.js";
 import { RUN_REQUESTER_REVOKED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
 import { WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS } from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
@@ -39,6 +40,12 @@ let statesSeen: unknown[] = [];
 /** How the stand-in answers its next call; a test can hold it. */
 let answer: () => Promise<unknown> = async () => "done";
 let restore: (() => void)[] = [];
+
+// Each test runs its workspace's alarm itself (`runAlarm`, below). One workerd fired on its own
+// would race the test's calls (a replay's withdrawal is due at once) or wake an earlier test's
+// workspace during a later one, through the stand-ins that test put on the shared prototype and
+// into `calls` and `gatekeeper`.
+beforeAll(() => onlyExplicitAlarms());
 
 afterEach(() => {
   for (let undo of restore.splice(0)) undo();
@@ -190,14 +197,21 @@ function runsAs(impl: any, kind: "gadget-bindings" | "assigned",
 }
 const actionsOf = (impl: any) => [...impl.storage.actions.list()].filter((a: any) => a.type === "action");
 
+/**
+ * Runs the workspace's alarm handler now, armed or not: workerd's own firing never runs it in this
+ * file (`onlyExplicitAlarms`, above), so each test runs it exactly when it means to.
+ */
+async function runAlarm(name: string) {
+  await runInDurableObject(env.TEST_OVERSEER.getByName(name), (instance: OverseerDurableObject) => instance.alarm());
+}
+
 /** Runs the workspace's alarm once more: what withdraws a replay's staged copies (retryReplayWithdrawals). */
 async function nextAlarm(name: string) {
-  await runDurableObjectAlarm(env.TEST_OVERSEER.getByName(name));
+  await runAlarm(name);
 }
 
 async function settled(name: string, id: number) {
-  let stub = env.TEST_OVERSEER.getByName(name);
-  await runDurableObjectAlarm(stub);
+  await runAlarm(name);
   return withImpl(name, impl => vi.waitFor(() => {
     let execution = deliveryOf(impl, id)?.execution;
     expect(["finished", "failed"]).toContain(execution?.state);
