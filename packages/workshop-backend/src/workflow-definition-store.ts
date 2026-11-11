@@ -1290,11 +1290,17 @@ export class WorkspaceWorkflowDefinitionStore {
     return this.storage.workflowDeliveries.get(deliveryId) ?? null;
   }
 
-  /** The deliveries of trigger `hookId` that `isLiveWorkflowDelivery` still counts as live work. */
-  liveDeliveriesOf(hookId: number): StoredWorkflowDelivery[] {
+  /**
+   * The runs of trigger `hookId` still executing (FAC-117, what a pause drains): live work
+   * (`isLiveWorkflowDelivery`) that hasn't ended, so queued, running, or admitted and not yet
+   * queued. A run that ended, `uncertain` included, isn't: its pending writes stay decidable
+   * (`hookContinuesRun`), and nothing it runs can start again.
+   */
+  executingDeliveriesOf(hookId: number): StoredWorkflowDelivery[] {
     let now = this.retention.now();
     return Array.from(this.storage.workflowDeliveries.list())
-      .filter(delivery => delivery.hookId === hookId && isLiveWorkflowDelivery(delivery, now));
+      .filter(delivery => delivery.hookId === hookId && isLiveWorkflowDelivery(delivery, now) &&
+        delivery.execution?.state !== "finished" && delivery.execution?.state !== "failed");
   }
 
   /** Drops trigger `hookId`'s waiting invocations (FAC-117: it was paused), and says how many. */

@@ -2585,15 +2585,18 @@ export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
 export type ActionState = "pending" | "approved" | "rejected" | "failed";
 
 /**
+ * Why the workspace rejected an action itself, with no person deciding (FAC-118, FAC-117; see
+ * `ActionLogEntry.rejectedBecause`): past its run's wait, its run's definition changed, or its run
+ * was cancelled.
+ */
+export type ActionRejectedBecause = "expired" | "definition-changed" | "cancelled";
+
+/**
  * Why a pending action's approved apply was refused before anything was sent (FAC-118): a re-check
  * at resume found that the authority it was proposed under no longer holds (the person who asked a
  * run, their role or grant, the run's assignment or company). It stays pending, and can be decided
  * again once that is fixed; the next apply that passes clears it.
  */
-/** Why the workspace rejected an action itself (FAC-118; see `ActionLogEntry.rejectedBecause`). */
-/** Why a write was rejected without a person deciding it: past its wait, its run's definition changed, or its run was cancelled (FAC-117). */
-export type ActionRejectedBecause = "expired" | "definition-changed" | "cancelled";
-
 export type ActionBlocked = {
   /** The refusal, in the words the re-check gave it. */
   reason: string;
@@ -2725,6 +2728,7 @@ export type ActionLogEntry = {
    * is then absent and nothing was sent. `expired`: nobody decided it within its workflow run's wait
    * (7 days from when the run proposed it). `definition-changed`: approved after the run's workflow
    * definition changed, which can't be fixed, so a fresh proposal is needed (run it again).
+   * `cancelled`: its run was cancelled (FAC-117), so none of its writes is applied.
    */
   rejectedBecause?: ActionRejectedBecause;
 

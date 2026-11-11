@@ -174,10 +174,13 @@ import {
 const logger = createWorkshopLogger("workshop.overseer");
 export const AGENT_RUNNING_ERROR_MESSAGE = "Agent is running, wait for it to finish.";
 
-/** The refusal when the invoker's own InferOps grant doesn't include `workflow:invoke` (FAC-102). */
-/** What a run past the deployment's time per run is ended with (FAC-117). */
+/** What an attempt of a run past the deployment's time per attempt is ended with (FAC-117). */
 export const WORKFLOW_RUN_TIMED_OUT = "This run took longer than its time limit, so it was stopped.";
 
+/** Why a cancelled run's write is refused at its apply and rejected (FAC-117): none of its writes is applied. */
+export const WORKFLOW_RUN_CANCELLED = "This write's run was cancelled, so it is not applied.";
+
+/** The refusal when the invoker's own InferOps grant doesn't include `workflow:invoke` (FAC-102). */
 export const WORKFLOW_INVOKE_REFUSED =
   "You don't have permission to run workflows here. Ask an Admin for it.";
 
@@ -255,6 +258,7 @@ export function workflowRunFailureOf(error: unknown): WorkflowRunFailure {
   if (message === WORKFLOW_BINDINGS_NEEDED || message === WORKFLOW_BINDINGS_NOT_OWNERS ||
       message === WORKFLOW_BINDINGS_UNATTRIBUTED) return "bindings-needed";
   if (message === WORKFLOW_RUN_TIMED_OUT) return "timed-out";
+  if (message === WORKFLOW_RUN_CANCELLED) return "cancelled";
   return "runtime-error";
 }
 
@@ -299,7 +303,9 @@ export function approvalRefusal(error: unknown): Error {
  * (FAC-111's record), so a request can't continue in another company. A run the trigger fired
  * itself has no person to re-check. A delivery a person asked for that has no run record (one
  * older than FAC-111) is refused: there is no company to compare. Refuses with
- * RUN_REQUESTER_REVOKED.
+ * RUN_REQUESTER_REVOKED, or with WORKFLOW_RUN_CANCELLED once the run is cancelled (FAC-117), which
+ * `revalidate` checks first, so a write approved while a cancel's rejections are still under way is
+ * never sent.
  *
  * Returns the two re-checks a protected point repeats once its own last await is done, in this
  * order and with no await after the second (see {@link RunRequesterCheck}).
@@ -309,7 +315,13 @@ export async function requireRunRequester(
         "workflowDefinitionStore" | "definitionRoles">,
     hookId: number, deliveryId: number): Promise<RunRequesterCheck> {
   let store = impl.workflowDefinitionStore();
+  // A cancelled run continues nowhere (FAC-117): nothing of it is applied, whoever asked.
+  const requireNotCancelled = () => {
+    if (store.delivery(deliveryId)?.execution?.cancelled) throw new Error(WORKFLOW_RUN_CANCELLED);
+  };
+  requireNotCancelled();
   let roleOf = await impl.definitionRoles();
+  requireNotCancelled();
   let recorded = store.deliveryRun(deliveryId);
   if (!recorded) throw new Error(RUN_REQUESTER_REVOKED);
   if (!recorded.invoked && recorded.run?.requester.kind !== "person") return NO_RUN_REQUESTER;
@@ -318,6 +330,8 @@ export async function requireRunRequester(
   let profileId = run.requester.profileId;
   let executor = run.executor;
   const revalidate = () => {
+    // First, synchronously after the protected point's last await: a cancel during it is seen here.
+    requireNotCancelled();
     let assignment = store.assignmentOf(hookId);
     let sameExecutor = executor.kind === "service_account"
       ? assignment?.credentialRef === executor.credentialRef && assignment.gatekeeperId === executor.gatekeeperId
@@ -7049,12 +7063,19 @@ class OverseerImpl implements AgentHooks {
       }
     } catch (error) {
       if (record.executedAs || record.workflowRun) {
-        // A changed definition can't be fixed, so the write is rejected now, under this claim, and
-        // a fresh proposal is needed; any other refusal can be, so it waits, blocked, with why.
+        // A changed definition or a cancelled run can't be fixed, so the write is rejected now,
+        // under this claim (a changed definition needs a fresh proposal); any other refusal can be,
+        // so it waits, blocked, with why.
         if (error instanceof Error && error.message === RUN_DEFINITION_CHANGED) {
           let current = this.storage.actions.get(record.id);
           if (current?.type === "action" && current.state === "pending") {
             await this.#rejectClaimed(current, "definition-changed");
+          }
+        } else if (error instanceof Error && error.message === WORKFLOW_RUN_CANCELLED) {
+          // Its run was cancelled (FAC-117): rejected now, under this claim, as the cancel would have.
+          let current = this.storage.actions.get(record.id);
+          if (current?.type === "action" && current.state === "pending") {
+            await this.#rejectClaimed(current, "cancelled");
           }
         } else {
           this.#recordBlocked(record.id, error);
@@ -12984,13 +13005,15 @@ class OverseerImpl implements AgentHooks {
   }
 
   /**
-   * Trigger `hookId` drained (FAC-117): once it is draining and none of its runs is live work any
-   * more (`isLiveWorkflowDelivery`), it is `paused`. Called whenever a run ends or settles.
+   * Trigger `hookId` drained (FAC-117): once it is draining and none of its runs is still executing
+   * (`executingDeliveriesOf`), it is `paused`. A run that ended `uncertain` doesn't hold it; its
+   * pending writes stay decidable while paused (`hookContinuesRun`). Called whenever a run ends or
+   * settles.
    */
   settleDrain(hookId: number): void {
     let lifecycle = this.triggerLifecycleOf(hookId);
     if (lifecycle?.state !== "draining") return;
-    if (this.workflowDefinitionStore().liveDeliveriesOf(hookId).length > 0) return;
+    if (this.workflowDefinitionStore().executingDeliveriesOf(hookId).length > 0) return;
     this.storage.workflowTriggerLifecycles.put({ ...lifecycle, state: "paused", changedAt: new Date() });
   }
 
@@ -19858,9 +19881,11 @@ export async function invokeWorkflowTrigger(
 
 /**
  * Whether run `deliveryId` of trigger `hookId` may go on (FAC-117): its hook is enabled, or the
- * trigger is draining and the run was admitted before the pause's recorded time. A run admitted
- * after it, a paused, retired or deleted trigger, and a run with no record are refused. New firings
- * never get this exception: they go through `requireLiveHook`.
+ * trigger is draining or paused and the run was admitted before the pause's recorded time. Draining,
+ * that lets an earlier run finish; paused, only a run that has ended qualifies, so all that can go
+ * on is deciding the writes it left pending, and a late firing never starts. A run admitted after
+ * the pause, a retired or deleted trigger, and a run with no record are refused. New firings never
+ * get this exception: they go through `requireLiveHook` and `requireTriggerStarts`.
  */
 function hookContinuesRun(impl: Pick<OverseerImpl, "storage" | "workflowDefinitionStore">,
                           hookId: number, deliveryId: number): boolean {
@@ -19868,9 +19893,14 @@ function hookContinuesRun(impl: Pick<OverseerImpl, "storage" | "workflowDefiniti
   if (!hook) return false;
   if (hook.enabled) return true;
   let lifecycle = impl.storage.workflowTriggerLifecycles.get(hookId);
-  let admitted = impl.workflowDefinitionStore().admittedAt(deliveryId);
-  return lifecycle?.state === "draining" && lifecycle.pausedAt !== undefined && admitted !== undefined &&
+  let store = impl.workflowDefinitionStore();
+  let admitted = store.admittedAt(deliveryId);
+  let before = lifecycle?.pausedAt !== undefined && admitted !== undefined &&
     admitted.getTime() < lifecycle.pausedAt.getTime();
+  if (lifecycle?.state === "draining") return before;
+  // Paused: only a run that has ended, so a late firing admitted before the pause never starts.
+  let state = store.delivery(deliveryId)?.execution?.state;
+  return lifecycle?.state === "paused" && before && (state === "finished" || state === "failed");
 }
 
 /**
@@ -19954,6 +19984,8 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
     // uncaught, too).
     async apply(_target, _thisArg, args: unknown[]) {
       let record = requireLiveHook(impl, hookId);
+      // Paused once its lifecycle says so (FAC-117), before the gatekeeper's disable lands.
+      impl.requireTriggerStarts(hookId);
       impl.requireHookBound(hookId);
       return Reflect.apply(record.callback as any, undefined, args);
     },
@@ -19964,6 +19996,7 @@ function makeHookFiringCallback(impl: OverseerImpl, hookId: number): NativeRpcSt
       if (typeof prop === "symbol" || prop === "then") return undefined;
       return async (...args: unknown[]) => {
         let record = requireLiveHook(impl, hookId);
+        impl.requireTriggerStarts(hookId);
         impl.requireHookBound(hookId);
         return Reflect.apply((record.callback as any)[prop], record.callback, args);
       };

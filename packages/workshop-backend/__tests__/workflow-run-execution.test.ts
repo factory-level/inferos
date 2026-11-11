@@ -13,7 +13,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { RUN_REQUESTER_REVOKED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
+import { RUN_REQUESTER_REVOKED, WORKFLOW_RUN_CANCELLED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
 import { DEFAULT_WORKFLOW_RUN_LIMITS, TRIGGER_LIFECYCLE_REFUSED, WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS } from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
 import { actionDescriptionDigest } from "../src/system-run.js";
@@ -828,9 +828,10 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
       expect(refused).toBe(RUN_REQUESTER_REVOKED);
       // Paused just after it instead: the same write is decidable (it reaches the connection).
       impl.storage.workflowTriggerLifecycles.put({ ...lifecycle, pausedAt: new Date(admittedAt + 1) });
+      impl.authorizeCollaborator = async () => true;
       let decided = await impl.applyPendingAction(impl.storage.actions.get(actionId), ADA, false)
         .then(() => "applied", (e: Error) => e.message);
-      expect(decided).not.toBe(RUN_REQUESTER_REVOKED);
+      expect(decided).toBe("the write was sent");
       await quiesce(impl);
     });
   });
@@ -850,6 +851,37 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
       expect(await impl.retireTrigger(HOOK, ADA)).toMatchObject({ state: "retired" });
       expect(impl.storage.boundHooks.get(HOOK)).toBeUndefined();
       expect(deliveryOf(impl, id).execution.state).toBe("finished");
+    });
+  });
+
+  // Round 2 (r1 MEDIUM): an ended `uncertain` run is history, not executing work, so it never holds
+  // the drain; the write it left pending stays decidable while paused, then the trigger retires.
+  it("pauses and retires a trigger whose earlier run ended uncertain, its pending write still decidable", async () => {
+    await withImpl(`life-uncertain-${crypto.randomUUID()}`, async impl => {
+      let { deliveryId } = queuedFirst(impl);
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId } };
+      let store = impl.workflowDefinitionStore();
+      store.startRun(deliveryId);
+      impl.gadgetRuns.begin(deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(deliveryId);
+      let actionId = await submitted(impl, caller);
+      impl.gadgetRuns.end(deliveryId);
+      store.endRun(deliveryId, "runtime-error");
+      impl.settleRunOfAction(actionId);
+      expect(deliveryOf(impl, deliveryId).result).toMatchObject({ outcome: "uncertain", reason: "lost-after-write" });
+      withController(impl);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      await impl.pauseTrigger(HOOK, ADA);
+      expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "paused" });
+      // Paused, the earlier run's write is still decided: it reaches the connection.
+      impl.authorizeCollaborator = async () => true;
+      impl.getGatekeeperFacet = () => { throw new Error("the write was sent"); };
+      let decided = await impl.applyPendingAction(impl.storage.actions.get(actionId), ADA, false)
+        .then(() => "applied", (e: Error) => e.message);
+      expect(decided).toBe("the write was sent");
+      expect(await impl.retireTrigger(HOOK, ADA)).toMatchObject({ state: "retired" });
+      expect(deliveryOf(impl, deliveryId).result.outcome).toBe("uncertain");
+      await quiesce(impl);
     });
   });
 
@@ -893,6 +925,77 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
       expect(deliveryOf(impl, first.deliveryId).execution.failure).toBe("cancelled");
       await quiesce(impl);
     });
+  });
+
+  // Round 2 (r1 MEDIUM): the cancel's rejection loop is cleanup; the apply path refuses a cancelled
+  // run's write itself, so one approved while an earlier rejection is still awaited is never sent.
+  it("refuses a write approved while a cancel's rejection is held, and rejects it as cancelled, never sent", async () => {
+    await withImpl(`life-cancel-race-${crypto.randomUUID()}`, async impl => {
+      let first = queuedFirst(impl);
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: first.deliveryId } };
+      impl.workflowDefinitionStore().startRun(first.deliveryId);
+      impl.gadgetRuns.begin(first.deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(first.deliveryId);
+      let one = await submitted(impl, caller);
+      let two = await submitted(impl, caller);
+      let release!: () => void;
+      let held = new Promise<void>(resolve => { release = resolve; });
+      let rejected: unknown[] = [];
+      let sent: unknown[] = [];
+      // The connection: the first rejection is held; anything but a rejection is the write sent.
+      impl.getGatekeeperFacet = () => new Proxy({}, {
+        get(_target, prop) {
+          if (prop === "then") return undefined;
+          if (prop === "rejectAction") {
+            return async (key: unknown) => {
+              rejected.push(key);
+              if (rejected.length === 1) await held;
+            };
+          }
+          return async () => {
+            sent.push(prop);
+            throw new Error("the write was sent");
+          };
+        },
+      });
+      // The person may use the workspace: nothing but the cancel stands between the write and its connection.
+      impl.authorizeCollaborator = async () => true;
+      let cancelling = impl.cancelWorkflowRun(first.invocationId, ADA, "build");
+      await vi.waitFor(() => expect(rejected).toHaveLength(1));
+      expect(impl.storage.actions.get(two).state).toBe("pending");
+      let approved = await impl.applyPendingAction(impl.storage.actions.get(two), ADA, false)
+        .then(() => "applied", (e: Error) => e.message);
+      expect(approved).toBe(WORKFLOW_RUN_CANCELLED);
+      expect(sent).toEqual([]);
+      expect(impl.storage.actions.get(two)).toMatchObject({ state: "rejected", rejectedBecause: "cancelled" });
+      release();
+      await cancelling;
+      expect(impl.storage.actions.get(one)).toMatchObject({ state: "rejected", rejectedBecause: "cancelled" });
+      expect(sent).toEqual([]);
+      impl.workflowDefinitionStore().endRun(first.deliveryId, "runtime-error");
+      impl.settleRunOfAction(one);
+      expect(deliveryOf(impl, first.deliveryId).result).toMatchObject({ outcome: "failed", reason: "cancelled" });
+      await quiesce(impl);
+    });
+  });
+
+  // Paused, an earlier run that never started (a firing delivered late) doesn't start: only an
+  // ended run's writes go on.
+  it("never starts a run admitted before the pause once the trigger is paused", async () => {
+    let name = `life-paused-late-${crypto.randomUUID()}`;
+    let id = await withImpl(name, async impl => {
+      let delivery = admitted(impl);
+      withController(impl);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      let lifecycle = await impl.pauseTrigger(HOOK, ADA);
+      // Its start window passed, so the drain let go of it.
+      impl.storage.workflowTriggerLifecycles.put({ ...lifecycle, state: "paused" });
+      impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+      return delivery.deliveryId;
+    });
+    let done = await settled(name, id);
+    expect(done.execution).toMatchObject({ state: "failed" });
+    expect(callsIn(name)).toBe(0);
   });
 
   it("bounds re-execution after resets: past its attempts it fails, and inside its backoff it waits", async () => {

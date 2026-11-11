@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { TRIGGER_LIFECYCLE_REFUSED } from "@gadgets/workshop-shared/workflow-definition";
 import { DEFAULT_ADMIN_CONFIG, serializeAdminConfig } from "../src/admin-config.js";
 import { OverseerDurableObject, makeOverseerStorage } from "../src/overseer.js";
 import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
@@ -129,6 +130,30 @@ describe("OverseerDurableObject.startHook", () => {
     let { callback } = await overseer.startHook(1);
     await expect((callback as any)("evt")).resolves.toBe("delivered:evt");
     expect(deliver).toHaveBeenCalledWith("evt");
+  });
+
+  // FAC-117: pausing records `draining` before the gatekeeper's disable is awaited, and the hook is
+  // still enabled until it lands; a firing delivered in that window is refused by the lifecycle.
+  it("refuses a scheduled firing's call once its trigger is draining, before the hook's disable lands", async () => {
+    let deliver = vi.fn(async (payload: string) => `delivered:${payload}`);
+    let overseer = makeOverseer(
+        async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG),
+        { enabled: true, vendorId: "email", callback: { deliver } });
+    let { callback } = await overseer.startHook(1);
+    (overseer as any).impl.requireTriggerStarts = () => { throw new Error(TRIGGER_LIFECYCLE_REFUSED.paused); };
+    await expect((callback as any).deliver("evt")).rejects.toThrow(TRIGGER_LIFECYCLE_REFUSED.paused);
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  it("refuses a function-valued scheduled firing's call once its trigger is draining", async () => {
+    let deliver = vi.fn(async (payload: string) => `delivered:${payload}`);
+    let overseer = makeOverseer(
+        async () => serializeAdminConfig(DEFAULT_ADMIN_CONFIG),
+        { enabled: true, vendorId: "email", callback: deliver });
+    let { callback } = await overseer.startHook(1);
+    (overseer as any).impl.requireTriggerStarts = () => { throw new Error(TRIGGER_LIFECYCLE_REFUSED.paused); };
+    await expect((callback as any)("evt")).rejects.toThrow(TRIGGER_LIFECYCLE_REFUSED.paused);
+    expect(deliver).not.toHaveBeenCalled();
   });
 
   it("rejects delivery for an administratively disabled ordinary vendor", async () => {

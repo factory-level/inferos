@@ -424,8 +424,6 @@ export type WorkflowRunExecution = {
    * one ends at its next guarded call. Its pending writes are rejected, never applied.
    */
   cancelled?: { by: AiChatAuthorInfo; at: Date };
-  /** The earliest an automatic re-execution may start, after a reset (FAC-117's backoff). */
-  notBefore?: Date;
 };
 
 /**
@@ -436,7 +434,7 @@ export type WorkflowRunExecution = {
  * - `trigger-gone`: the trigger was disabled or deleted;
  * - `bindings-needed`: a connection its workflow needs isn't set up (FAC-123);
  * - `cancelled`: a person cancelled it (FAC-117; who and when are on its execution);
- * - `timed-out`: it ran past the deployment's time per run (FAC-117);
+ * - `timed-out`: an attempt of it ran past the deployment's time per attempt (FAC-117);
  * - `attempts-exhausted`: it was interrupted more times than the deployment's attempts allow (FAC-117);
  * - `runtime-error`: anything else the run threw.
  * A run whose write may have landed reads `uncertain`, never failed, whatever stopped it.
@@ -471,9 +469,9 @@ export const DEFAULT_WORKFLOW_RUN_LIMITS = {
   perTrigger: 1,
   /** Runs executing at once in one workspace; more wait queued. */
   perWorkspace: 5,
-  /** Wall-clock time one run may take, in minutes. */
+  /** Wall-clock time one attempt of a run may take, in minutes; each re-execution starts its own. */
   runMinutes: 15,
-  /** Times a run may start, counting each re-execution after a reset. */
+  /** Times a run may start in all, the first included: 3 is the first start and two re-executions after resets. */
   attempts: 3,
   /** The first re-execution's wait, in seconds, doubling each time. */
   backoffSeconds: 30,
