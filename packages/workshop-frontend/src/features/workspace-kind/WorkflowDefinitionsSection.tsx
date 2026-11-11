@@ -9,7 +9,10 @@ import {
 } from '@gadgets/workshop-shared/workflow-definition'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { WorkshopButton } from '../../components/WorkshopControls'
+import { DuplicateWorkflowDialog } from './DuplicateWorkflowDialog'
+import { SetUpConnectionsDialog } from './SetUpConnectionsDialog'
 import { ShareWorkflowDialog, describeRights } from './ShareWorkflowDialog'
+import { bindingsNeededText, duplicatedFromText } from './duplicateText'
 
 type Props = {
   overseer: RpcStub<Overseer>
@@ -44,6 +47,11 @@ const EXPIRED_BEFORE_SAVE =
  * An owner shares a saved definition with people of the workspace, by account (FAC-122); one shared
  * with this person says so and what it lets them do, and an editor saves new revisions, which its
  * owner publishes.
+ *
+ * Anyone who can see a definition may duplicate it into one of their own (FAC-123; the server decides
+ * who builds here). A duplicate says where it came from, as far as this person may know, and until
+ * its connections are set up from its owner's own accounts and models it says it can't run and why,
+ * in the words its runs are refused with; only its owner sees that and sets them up.
  */
 export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, collaborators = [], onChanged }: Props) => {
   const toasts = useKumoToastManager()
@@ -52,6 +60,8 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, col
   const [gadgetId, setGadgetId] = useState<number | null>(null)
   const [busy, setBusy] = useState(false)
   const [sharing, setSharing] = useState<WorkflowDefinition | null>(null)
+  const [duplicating, setDuplicating] = useState<WorkflowDefinition | null>(null)
+  const [settingUp, setSettingUp] = useState<WorkflowDefinition | null>(null)
   const chosenGadget = gadgetId ?? gadgets[0]?.id ?? null
   const trimmed = title.trim()
 
@@ -149,6 +159,8 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, col
             // shared configuration is in force, which this page can't tell, and elsewhere the server
             // refuses it as not found, which would mislead.
             const canPublish = own && !expired && latest !== undefined && latest.revision !== published
+            // Only its owner is told what it still needs, and only they can set it up.
+            const cannotRun = own ? bindingsNeededText(definition.bindingsNeeded) : null
             return (
               <li
                 key={definition.id}
@@ -170,6 +182,17 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, col
                       Shared with you · you can {describeRights(definition.access)}
                     </p>
                   )}
+                  {definition.duplicatedFrom && (
+                    <p className="mt-0.5 mb-0 truncate text-[12px] leading-4 text-kumo-subtle">
+                      {duplicatedFromText(definition.duplicatedFrom)} ·{' '}
+                      <time dateTime={definition.duplicatedFrom.at.toISOString()}>
+                        {definition.duplicatedFrom.at.toLocaleString()}
+                      </time>
+                    </p>
+                  )}
+                  {cannotRun && (
+                    <p role="status" className="mt-0.5 mb-0 text-[12px] leading-4 text-kumo-warning">{cannotRun}</p>
+                  )}
                   {definition.expiresAt && (expired ? (
                     <p className="mt-0.5 mb-0 text-[12px] leading-4 text-kumo-subtle">
                       Expired{' '}
@@ -184,6 +207,12 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, col
                     </p>
                   ))}
                 </div>
+                {cannotRun && (
+                  <WorkshopButton disabled={busy} onClick={() => setSettingUp(definition)}>Set up connections</WorkshopButton>
+                )}
+                {!expired && (
+                  <WorkshopButton disabled={busy} onClick={() => setDuplicating(definition)}>Duplicate</WorkshopButton>
+                )}
                 {own && !definition.expiresAt && (
                   <WorkshopButton disabled={busy} onClick={() => setSharing(definition)}>Share</WorkshopButton>
                 )}
@@ -205,6 +234,21 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, col
       {sharing && (
         <ShareWorkflowDialog overseer={overseer} definition={sharing} collaborators={collaborators}
           onClose={() => { setSharing(null); onChanged() }} />
+      )}
+      {duplicating && (
+        <DuplicateWorkflowDialog overseer={overseer} source={duplicating}
+          onClose={() => setDuplicating(null)}
+          onDuplicated={(copy) => {
+            setDuplicating(null)
+            onChanged()
+            // A copy needs its connections before it can run, so its owner goes straight there.
+            if (copy.bindingsNeeded && copy.bindingsNeeded.length > 0) setSettingUp(copy)
+          }} />
+      )}
+      {settingUp && (
+        <SetUpConnectionsDialog overseer={overseer} definition={settingUp}
+          onClose={() => setSettingUp(null)}
+          onSetUp={() => { setSettingUp(null); onChanged() }} />
       )}
     </section>
   )

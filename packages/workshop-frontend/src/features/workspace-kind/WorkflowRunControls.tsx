@@ -4,6 +4,7 @@ import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { ActionOutcome } from '@gadgets/workshop-shared/action-outcome'
 import type { RequestedRun, TriggerControl, WorkflowRunOutcome } from '@gadgets/workshop-shared/workflow-definition'
 import { WorkshopButton } from '../../components/WorkshopControls'
+import { bindingsNeededText } from './duplicateText'
 
 /**
  * Where one press stands. A run the server accepted was handed to its trigger and is in flight,
@@ -31,6 +32,10 @@ export const RUN_OUTCOME_TEXT: Readonly<Record<WorkflowRunOutcome, string>> = {
   uncertain: 'May or may not have finished; check before running it again',
 }
 
+/** Why a run that didn't finish stopped, where saying so helps the person who asked (FAC-123). */
+const failureText = (run: RequestedRun) =>
+  run.outcome === 'failed' && run.reason === 'bindings-needed' ? "Didn't finish: its connections aren't set up" : null
+
 /** How often a run that isn't final yet is read again while this page shows it. */
 const FOLLOW_MS = 5_000
 const isFinal = (outcome: WorkflowRunOutcome) => outcome === 'succeeded' || outcome === 'failed' || outcome === 'uncertain'
@@ -53,9 +58,15 @@ const errorText = (err: unknown) =>
  * `listRequestedRuns`), read when the page opens, so it shows after any reconnect, and again after
  * a press; a run that isn't final yet is read again every few seconds until it is. Runs that
  * can't be read show nothing beyond the press itself.
+ *
+ * A control whose workflow can't run until its connections are set up (FAC-123) is disabled for its
+ * owner, the one person shown that and able to set them up, with the reason in the words its runs
+ * are refused with. Anyone else presses it and is refused in those same words by the server.
  */
 export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> }) => {
   const [controls, setControls] = useState<Pick<TriggerControl, 'hookId' | 'label'>[]>([])
+  // Why each control's workflow can't run yet, by hook id: only what its owner is shown.
+  const [blocked, setBlocked] = useState<ReadonlyMap<number, string>>(new Map())
   const [pressed, setPressed] = useState<ReadonlyMap<number, Pressed>>(new Map())
   const [newest, setNewest] = useState<ReadonlyMap<number, RequestedRun>>(new Map())
   // Counts answers, so each one re-arms the next read of a run that isn't final, even unchanged.
@@ -75,12 +86,25 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
   useEffect(() => {
     live.current = overseer
     setNewest(new Map())
+    setBlocked(new Map())
     // A backend without controls, or any failure, shows none rather than breaking the page.
     Promise.resolve().then(() => overseer.listTriggerControls())
       .then(list => {
         if (live.current !== overseer) return
         setControls(list.map(({ hookId, label }) => ({ hookId, label })))
         for (const { hookId } of list) readRuns(overseer, hookId)
+        // The definitions say what an owner's own still needs; unreadable, nothing is disabled.
+        const pinned = list.filter(control => control.definition)
+        if (pinned.length === 0) return
+        Promise.resolve().then(() => overseer.listWorkflowDefinitions()).then(definitions => {
+          if (live.current !== overseer) return
+          const reasons = new Map<number, string>()
+          for (const control of pinned) {
+            const text = bindingsNeededText(definitions.find(d => d.id === control.definition!.definitionId)?.bindingsNeeded)
+            if (text) reasons.set(control.hookId, text)
+          }
+          setBlocked(reasons)
+        }, () => {})
       })
       .catch(() => { if (live.current === overseer) setControls([]) })
     return () => { live.current = null }
@@ -114,14 +138,21 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
       {controls.map(control => {
         const state = pressed.get(control.hookId)
         const last = newest.get(control.hookId)
+        const cannotRun = blocked.get(control.hookId)
         return (
           <div key={control.hookId} className="flex items-center gap-2">
-            <WorkshopButton disabled={state?.status === 'sending'} onClick={() => press(control.hookId)}>
+            <WorkshopButton disabled={state?.status === 'sending' || cannotRun !== undefined}
+              onClick={() => press(control.hookId)}>
               {control.label}
             </WorkshopButton>
+            {cannotRun && (
+              <span role="status" className="text-[12px] leading-4 text-kumo-warning">
+                {cannotRun} Set them up under Definitions.
+              </span>
+            )}
             {last ? (
               <span role="status" className="text-[12px] leading-4 text-kumo-subtle">
-                Last run: {RUN_OUTCOME_TEXT[last.outcome]} (requested at {timeOf(new Date(last.requestedAt))})
+                Last run: {failureText(last) ?? RUN_OUTCOME_TEXT[last.outcome]} (requested at {timeOf(new Date(last.requestedAt))})
               </span>
             ) : state?.status === 'requested' && (
               <span role="status" className="text-[12px] leading-4 text-kumo-subtle">

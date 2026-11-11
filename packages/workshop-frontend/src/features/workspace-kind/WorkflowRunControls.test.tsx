@@ -8,7 +8,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import type { RequestedRun } from '@gadgets/workshop-shared/workflow-definition'
+import { WORKFLOW_BINDINGS_NEEDED, type RequestedRun, type WorkflowDefinition } from '@gadgets/workshop-shared/workflow-definition'
 import { RUN_OUTCOME_TEXT, RUN_REQUESTED_TEXT, WorkflowRunControls } from './WorkflowRunControls'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -155,4 +155,40 @@ it('keeps following a run whose outcome comes back unchanged, until it is final'
   } finally {
     vi.useRealTimers()
   }
+})
+
+// FAC-123: a duplicate that can't run until its connections are set up.
+const ADA = { type: 'user' as const, id: 'ada', name: 'Ada' }
+const copyOf = (bindingsNeeded?: WorkflowDefinition['bindingsNeeded']): WorkflowDefinition => ({
+  id: 'copy', title: 'Refunds (copy)', owner: ADA, published: null, bindingsNeeded,
+  revisions: [{ revision: 1, source: { kind: 'gadget', gadgetId: 3, commitId: 'a'.repeat(40) }, savedAt: new Date(0) }],
+})
+const NEEDS = [{ name: 'BOARD', type: 'gatekeeper' as const, vendorId: 'inferops', typeUrlPattern: 'inferops://*', unmet: 'missing' as const }]
+const pinnedControl = { hookId: 7, label: 'Issue refunds now', definition: { definitionId: 'copy', revision: 1 } }
+
+it("disables its owner's control while its workflow's connections aren't set up, and says why", async () => {
+  const invokeTrigger = vi.fn<Overseer['invokeTrigger']>()
+  await render({
+    listTriggerControls: async () => [pinnedControl],
+    listRequestedRuns: async () => [],
+    listWorkflowDefinitions: async () => [copyOf(NEEDS)],
+    invokeTrigger,
+  })
+  expect(button('Issue refunds now')!.disabled).toBe(true)
+  expect(container.querySelector('[role="status"]')?.textContent).toBe(`${WORKFLOW_BINDINGS_NEEDED} Set them up under Definitions.`)
+  expect(invokeTrigger).not.toHaveBeenCalled()
+})
+
+it('leaves the control as it was once set up, or when the definitions can\'t be read', async () => {
+  for (const listWorkflowDefinitions of [async () => [copyOf([])], async () => { throw new Error('no') }]) {
+    await render({ listTriggerControls: async () => [pinnedControl], listRequestedRuns: async () => [], listWorkflowDefinitions })
+    expect(button('Issue refunds now')!.disabled).toBe(false)
+    expect(container.textContent).not.toContain('before it can run')
+  }
+})
+
+it("says a run didn't finish because its connections weren't set up", async () => {
+  const run: RequestedRun = { runId: 'r', invocationId: 'i', revision: 1, requestedAt: new Date(0), outcome: 'failed', reason: 'bindings-needed', actions: [] }
+  await render({ listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }], listRequestedRuns: async () => [run] })
+  expect(container.querySelector('[role="status"]')?.textContent).toMatch(/^Last run: Didn't finish: its connections aren't set up \(requested at .+\)$/)
 })
