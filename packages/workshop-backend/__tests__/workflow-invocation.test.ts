@@ -755,7 +755,7 @@ describe("an approved run's revision is held through admission (FAC-120)", () =>
     };
     return { ...session, definitionId, release, waiting: pending.promise, publishTwo };
   }
-  const run = (impl: unknown, expected?: { definitionId: string; revision: number }) =>
+  const run = (impl: unknown, expected?: { definitionId: string; revision: number; onAdmitted?: (id: string) => void }) =>
     (invokeWorkflowTrigger as (...a: unknown[]) => Promise<{ revision: number }>)(impl, "viewer-id", OPERATOR, HOOK, expected);
   // Nothing was minted: the per-person rate still has all its runs.
   const nothingMinted = (store: WorkspaceWorkflowDefinitionStore) => {
@@ -784,6 +784,31 @@ describe("an approved run's revision is held through admission (FAC-120)", () =>
     await expect(admitting).rejects.toThrow(WORKFLOW_REVISION_CHANGED);
     expect(race.invoke).not.toHaveBeenCalled();
     nothingMinted(race.store);
+  });
+
+  it("tells the approved call of its own admission only: not of another person's run minted while it waits", async () => {
+    let race = await racing();
+    let heard: string[] = [];
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1, onAdmitted: id => heard.push(id) });
+    await race.waiting;
+    // Another request is minted meanwhile; this call hasn't been admitted.
+    race.store.cancelInvocation(race.store.beginInvocation(OPERATOR, HOOK).id);
+    expect(heard).toEqual([]);
+    race.release();
+    let invocation = await admitting as unknown as { id: string };
+    expect(heard).toEqual([invocation.id]);
+  });
+
+  it("never reports an admission it refused", async () => {
+    let race = await racing();
+    let heard: string[] = [];
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1, onAdmitted: id => heard.push(id) });
+    await race.waiting;
+    race.publishTwo();
+    race.store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: race.definitionId, revision: 2, mode: "pinned" });
+    race.release();
+    await expect(admitting).rejects.toThrow(WORKFLOW_REVISION_CHANGED);
+    expect(heard).toEqual([]);
   });
 
   it("admits the approved revision when nothing moved, and a person's own request (no reference) as before", async () => {

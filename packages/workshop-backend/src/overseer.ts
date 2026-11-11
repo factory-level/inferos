@@ -12818,9 +12818,9 @@ class OverseerImpl implements AgentHooks {
     return setWorkflowTriggerAssignment(this, caller, hookId, settings);
   }
 
-  /** See invokeWorkflowTrigger; `expected` is an approved run's definition and revision (FAC-120). */
+  /** See invokeWorkflowTrigger; `expected` is an approved run's admission (FAC-120). */
   async invokeTrigger(userId: string, profileId: string, hookId: number,
-      expected?: {definitionId: string, revision: number}): Promise<WorkflowInvocation> {
+      expected?: ApprovedRunAdmission): Promise<WorkflowInvocation> {
     return invokeWorkflowTrigger(this, userId, profileId, hookId, expected);
   }
 
@@ -13048,22 +13048,23 @@ class OverseerImpl implements AgentHooks {
     if (this.workflowDefinitionStore().pinOf(hookId)?.revision !== revision) {
       return refuse("policy", WORKFLOW_REVISION_CHANGED);
     }
-    // Whether an invocation was minted is what tells "not started" from "may have started":
-    // beginInvocation advances the invocation log, and nothing before it can start a run.
-    let mintedBefore = this.storage.nextWorkflowInvocationLogId.get();
+    // Whether this call's own invocation was minted is what tells "not started" from "may have
+    // started": nothing before beginInvocation can start a run. invokeWorkflowTrigger reports it as
+    // it mints; never a workspace-wide counter, which another person's run can move meanwhile.
+    let admitted = false;
     this.ctx.storage.kv.put(key, {state: "starting"});
     try {
       // The person's own on-request path (invokeTrigger -> invokeWorkflowTrigger), held to the
       // approved definition and revision when it mints, after its last await (r2's HIGH).
-      let invocation = await this.invokeTrigger(caller.userId, caller.profileId, hookId, {definitionId, revision});
+      let invocation = await this.invokeTrigger(caller.userId, caller.profileId, hookId,
+          {definitionId, revision, onAdmitted: () => { admitted = true; }});
       this.ctx.storage.kv.put(key, {state: "started", runId: invocation.id});
       return {status: "started", runId: invocation.id};
     } catch (error) {
       let message = error instanceof Error ? error.message : String(error);
-      let minted = this.storage.nextWorkflowInvocationLogId.get() !== mintedBefore;
-      // Not started: refused before an invocation was minted, or in invokeWorkflowTrigger's own
-      // fixed words for one its gatekeeper never took. Anything else may have started.
-      if (!minted || NOT_TAKEN_REFUSALS.has(message)) {
+      // Not started: refused before this call's invocation was minted, or in invokeWorkflowTrigger's
+      // own fixed words for one its gatekeeper never took. Anything else may have started.
+      if (!admitted || NOT_TAKEN_REFUSALS.has(message)) {
         this.ctx.storage.kv.delete(key);
         if (message === WORKFLOW_REVISION_CHANGED) return refuse("policy", WORKFLOW_REVISION_CHANGED);
         return message === CANNOT_RUN || message === WORKFLOW_INVOKE_REFUSED
@@ -19661,6 +19662,18 @@ async function forgetProvisioned(
 }
 
 /**
+ * An approved run's admission (FAC-120): the definition and revision the person approved, which
+ * `beginInvocation` holds the run to, and `onAdmitted`, called with the invocation id as soon as
+ * this call mints it, so the caller tells "refused before admission" from "may have started" by
+ * its own call's outcome, not by any state another request shares.
+ */
+export type ApprovedRunAdmission = {
+  definitionId: string;
+  revision: number;
+  onAdmitted?: (invocationId: string) => void;
+};
+
+/**
  * Admit `profileId`'s request to run trigger `hookId` now, then ask the trigger's gatekeeper to
  * deliver it once (Overseer.invokeTrigger). The hook must be live, the person (`userId`) must hold
  * InferOps' `workflow:invoke` through their own account where the deployment names that authority
@@ -19668,14 +19681,15 @@ async function forgetProvisioned(
  * startHook like any other, which runs the pinned revision with the gadget's own bindings. A
  * gatekeeper that can't run on request, or refuses now, leaves no invocation behind. With `expected`
  * (an approved run, FAC-120), the run must start on that definition and revision, checked as the
- * invocation is minted, after the last await; the person's own request names none.
+ * invocation is minted, after the last await, and `expected.onAdmitted` hears of the mint at once;
+ * the person's own request names none.
  */
 export async function invokeWorkflowTrigger(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
         "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations" | "getGadgetHead" |
         "definitionRoles" | "requireHookBound">,
     userId: string, profileId: string, hookId: number,
-    expected?: {definitionId: string, revision: number}): Promise<WorkflowInvocation> {
+    expected?: ApprovedRunAdmission): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
   // Who may run what here (FAC-122), resolved before the other awaits and read after the last one.
@@ -19701,7 +19715,10 @@ export async function invokeWorkflowTrigger(
   // The company the person was answered in becomes the run's scope (FAC-111).
   // An approved run (FAC-120) is held to the definition and revision the person approved, checked
   // where the invocation is minted, after the last await: a repin or a new publication meanwhile refuses.
-  let invocation = store.beginInvocation(profileId, hookId, company, expected);
+  let invocation = store.beginInvocation(profileId, hookId, company,
+      expected && {definitionId: expected.definitionId, revision: expected.revision});
+  // This call's own admission, reported before anything else can happen (see ApprovedRunAdmission).
+  expected?.onAdmitted?.(invocation.id);
   // What startHook reads to tell this call's delivery taken (see takenInvocations).
   impl.takenInvocations.set(invocation.id, false);
   try {

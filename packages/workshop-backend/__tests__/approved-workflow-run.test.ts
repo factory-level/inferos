@@ -82,7 +82,8 @@ describe("the trigger's own workspace", () => {
       let p1 = person(h, "p1", "use");
       expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "started", runId: "run-1" });
       // With the definition and revision approved, which admission holds the run to (r2's HIGH).
-      expect(h.invoked).toEqual([[uid("p1"), "p1", HOOK, { definitionId: DEFINITION, revision: 2 }]]);
+      expect(h.invoked).toEqual([[uid("p1"), "p1", HOOK,
+        { definitionId: DEFINITION, revision: 2, onAdmitted: expect.any(Function) }]]);
     }));
 
   it("starts nothing for a stranger, an unverified caller, a caller naming W as its session, or in an operate session", () =>
@@ -137,6 +138,22 @@ describe("the trigger's own workspace", () => {
       expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "started", runId: "run-2" });
     }));
 
+  it("refuses, and lets the same action try again, when another person's run is minted while this one waits and this one is refused before admission", () =>
+    withTrigger(async h => {
+      let p1 = person(h, "p1", "use");
+      h.impl.invokeTrigger = async () => {
+        // Someone else's run is minted while this call awaits its grant: the workspace's invocation
+        // log moves, but this call never reaches beginInvocation.
+        h.impl.storage.nextWorkflowInvocationLogId.put(h.impl.storage.nextWorkflowInvocationLogId.get() + 1);
+        throw new Error("You can't run this trigger.");
+      };
+      expect(await h.instance.invokeTriggerAs(p1, request()))
+        .toEqual({ status: "refused", kind: "permission", reason: "You can't run this trigger." });
+      // No record is left: the same approved action is answered afresh, and starts.
+      h.impl.invokeTrigger = async () => ({ id: "run-2", hookId: HOOK, definitionId: DEFINITION, revision: 2 });
+      expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "started", runId: "run-2" });
+    }));
+
   it("returns the same run for the same approved action, and starts no second one", () =>
     withTrigger(async h => {
       let p1 = person(h, "p1", "use");
@@ -151,10 +168,10 @@ describe("the trigger's own workspace", () => {
   it("answers a start that may have happened as unknown, never a refusal, and never starts it again", () =>
     withTrigger(async h => {
       let p1 = person(h, "p1", "use");
-      // An invocation was minted, then the answer was lost: the run may exist.
-      h.impl.invokeTrigger = async () => {
+      // This call's invocation was minted, then the answer was lost: the run may exist.
+      h.impl.invokeTrigger = async (...args: unknown[]) => {
         h.invoked.push(["minted"]);
-        h.impl.storage.nextWorkflowInvocationLogId.put(h.impl.storage.nextWorkflowInvocationLogId.get() + 1);
+        (args[3] as { onAdmitted(id: string): void }).onAdmitted("invocation-1");
         throw new Error("the run's own failure after it was taken");
       };
       expect(await h.instance.invokeTriggerAs(p1, request())).toMatchObject({ status: "unknown" });
