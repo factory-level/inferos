@@ -4,7 +4,8 @@ import {
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, TRIGGER_RUNS_PER_INVOKER, TRIGGER_RUNS_PER_TRIGGER,
   WORKFLOW_DEFINITION_EXPIRED, WORKFLOW_INVOCATION_TTL_MS, dynamicDefinitionTtlMs, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
   type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery,
-  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunFailure, type WorkflowRunResult,
+  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowDefinitionHistoryRef,
+  type WorkflowInvocation, type WorkflowRunFailure, type WorkflowRunResult,
   type WorkflowTriggerDefinitionRef, isLiveWorkflowDelivery, WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME,
   MAX_WORKFLOW_DEFINITION_SHARES, parseWorkflowDefinitionRights,
   type WorkflowDefinitionRights, type WorkflowDefinitionShare,
@@ -1307,18 +1308,54 @@ export class WorkspaceWorkflowDefinitionStore {
    * from their own records (`run`).
    */
   deliveries(viewer: string, definitionId: string, role: CollaboratorRole | null): WorkflowDefinitionDelivery[] {
-    let stored = this.storage.workflowDefinitions.get(definitionId);
     let matches = Array.from(this.storage.workflowDeliveries.list()).filter(delivery => delivery.definitionId === definitionId);
-    let owner = stored?.owner.id ?? matches.find(delivery => delivery.historyOwnerProfileId)?.historyOwnerProfileId;
-    let editShare = role === "build" && this.storage.workflowDefinitionShares.get(shareKey(definitionId, viewer))?.rights.edit === true;
-    if (stored ? !this.#rights(stored, viewer, role).edit : (!owner || (owner !== viewer && !editShare))) {
-      throw new Error(NOT_FOUND);
-    }
+    let sweptOwner = this.#sweptHistoryOwner(matches);
+    if (!this.#canReadHistory(viewer, definitionId, role, sweptOwner)) throw new Error(NOT_FOUND);
     let shown: WorkflowDefinitionDelivery[] = [];
     for (let { id: _, historyOwnerProfileId: __, ...delivery } of matches) {
-      if (delivery.definitionId === definitionId) shown.push(delivery);
+      if (delivery.definitionId === definitionId) {
+        let stored = { id: _, ...delivery };
+        // The expiry index schedules never-started deliveries at their start-window boundary so
+        // they can eventually be swept. That index entry is not user-facing expiry while live.
+        let expiry = isLiveWorkflowDelivery(stored, this.retention.now())
+          ? undefined
+          : this.#historyExpiry(stored);
+        shown.push({ ...delivery, historyExpiresAt: expiry === undefined ? null : new Date(expiry) });
+      }
     }
     return shown;
+  }
+
+  /** Discover only histories the caller can already read; swept definitions use retained owner IDs. */
+  listReadableWorkflowHistories(viewer: string, role: CollaboratorRole | null): WorkflowDefinitionHistoryRef[] {
+    let deliveriesByDefinition = new Map<string, StoredWorkflowDelivery[]>();
+    for (let delivery of this.storage.workflowDeliveries.list()) {
+      let deliveries = deliveriesByDefinition.get(delivery.definitionId);
+      if (deliveries) deliveries.push(delivery);
+      else deliveriesByDefinition.set(delivery.definitionId, [delivery]);
+    }
+    return Array.from(deliveriesByDefinition, ([definitionId, deliveries]) =>
+      this.#canReadHistory(viewer, definitionId, role, this.#sweptHistoryOwner(deliveries))
+        ? { definitionId }
+        : null)
+      .filter((history): history is WorkflowDefinitionHistoryRef => history !== null)
+      .toSorted((left, right) => left.definitionId.localeCompare(right.definitionId));
+  }
+
+  /** Use one owner selection rule for direct reads and swept-history discovery. */
+  #sweptHistoryOwner(deliveries: Iterable<StoredWorkflowDelivery>): string | undefined {
+    for (let delivery of deliveries) {
+      if (delivery.historyOwnerProfileId) return delivery.historyOwnerProfileId;
+    }
+    return undefined;
+  }
+
+  #canReadHistory(viewer: string, definitionId: string, role: CollaboratorRole | null,
+      sweptOwner?: string): boolean {
+    let stored = this.storage.workflowDefinitions.get(definitionId);
+    if (stored) return this.#rights(stored, viewer, role).edit;
+    let editShare = role === "build" && this.storage.workflowDefinitionShares.get(shareKey(definitionId, viewer))?.rights.edit === true;
+    return !!sweptOwner && (sweptOwner === viewer || editShare);
   }
 
   #owned(profileId: string, id: string): StoredWorkflowDefinition {

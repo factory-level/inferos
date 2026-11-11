@@ -2105,6 +2105,20 @@ describe("the company the person works in (FAC-88)", () => {
     vars.INFEROPS_COMPANY = "acme";
     expect(await hooks().presentationCompany(account)).toHaveProperty("failed");
   });
+
+  // FAC-14 K2: a board connection's own company, which the Workshop compares with the person's.
+  it("names a board connection's company as its connected account's, without asking InferOps", async () => {
+    inferlab.tenantId = COMPANY_A.toUpperCase();
+    const account = await connect("connection company");
+    expect(await hooks().bindAccount("company-board", account, BOARD_URL)).toBeNull();
+    const before = inferlab.apiCalls.length;
+    expect(await hooks().boundConnectionCompany("company-board")).toBe(COMPANY_A);
+    expect(inferlab.apiCalls.length).toBe(before);
+    vars.INFEROPS_COMPANY = COMPANY_B;
+    expect(await hooks().boundConnectionCompany("company-board")).toBeNull();
+    vars.INFEROPS_COMPANY = "acme";
+    expect(await hooks().boundConnectionCompany("company-board")).toHaveProperty("failed");
+  });
 });
 
 describe("system credentials (FAC-102)", () => {
