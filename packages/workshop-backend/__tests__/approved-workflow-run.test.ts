@@ -14,7 +14,7 @@ import { runInDurableObject } from "cloudflare:test";
 import type { ApprovedEffects, ApprovedWorkflowRun } from "@gadgets/workshop-shared/gatekeeper";
 import { workflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
 import type { ConsoleToolCaller } from "../src/console-tools";
-import { WORKFLOW_RUN_FIELD_LABEL, type OverseerDurableObject } from "../src/overseer.js";
+import { actionContextOf, WORKFLOW_RUN_FIELD_LABEL, type OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -210,8 +210,9 @@ describe("the approved effects a gatekeeper's apply receives", () => {
       if (options.executedAs) record.executedAs = options.executedAs;
       // The description as submission stored it, before anything applies.
       let stored = structuredClone(record.description);
+      let context = actionContextOf(record);
       try { await impl.applyPendingAction(record, options.resolvedBy ?? ADA, options.autoApproved ?? false); } catch { /* recorded */ }
-      return { seen, impl, stored };
+      return { seen, impl, stored, context };
     });
   }
 
@@ -261,6 +262,37 @@ describe("the approved effects a gatekeeper's apply receives", () => {
     // An action that declares no run gets no such field.
     expect((await applying("shown-none", { description: ISSUE, vendorId: "github" })).stored.fields ?? []).toEqual([]);
   });
+
+  it("marks the action's context with the declared run, from the kernel's own record, and only then", async () => {
+    // r1 round 6: what the compact approve surfaces read, without parsing fields.
+    // These are an agent's turn's actions: the origin keeps its kind and carries the marker.
+    expect((await applying("marked-github", { description: { ...ISSUE, workflowRun: { reference: REFERENCE } }, vendorId: "github" })).context)
+      .toEqual({ kind: "agent-turn", declaredRun: { reference: REFERENCE } });
+    expect((await applying("marked-agent")).context).toEqual({ kind: "agent-turn", declaredRun: { reference: REFERENCE } });
+    // With no other origin to report, the context is the declared run alone.
+    expect(actionContextOf({ type: "action", caller: { from: "user" }, description: { ...ISSUE, workflowRun: { reference: REFERENCE } } } as any))
+      .toEqual({ kind: "declared-run", declaredRun: { reference: REFERENCE } });
+    expect(actionContextOf({ type: "action", caller: { from: "user" }, description: ISSUE } as any)).toBeUndefined();
+    // No declared run, no marker; and nothing a gatekeeper writes into its description sets one.
+    expect((await applying("marked-none", { description: ISSUE, vendorId: "github" })).context).toEqual({ kind: "agent-turn" });
+    let forged = { ...ISSUE, declaredRun: { reference: REFERENCE }, context: { kind: "declared-run", declaredRun: { reference: REFERENCE } } };
+    expect((await applying("marked-forged", { description: forged, vendorId: "github" })).context).toEqual({ kind: "agent-turn" });
+  });
+
+  it("refuses at submit a gatekeeper's field that takes the kernel's reserved label, however it is cased or spaced", () =>
+    runInDurableObject(env.TEST_OVERSEER.getByName("reserved-label"), async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      impl.storage.gatekeepers.put({ id: 41, resourceTitle: "Connection", class: {} as any,
+        creationSpec: { type: "gatekeeper", vendorId: "github", resourceUrl: "test://x", typeUrlPattern: "test://*" } });
+      let decoy = (label: string) => ({ ...ISSUE, fields: [{ label, kind: "inline", value: "inferops://elsewhere" }] });
+      for (let label of [WORKFLOW_RUN_FIELD_LABEL, ` ${WORKFLOW_RUN_FIELD_LABEL.toUpperCase()}  `, WORKFLOW_RUN_FIELD_LABEL.toLowerCase()]) {
+        await expect(impl.submitAction(41, 1, decoy(label), { from: "agent", chatId: 1 })).rejects.toThrow(/reserved for InferOS/);
+        // With a declared run too: the decoy is refused, not shown beside the kernel's field.
+        await expect(impl.submitAction(41, 1, { ...decoy(label), workflowRun: { reference: REFERENCE } }, { from: "agent", chatId: 1 }))
+          .rejects.toThrow(/reserved for InferOS/);
+      }
+      expect(Array.from(impl.storage.actions.list())).toEqual([]);
+    }));
 
   it("refuses at submit a declared run that isn't a workflow trigger reference", () =>
     runInDurableObject(env.TEST_OVERSEER.getByName("effects-malformed"), async (instance: OverseerDurableObject) => {

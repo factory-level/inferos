@@ -1285,6 +1285,16 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
  */
 export const WORKFLOW_RUN_FIELD_LABEL = "Workflow run this approval starts (shown by InferOS)";
 
+/**
+ * Whether `label` is the kernel's reserved `WORKFLOW_RUN_FIELD_LABEL` (round 6), compared trimmed and
+ * case-insensitively, so a near-copy can't pass for it. A gatekeeper's field so labelled is refused
+ * at submit; only the kernel's own appended field carries it.
+ */
+export function isReservedFieldLabel(label: unknown): boolean {
+  return typeof label === "string" &&
+      label.trim().toLowerCase() === WORKFLOW_RUN_FIELD_LABEL.toLowerCase();
+}
+
 /** Which requested run proposed a write, and where (FAC-112; `ActionRecord.workflowRun`). */
 export type WorkflowRunWrite = { runId: string; hookId: number; deliveryId: number; writeKey?: string; attempt: number };
 
@@ -1675,6 +1685,17 @@ async function computeSessionAffinity(gadgetId: string, chatId: number): Promise
  * than its requester.
  */
 export function actionContextOf(record: ActionRecord & {type: "action"},
+    labelOf?: (hookId: number) => string | undefined): ActionContext | undefined {
+  let origin = actionOriginOf(record, labelOf);
+  // The declared run (round 6), from the kernel's own record of the reference it validated at
+  // submit: never from anything else a gatekeeper wrote.
+  let reference = record.description.workflowRun?.reference;
+  if (typeof reference !== "string") return origin;
+  return {...origin ?? {kind: "declared-run"}, declaredRun: {reference}};
+}
+
+// Where an action came from, before its declared run (see actionContextOf).
+function actionOriginOf(record: ActionRecord & {type: "action"},
     labelOf?: (hookId: number) => string | undefined): ActionContext | undefined {
   let run = record.executedAs
     ? {hookId: record.executedAs.hookId, assigned: true, runId: record.executedAs.runId,
@@ -8355,6 +8376,11 @@ class OverseerImpl implements AgentHooks {
     // declare one, so the kernel itself shows it to every approver: it appends its own field naming
     // the reference (WORKFLOW_RUN_FIELD_LABEL), last, whatever the gatekeeper's title, prose and
     // fields say, and that stored description is what every surface shows.
+    // Only the kernel's own field may carry its label (round 6): a gatekeeper's field that takes it,
+    // however it is cased or spaced, is refused, so no decoy ever stands beside or for the real one.
+    if ((description.fields ?? []).some(field => isReservedFieldLabel(field?.label))) {
+      throw new Error(`The field label "${WORKFLOW_RUN_FIELD_LABEL}" is reserved for InferOS.`);
+    }
     if (description.workflowRun !== undefined) {
       if (!parseWorkflowTriggerRef(description.workflowRun?.reference)) {
         throw new Error("A declared workflow run must name an InferOS workflow trigger reference.");

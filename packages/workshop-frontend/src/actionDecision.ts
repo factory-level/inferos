@@ -55,6 +55,8 @@ export const contextText = (entry: ActionEntry, viewerProfileId?: string | null)
   const context = entry.context
   if (!context) return null
   if (context.kind === 'agent-turn') return "From the agent's turn in a chat"
+  // A declared run alone (FAC-120 round 6, `context.declaredRun`) names no origin here; the UI PR shows the run.
+  if (context.kind === 'declared-run') return null
   const trigger = context.triggerLabel ? `the workflow trigger “${context.triggerLabel}”` : 'a workflow trigger'
   const asker = context.requestedBy === null ? ', which fired by itself'
     : context.requestedBy === undefined ? ''
