@@ -141,7 +141,7 @@ describe("OverseerDurableObject.startHook", () => {
         { enabled: true, vendorId: "email", callback: { deliver } });
     let { callback } = await overseer.startHook(1);
     (overseer as any).impl.requireTriggerStarts = () => { throw new Error(TRIGGER_LIFECYCLE_REFUSED.paused); };
-    await expect((callback as any).deliver("evt")).rejects.toThrow(TRIGGER_LIFECYCLE_REFUSED.paused);
+    await expectRejection((callback as any).deliver("evt"), /trigger is paused/);
     expect(deliver).not.toHaveBeenCalled();
   });
 
@@ -152,7 +152,7 @@ describe("OverseerDurableObject.startHook", () => {
         { enabled: true, vendorId: "email", callback: deliver });
     let { callback } = await overseer.startHook(1);
     (overseer as any).impl.requireTriggerStarts = () => { throw new Error(TRIGGER_LIFECYCLE_REFUSED.paused); };
-    await expect((callback as any)("evt")).rejects.toThrow(TRIGGER_LIFECYCLE_REFUSED.paused);
+    await expectRejection((callback as any)("evt"), /trigger is paused/);
     expect(deliver).not.toHaveBeenCalled();
   });
 
