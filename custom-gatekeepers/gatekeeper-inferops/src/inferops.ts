@@ -4240,10 +4240,10 @@ async function applyDotAction(binding: DotBinding, actionId: number, effects?: P
 }
 
 /** The Dot's InferOS workflow-run proposal (FAC-120, inferops#2627): InferOps runs nothing for it. */
-export const DOT_WORKFLOW_INVOKE_TOOL = "inferos_workflow_invoke";
+const DOT_WORKFLOW_INVOKE_TOOL = "inferos_workflow_invoke";
 
 /** Why a workflow run can't start without the kernel's approved effects (an automatic approval, an older kernel). */
-export const DOT_WORKFLOW_NEEDS_APPROVAL = "Starting a workflow run needs your own approval here.";
+const DOT_WORKFLOW_NEEDS_APPROVAL = "Starting a workflow run needs your own approval here.";
 
 // A refused run's FAC-119 kind as the facet's error code, so it is settled and shown like any other.
 const RUN_REFUSAL_CODES = { permission: "FORBIDDEN", conflict: "CONFLICT", policy: "CONFLICT", invalid: "INVALID_REQUEST",
