@@ -81,7 +81,8 @@ describe("the trigger's own workspace", () => {
     withTrigger(async h => {
       let p1 = person(h, "p1", "use");
       expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "started", runId: "run-1" });
-      expect(h.invoked).toEqual([[uid("p1"), "p1", HOOK]]);
+      // With the definition and revision approved, which admission holds the run to (r2's HIGH).
+      expect(h.invoked).toEqual([[uid("p1"), "p1", HOOK, { definitionId: DEFINITION, revision: 2 }]]);
     }));
 
   it("starts nothing for a stranger, an unverified caller, a caller naming W as its session, or in an operate session", () =>
@@ -120,6 +121,20 @@ describe("the trigger's own workspace", () => {
       h.impl.invokeTrigger = async () => { throw new Error("You can't run this trigger."); };
       expect(await h.instance.invokeTriggerAs(p1, request()))
         .toEqual({ status: "refused", kind: "permission", reason: "You can't run this trigger." });
+    }));
+
+  it("refuses as policy, starting nothing, when admission finds the trigger moved since approval, and lets it try again", () =>
+    withTrigger(async h => {
+      let p1 = person(h, "p1", "use");
+      // invokeWorkflowTrigger's refusal after its last await: thrown before anything is minted.
+      h.impl.invokeTrigger = async () => {
+        throw new Error("The workflow changed since it was proposed: its trigger no longer runs that revision. Ask the Dot again.");
+      };
+      expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "refused", kind: "policy",
+        reason: "The workflow changed since it was proposed: its trigger no longer runs that revision. Ask the Dot again." });
+      // Refused, not unknown: the record is gone, so the same action is answered afresh.
+      h.impl.invokeTrigger = async () => ({ id: "run-2", hookId: HOOK, definitionId: DEFINITION, revision: 2 });
+      expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "started", runId: "run-2" });
     }));
 
   it("returns the same run for the same approved action, and starts no second one", () =>

@@ -30,7 +30,7 @@ import {
   type SystemRunRequester,
 } from "./system-run.js";
 import {
-  CANNOT_RUN, WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
+  CANNOT_RUN, WORKFLOW_REVISION_CHANGED, WorkspaceWorkflowDefinitionStore, type StoredTriggerControl, type StoredTriggerPin, type StoredWorkflowDefinition,
   type StoredWorkflowDefinitionShare, type WorkflowDefinitionAudience, WORKSPACE_AUDIENCE,
   type StoredWorkflowDelivery, type StoredWorkflowInvocation, type StoredWorkflowInvocationRecord,
   type StoredWorkflowDeliveryExpiry,
@@ -12818,9 +12818,10 @@ class OverseerImpl implements AgentHooks {
     return setWorkflowTriggerAssignment(this, caller, hookId, settings);
   }
 
-  /** See invokeWorkflowTrigger. */
-  async invokeTrigger(userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
-    return invokeWorkflowTrigger(this, userId, profileId, hookId);
+  /** See invokeWorkflowTrigger; `expected` is an approved run's definition and revision (FAC-120). */
+  async invokeTrigger(userId: string, profileId: string, hookId: number,
+      expected?: {definitionId: string, revision: number}): Promise<WorkflowInvocation> {
+    return invokeWorkflowTrigger(this, userId, profileId, hookId, expected);
   }
 
   workflowDefinitionStore(): WorkspaceWorkflowDefinitionStore {
@@ -13043,18 +13044,18 @@ class OverseerImpl implements AgentHooks {
     if (!pin || pin.definitionId !== definitionId || !this.storage.boundHooks.get(hookId)?.enabled) {
       return refuse("permission", CANNOT_RUN);
     }
-    // The revision a run would start on now, as beginInvocation reads it.
-    let current = pin.mode === "follow-latest"
-        ? this.storage.workflowDefinitions.get(definitionId)?.published?.revision ?? null
-        : pin.revision;
-    if (current !== revision) return refuse("policy", WORKFLOW_REVISION_CHANGED);
+    // Early, for a clear answer; beginInvocation checks it again where it mints, after the last await.
+    if (this.workflowDefinitionStore().pinOf(hookId)?.revision !== revision) {
+      return refuse("policy", WORKFLOW_REVISION_CHANGED);
+    }
     // Whether an invocation was minted is what tells "not started" from "may have started":
     // beginInvocation advances the invocation log, and nothing before it can start a run.
     let mintedBefore = this.storage.nextWorkflowInvocationLogId.get();
     this.ctx.storage.kv.put(key, {state: "starting"});
     try {
-      // The person's own on-request path (invokeTrigger -> invokeWorkflowTrigger), unchanged.
-      let invocation = await this.invokeTrigger(caller.userId, caller.profileId, hookId);
+      // The person's own on-request path (invokeTrigger -> invokeWorkflowTrigger), held to the
+      // approved definition and revision when it mints, after its last await (r2's HIGH).
+      let invocation = await this.invokeTrigger(caller.userId, caller.profileId, hookId, {definitionId, revision});
       this.ctx.storage.kv.put(key, {state: "started", runId: invocation.id});
       return {status: "started", runId: invocation.id};
     } catch (error) {
@@ -13064,6 +13065,7 @@ class OverseerImpl implements AgentHooks {
       // fixed words for one its gatekeeper never took. Anything else may have started.
       if (!minted || NOT_TAKEN_REFUSALS.has(message)) {
         this.ctx.storage.kv.delete(key);
+        if (message === WORKFLOW_REVISION_CHANGED) return refuse("policy", WORKFLOW_REVISION_CHANGED);
         return message === CANNOT_RUN || message === WORKFLOW_INVOKE_REFUSED
             ? refuse("permission", CANNOT_RUN)
             : refuse("unavailable", RUN_NOT_STARTED);
@@ -14936,8 +14938,6 @@ function joinSessionPresence(
 
 // FAC-120: the words of an approved workflow run that isn't started.
 const WORKFLOW_REFERENCE_UNKNOWN = "That isn't a workflow trigger this workspace can find.";
-const WORKFLOW_REVISION_CHANGED =
-  "The workflow changed since it was proposed: its trigger no longer runs that revision. Ask the Dot again.";
 const WORKFLOW_NEEDS_APPROVAL = "Starting a workflow run needs a person's approval.";
 const WORKFLOW_RUN_UNKNOWN =
   "It isn't known whether the workflow run started: check the trigger's runs before approving it again.";
@@ -19666,13 +19666,16 @@ async function forgetProvisioned(
  * InferOps' `workflow:invoke` through their own account where the deployment names that authority
  * (`requireWorkflowInvoke`), and the control must list them; the gatekeeper gets only the minted invocation id, and its delivery goes through
  * startHook like any other, which runs the pinned revision with the gadget's own bindings. A
- * gatekeeper that can't run on request, or refuses now, leaves no invocation behind.
+ * gatekeeper that can't run on request, or refuses now, leaves no invocation behind. With `expected`
+ * (an approved run, FAC-120), the run must start on that definition and revision, checked as the
+ * invocation is minted, after the last await; the person's own request names none.
  */
 export async function invokeWorkflowTrigger(
     impl: Pick<OverseerImpl, "env" | "users" | "storage" | "assertGatekeeperUsable" | "workflowDefinitionStore" |
         "defaultGadgetId" | "visibleBindings" | "getGadgetRecord" | "takenInvocations" | "getGadgetHead" |
         "definitionRoles" | "requireHookBound">,
-    userId: string, profileId: string, hookId: number): Promise<WorkflowInvocation> {
+    userId: string, profileId: string, hookId: number,
+    expected?: {definitionId: string, revision: number}): Promise<WorkflowInvocation> {
   if (!Number.isSafeInteger(hookId)) throw new TypeError("A trigger is named by its hook id.");
   requireLiveHook(impl as OverseerImpl, hookId);
   // Who may run what here (FAC-122), resolved before the other awaits and read after the last one.
@@ -19696,7 +19699,9 @@ export async function invokeWorkflowTrigger(
   // rule, beside the trigger's run control, which beginInvocation checks. Both, never either.
   store.requireRunRight(profileId, hookId, roleOf(profileId));
   // The company the person was answered in becomes the run's scope (FAC-111).
-  let invocation = store.beginInvocation(profileId, hookId, company);
+  // An approved run (FAC-120) is held to the definition and revision the person approved, checked
+  // where the invocation is minted, after the last await: a repin or a new publication meanwhile refuses.
+  let invocation = store.beginInvocation(profileId, hookId, company, expected);
   // What startHook reads to tell this call's delivery taken (see takenInvocations).
   impl.takenInvocations.set(invocation.id, false);
   try {
