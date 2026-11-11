@@ -9,16 +9,17 @@
 // Fixtures are synthetic only.
 
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:workers";
+import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { ConsoleWidgetEntry, OperateConsole, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import type { OperateConsoleRun } from "@gadgets/workshop-shared/operate-session";
+import { SHARED_CONFIGURATION_REFUSED } from "@gadgets/workshop-shared/api";
 import { WorkspaceConsoleStore } from "../src/console-store";
 import {
   COMMAND_OTHER_COMPANY, NO_CONSOLE_TOOL_ACCESS, UNVERIFIED_CONSOLE_TOOL_CALLER,
   type ConsoleToolCaller, type ConsoleToolOutcome,
 } from "../src/console-tools";
-import type { OverseerDurableObject } from "../src/overseer.js";
+import { actionContextOf, type OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -52,7 +53,13 @@ const DONE = "40000000-0000-4000-8000-000000000002";
 const INPUT = { issueId: ISSUE, toStateId: DONE, expectedRevision: "7" };
 const TAG = "inferops.issue-transition";
 
-type Person = { profileId: string; session: string | null; page: OperateConsoleRun | null; company: string };
+type Person = {
+  profileId: string; session: string | null; page: OperateConsoleRun | null; company: string;
+  /** What their account answers when asked whether they may build shared configuration. */
+  holds?: boolean;
+  /** Runs while their page is being read, before it is returned (a change racing a request). */
+  onPage?: () => Promise<void>;
+};
 
 type Board = {
   /** Each transition the board was asked for. */
@@ -102,7 +109,14 @@ async function withConsole(fn: (h: Harness) => Promise<void>, name = `console-co
         id,
         whoami: async () => ({ type: "user", id: people.get(id)?.profileId ?? "nobody", name: "Someone" }),
         operateSessionWorkspaceId: async () => people.get(id)?.session ?? null,
-        getOperatePage: async () => ({ state: { console: people.get(id)?.page ?? null } }),
+        getOperatePage: async () => {
+          let person = people.get(id);
+          let race = person?.onPage;
+          if (person) person.onPage = undefined;
+          await race?.();
+          return { state: { console: people.get(id)?.page ?? null } };
+        },
+        holdsSharedConfiguration: async () => people.get(id)?.holds ?? false,
         currentPresentationCompany: async () => people.get(id)?.company ?? "",
         recordSharedGadgetOpen: async () => {},
         getChatContext: async () => ({ profile: { type: "user", id: OWNER, name: "Owner" } }),
@@ -234,10 +248,70 @@ describe("a declared command, bound by the builder (FAC-14 K2)", () => {
       expect(outcome.status).toBe("ok");
       expect(outcome.status === "ok" && outcome.text).toContain('"requested":true');
       expect(h.board.transitions).toEqual([[ISSUE, DONE, "7"]]);
-      expect(h.board.callers).toEqual([{ from: "operateAgent", userId: uid("ada"), profileId: "ada", sessionWorkspaceId: "session-of-ada" }]);
+      expect(h.board.callers).toEqual([{ from: "operateAgent", userId: uid("ada"), profileId: "ada",
+        sessionWorkspaceId: "session-of-ada", name: "Someone" }]);
       let [record] = actions(h);
       expect(record).toMatchObject({ state: "pending", gatekeeperId: BOARD, caller: { from: "operateAgent", profileId: "ada" } });
       expect(h.board.applied).toEqual([]);
+    }));
+
+  it("names the person it asked for to whoever decides it, by profile and display name", () =>
+    withConsole(async h => {
+      await request(h, operator(h, "ada", "use"));
+      let [record] = actions(h);
+      expect(actionContextOf(record)).toEqual({ kind: "agent-turn", onBehalfOf: { profileId: "ada", name: "Someone" } });
+    }));
+
+  it("can't be decided by the person who asked, with use: approving and rejecting are refused, nothing applies", () =>
+    withConsole(async h => {
+      let ada = operator(h, "ada", "use");
+      await request(h, ada);
+      let [record] = actions(h);
+      let client: any = await h.instance.open(ada.userId, ada.profileId, new NativeRpcStub<() => void>(() => {}));
+      await expect(client.approveAction(record.id)).rejects.toThrow();
+      await expect(client.rejectAction(record.id)).rejects.toThrow();
+      expect(h.impl.storage.actions.get(record.id).state).toBe("pending");
+      expect(h.board.applied).toEqual([]);
+      expect(h.board.rejected).toEqual([]);
+    }));
+
+  it("is decided through the decision calls: a decider's approval runs it once, their rejection runs nothing", () =>
+    withConsole(async h => {
+      let ada = operator(h, "ada", "use");
+      await request(h, ada);
+      await request(h, ada, "moveIssue", { ...INPUT, expectedRevision: "8" });
+      let [first, second] = actions(h);
+      // The owner, whose shared-configuration authority holds, decides here (#requireDecider).
+      h.flags.SHARED_CONFIGURATION_GATEKEEPER = "inferops";
+      h.impl.isSharedConfiguration = async () => true;
+      operator(h, OWNER);
+      h.people.get(uid(OWNER))!.holds = true;
+      let decider: any = await h.instance.open(uid(OWNER), OWNER, new NativeRpcStub<() => void>(() => {}));
+      await decider.approveAction(first.id);
+      await decider.rejectAction(second.id);
+      expect(h.board.applied).toEqual([first.action]);
+      expect(h.board.rejected).toEqual([second.action]);
+      expect(h.impl.storage.actions.get(first.id).state).toBe("approved");
+      expect(h.impl.storage.actions.get(second.id).state).toBe("rejected");
+    }));
+
+  it("is refused to a builder whose shared-configuration authority says no (#requireDecider): nothing applies or is rejected", () =>
+    withConsole(async h => {
+      await request(h, operator(h, "ada", "use"));
+      let [record] = actions(h);
+      h.flags.SHARED_CONFIGURATION_GATEKEEPER = "inferops";
+      h.impl.isSharedConfiguration = async () => true;
+      // The owner opened a building session while the authority held; it says no by the decision,
+      // which #requireDecider asks again at that point.
+      operator(h, OWNER);
+      h.people.get(uid(OWNER))!.holds = true;
+      let client: any = await h.instance.open(uid(OWNER), OWNER, new NativeRpcStub<() => void>(() => {}));
+      h.people.get(uid(OWNER))!.holds = false;
+      await expect(client.approveAction(record.id)).rejects.toThrow(SHARED_CONFIGURATION_REFUSED);
+      await expect(client.rejectAction(record.id)).rejects.toThrow(SHARED_CONFIGURATION_REFUSED);
+      expect(h.impl.storage.actions.get(record.id).state).toBe("pending");
+      expect(h.board.applied).toEqual([]);
+      expect(h.board.rejected).toEqual([]);
     }));
 
   it("is never auto-approved, even under an enabled rule for its kind", () =>
@@ -307,6 +381,15 @@ describe("refused, asking the board nothing (FAC-14 K2)", () => {
       let ada = operator(h, "ada", "use");
       await refusedAsking(h, request(h, ada, "moveIssue", { ...INPUT, expectedRevision: "07" }), /does not match tool moveIssue/);
       await refusedAsking(h, request(h, ada, "moveIssue", { ...INPUT, title: "x" }), /does not match tool moveIssue/);
+    }));
+
+  it("an offer withdrawn while the request was being checked: the final check stops it before the board", () =>
+    withConsole(async h => {
+      let ada = operator(h, "ada", "use");
+      // A republish that drops the binding lands during the page read, the last await before the
+      // final, await-free check (`stillOffered`). The page still shows the old revision.
+      h.people.get(uid("ada"))!.onPage = async () => { await h.publish(h.content()); };
+      await refusedAsking(h, request(h, ada), /The console changed or your access ended during the call/);
     }));
 
   it("a binding whose connection is gone by the time it is requested", () =>

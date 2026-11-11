@@ -1681,9 +1681,13 @@ export function actionContextOf(record: ActionRecord & {type: "action"},
       ...(run.requestedBy !== undefined ? {requestedBy: run.requestedBy} : {}),
       ...(triggerLabel ? {triggerLabel} : {})};
   }
-  // An agent's turn proposed it: a chat's agent here, or the operate agent's request (FAC-14 K2).
-  let from = (record.caller as GatekeeperCaller | undefined)?.from;
-  return from === "agent" || from === "operateAgent" ? {kind: "agent-turn"} : undefined;
+  // An agent's turn proposed it: a chat's agent here, or the operate agent's request for a person
+  // (FAC-14 K2), which names that person for the decider.
+  let caller = record.caller as GatekeeperCaller | undefined;
+  if (caller?.from === "operateAgent") {
+    return {kind: "agent-turn", onBehalfOf: {profileId: caller.profileId, name: caller.name ?? caller.profileId}};
+  }
+  return caller?.from === "agent" ? {kind: "agent-turn"} : undefined;
 }
 
 /**
@@ -13256,6 +13260,8 @@ class OverseerImpl implements AgentHooks {
     let problem = commandInputProblem(command.command, input);
     if (problem !== null) return consoleToolFailure(`The tool input does not match tool ${command.name}: ${problem}.`);
     let {issueId, toStateId, expectedRevision} = input as {issueId: string, toStateId: string, expectedRevision: string};
+    // The person's display name, for the decider (ActionContext.onBehalfOf): their own profile's.
+    let personName = (await beforeDeadline(user.whoami(), deadlineAt)).name;
     let refusal = this.consoleCommandRefusal(command.gatekeeperId, command.command);
     if (refusal) return consoleToolFailure(`Tool ${command.name} cannot be requested now: ${refusal}`);
 
@@ -13295,7 +13301,7 @@ class OverseerImpl implements AgentHooks {
 
     attempt.ran = true;
     let requester: GatekeeperCaller = {from: "operateAgent", userId: caller.userId, profileId: caller.profileId,
-      sessionWorkspaceId: caller.sessionWorkspaceId};
+      sessionWorkspaceId: caller.sessionWorkspaceId, name: personName};
     let payload = {widgetId: entry.gadgetId, tool: command.name};
     let receipt;
     try {
@@ -14672,6 +14678,11 @@ type GatekeeperCaller = {
   profileId: string;
   /** Their operate session workspace, where the agent asked. */
   sessionWorkspaceId: string;
+  /**
+   * Their profile's display name when they asked, as `whoami` gave it: shown to the decider
+   * (`ActionContext.onBehalfOf`), never authority. Absent on no record written before it was kept.
+   */
+  name?: string;
 };
 
 type GatekeeperLoopbackProps = {

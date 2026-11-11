@@ -2646,11 +2646,13 @@ export type ActionRequester = "agent" | "person" | "gadget" | "hook";
  * assigned service account (FAC-102) rather than as the person who asked; `requestedBy` is the
  * profile id of the person who asked for the run, or null when the trigger fired it itself;
  * `triggerLabel` is the trigger's run-control label, when it has one. `agent-turn`: an agent's turn
- * in a chat proposed it, the chat itself not named.
+ * in a chat proposed it, the chat itself not named; for the operate agent's request of a widget's
+ * command (FAC-14 K2), `onBehalfOf` names the person it asked for, by profile id and the display
+ * name their profile had then, so the decider knows whose request it is. A name, never authority.
  */
 export type ActionContext =
   | { kind: "workflow-run"; hookId: WorkpieceId; assigned: boolean; runId?: string; requestedBy?: string | null; triggerLabel?: string }
-  | { kind: "agent-turn" };
+  | { kind: "agent-turn"; onBehalfOf?: { profileId: string; name: string } };
 
 export type ActionLogEntry = {
   /** Sequential ID number for the action. Counts up from when the workspace was created. */
