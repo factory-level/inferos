@@ -59,7 +59,7 @@ import {
   type WikiSearchRecord, type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
   type WikiProposalRecord, type WikiProposalState, PROPOSAL_APPROVE_REFUSED,
   ActivityWindow, type HistoryEntryRecord,
-  type DotConversationWire, type DotEvent, type DotProposalWire, type DotRunEnd, type DotRunRequest,
+  type DotConversationWire, type DotEvent, type DotProposalWire, type DotRunOutcomeWire, type DotRunEnd, type DotRunRequest,
 } from "./inferops-client";
 import { DOT_RELAY_LIMITS, DotMalformed, parseDotConversation, parseDotProposal, relayDotStream } from "./dot-relay";
 import { membersNotFound } from "./members";
@@ -1741,13 +1741,28 @@ export function openHttpInferOpsClient(
       });
     },
 
-    async confirmDotProposal(conversationId: string, proposalId: string, idempotencyKey: string): Promise<DotProposalWire> {
+    async confirmDotProposal(
+      conversationId: string, proposalId: string, idempotencyKey: string, opts?: { runId?: string },
+    ): Promise<DotProposalWire> {
       await beforeSending(async () => dotIds(conversationId, proposalId));
       const body = await dot("chatbot.proposal_confirm", {
-        method: "POST", path: `/chatbot/conversations/${conversationId}/proposals/${proposalId}/confirm`, body: {},
+        method: "POST", path: `/chatbot/conversations/${conversationId}/proposals/${proposalId}/confirm`,
+        body: opts?.runId !== undefined ? { runId: opts.runId } : {},
         idempotencyKey,
       });
       return dotParsed("chatbot.proposal_confirm", body, raw => onlyProposal(raw, proposalId));
+    },
+
+    async recordDotRunOutcome(conversationId: string, proposalId: string, run: DotRunOutcomeWire): Promise<DotProposalWire> {
+      await beforeSending(async () => dotIds(conversationId, proposalId));
+      const body = await dot("chatbot.proposal_run_outcome", {
+        method: "POST", path: `/chatbot/conversations/${conversationId}/proposals/${proposalId}/run-outcome`,
+        body: {
+          kind: run.kind, runId: run.runId, outcome: run.outcome, ranAs: run.ranAs,
+          ...(run.reasonCode ? { reasonCode: run.reasonCode } : {}),
+        },
+      });
+      return dotParsed("chatbot.proposal_run_outcome", body, raw => onlyProposal(raw, proposalId));
     },
 
     async declineDotProposal(conversationId: string, proposalId: string): Promise<DotProposalWire> {

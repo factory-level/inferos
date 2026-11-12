@@ -35,3 +35,20 @@ controller read two seconds. Reads proceed independently: a timeout, rejection, 
 projection omits that entry without withholding the others. Runtime validation checks the cadence
 and status variants and bounds schedule id, title, description, and time-zone strings before the
 projection crosses the RPC boundary.
+
+## Removing a workflow trigger
+
+Removing a workflow trigger first pauses it. No firing admitted after the pause begins, and no new
+manual request, can start. A run admitted before the pause is allowed to finish with its recorded
+definition and revision. If it is still executing, the removal request returns a fixed message that
+the trigger is paused while its run finishes; retry removal after the run completes to retire the
+trigger. Retirement removes the trigger and its control but preserves delivery and run history.
+Ordinary hooks that are not pinned to a workflow keep immediate deletion behavior.
+
+Deleting the gadget itself stops its runs: the run's executable code is part of the gadget being
+removed. This is distinct from removing only a schedule, which drains the already admitted run.
+While a trigger is draining, the delete response carries the stable `TRIGGER_DRAINING` code and
+explains that the trigger is paused; clients can offer retry after the run finishes. In the
+Connections tab, this response is shown as an informational paused state rather than a deletion
+error. The owner can retry removal there; after the run finishes, retry removes the trigger while
+leaving its history available in Recent.

@@ -1075,6 +1075,7 @@ export function openInferOpsClient(
     listDotProposals: noDot,
     confirmDotProposal: noDot,
     declineDotProposal: noDot,
+    recordDotRunOutcome: noDot,
     listProjects: () => stub.listProjects(),
     readProject: projectKey => stub.readProject(projectKey),
     commentIssue: async () => { throw new InferOpsError("UNAVAILABLE", "Governed comments require a live company data plane."); },

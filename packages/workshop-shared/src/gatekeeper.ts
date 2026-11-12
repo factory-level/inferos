@@ -1,5 +1,6 @@
 import type { ActionOutcome, ActionReceiptCode, ActionResult } from "./action-outcome";
 import type { ApprovalEdit, BoardTransitionProposal } from "./operate-approval";
+import type { TemporaryCanvasInput } from "./temporary-canvas";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
 // installation of the Gadgets Workshop may have access to different adapters, typically based on
@@ -1051,9 +1052,11 @@ export type ActionApplied = { applied: { result: ActionResult } };
 /**
  * What the kernel does for a gatekeeper as the person approving one of its actions (FAC-120): passed
  * to `applyAction()` only for that person's own approval of an action that declared
- * `ActionDescription.workflowRun`, never for an automatic approval or an assigned run's write, and
- * revoked when it returns. It runs as that person, with every check of the same request made by
- * them directly, on the run the action declared and nothing else; its answer is kernel text.
+ * `ActionDescription.workflowRun` or `ActionDescription.temporaryCanvas` (FAC-137), never for an
+ * automatic approval or an assigned run's write, and revoked when it returns. It runs as that
+ * person, with every check of the same request made by them directly, on what the action declared
+ * and nothing else; its answer is kernel text. A method for something the action didn't declare
+ * refuses.
  */
 export interface ApprovedEffects extends RpcTarget {
   /**
@@ -1065,7 +1068,54 @@ export interface ApprovedEffects extends RpcTarget {
    * returns the run it started.
    */
   invokeWorkflow(): Promise<ApprovedWorkflowRun>;
+  /**
+   * Creates the temporary canvas the action's `temporaryCanvas` declares (FAC-137), for the
+   * approving person, in their own live operate session: the workspace the action was approved in,
+   * which must be theirs. Every widget on it is checked again as one offered to them now (a console
+   * widget by its own workspace, a built-in one by their own widget search); one that isn't refuses
+   * the whole canvas, and nothing is created. Its expiry is the server's. Idempotent per approved
+   * action: asking again returns the canvas the first call created.
+   */
+  createTemporaryCanvas(): Promise<ApprovedTemporaryCanvas>;
+
+  /**
+   * Creates the personal workflow the action declared (`ActionDescription.personalWorkflow`, FAC-134
+   * capability 2) in the approving person's own operate session, after each step's console workspace
+   * says the command is offered to them now, by a console it published at that revision, on the
+   * connection fixed at publication, in their own company, with an input that fits it. Idempotent per
+   * approved action: asking again returns the workflow it created. Refused unless declared.
+   */
+  createPersonalWorkflow(): Promise<ApprovedPersonalWorkflow>;
+
+  /**
+   * Starts the run of the personal workflow the action declared (`ActionDescription.personalWorkflowRun`),
+   * one of the approving person's own, in this operate session, not expired. Its steps then run in
+   * order, each placing a request the console's builders decide. Idempotent per approved action.
+   * Refused unless declared.
+   */
+  runPersonalWorkflow(): Promise<ApprovedWorkflowRun>;
 }
+
+/**
+ * An `ApprovedEffects.createTemporaryCanvas` answer: the canvas created, with the expiry the server
+ * set (absent once the person has saved it, when a retry reads it back); or refused, so known not
+ * created, in a FAC-119 kind with a fixed sentence: also when the canvas this action created was
+ * removed or expired since, which is never created again.
+ */
+export type ApprovedTemporaryCanvas =
+  | { status: "created"; canvasId: string; expiresAt?: Date }
+  | { status: "refused"; kind: ActionFailureKind; reason: string };
+
+/**
+ * An `ApprovedEffects.createPersonalWorkflow` answer: created, with the workflow's id in the operate
+ * session (`sessionWorkspaceId`) and when it expires; refused, in a FAC-119 kind, with a fixed
+ * sentence that never says which step's check refused it; or `unknown`, when a step's check couldn't
+ * be answered, with nothing created.
+ */
+export type ApprovedPersonalWorkflow =
+  | { status: "created"; personalWorkflowId: string; sessionWorkspaceId: string; expiresAt: string }
+  | { status: "refused"; kind: ActionFailureKind; reason: string }
+  | { status: "unknown"; reason: string };
 
 /**
  * An `ApprovedEffects.invokeWorkflow` answer: the run admitted; refused, so known not started, in a
@@ -1076,6 +1126,40 @@ export type ApprovedWorkflowRun =
   | { status: "started"; runId: string }
   | { status: "refused"; kind: ActionFailureKind; reason: string }
   | { status: "unknown"; reason: string };
+
+/**
+ * How a run an approved action started came out (FAC-134), as `Gatekeeper.workflowRunOutcome` is
+ * told it: the run, its final outcome and fixed reason (FAC-114's categories, never what the run
+ * returned or wrote), who asked for it, and what it ran as. Kernel text throughout.
+ */
+export type ApprovedRunOutcome = {
+  /**
+   * What the approval started: a published workflow's run, or a personal workflow's (FAC-134,
+   * capability 2), whose `succeeded` means every step's request was placed, never that it was made.
+   */
+  kind: "workflow-run" | "personal-workflow";
+  /** The run `ApprovedEffects.invokeWorkflow` (or `runPersonalWorkflow`) started. */
+  runId: string;
+  /** Its final outcome: `succeeded`, `failed` or `uncertain` (see WorkflowRunOutcome). */
+  outcome: "succeeded" | "failed" | "uncertain";
+  /** The fixed reason a failed or uncertain run gives (WorkflowRunFailure, WorkflowRunUncertainty). */
+  reason?: string;
+  /** The InferOps profile of the person who asked: the one who approved the action. */
+  requestedBy: string;
+  /**
+   * What the run executed as: the workflow's own connections (`gadget_bindings`), or the
+   * trigger's assigned service account (`service_account`). Never the person's own authority beyond
+   * their request (inferops ADR 0011's two contexts). A personal workflow's steps run on each
+   * console's own connections, as their builders bound them: `gadget_bindings`.
+   */
+  ranAs: "gadget_bindings" | "service_account";
+  /**
+   * Set by the session handing it on: true when the approval that started the run was recorded as
+   * applied; false when that apply ended without succeeding after the run had started (the
+   * action's own failure stays on the action).
+   */
+  actionApplied?: boolean;
+};
 
 /**
  * An apply that did not succeed, as `applyAction` reports it when it knows more than a thrown error
@@ -1317,6 +1401,17 @@ export interface Gatekeeper<Session> extends DurableObject {
    */
   applyAction(action: number, cache: RpcStub<GitCache>, effects?: RpcStub<ApprovedEffects>)
       : Promise<void | { failed: ActionApplyFailure } | ActionApplied>;
+
+  /**
+   * How the run approved action `action` started came out (FAC-134): called only for an action whose
+   * description declared `workflowRun` with `reportOutcome`, after the run has a final outcome. It is
+   * delivered at least once, never exactly once: a throw is retried a few times, then given up, and
+   * a call cut off by a restart may be repeated. **Implementations must deduplicate by `action` and
+   * `outcome.runId`**, so a repeat has no second effect. The gatekeeper records it where the action
+   * came from; it is told nothing it may act on as anyone. Gatekeepers that never set
+   * `reportOutcome` need not implement it.
+   */
+  workflowRunOutcome?(action: number, outcome: ApprovedRunOutcome): Promise<void>;
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
@@ -1773,8 +1868,47 @@ export type ActionDescription = {
    * reference, whatever this description says), and, only for that person's own approval of this action,
    * hands `applyAction()` the `ApprovedEffects` that start exactly this run. It is fixed at submit:
    * nothing at apply time can name another.
+   *
+   * With `reportOutcome` (FAC-134), the kernel also tells this gatekeeper how the run it started
+   * came out (`Gatekeeper.workflowRunOutcome`, at least once), after the run has a final outcome and
+   * whether or not the approver's browser is still open. Without it, nothing is reported.
    */
-  workflowRun?: { reference: string };
+  workflowRun?: { reference: string; reportOutcome?: boolean };
+
+  /**
+   * If present (FAC-137), approving this action asks the kernel to create this temporary canvas
+   * (temporary-canvas.ts) for the person approving it, in their own operate session. The kernel
+   * checks it when the action is submitted (`parseTemporaryCanvasInput`; an action may not declare
+   * this and a `workflowRun` both), shows it to every approver in its own words (it appends a last
+   * field naming the canvas), and, only for that person's own approval, hands `applyAction()` the
+   * `ApprovedEffects` that create exactly this canvas. It names no workspace: the canvas is always
+   * the approver's own, and never shared configuration.
+   */
+  temporaryCanvas?: TemporaryCanvasInput;
+
+  /**
+   * If present (FAC-134, capability 2), approving this action asks the kernel to create this
+   * personal workflow in the approving person's own operate session: a title and 1 to 10 steps, each
+   * a published console command's reference and the transition's input without its revision
+   * (`parsePersonalWorkflowDeclaration`, personal-workflow.ts). The kernel checks its shape when the
+   * action is submitted and appends its own last field listing every step and its input (whatever
+   * this description says). Only for that person's own approval of this action, and only once each
+   * step's console workspace says the command is offered to them now, does `applyAction()` get the
+   * `ApprovedEffects` that create exactly it. It is never approved automatically. At most one of
+   * `workflowRun`, `temporaryCanvas`, `personalWorkflow` and `personalWorkflowRun` is declared.
+   */
+  personalWorkflow?: { title: string; steps: { reference: string; input: { issueId: string; toStateId: string } }[] };
+
+  /**
+   * If present (FAC-134, capability 2), approving this action asks the kernel to run the personal
+   * workflow this reference names (`inferops://<company>.<workspace>/inferos/personal-workflow/...`),
+   * which must be one of the approving person's own, in the operate session this action is in. As
+   * with `workflowRun`, the kernel checks its form at submit, shows it in its own appended field,
+   * never approves it automatically, and hands `applyAction()` the `ApprovedEffects` that start
+   * exactly this run, only for the person's own approval. With `reportOutcome`, the run's outcome is
+   * reported to this gatekeeper (`Gatekeeper.workflowRunOutcome`, `kind: "personal-workflow"`).
+   */
+  personalWorkflowRun?: { reference: string; reportOutcome?: boolean };
 
   /**
    * If present, applying this action will push the named commits to the remote resource this

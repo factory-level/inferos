@@ -1089,9 +1089,24 @@ export interface DotProposal {
   status: WriteStatus;
   /** The receipt for it while this session is open and it was proposed in it; else null. */
   receipt: WriteReceipt | null;
+  /**
+   * For a workflow run it handed to InferOS, how that run came out once it ended; null until then,
+   * and for any other change. Its outcome and fixed reason only, never what the run returned.
+   */
+  run: DotProposalRun | null;
   createdAt: string;
   /** After this it can no longer be approved. */
   expiresAt: string;
+}
+
+/** How a workflow run your Dot's proposal started came out. */
+export interface DotProposalRun {
+  runId: string;
+  outcome: "succeeded" | "failed" | "uncertain";
+  /** Why it failed or is uncertain, as InferOS names it (for example "runtime-error"). */
+  reasonCode?: string;
+  /** What it ran as: the workflow's own connections, or its trigger's assigned account. */
+  ranAs: "gadget_bindings" | "service_account";
 }
 
 /** One message of a Dot conversation. */
