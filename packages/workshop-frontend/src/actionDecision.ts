@@ -58,6 +58,12 @@ export const contextText = (entry: ActionEntry, viewerProfileId?: string | null)
     // FAC-14: the operate agent's request runs on the connection's own account once approved, so
     // the decider is told whose request it is. The name is the person's profile name, never authority.
     if (context.onBehalfOf) {
+      // FAC-134 capability 2: a step of the person's own approved personal workflow, not the agent's.
+      if (context.personalWorkflowStep) {
+        const step = context.personalWorkflowStep.index + 1
+        return context.onBehalfOf.profileId === viewerProfileId ? `Step ${step} of your approved personal workflow`
+          : `Step ${step} of ${context.onBehalfOf.name}'s approved personal workflow`
+      }
       return context.onBehalfOf.profileId === viewerProfileId ? 'Requested by the operate agent for you'
         : `Requested by the operate agent for ${context.onBehalfOf.name}`
     }

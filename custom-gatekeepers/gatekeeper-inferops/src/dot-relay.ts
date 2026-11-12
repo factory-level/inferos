@@ -172,14 +172,15 @@ const RUN_REASON_CODES: Record<WorkflowRunFailure | WorkflowRunUncertainty, true
 function parseDotRun(raw: unknown): DotProposalWire["run"] {
   if (typeof raw !== "object" || raw === null) return null;
   const r = raw as Record<string, unknown>;
-  if (r.kind !== "workflow-run" || typeof r.runId !== "string" || r.runId.length === 0 || r.runId.length > 200 ||
+  if ((r.kind !== "workflow-run" && r.kind !== "personal-workflow") ||
+      typeof r.runId !== "string" || r.runId.length === 0 || r.runId.length > 200 ||
       typeof r.outcome !== "string" || !RUN_OUTCOMES.has(r.outcome) ||
       typeof r.ranAs !== "string" || !RUN_AUTHORITIES.has(r.ranAs) ||
       (r.reasonCode !== undefined && (typeof r.reasonCode !== "string" || !Object.hasOwn(RUN_REASON_CODES, r.reasonCode)))) {
     return null;
   }
   return {
-    kind: "workflow-run", runId: r.runId, outcome: r.outcome as "succeeded" | "failed" | "uncertain",
+    kind: r.kind, runId: r.runId, outcome: r.outcome as "succeeded" | "failed" | "uncertain",
     ranAs: r.ranAs as "gadget_bindings" | "service_account",
     ...(typeof r.reasonCode === "string" ? { reasonCode: r.reasonCode } : {}),
   };

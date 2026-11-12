@@ -6,7 +6,7 @@
 import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
-  ActionApplied, ActionApplyFailure, ActionFailureKind, ActionDescription, ApprovedRunOutcome, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  ActionApplied, ActionApplyFailure, ActionFailureKind, ActionDescription, ApprovedRunOutcome, ApprovedPersonalWorkflow, ApprovedWorkflowRun, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { dotBindingOver } from "../src/inferops.js";
@@ -245,6 +245,8 @@ export type QueueLog = {
     id: number; title: string; description: string; implementsRevert: boolean;
     /** The run the action declared to the kernel (FAC-120), if any. */
     workflowRun?: { reference: string };
+    personalWorkflow?: { title: string; steps: { reference: string; input: { issueId: string; toStateId: string } }[] };
+    personalWorkflowRun?: { reference: string; reportOutcome?: boolean };
     /** Each field's label and shown value. */
     fields: Record<string, string>;
     /** Each list field's label and shown items. */
@@ -284,6 +286,8 @@ class TestApprovalQueue extends RpcTarget {
       labels: (description.fields ?? []).map(field => field.label),
       ...(description.actionKind ? { kind: description.actionKind.tag } : {}),
       ...(description.workflowRun ? { workflowRun: description.workflowRun } : {}),
+      ...(description.personalWorkflow ? { personalWorkflow: description.personalWorkflow } : {}),
+      ...(description.personalWorkflowRun ? { personalWorkflowRun: description.personalWorkflowRun } : {}),
       complete: description.descriptionIsComplete === true,
       truncated: (description.fields ?? []).filter(field => "truncated" in field && field.truncated !== undefined)
         .map(field => field.label),
@@ -1363,7 +1367,7 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       | { status: "unknown"; reason: string })
       : Promise<{ failure: ActionApplyFailure | null; result: ActionResult | null }> {
     // The kernel's effects take no reference: the run is the one the action declared at submit.
-    const effects = run ? { invokeWorkflow: async () => { this.#effectsAsked.push("invoked"); return run; } } : undefined;
+    const effects = run ? { invokeWorkflow: async () => { this.#effectsAsked.push("invoked"); return run; } } as never : undefined;
     const outcome = await this.#dotBinding().applyAction(actionId, effects);
     if (outcome && "failed" in outcome) return { failure: outcome.failed, result: null };
     return { failure: null, result: outcome && "applied" in outcome ? outcome.applied.result ?? null : null };
@@ -1381,6 +1385,28 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
+  }
+
+  /**
+   * Applies a Dot action with the kernel's personal workflow effects (FAC-134 capability 2): each
+   * answers as given, and records that it was asked. The invoke effect is there too, never to be
+   * asked for a personal workflow.
+   */
+  async applyDotPersonal(actionId: number, answers: { created?: ApprovedPersonalWorkflow; run?: ApprovedWorkflowRun })
+      : Promise<{ failure: ActionApplyFailure | null; asked: string[] }> {
+    const asked: string[] = [];
+    const effects = {
+      invokeWorkflow: async () => { asked.push("invoked"); return answers.run; },
+      createPersonalWorkflow: async () => { asked.push("created"); return answers.created; },
+      runPersonalWorkflow: async () => { asked.push("ran"); return answers.run; },
+    } as never;
+    const outcome = await this.#dotBinding().applyAction(actionId, effects);
+    return { failure: outcome && "failed" in outcome ? outcome.failed : null, asked };
+  }
+
+  /** A Dot action's recorded personal workflow (FAC-134 capability 2), if it created one. */
+  async dotPersonalWorkflow(actionId: number): Promise<{ id: string; reference: string; expiresAt: string } | null> {
+    return this.ctx.storage.kv.get<{ personalWorkflow?: { id: string; reference: string; expiresAt: string } }>(`action:${actionId}`)?.personalWorkflow ?? null;
   }
 
   /** The run outcomes a Dot action recorded (FAC-134). */
