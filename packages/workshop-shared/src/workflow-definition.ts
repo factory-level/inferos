@@ -453,6 +453,11 @@ export type WorkflowRunExecution = {
    * one ends at its next guarded call. Its pending writes are rejected, never applied.
    */
   cancelled?: { by: AiChatAuthorInfo; at: Date };
+  /**
+   * Each manual retry of it (FAC-117 K2): the person who asked for the run, by their profile, and
+   * when. A retry is another attempt of this run, so `attempts` carries on counting.
+   */
+  retries?: { by: AiChatAuthorInfo; at: Date }[];
 };
 
 /**
@@ -535,6 +540,32 @@ export function workflowRunLimits(settings: Partial<Record<string, string | unde
   }
   return limits;
 }
+
+/**
+ * Why a run can't be retried (FAC-117 K2), in the words the person who asked is told. A run anyone
+ * else names, or one that doesn't exist, is "No such run." instead.
+ */
+export const WORKFLOW_RUN_RETRY_REFUSED = {
+  notFailed: "Only a run that failed can be retried.",
+  cancelled: "This run was cancelled. Start a new run instead.",
+  exhausted: "This run has used all its attempts. Start a new run instead.",
+  unmatchable: "This run proposed a write that can't be matched if it runs again. Start a new run instead.",
+  noCall: "This run can't be retried. Start a new run instead.",
+  repinned: "This trigger now runs another revision of its workflow. Start a new run instead.",
+  tooOld: "This run is too old to retry. Start a new run instead.",
+} as const;
+
+/**
+ * How long after it was admitted a failed run may still be retried (FAC-117 K2): a retry repeats
+ * the person's request, so it is bounded as a fresh one would be stale, not by history retention.
+ */
+export const WORKFLOW_RUN_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Why a run's write can't be settled (FAC-117 K2): only a workflow run's write whose outcome is
+ * still unknown can be.
+ */
+export const WORKFLOW_WRITE_SETTLE_REFUSED = "Only a workflow run's write whose outcome is unknown can be settled.";
 
 /** Refused when a trigger isn't in the state a lifecycle change needs (FAC-117). */
 export const TRIGGER_LIFECYCLE_REFUSED = {

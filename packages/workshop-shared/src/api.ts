@@ -2789,6 +2789,13 @@ export type ActionLogEntry = {
   lastAttempt?: ActionAttempt;
 
   /**
+   * Set when a person settled an action whose outcome was unknown (FAC-117 K2,
+   * `resolveWorkflowRunWrite`): whether it applied, as they found it, and who said so and when. The
+   * state follows it (`approved` for applied, `failed` for not applied); nothing was sent again.
+   */
+  settled?: { outcome: "applied" | "not-applied"; by: AiChatAuthorInfo; at: Date };
+
+  /**
    * Set while the action is pending with an approved apply in flight, so it reads as running and
    * not as waiting for a decision (see `actionOutcome`). Absent otherwise.
    */
@@ -3161,6 +3168,24 @@ export interface Overseer extends RpcTarget {
    * and when are kept on the run. A run already ended is refused; anyone else is told it doesn't exist.
    */
   cancelWorkflowRun(invocationId: string): Promise<void>;
+  /**
+   * Retry the failed run the request `invocationId` made (FAC-117 K2): another attempt of the same
+   * run, so it keeps its run id and counts against the deployment's attempts, and every write it
+   * proposes again is matched to the one it already made, never applied twice. Only the person who
+   * asked, through the same admission as their own request (the trigger's control, their InferOps
+   * `workflow:invoke` in the run's company, the trigger active and enabled, the rate caps). Refused
+   * for a run that isn't `failed`, one cancelled, one out of attempts, and one holding a write that
+   * can't be matched again; anyone else is told it doesn't exist. Answers the run as it now reads.
+   * Open to build and use sessions; refused in an operate session.
+   */
+  retryWorkflowRun(invocationId: string): Promise<RequestedRun>;
+  /**
+   * Settle a run's write whose outcome is unknown (FAC-117 K2): `applied` or `not-applied`, as the
+   * person deciding it found it at the provider. It records the answer, who gave it and when, and
+   * re-reads the run's result; it never sends the write again. Only for a write a workflow run
+   * proposed, still unknown, by whoever may approve or reject it here. Build sessions only.
+   */
+  resolveWorkflowRunWrite(actionId: number, outcome: "applied" | "not-applied"): Promise<void>;
   /**
    * Pause trigger `hookId` (FAC-117): it drains. It starts no new run and its waiting requests are
    * dropped; runs admitted before the pause finish, their pending writes still decidable, and the
