@@ -95,7 +95,11 @@ afterEach(() => {
 
 async function render(overseer: Partial<Overseer>, gadgets: GadgetSummary[] = []) {
   const withDefaults: Partial<Overseer> = {
+    listHooks: async () => [],
     listWorkflowDefinitions: async () => [],
+    listReadableWorkflowSchedules: async () => [],
+    listReadableWorkflowHistories: async () => [],
+    listWorkflowDeliveries: async () => [],
     getTriggerDefinition: async () => null,
     listTriggerControls: async () => [],
     listCollaborators: async () => [],
@@ -131,6 +135,44 @@ describe('WorkflowTriggersPanel', () => {
     expect(items[1]).toContain('Standup sheet')
   })
 
+  it('shows only the readable schedule projection, including cadence, status, and next run', async () => {
+    const listReadableWorkflowSchedules = vi.fn<Overseer['listReadableWorkflowSchedules']>(async () => [{
+      hookId: 7,
+      scheduleId: 'schedule-7',
+      title: 'Nightly report',
+      description: 'Send the daily summary',
+      cadence: { kind: 'calendar', timeZone: 'UTC', rule: {
+        freq: 'daily', interval: 1, hour: 9, minute: 30, anchorMs: 0,
+      } },
+      status: 'active',
+      nextFire: Date.UTC(2026, 10, 13, 9, 30),
+    }])
+    await render({ listHooks: async () => [], listReadableWorkflowSchedules })
+    await act(async () => { button('Scheduled')!.click() })
+    expect(listReadableWorkflowSchedules).toHaveBeenCalledOnce()
+    expect(container.querySelector('h2#workflow-schedules-heading')?.textContent).toBe('Scheduled')
+    expect(container.textContent).toContain('Nightly report')
+    expect(container.textContent).toContain('Every 1 day at 09:30 (UTC)')
+    expect(container.textContent).toContain('Active')
+    expect(container.textContent).toContain('Next run')
+  })
+
+  it('loads Recent runs only when selected and reads only server-discovered histories', async () => {
+    const listReadableWorkflowHistories = vi.fn<Overseer['listReadableWorkflowHistories']>(async () => [
+      { definitionId: 'readable-history' },
+    ])
+    const listWorkflowDeliveries = vi.fn<Overseer['listWorkflowDeliveries']>(async id => [{
+      definitionId: id, hookId: 3, revision: 2, commitId: 'b'.repeat(40), at: new Date('2026-11-12T01:00:00Z'),
+    }])
+    await render({ listReadableWorkflowHistories, listWorkflowDeliveries })
+    expect(listReadableWorkflowHistories).not.toHaveBeenCalled()
+    await act(async () => { button('Recent')!.click() })
+    expect(listReadableWorkflowHistories).toHaveBeenCalledOnce()
+    expect(listWorkflowDeliveries).toHaveBeenCalledWith('readable-history')
+    expect(container.textContent).toContain('Recent runs')
+    expect(container.textContent).toContain('Workflow run · revision 2')
+  })
+
   it('says so when there are no triggers', async () => {
     await render({ listHooks: async () => [] })
     expect(container.textContent).toContain('No triggers yet')
@@ -163,7 +205,9 @@ describe('WorkflowTriggersPanel', () => {
       setter.call(input, ' Standup ')
       input.dispatchEvent(new Event('input', { bubbles: true }))
     })
-    await act(async () => { button('Save')!.click() })
+    await act(async () => {
+      [...container.querySelectorAll('button')].find(candidate => candidate.textContent === 'Save')!.click()
+    })
     expect(saveWorkflowDefinition).toHaveBeenCalledWith({ title: 'Standup', gadgetId: 0 })
     expect(publishWorkflowDefinition).not.toHaveBeenCalled()
   })
