@@ -1098,6 +1098,36 @@ export type ApprovedWorkflowRun =
   | { status: "unknown"; reason: string };
 
 /**
+ * How a run an approved action started came out (FAC-134), as `Gatekeeper.workflowRunOutcome` is
+ * told it: the run, its final outcome and fixed reason (FAC-114's categories, never what the run
+ * returned or wrote), who asked for it, and what it ran as. Kernel text throughout.
+ */
+export type ApprovedRunOutcome = {
+  /** What the approval started: a workflow run (FAC-134's later kinds join here). */
+  kind: "workflow-run";
+  /** The run `ApprovedEffects.invokeWorkflow` started. */
+  runId: string;
+  /** Its final outcome: `succeeded`, `failed` or `uncertain` (see WorkflowRunOutcome). */
+  outcome: "succeeded" | "failed" | "uncertain";
+  /** The fixed reason a failed or uncertain run gives (WorkflowRunFailure, WorkflowRunUncertainty). */
+  reason?: string;
+  /** The InferOps profile of the person who asked: the one who approved the action. */
+  requestedBy: string;
+  /**
+   * What the run executed as: the workflow's own connections (`gadget_bindings`), or the
+   * trigger's assigned service account (`service_account`). Never the person's own authority beyond
+   * their request (inferops ADR 0011's two contexts).
+   */
+  ranAs: "gadget_bindings" | "service_account";
+  /**
+   * Set by the session handing it on: true when the approval that started the run was recorded as
+   * applied; false when that apply ended without succeeding after the run had started (the
+   * action's own failure stays on the action).
+   */
+  actionApplied?: boolean;
+};
+
+/**
  * An apply that did not succeed, as `applyAction` reports it when it knows more than a thrown error
  * says. Returned rather than thrown, because RPC carries only an error's message.
  */
@@ -1337,6 +1367,17 @@ export interface Gatekeeper<Session> extends DurableObject {
    */
   applyAction(action: number, cache: RpcStub<GitCache>, effects?: RpcStub<ApprovedEffects>)
       : Promise<void | { failed: ActionApplyFailure } | ActionApplied>;
+
+  /**
+   * How the run approved action `action` started came out (FAC-134): called only for an action whose
+   * description declared `workflowRun` with `reportOutcome`, after the run has a final outcome. It is
+   * delivered at least once, never exactly once: a throw is retried a few times, then given up, and
+   * a call cut off by a restart may be repeated. **Implementations must deduplicate by `action` and
+   * `outcome.runId`**, so a repeat has no second effect. The gatekeeper records it where the action
+   * came from; it is told nothing it may act on as anyone. Gatekeepers that never set
+   * `reportOutcome` need not implement it.
+   */
+  workflowRunOutcome?(action: number, outcome: ApprovedRunOutcome): Promise<void>;
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
@@ -1793,8 +1834,12 @@ export type ActionDescription = {
    * reference, whatever this description says), and, only for that person's own approval of this action,
    * hands `applyAction()` the `ApprovedEffects` that start exactly this run. It is fixed at submit:
    * nothing at apply time can name another.
+   *
+   * With `reportOutcome` (FAC-134), the kernel also tells this gatekeeper how the run it started
+   * came out (`Gatekeeper.workflowRunOutcome`, at least once), after the run has a final outcome and
+   * whether or not the approver's browser is still open. Without it, nothing is reported.
    */
-  workflowRun?: { reference: string };
+  workflowRun?: { reference: string; reportOutcome?: boolean };
 
   /**
    * If present (FAC-137), approving this action asks the kernel to create this temporary canvas

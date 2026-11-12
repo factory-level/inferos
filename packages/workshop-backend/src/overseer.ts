@@ -40,6 +40,8 @@ import {
   type StoredWorkflowOccurrenceExpiry,
   type StoredWorkflowOccurrenceCount,
   type QueuedWorkflowRun,
+  type RunChatReport,
+  type RunReportTo,
 } from "./workflow-definition-store";
 import { collaboratorAccountName } from "./account-subject";
 import { TemporaryCanvasStore, type StoredTemporaryCanvas } from "./temporary-canvas-store";
@@ -94,7 +96,7 @@ import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId,
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, type HookOccurrence, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionFailureKind, type ApprovedEffects, type ApprovedTemporaryCanvas, type ApprovedWorkflowRun, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, type HookOccurrence, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionFailureKind, type ApprovedEffects, type ApprovedWorkflowRun, type ApprovedRunOutcome, type ApprovedTemporaryCanvas, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
 import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionOutcome, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -1372,6 +1374,16 @@ export type ReplayWithdrawal = {
 /** How many times the alarm asks a gatekeeper to withdraw a replay's copy before a person is shown it. */
 export const REPLAY_WITHDRAW_TRIES = 5;
 
+/** How many times a run's outcome is offered to the approved action that started it (FAC-134). */
+export const RUN_CHAT_REPORT_TRIES = 5;
+
+/**
+ * How long a run outcome's send stays `sending` before it is tried again (FAC-134,
+ * reportApprovedRunOutcome): long enough for one gatekeeper call, so only a send a crash cut off
+ * is repeated.
+ */
+export const RUN_OUTCOME_SENDING_STALE_MS = 2 * 60_000;
+
 /** The refusal to apply such a copy: it is the same write as one already proposed. */
 export const REPLAY_DUPLICATE_REFUSED =
   "This is a duplicate of a write a workflow run proposed again after a restart. Reject it; the first one stands.";
@@ -2109,6 +2121,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Copies a gatekeeper staged when a workflow run proposed a write again, still to withdraw
       // (FAC-112; see OverseerImpl.retryReplayWithdrawals).
       replayWithdrawals: collection<ReplayWithdrawal>()({ primaryKey: "key" }),
+      // Outcomes owed to the approved actions that started runs here (FAC-134; see
+      // OverseerImpl.reportRunsToChat), by delivery, until delivered or given up on.
+      runChatReports: collection<RunChatReport>()({ primaryKey: "deliveryId" }),
       // An operate session workspace's host-board selections, by target; its selection requests,
       // by request key (settled ones kept as tombstones); and its audited reads (see host-boards.ts).
       hostBoardSelections: collection<HostBoardSelectionRecord>()({ primaryKey: "target" }),
@@ -2934,6 +2949,9 @@ class OverseerImpl implements AgentHooks {
     // A replay's staged copies still to withdraw (FAC-112), each at its next try.
     for (let entry of this.storage.replayWithdrawals.list()) times.push(entry.nextAttemptAt);
 
+    // A run's outcome still owed to the approved action that started it (FAC-134), at its next try.
+    for (let owed of this.storage.runChatReports.list()) if (owed.due !== undefined) times.push(owed.due);
+
     // A workflow run's write waiting past its wait is rejected (FAC-118).
     let runWriteExpiry = this.nextRunWriteExpiry();
     if (runWriteExpiry !== undefined) times.push(runWriteExpiry);
@@ -2973,6 +2991,7 @@ class OverseerImpl implements AgentHooks {
       this.toolLane.sweep();
       await this.#retryDueWidgetWithdrawals();
       await this.retryReplayWithdrawals();
+      await this.reportRunsToChat();
       await this.expireRunWrites();
       do {
         let results = await Promise.allSettled([
@@ -7224,7 +7243,8 @@ class OverseerImpl implements AgentHooks {
     let ownApproval = !autoApproved && resolvedBy.type === "user" && !record.executedAs;
     let effects = ownApproval && (declaredRun !== undefined || declaredCanvas !== undefined)
         ? new ApprovedEffectsImpl({
-          ...(declaredRun !== undefined ? {invoke: () => this.#invokeApprovedWorkflow(resolvedBy.id, declaredRun, record.id)} : {}),
+          ...(declaredRun !== undefined ? {invoke: () => this.#invokeApprovedWorkflow(resolvedBy.id, declaredRun, record.id,
+              record.description.workflowRun?.reportOutcome === true)} : {}),
           ...(declaredCanvas !== undefined
             ? {createCanvas: () => this.#createApprovedTemporaryCanvas(resolvedBy.id, declaredCanvas, record.id)} : {}),
         })
@@ -7778,6 +7798,84 @@ class OverseerImpl implements AgentHooks {
     this.deliverRunToCanvas(deliveryId);
     // The last of a draining trigger's runs settling pauses it (FAC-117).
     this.settleDrain(delivery.hookId);
+    this.#oweRunToChat(deliveryId);
+  }
+
+  // A run's first final result (succeeded, failed or uncertain), owed to the approved action that
+  // started it and asked for it (FAC-134): made due once, then delivered by reportRunsToChat, now and
+  // by the alarm until it is delivered or given up on. A result settled again changes nothing owed.
+  #oweRunToChat(deliveryId: number): void {
+    let owed = this.storage.runChatReports.get(deliveryId);
+    if (!owed || owed.due !== undefined) return;
+    let outcome = this.storage.workflowDeliveries.get(deliveryId)?.result?.outcome;
+    if (outcome !== "succeeded" && outcome !== "failed" && outcome !== "uncertain") return;
+    this.storage.runChatReports.put({ ...owed, due: Date.now() });
+    this.workflowDefinitionStore().setChatDelivery(deliveryId, "pending");
+    this.#updateAlarm();
+    void this.reportRunsToChat();
+  }
+
+  /**
+   * Delivers each run outcome due by `now` to the approved action that started it (FAC-134; the
+   * `chat` destination): to that person's operate session (`reportApprovedRunOutcome`), which hands
+   * it to the action's gatekeeper. The person is re-checked first, as for their page
+   * (`#requesterStillMay`); one no longer allowed is told nothing. A failed try is retried later,
+   * with a growing delay, `RUN_CHAT_REPORT_TRIES` times in all; a refusal, or the last failure, gives
+   * it up. One pass at a time.
+   */
+  async reportRunsToChat(now = Date.now()): Promise<void> {
+    if (this.#reportingRunsToChat) return;
+    this.#reportingRunsToChat = true;
+    try {
+      for (let owed of Array.from(this.storage.runChatReports.list())) {
+        if (owed.due === undefined || owed.due > now) continue;
+        let answer: "delivered" | "undelivered" | "retry";
+        try {
+          answer = await this.#reportRunToChat(owed);
+        } catch (error) {
+          this.logger.warn("a run's outcome didn't reach the action that started it", {
+            event: "workflow.run.chat.failed", operation: String(owed.deliveryId), failureCount: owed.attempts + 1, error,
+          });
+          answer = "retry";
+        }
+        let store = this.workflowDefinitionStore();
+        if (answer === "retry" && owed.attempts + 1 < RUN_CHAT_REPORT_TRIES) {
+          this.storage.runChatReports.put({ ...owed, attempts: owed.attempts + 1, due: now + 30_000 * 2 ** owed.attempts });
+          continue;
+        }
+        this.storage.runChatReports.delete(owed.deliveryId);
+        store.setChatDelivery(owed.deliveryId, answer === "delivered" ? "delivered" : "undelivered");
+      }
+    } finally {
+      this.#reportingRunsToChat = false;
+      this.#updateAlarm();
+    }
+  }
+
+  #reportingRunsToChat = false;
+
+  // One try at reporting a run's outcome (see reportRunsToChat): "retry" when the session may not
+  // have heard it, or answered that it can't take it yet (its approval still applying, or a send in
+  // progress); "undelivered" for a refusal.
+  async #reportRunToChat(owed: RunChatReport): Promise<"delivered" | "undelivered" | "retry"> {
+    let delivery = this.storage.workflowDeliveries.get(owed.deliveryId);
+    let result = delivery?.result;
+    if (!delivery?.run || !delivery.invocation || !result ||
+        (result.outcome !== "succeeded" && result.outcome !== "failed" && result.outcome !== "uncertain")) {
+      return "undelivered";
+    }
+    let requestedBy = delivery.invocation.requestedBy;
+    if (!(await this.#requesterStillMay(delivery.hookId, delivery.id, requestedBy,
+        this.users.get(this.users.idFromName(requestedBy))))) {
+      return "undelivered";
+    }
+    let ns = this.ctx.exports.OverseerDurableObject;
+    let session = ns.get(ns.idFromString(owed.sessionWorkspaceId));
+    let answer = await session.reportApprovedRunOutcome(owed.actionId, this.ctx.id.toString(), {
+      kind: "workflow-run", runId: delivery.run.runId, outcome: result.outcome, ...(result.reason ? { reason: result.reason } : {}),
+      requestedBy, ranAs: delivery.run.executor.kind,
+    });
+    return answer === "delivered" ? "delivered" : answer === "retry" ? "retry" : "undelivered";
   }
 
   // Whether the person who asked for run `deliveryId` still may now (FAC-116): `requireRunRequester`
@@ -8597,8 +8695,14 @@ class OverseerImpl implements AgentHooks {
       if (!parseWorkflowTriggerRef(description.workflowRun?.reference)) {
         throw new Error("A declared workflow run must name an InferOS workflow trigger reference.");
       }
+      // Only the two fields it has (FAC-134): its reference, and whether its outcome is reported.
+      let {reference, reportOutcome} = description.workflowRun;
+      if (reportOutcome !== undefined && typeof reportOutcome !== "boolean") {
+        throw new Error("A declared workflow run's reportOutcome is true or false.");
+      }
+      description = {...description, workflowRun: {reference, ...(reportOutcome ? {reportOutcome: true} : {})}};
       description = {...description, fields: [...description.fields ?? [],
-        {label: WORKFLOW_RUN_FIELD_LABEL, kind: "inline", value: description.workflowRun.reference}]};
+        {label: WORKFLOW_RUN_FIELD_LABEL, kind: "inline", value: reference}]};
     }
 
     // Push authorization (see ActionDescription.pushedCommits): before anything is queued,
@@ -13512,7 +13616,8 @@ class OverseerImpl implements AgentHooks {
    * returns the same run. A call that may have reached it but didn't answer is `unknown`, never a
    * refusal. Every answer is kernel text.
    */
-  async #invokeApprovedWorkflow(profileId: string, reference: string, actionId: number): Promise<ApprovedWorkflowRun> {
+  async #invokeApprovedWorkflow(profileId: string, reference: string, actionId: number,
+      reportOutcome: boolean): Promise<ApprovedWorkflowRun> {
     let ref = parseWorkflowTriggerRef(reference);
     if (!ref) return {status: "refused", kind: "invalid", reason: WORKFLOW_REFERENCE_UNKNOWN};
     let ns = this.ctx.exports.OverseerDurableObject;
@@ -13526,10 +13631,78 @@ class OverseerImpl implements AgentHooks {
       sessionWorkspaceId: this.ctx.id.toString()};
     try {
       return await workspace.invokeTriggerAs(caller,
-          {hookId: ref.hookId, definitionId: ref.definitionId, revision: ref.revision, actionId});
+          {hookId: ref.hookId, definitionId: ref.definitionId, revision: ref.revision, actionId, reportOutcome});
     } catch {
       return {status: "unknown", reason: WORKFLOW_RUN_UNKNOWN};
     }
+  }
+
+  /**
+   * Hands the outcome of a run that action `actionId` started to that action's gatekeeper (FAC-134;
+   * `Gatekeeper.workflowRunOutcome`), as workspace `workspaceId`, where the run ran, reports it
+   * (reportRunsToChat). Only for an action of this workspace that declared its run with
+   * `reportOutcome`, naming a trigger in `workspaceId`, whose approval here is the person `outcome`
+   * says asked:
+   * - still applying (its `applyAction`, which started the run, hasn't returned): `retry`, never a
+   *   refusal, so the outcome waits for the approval to be recorded (review r1, round 2);
+   * - approved: handed on, with `actionApplied` true;
+   * - its apply ended without succeeding after the run started (`failed`, or `pending` with a last
+   *   attempt): the person's approval still started the run, so it is handed on too, with
+   *   `actionApplied` false; the action's own failure stays on the action;
+   * - anything else (rejected, never approved, another workspace, another person, a bad shape):
+   *   `refused`, with nothing handed on.
+   * At least once, never exactly once (review r2, round 2): a send in progress is marked
+   * synchronously before the gatekeeper is called (`sending`), so an overlapping call answers `retry`
+   * rather than sending again; a delivered one is marked `sent` and answers `delivered`; a throw
+   * clears the mark for the sender's retry. A crash between the gatekeeper's answer and the `sent`
+   * mark leaves `sending`, which after `RUN_OUTCOME_SENDING_STALE_MS` is sent again: the gatekeeper
+   * deduplicates by action and run id. The gatekeeper is given fixed fields only.
+   */
+  async reportApprovedRunOutcome(actionId: number, workspaceId: string, outcome: ApprovedRunOutcome)
+      : Promise<"delivered" | "retry" | "refused"> {
+    let record = Number.isSafeInteger(actionId) ? this.storage.actions.get(actionId) : undefined;
+    let declared = record?.type === "action" ? record.description.workflowRun : undefined;
+    if (record?.type !== "action" || !declared?.reportOutcome ||
+        parseWorkflowTriggerRef(declared.reference)?.inferosWorkspaceId !== workspaceId) {
+      return "refused";
+    }
+    let {runId, reason, requestedBy, ranAs} = outcome ?? {};
+    let final = outcome?.outcome;
+    if (outcome?.kind !== "workflow-run" || typeof runId !== "string" || typeof requestedBy !== "string" ||
+        (final !== "succeeded" && final !== "failed" && final !== "uncertain") ||
+        (reason !== undefined && typeof reason !== "string") ||
+        (ranAs !== "gadget_bindings" && ranAs !== "service_account")) {
+      return "refused";
+    }
+    if (record.state === "pending" && (record.applyStartedAt !== undefined || this.#claimedActions.has(record.id))) {
+      return "retry";
+    }
+    // Whose approval started it: the recorded resolver, or, for an apply that ended without a
+    // decision, this operate session's owner, the only one who decides here.
+    let approver = record.state === "approved" || record.state === "failed"
+      ? (record.resolvedBy?.type === "user" ? record.resolvedBy.id : undefined)
+      : record.state === "pending" && record.lastAttempt ? this.ownerProfileId : undefined;
+    if (approver === undefined || approver !== requestedBy) return "refused";
+    let key = `fac134:runOutcome:${actionId}`;
+    let mark = this.ctx.storage.kv.get<{state: "sending" | "sent", runId: string, at: number}>(key);
+    if (mark && mark.runId !== runId) return "refused";
+    if (mark?.state === "sent") return "delivered";
+    if (mark?.state === "sending" && Date.now() - mark.at < RUN_OUTCOME_SENDING_STALE_MS) return "retry";
+    // Before the await: the input gate holds between this write and the check above.
+    this.ctx.storage.kv.put(key, {state: "sending", runId, at: Date.now()});
+    let facet = this.getGatekeeperFacet(record.gatekeeperId) as unknown as
+        Pick<Required<Gatekeeper<unknown>>, "workflowRunOutcome">;
+    try {
+      await facet.workflowRunOutcome(record.action, {
+        kind: "workflow-run", runId, outcome: final, ...(reason !== undefined ? {reason} : {}), requestedBy, ranAs,
+        actionApplied: record.state === "approved",
+      });
+    } catch (error) {
+      this.ctx.storage.kv.delete(key);
+      throw error;
+    }
+    this.ctx.storage.kv.put(key, {state: "sent", runId, at: Date.now()});
+    return "delivered";
   }
 
   /**
@@ -13544,12 +13717,12 @@ class OverseerImpl implements AgentHooks {
    * reach read alike; every answer is a fixed sentence.
    */
   async invokeTriggerAs(caller: ConsoleToolCaller,
-      request: {hookId: number, definitionId: string, revision: number, actionId: number})
+      request: {hookId: number, definitionId: string, revision: number, actionId: number, reportOutcome?: boolean})
       : Promise<ApprovedWorkflowRun> {
     let refuse = (kind: ActionFailureKind, reason: string): ApprovedWorkflowRun => ({status: "refused", kind, reason});
-    let {hookId, definitionId, revision, actionId} = request ?? {};
+    let {hookId, definitionId, revision, actionId, reportOutcome} = request ?? {};
     if (!Number.isSafeInteger(hookId) || typeof definitionId !== "string" || !Number.isSafeInteger(revision) ||
-        !Number.isSafeInteger(actionId)) {
+        !Number.isSafeInteger(actionId) || (reportOutcome !== undefined && typeof reportOutcome !== "boolean")) {
       return refuse("invalid", WORKFLOW_REFERENCE_UNKNOWN);
     }
     if (!this.ownerId || this.storage.operateSession.get()) return refuse("permission", CANNOT_RUN);
@@ -13576,10 +13749,16 @@ class OverseerImpl implements AgentHooks {
     try {
       // The person's own on-request path (invokeTrigger -> invokeWorkflowTrigger), held to the
       // approved definition and revision when it mints, after its last await (r2's HIGH).
+      // Its outcome goes back to the approving action, in the person's own session (verified above as
+      // theirs), only when that action asked (FAC-134): never a destination a caller names.
+      let reportTo = reportOutcome ? {sessionWorkspaceId: caller.sessionWorkspaceId, actionId} : undefined;
       let invocation = await this.invokeTrigger(caller.userId, caller.profileId, hookId,
-          {definitionId, revision, onAdmitted: () => { admitted = true; }});
-      this.ctx.storage.kv.put(key, {state: "started", runId: invocation.id});
-      return {status: "started", runId: invocation.id};
+          {definitionId, revision, reportTo, onAdmitted: () => { admitted = true; }});
+      // The run's own id (FAC-134), never the invocation's: a run is what its outcome names.
+      let runId = this.workflowDefinitionStore().runIdOfInvocation(invocation.id);
+      if (runId === null) return {status: "unknown", reason: WORKFLOW_RUN_UNKNOWN};
+      this.ctx.storage.kv.put(key, {state: "started", runId});
+      return {status: "started", runId};
     } catch (error) {
       let message = error instanceof Error ? error.message : String(error);
       // Not started: refused before this call's invocation was minted, or in invokeWorkflowTrigger's
@@ -14515,9 +14694,18 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * calls it for them (ApprovedEffects.invokeWorkflow); no client interface reaches it.
    */
   async invokeTriggerAs(caller: ConsoleToolCaller,
-      request: {hookId: number, definitionId: string, revision: number, actionId: number})
+      request: {hookId: number, definitionId: string, revision: number, actionId: number, reportOutcome?: boolean})
       : Promise<ApprovedWorkflowRun> {
     return this.impl.invokeTriggerAs(caller, request);
+  }
+
+  /**
+   * See `OverseerImpl.reportApprovedRunOutcome`. Worker-only: the workspace a run ran in calls it on
+   * the operate session whose approved action started that run; no client interface reaches it.
+   */
+  async reportApprovedRunOutcome(actionId: number, workspaceId: string, outcome: ApprovedRunOutcome)
+      : Promise<"delivered" | "retry" | "refused"> {
+    return this.impl.reportApprovedRunOutcome(actionId, workspaceId, outcome);
   }
 
   /** See `OverseerImpl.listWidgetInstancesFor`. Worker-only: an operate session asks it for its owner. */
@@ -20405,6 +20593,8 @@ export type ApprovedRunAdmission = {
   definitionId: string;
   revision: number;
   onAdmitted?: (invocationId: string) => void;
+  /** Where the run reports its outcome (FAC-134): the approval's own session and action, set by the kernel. */
+  reportTo?: RunReportTo;
 };
 
 /**
@@ -20452,7 +20642,7 @@ export async function invokeWorkflowTrigger(
   // An approved run (FAC-120) is held to the definition and revision the person approved, checked
   // where the invocation is minted, after the last await: a repin or a new publication meanwhile refuses.
   let invocation = store.beginInvocation(profileId, hookId, company,
-      expected && {definitionId: expected.definitionId, revision: expected.revision});
+      expected && {definitionId: expected.definitionId, revision: expected.revision, reportTo: expected.reportTo});
   // This call's own admission, reported before anything else can happen (see ApprovedRunAdmission).
   expected?.onAdmitted?.(invocation.id);
   // What startHook reads to tell this call's delivery taken (see takenInvocations).

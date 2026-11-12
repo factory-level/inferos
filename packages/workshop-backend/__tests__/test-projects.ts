@@ -181,6 +181,7 @@ export const BACKEND_RESTART: readonly string[] = [
   "published-consoles-migration.test.ts",
   "tool-lane.test.ts",
   "workflow-run-execution.test.ts",
+  "dot-run-outcome.test.ts",
   "workflow-run-restart.test.ts",
   "workflow-run-results.test.ts",
   "worktrees.test.ts",
