@@ -131,7 +131,10 @@ describe("the trigger's own workspace", () => {
       // 1. One delivery for that run, requested by the approver.
       let deliveries = store.deliveries(OWNER, saved.id, "build");
       expect(deliveries).toHaveLength(1);
-      expect(deliveries[0]!.invocation).toEqual({ id: runId, requestedBy: "p1" });
+      // The answer names the run itself (FAC-134, #459), never the invocation that admitted it.
+      expect(deliveries[0]!.invocation).toEqual({ id: expect.any(String), requestedBy: "p1" });
+      expect(deliveries[0]!.run?.runId).toBe(runId);
+      expect(deliveries[0]!.invocation!.id).not.toBe(runId);
       // 2. The owner's readable histories discover it.
       expect(store.listReadableWorkflowHistories(OWNER, "build")).toContainEqual({ definitionId: saved.id });
       // 3. A person of another company holds no role in this workspace: not listed, and its
