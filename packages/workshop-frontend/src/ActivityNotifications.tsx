@@ -9,6 +9,7 @@ import { ActionFields, entryFields, fieldCountLabel } from './components/ActionF
 import { DeclaredRunNotice } from './components/DeclaredRunNotice'
 import { ResolveButton } from './components/ResolveButton'
 import { contextText } from './actionDecision'
+import { canApproveAgain } from './actionAttempt'
 import { RestrictedApprovalNotice } from './components/RestrictedApprovalNotice'
 import {
   formatRelativeTime,
@@ -160,7 +161,9 @@ export default function ActivityNotifications({
                       />
                       <ResolveButton
                         tone="approve"
-                        disabled={isProcessing}
+                        // As every other decision surface (FAC-15 parity): approved again only when
+                        // its gatekeeper said another attempt is safe.
+                        disabled={isProcessing || !canApproveAgain(action)}
                         onClick={() => void resolveAction(action.id, 'approve')}
                         describedBy={describedBy}
                       />

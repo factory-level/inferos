@@ -68,6 +68,29 @@ function approveDescribedBy(): string | null {
 }
 
 describe('ActivityNotifications', () => {
+  // FAC-15 P-1, parity: the dropdown offers Approve again exactly when Activity, the operate
+  // session's approvals and chat do (canApproveAgain): an attempted action is approved again only
+  // when its gatekeeper said another attempt is safe. The kernel refuses it otherwise anyway.
+  const dropdownApprove = () => [...document.querySelectorAll('button')].find(b => b.textContent === 'Approve')
+  async function renderAttemptedInDropdown(lastAttempt: NonNullable<Parameters<typeof entry>[1]>['lastAttempt']) {
+    const server = makeOverseer()
+    await view.render(<ActivityNotifications overseer={server.overseer} onViewActivity={() => {}} />)
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [entry(1, { lastAttempt })] })
+    flushFrames()
+  }
+
+  it('offers only Deny for an attempted action that cannot be repeated, as every other surface does', async () => {
+    await renderAttemptedInDropdown({ outcome: 'unknown', message: 'Lost after sending.', retryable: false, at: new Date(1700000200000) })
+    expect(dropdownApprove()).toBeDefined()
+    expect(dropdownApprove()!.disabled).toBe(true)
+  })
+
+  it('offers Approve again for an attempted action its gatekeeper says is safe to repeat', async () => {
+    await renderAttemptedInDropdown({ outcome: 'notApplied', message: 'Try again.', retryable: true, at: new Date(1700000200000) })
+    expect(dropdownApprove()!.disabled).toBe(false)
+  })
+
   // FAC-14: the dropdown's Approve is a decision too, so it names who an operate-agent request is for.
   it("names the person an operate-agent request is for, beside Approve", async () => {
     const server = makeOverseer()
