@@ -183,7 +183,7 @@ export const APPLY_OUTCOME_UNKNOWN_MESSAGE = "This action was interrupted after 
 type KitOwnedField = "awaitDecision" | "autoApprovable" | "actionKind";
 type ProviderOwnedField =
   | "title" | "description" | "fields" | "descriptionIsComplete" | "pushedCommits"
-  | "implementsRevert";
+  | "implementsRevert" | "workflowRun";
 type Unclassified = Exclude<keyof ActionDescription, KitOwnedField | ProviderOwnedField>;
 
 /**

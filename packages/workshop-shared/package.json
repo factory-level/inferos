@@ -31,6 +31,10 @@
       "types": "./src/widget-placements.ts",
       "import": "./src/widget-placements.ts"
     },
+    "./workflow-trigger-ref": {
+      "types": "./src/workflow-trigger-ref.ts",
+      "import": "./src/workflow-trigger-ref.ts"
+    },
     "./agent-widgets": {
       "types": "./src/agent-widgets.ts",
       "import": "./src/agent-widgets.ts"
