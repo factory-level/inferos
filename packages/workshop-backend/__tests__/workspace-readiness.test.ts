@@ -95,6 +95,51 @@ describe("the decision (workspaceReadiness)", () => {
     expect(off.deploymentReady).toBe(false);
   });
 
+  it("never counts the demo data as ready: a gadget bound only to the demo table and policy is attention", () => {
+    const DEMO_TABLE = "inferops://demo.local/object/table/70000000-0000-4000-8000-000000000001";
+    const DEMO_POLICY = "inferops://demo.local/project/workflow/DEMO";
+    let readiness = workspaceReadiness({
+      ...complete(),
+      connections: [
+        // A person's real board makes the account item ready; the bound kinds are demo only.
+        { id: 1, vendorId: "inferops", resourceUrl: BOARD, connected: true },
+        { id: 2, vendorId: "inferops", resourceUrl: DEMO_TABLE, connected: true },
+        { id: 3, vendorId: "inferops", resourceUrl: DEMO_POLICY, connected: true },
+      ],
+    });
+    expect(readiness.deploymentReady).toBe(false);
+    expect(statuses(readiness)).toMatchObject({
+      "inferops-connection": "ready", "records-binding": "attention", "workflow-policy-binding": "attention",
+    });
+    for (let name of ["records-binding", "workflow-policy-binding"]) {
+      expect(readiness.items.find(item => item.name === name)?.detail).toContain("only to the InferOps demo");
+    }
+    // A demo connection alone is not a person's account here either.
+    let demoOnly = workspaceReadiness({
+      ...complete(), connections: [{ id: 2, vendorId: "inferops", resourceUrl: DEMO_TABLE, connected: true }],
+      boundConnectionIds: new Set([2]),
+    });
+    expect(statuses(demoOnly)["inferops-connection"]).toBe("attention");
+  });
+
+  it("counts a binding only through a person's account, and a real binding beside a demo one", () => {
+    let unbacked = workspaceReadiness({
+      ...complete(), connections: complete().connections.map(c => c.id === 2 ? { ...c, connected: false } : c),
+    });
+    expect(unbacked.items.find(item => item.name === "records-binding")).toMatchObject({
+      status: "attention", detail: expect.stringContaining("no person's account backs"),
+    });
+    expect(unbacked.deploymentReady).toBe(false);
+
+    let both = workspaceReadiness({
+      ...complete(),
+      connections: [...complete().connections,
+        { id: 4, vendorId: "inferops", resourceUrl: "inferops://demo.local/object/table/x", connected: true }],
+      boundConnectionIds: new Set([2, 3, 4]),
+    });
+    expect(both.deploymentReady).toBe(true);
+  });
+
   it("counts only an InferOps connection of the kind: another vendor's, or a board, binds nothing here", () => {
     let readiness = workspaceReadiness({
       ...complete(),

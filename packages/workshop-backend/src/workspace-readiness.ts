@@ -21,7 +21,10 @@ export type ReadinessConnection = {
   id: number;
   vendorId: string | undefined;
   resourceUrl: string | undefined;
-  /** Made from a person's connected account (GatekeeperRecord.connectedBy). */
+  /**
+   * Made from a person's connected account (GatekeeperRecord.connectedBy), when it was made: whether
+   * that account is still signed in is not read here.
+   */
   connected: boolean;
 };
 
@@ -43,24 +46,52 @@ const item = (name: WorkspaceReadinessItem["name"], ready: boolean, detail: stri
     blocked = false): WorkspaceReadinessItem =>
   ({ name, status: ready ? "ready" : blocked ? "blocked" : "attention", detail, action: ready ? null : action });
 
-/** Whether a connection serves `pattern` from the InferOps gatekeeper and some gadget binds it. */
-function bound(inputs: ReadinessInputs, pattern: string): boolean {
-  return inputs.connections.some(connection =>
-    connection.vendorId === INFEROPS_VENDOR && connection.resourceUrl !== undefined &&
-    matchesResourceUrlPattern(pattern, connection.resourceUrl) && inputs.boundConnectionIds.has(connection.id));
+/**
+ * The gatekeeper-inferops demo data's host (`resources.ts`, `DEMO_HOST`): its mock boards, tables
+ * and workflow policy match every resource pattern but reach no person's data, so a binding to them
+ * never counts as ready.
+ */
+export const INFEROPS_DEMO_HOST = "demo.local";
+
+/** The `<tenant>.<workspace>` (or demo) host of an `inferops://` URL, lowercase, or null. */
+function inferopsHost(url: string): string | null {
+  let match = /^inferops:\/\/([^/]+)\//i.exec(url);
+  return match ? match[1]!.toLowerCase() : null;
 }
 
-/** The kind's own item: blocked while the deployment doesn't offer it, otherwise ready once bound. */
+/** How the gadgets here bind the kind `pattern`: to a person's real resource, only to the demo, or not at all. */
+function binding(inputs: ReadinessInputs, pattern: string): "real" | "demo" | "unbacked" | "none" {
+  let bound = inputs.connections.filter(connection =>
+    connection.vendorId === INFEROPS_VENDOR && connection.resourceUrl !== undefined &&
+    matchesResourceUrlPattern(pattern, connection.resourceUrl) && inputs.boundConnectionIds.has(connection.id));
+  if (bound.some(c => c.connected && inferopsHost(c.resourceUrl!) !== INFEROPS_DEMO_HOST)) return "real";
+  if (bound.some(c => inferopsHost(c.resourceUrl!) === INFEROPS_DEMO_HOST)) return "demo";
+  return bound.length > 0 ? "unbacked" : "none";
+}
+
+/**
+ * The kind's own item: blocked while the deployment doesn't offer it, and ready only once a gadget
+ * here is bound to one through a person's account and not to the demo data.
+ */
 function bindingItem(inputs: ReadinessInputs, name: "records-binding" | "workflow-policy-binding",
     pattern: string, noun: string, plural: string): WorkspaceReadinessItem {
   if (!inputs.inferopsPatterns?.includes(pattern)) {
     return item(name, false, `InferOps ${plural} are turned off for this deployment, so nothing can bind them.`,
         `Turn on InferOps ${plural} for this deployment.`, true);
   }
-  return bound(inputs, pattern)
-    ? item(name, true, `A gadget here is bound to an InferOps ${noun}.`, null)
-    : item(name, false, `No gadget here is bound to an InferOps ${noun} yet.`,
-        `Install the gadget and configure its InferOps ${noun} connection.`);
+  let configure = `Configure the gadget's InferOps ${noun} connection with your company's own ${noun}.`;
+  switch (binding(inputs, pattern)) {
+    case "real":
+      return item(name, true, `A gadget here is bound to an InferOps ${noun} through a person's account.`, null);
+    case "demo":
+      return item(name, false, `A gadget here is bound only to the InferOps demo ${noun}, which holds no company data.`,
+          configure);
+    case "unbacked":
+      return item(name, false, `A gadget here is bound to an InferOps ${noun} no person's account backs.`, configure);
+    case "none":
+      return item(name, false, `No gadget here is bound to an InferOps ${noun} yet.`,
+          `Install the gadget and configure its InferOps ${noun} connection.`);
+  }
 }
 
 /**
@@ -72,8 +103,9 @@ export function workspaceReadiness(inputs: ReadinessInputs): WorkspaceReadiness 
     inputs.inferopsPatterns === null
       ? item("inferops-connection", false, "This deployment has no InferOps gatekeeper to connect.",
           "Set up the InferOps gatekeeper for this deployment.", true)
-      : inputs.connections.some(c => c.vendorId === INFEROPS_VENDOR && c.connected)
-        ? item("inferops-connection", true, "A person's InferOps account is connected here.", null)
+      : inputs.connections.some(c => c.vendorId === INFEROPS_VENDOR && c.connected &&
+          (c.resourceUrl === undefined || inferopsHost(c.resourceUrl) !== INFEROPS_DEMO_HOST))
+        ? item("inferops-connection", true, "A person's InferOps account was connected here.", null)
         : item("inferops-connection", false, "No InferOps connection here is backed by a person's account.",
             "Connect your InferOps account."),
     bindingItem(inputs, "records-binding", RECORDS_PATTERN, "custom table", "custom tables"),
