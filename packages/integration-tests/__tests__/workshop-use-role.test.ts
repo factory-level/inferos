@@ -121,6 +121,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   // A use-role operator holds no temporary canvases in someone else's workspace (FAC-137).
   listTemporaryCanvases: ws => ws.listTemporaryCanvases(),
   listPersonalWorkflows: ws => ws.listPersonalWorkflows(),
+  listDelegates: ws => ws.listDelegates(),
+  stopDelegate: ws => ws.stopDelegate("d-1"),
   getTemporaryCanvas: ws => ws.getTemporaryCanvas("canvas"),
   saveTemporaryCanvas: ws => ws.saveTemporaryCanvas("canvas", 1),
   removeTemporaryCanvas: ws => ws.removeTemporaryCanvas("canvas", 1),

@@ -97,9 +97,13 @@ describe("the call-site scan", () => {
 });
 
 describe("chat-creating and delivering call sites", () => {
-  it("nextChatId() is called only by OverseerImpl.newChat and #createSpawnedChat", () => {
+  it("nextChatId() is called only by OverseerImpl.newChat, #createSpawnedChat and #launchApprovedDelegate", () => {
+    // #launchApprovedDelegate (FAC-134 capability 3) creates a delegate's chat only for the person's
+    // own approval of an action that declared it, never on an agent's call; submit refuses a delegate
+    // declared from a tainted chat (DELEGATE_TAINTED) or from a delegate's own (DELEGATE_NO_RELAUNCH).
     expect(callers("nextChatId")).toEqual([
       "overseer.ts:OverseerDurableObject.#createSpawnedChat",
+      "overseer.ts:OverseerImpl.#launchApprovedDelegate",
       "overseer.ts:OverseerImpl.newChat",
     ]);
   });

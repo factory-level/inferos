@@ -1,6 +1,7 @@
 import type { ActionOutcome, ActionReceiptCode, ActionResult } from "./action-outcome";
 import type { ApprovalEdit, BoardTransitionProposal } from "./operate-approval";
 import type { TemporaryCanvasInput } from "./temporary-canvas";
+import type { DelegateDeclaration } from "./delegate";
 // This file defines the API that the AI Gadgets Workshop uses to talk to Adapters. Each Adapter
 // provides connectivity to some external service which AI Gadgets can then manipulate. Each
 // installation of the Gadgets Workshop may have access to different adapters, typically based on
@@ -1094,7 +1095,27 @@ export interface ApprovedEffects extends RpcTarget {
    * Refused unless declared.
    */
   runPersonalWorkflow(): Promise<ApprovedWorkflowRun>;
+
+  /**
+   * Launches the delegate the action declared (`ActionDescription.delegate`, FAC-134 capability 3,
+   * ADR 0020) in the approving person's own live operate session: an agent chat on their own account
+   * whose ceiling is fixed now and only narrows, the session's own connections of the declared types
+   * that an operate chat may use, and the declared tools within `DELEGATE_TOOLS`. Every call it makes
+   * re-checks the person, and a change cancels it; it can't launch another. Idempotent per approved
+   * action: asking again returns the delegate it launched. Refused unless declared.
+   */
+  launchDelegate(): Promise<ApprovedDelegate>;
 }
+
+/**
+ * An `ApprovedEffects.launchDelegate` answer: launched, with the run its outcome will be reported as
+ * (`ApprovedRunOutcome.kind: "delegate"`); refused, so known not launched, in a FAC-119 kind with a
+ * fixed sentence; or `unknown`, when it may have been launched.
+ */
+export type ApprovedDelegate =
+  | { status: "launched"; runId: string; delegateId: string }
+  | { status: "refused"; kind: ActionFailureKind; reason: string }
+  | { status: "unknown"; reason: string };
 
 /**
  * An `ApprovedEffects.createTemporaryCanvas` answer: the canvas created, with the expiry the server
@@ -1137,7 +1158,7 @@ export type ApprovedRunOutcome = {
    * What the approval started: a published workflow's run, or a personal workflow's (FAC-134,
    * capability 2), whose `succeeded` means every step's request was placed, never that it was made.
    */
-  kind: "workflow-run" | "personal-workflow";
+  kind: "workflow-run" | "personal-workflow" | "delegate";
   /** The run `ApprovedEffects.invokeWorkflow` (or `runPersonalWorkflow`) started. */
   runId: string;
   /** Its final outcome: `succeeded`, `failed` or `uncertain` (see WorkflowRunOutcome). */
@@ -1150,9 +1171,10 @@ export type ApprovedRunOutcome = {
    * What the run executed as: the workflow's own connections (`gadget_bindings`), or the
    * trigger's assigned service account (`service_account`). Never the person's own authority beyond
    * their request (inferops ADR 0011's two contexts). A personal workflow's steps run on each
-   * console's own connections, as their builders bound them: `gadget_bindings`.
+   * console's own connections, as their builders bound them: `gadget_bindings`. A delegate
+   * (FAC-134 capability 3) ran as the person who approved it, within its ceiling: `person`.
    */
-  ranAs: "gadget_bindings" | "service_account";
+  ranAs: "gadget_bindings" | "service_account" | "person";
   /**
    * Set by the session handing it on: true when the approval that started the run was recorded as
    * applied; false when that apply ended without succeeding after the run had started (the
@@ -1909,6 +1931,19 @@ export type ActionDescription = {
    * reported to this gatekeeper (`Gatekeeper.workflowRunOutcome`, `kind: "personal-workflow"`).
    */
   personalWorkflowRun?: { reference: string; reportOutcome?: boolean };
+
+  /**
+   * If present (FAC-134, capability 3, ADR 0020), approving this action asks the kernel to launch
+   * this delegate in the approving person's own operate session (`parseDelegateDeclaration`,
+   * delegate.ts): a title, the prompt it starts from, the connection types it may use and, optionally,
+   * its tools. The kernel checks its shape when the action is submitted, refuses one declared from a
+   * delegate's own chat, and appends its own last field naming the ceiling and quoting the prompt
+   * (whatever this description says). It is never approved automatically, and only that person's own
+   * approval gets the `ApprovedEffects` that launch exactly it. With `reportOutcome`, its outcome is
+   * reported to this gatekeeper (`kind: "delegate"`, `ranAs: "person"`). At most one of
+   * `workflowRun`, `temporaryCanvas`, `personalWorkflow`, `personalWorkflowRun` and `delegate`.
+   */
+  delegate?: DelegateDeclaration & { reportOutcome?: boolean };
 
   /**
    * If present, applying this action will push the named commits to the remote resource this

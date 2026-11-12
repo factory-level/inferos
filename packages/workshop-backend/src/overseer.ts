@@ -49,6 +49,8 @@ import {
   PERSONAL_WORKFLOW_GONE, PersonalWorkflowStore, type PersonalWorkflowStepResult, type StoredPersonalWorkflow,
   type StoredPersonalWorkflowRun,
 } from "./personal-workflow-store";
+import { DelegateStore, type StoredDelegate } from "./delegate-store";
+import { delegateFieldValue, delegateTools, parseDelegateDeclaration, type DelegateSummary } from "@gadgets/workshop-shared/delegate";
 import {
   parseConsoleCommandRef, parsePersonalWorkflowDeclaration, parsePersonalWorkflowRef, personalWorkflowFieldValue,
   personalWorkflowStepInputProblem, type PersonalWorkflow, type PersonalWorkflowStep,
@@ -104,7 +106,7 @@ import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId,
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, type HookOccurrence, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionFailureKind, type ApprovedEffects, type ApprovedWorkflowRun, type ApprovedPersonalWorkflow, type ApprovedRunOutcome, type ApprovedTemporaryCanvas, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, type HookOccurrence, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionFailureKind, type ApprovedEffects, type ApprovedWorkflowRun, type ApprovedPersonalWorkflow, type ApprovedDelegate, type ApprovedRunOutcome, type ApprovedTemporaryCanvas, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
 import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionOutcome, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -1340,6 +1342,30 @@ export const PERSONAL_WORKFLOW_FIELD_LABEL = "Personal workflow this approval cr
 export const PERSONAL_WORKFLOW_RUN_FIELD_LABEL = "Personal workflow this approval runs (shown by InferOS)";
 
 /**
+ * The label of the field the kernel appends to an action that declares a delegate (FAC-134
+ * capability 3, `ActionDescription.delegate`), whose value names its ceiling and quotes its prompt
+ * in the kernel's words (`delegateFieldValue`), since the gatekeeper's text was written by the Dot.
+ */
+export const DELEGATE_FIELD_LABEL = "Delegate this approval launches (shown by InferOS)";
+
+/** FAC-134 capability 3: a delegate is launched only by its own person's approval, in their own operate session. */
+export const DELEGATE_OWN_SESSION = "A delegate is launched only by your own approval, in your own operate session.";
+/** A delegate's own chat can't launch another (ADR 0020). */
+export const DELEGATE_NO_RELAUNCH = "A delegate can't launch another delegate.";
+/** A chat that read console tool output declares no delegate (the cross-chat taint invariant). */
+export const DELEGATE_TAINTED = "This chat read console output, so it can't propose a delegate.";
+/** The stored declaration no longer checks. */
+export const DELEGATE_INVALID = "This delegate proposal isn't valid.";
+/** The effect asked for without a declared delegate, or after the apply ended. */
+export const DELEGATE_NEEDS_APPROVAL = "A delegate is launched only by your own approval of one your Dot proposed.";
+/** No model is set up for the person, so nothing was launched. */
+export const DELEGATE_NO_MODEL = "No AI model is set up for you here, so the delegate wasn't launched.";
+/** Why a delegate's call, or its next turn, is refused: its starter's access here changed (ADR 0020). */
+export const DELEGATE_REVOKED = "This delegate was stopped: your access here changed since you launched it.";
+/** Why a delegate's call to something outside its ceiling is refused. */
+export const DELEGATE_OUTSIDE_CEILING = "A delegate may use only the connections it was launched with.";
+
+/**
  * FAC-137: the once-per-action record of an approved temporary canvas (`fac137:approvedCanvas:<action>`):
  * the canvas created, and the approver and operate session it was created for. A retry answers with
  * it only for that approver in that session, still live (r2's HIGH).
@@ -1373,12 +1399,12 @@ const foldLabel = (label: string) => label.normalize("NFKC").replace(/\p{Default
 export const TEMPORARY_CANVAS_FIELD_LABEL = "Temporary canvas this approval creates for you (shown by InferOS)";
 
 const RESERVED_LABELS_FOLDED = new Set([WORKFLOW_RUN_FIELD_LABEL, TEMPORARY_CANVAS_FIELD_LABEL,
-    PERSONAL_WORKFLOW_FIELD_LABEL, PERSONAL_WORKFLOW_RUN_FIELD_LABEL].map(foldLabel));
+    PERSONAL_WORKFLOW_FIELD_LABEL, PERSONAL_WORKFLOW_RUN_FIELD_LABEL, DELEGATE_FIELD_LABEL].map(foldLabel));
 
 /**
  * Whether `label` is one of the kernel's reserved labels: `WORKFLOW_RUN_FIELD_LABEL` (rounds 6 and 7),
- * `TEMPORARY_CANVAS_FIELD_LABEL` (FAC-137), and FAC-134's `PERSONAL_WORKFLOW_FIELD_LABEL` and
- * `PERSONAL_WORKFLOW_RUN_FIELD_LABEL`, so a near-copy
+ * `TEMPORARY_CANVAS_FIELD_LABEL` (FAC-137), and FAC-134's `PERSONAL_WORKFLOW_FIELD_LABEL`,
+ * `PERSONAL_WORKFLOW_RUN_FIELD_LABEL` and `DELEGATE_FIELD_LABEL`, so a near-copy
  * can't pass for it. Both are folded the same way first: NFKC (so fullwidth and other compatibility
  * forms match), every default-ignorable code point removed (zero-width and other invisible
  * characters), whitespace collapsed, trimmed and lower-cased. A gatekeeper's field so labelled is
@@ -2120,6 +2146,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // workspace, each expiring; and their runs (see personal-workflow-store.ts).
       personalWorkflows: collection<StoredPersonalWorkflow>()({ primaryKey: "id" }),
       personalWorkflowRuns: collection<StoredPersonalWorkflowRun>()({ primaryKey: "runId" }),
+      // FAC-134 capability 3 (ADR 0020): the delegates the owner's own approvals launched in this
+      // operate session workspace, each with its ceiling fixed then (see delegate-store.ts).
+      delegates: collection<StoredDelegate>()({ primaryKey: "delegateId" }),
       // Saved and published workflow definitions, the triggers pinned to them, and the deliveries
       // those triggers made (see workflow-definition-store.ts).
       workflowDefinitions: collection<StoredWorkflowDefinition>()({ primaryKey: "id" }),
@@ -3004,6 +3033,10 @@ class OverseerImpl implements AgentHooks {
         if (run.state === "running") times.push(Date.now());
         else if (run.reportDue !== undefined) times.push(run.reportDue);
       }
+      // An ended delegate's outcome still owed (FAC-134 capability 3).
+      for (let delegate of this.delegateStore().active()) {
+        if (delegate.reportDue !== undefined) times.push(delegate.reportDue);
+      }
     }
     let nextRunHistorySweep = this.workflowDefinitionStore().nextRunHistorySweep();
     if (nextRunHistorySweep !== undefined) times.push(nextRunHistorySweep);
@@ -3055,6 +3088,7 @@ class OverseerImpl implements AgentHooks {
       await this.retryReplayWithdrawals();
       await this.reportRunsToChat();
       await this.advancePersonalWorkflowRuns();
+      await this.reportDelegates();
       await this.expireRunWrites();
       do {
         let results = await Promise.allSettled([
@@ -7320,9 +7354,11 @@ class OverseerImpl implements AgentHooks {
     let declaredCanvas = record.description.temporaryCanvas;
     let declaredWorkflow = record.description.personalWorkflow;
     let declaredWorkflowRun = record.description.personalWorkflowRun;
+    // FAC-134 capability 3 (ADR 0020): and a declared delegate, launched only for this approval.
+    let declaredDelegate = record.description.delegate;
     let ownApproval = !autoApproved && resolvedBy.type === "user" && !record.executedAs;
     let effects = ownApproval && (declaredRun !== undefined || declaredCanvas !== undefined ||
-        declaredWorkflow !== undefined || declaredWorkflowRun !== undefined)
+        declaredWorkflow !== undefined || declaredWorkflowRun !== undefined || declaredDelegate !== undefined)
         ? new ApprovedEffectsImpl({
           ...(declaredRun !== undefined ? {invoke: () => this.#invokeApprovedWorkflow(resolvedBy.id, declaredRun, record.id,
               record.description.workflowRun?.reportOutcome === true)} : {}),
@@ -7333,6 +7369,8 @@ class OverseerImpl implements AgentHooks {
           ...(declaredWorkflowRun !== undefined
             ? {run: () => this.#runApprovedPersonalWorkflow(resolvedBy.id, declaredWorkflowRun.reference, record.id,
                 declaredWorkflowRun.reportOutcome === true)} : {}),
+          ...(declaredDelegate !== undefined
+            ? {launch: () => this.#launchApprovedDelegate(resolvedBy.id, declaredDelegate, record)} : {}),
         })
         : undefined;
     try {
@@ -8258,6 +8296,9 @@ class OverseerImpl implements AgentHooks {
     if (caller.from === "gadget" && caller.run) {
       return openGadgetRunSession(this.#systemRunHost(), target, caller as GadgetRunCaller);
     }
+    // A delegate's chat (FAC-134 capability 3) reaches only its ceiling's connections, and only while
+    // its starter still holds it: checked on every binding call, before anything else.
+    if (caller.from === "agent") this.assertDelegateMayCall(caller.chatId, target);
     // Before every case, so a tainted chat's agent reaches no gadget, worktree, git or
     // non-allowlisted gatekeeper code, whenever the mark landed (see chat-taint.ts).
     if (caller.from === "agent") this.#assertUsableWhileTainted(caller.chatId, target);
@@ -8782,9 +8823,9 @@ class OverseerImpl implements AgentHooks {
         {label: TEMPORARY_CANVAS_FIELD_LABEL, kind: "inline", value: `${canvas.title} (${widgets})`}]};
     }
     // At most one thing the person's approval starts or creates (FAC-120, FAC-137, FAC-134).
-    if ([description.workflowRun, description.temporaryCanvas, description.personalWorkflow, description.personalWorkflowRun]
-        .filter(declared => declared !== undefined).length > 1) {
-      throw new Error("An action declares at most one of a workflow run, a temporary canvas, a personal workflow and a personal workflow run.");
+    if ([description.workflowRun, description.temporaryCanvas, description.personalWorkflow, description.personalWorkflowRun,
+      description.delegate].filter(declared => declared !== undefined).length > 1) {
+      throw new Error("An action declares at most one of a workflow run, a temporary canvas, a personal workflow, a personal workflow run and a delegate.");
     }
     if (description.workflowRun !== undefined) {
       if (!parseWorkflowTriggerRef(description.workflowRun?.reference)) {
@@ -8818,6 +8859,22 @@ class OverseerImpl implements AgentHooks {
       }
       description = {...description, personalWorkflowRun: {reference, ...(reportOutcome ? {reportOutcome: true} : {})},
         fields: [...description.fields ?? [], {label: PERSONAL_WORKFLOW_RUN_FIELD_LABEL, kind: "inline", value: reference}]};
+    }
+    // A declared delegate (FAC-134 capability 3, ADR 0020) is checked for its shape here and shown in
+    // the kernel's own last field: its ceiling, and its prompt with every line marked as the Dot's.
+    // A delegate's own chat can't launch another: refused here, whatever gatekeeper it reaches.
+    if (description.delegate !== undefined) {
+      if (caller.from === "agent" && this.delegateStore().forChat(caller.chatId)) throw new Error(DELEGATE_NO_RELAUNCH);
+      // Nor a chat that read console tool output (chat-taint.ts): a tainted chat creates no chat,
+      // even one only the person's approval would launch (the cross-chat taint invariant).
+      if (caller.from === "agent" && isConsoleToolTainted(this.storage, caller.chatId)) throw new Error(DELEGATE_TAINTED);
+      let {reportOutcome, ...declared} = description.delegate;
+      if (reportOutcome !== undefined && typeof reportOutcome !== "boolean") {
+        throw new Error("A declared delegate's reportOutcome is true or false.");
+      }
+      let declaration = parseDelegateDeclaration(declared);
+      description = {...description, delegate: {...declaration, ...(reportOutcome ? {reportOutcome: true} : {})},
+        fields: [...description.fields ?? [], {label: DELEGATE_FIELD_LABEL, kind: "text", value: delegateFieldValue(declaration)}]};
     }
 
     // Push authorization (see ActionDescription.pushedCommits): before anything is queued,
@@ -10187,6 +10244,17 @@ class OverseerImpl implements AgentHooks {
       }
       return;
     }
+    // A delegate's turn starts only while its starter still holds it (FAC-134 capability 3, ADR 0020):
+    // every resume, after an approval or a restart or for a delivered call, comes through here.
+    if (!this.#delegateMayStart(chatId)) {
+      let meta = this.storage.chatMeta.get(chatId);
+      if (meta?.activeAgent) {
+        this.postAgentErrorMessage(chatId, meta.activeAgent, DELEGATE_REVOKED);
+        delete meta.activeAgent;
+        this.storage.chatMeta.put(meta);
+      }
+      return;
+    }
     // Register before starting the turn so registration always precedes the turn's teardown
     // (`#unregisterRunningAgent`, in `#runAgentTurn`'s finally).
     this.#registerRunningAgent(chatId);
@@ -10224,6 +10292,8 @@ class OverseerImpl implements AgentHooks {
     // balance once the turn completes (see the `finally` below) so the next billing decision
     // reflects the spend this turn just incurred, rather than waiting for the cache TTL to lapse.
     let byokOwnerStub: DurableObjectStub<UserDurableObject> | undefined;
+    // Whether the turn ended by throwing: how a delegate's turn settles it (FAC-134 capability 3).
+    let turnFailed = false;
     let startedAt = Date.now();
     const turnLogger = this.logger.with({
       operation: "agent.run",
@@ -10304,6 +10374,7 @@ class OverseerImpl implements AgentHooks {
         });
       });
     } catch (err: unknown) {
+      turnFailed = true;
       // A failed model request surfaces as AgentTurnError (pi reports provider failures as data;
       // runAgent converts them back to a throw), carrying the failing request's HTTP status when
       // one was observed.
@@ -10370,6 +10441,12 @@ class OverseerImpl implements AgentHooks {
       this.#unregisterRunningAgent(chatId);
 
       this.#finishAgentTurn(chatId);
+
+      // A delegate's chat settles its outcome once its turn ends (FAC-134 capability 3): a turn
+      // cancelled (by its person, or its starter's revoked access) is `cancelled`, one that threw
+      // otherwise `runtime-error`.
+      this.settleDelegateAfterTurn(chatId,
+          turnFailed ? (liveChat.cancelController.signal.aborted ? "cancelled" : "runtime-error") : null);
     }
   }
 
@@ -13985,6 +14062,266 @@ class OverseerImpl implements AgentHooks {
     });
   }
 
+  // --- Delegates (FAC-134 capability 3, ADR 0020) ---
+  //
+  // A delegate is an agent chat in its starter's own operate session, launched only by their own
+  // approval of an action that declared it. Its authority is theirs at each moment, within a ceiling
+  // fixed at that approval: every call it makes, and every turn it starts, checks again that this is
+  // still their live session at the authorization generation it was launched at
+  // (`#delegateRevoked`); a change cancels it. It can't launch another, and reports only its
+  // outcome.
+
+  /** This operate session's delegates (delegate-store.ts). */
+  delegateStore(): DelegateStore {
+    return new DelegateStore(this.storage, () => {
+      if (this.toolLane) this.#updateAlarm();
+      else this.#alarmOwed = true;
+    });
+  }
+
+  /**
+   * Why delegate `delegate` no longer acts here, or null while it may: this must still be its
+   * starter's own live operate session (not retired, the same owner), at the authorization
+   * generation it was launched at. A grant, role or ownership change raises the generation, and a
+   * company switch retires the session, so either ends it.
+   */
+  #delegateRevoked(delegate: StoredDelegate): string | null {
+    if (delegate.state !== "running") return DELEGATE_REVOKED;
+    if (!this.ownerId || !this.storage.operateSession.get() || this.isRetiredOperateSession()) return DELEGATE_REVOKED;
+    if (this.ownerProfileId !== delegate.starterProfileId) return DELEGATE_REVOKED;
+    if (this.authzGeneration() !== delegate.authzGeneration) return DELEGATE_REVOKED;
+    return null;
+  }
+
+  /**
+   * Refuses a call chat `chatId` makes when it is a delegate that may not make it: one revoked
+   * (`#delegateRevoked`, which also cancels it, outcome `failed`, `requester-revoked`), or one to
+   * anything outside its ceiling (only its own connections; no gadget, worktree or git). A chat that
+   * isn't a delegate passes. Synchronous, so nothing runs between the check and the call it guards.
+   */
+  assertDelegateMayCall(chatId: number, target?: BindingLoopbackTarget): void {
+    if (!this.storage.operateSession.get()) return;
+    let store = this.delegateStore();
+    let delegate = store.forChat(chatId);
+    if (!delegate) return;
+    let revoked = this.#delegateRevoked(delegate);
+    if (revoked !== null) {
+      this.#cancelDelegate(store, delegate, "requester-revoked");
+      throw new Error(revoked);
+    }
+    if (target && (target.type !== "gatekeeper" || !Object.values(delegate.ceiling.connections).includes(target.id))) {
+      throw new Error(DELEGATE_OUTSIDE_CEILING);
+    }
+  }
+
+  /**
+   * The tools chat `chatId` may be offered and run when it is a delegate, fixed at its approval, or
+   * null for any other chat (AgentHooks.delegateToolsFor).
+   */
+  delegateToolsFor(chatId: number): readonly string[] | null {
+    if (!this.storage.operateSession.get()) return null;
+    return this.delegateStore().forChat(chatId)?.ceiling.tools ?? null;
+  }
+
+  /**
+   * Whether a turn of chat `chatId` may start now: any chat that isn't a delegate, or a delegate whose
+   * starter still holds it (`#delegateRevoked`). One that may not is cancelled. Asked by `startAgent`,
+   * so every resume (after an approval, after a restart, for a delivered call) checks it.
+   */
+  #delegateMayStart(chatId: number): boolean {
+    if (!this.storage.operateSession.get()) return true;
+    let store = this.delegateStore();
+    let delegate = store.forChat(chatId);
+    if (!delegate) return true;
+    if (this.#delegateRevoked(delegate) === null) return true;
+    this.#cancelDelegate(store, delegate, "requester-revoked");
+    return false;
+  }
+
+  /** Ends running delegate `delegate` as cancelled (`failed` with `reason`), stopping its turn. */
+  #cancelDelegate(store: DelegateStore, delegate: StoredDelegate, reason: "cancelled" | "requester-revoked"): void {
+    if (delegate.state !== "running") return;
+    store.end(delegate.delegateId, "failed", reason);
+    this.logger.info("a delegate was cancelled", {
+      event: "operate.delegate.cancelled", operation: delegate.delegateId, runFailure: reason,
+    });
+    if (this.#liveChats.has(delegate.chatId)) this.cancelAgent(delegate.chatId);
+  }
+
+  /**
+   * After a turn of chat `chatId` (from `#runAgentTurnWithContext`'s finally): when it is a running
+   * delegate, a turn that threw ends it `failed`, `cancelled` when it was cancelled and
+   * `runtime-error` otherwise; one that ended with nothing of
+   * its own still pending (no action it proposed waiting for approval, no call or resume due) ends it
+   * `succeeded`, which means its work ended, never that anything it asked for was made. Otherwise it
+   * keeps running until those settle and its next turn ends.
+   */
+  settleDelegateAfterTurn(chatId: number, failed: "cancelled" | "runtime-error" | null): void {
+    if (!this.storage.operateSession.get()) return;
+    let store = this.delegateStore();
+    let delegate = store.forChat(chatId);
+    if (!delegate || delegate.state !== "running") return;
+    if (failed !== null) {
+      store.end(delegate.delegateId, "failed", failed);
+      return;
+    }
+    let waiting = Array.from(this.storage.actions.list()).some(action =>
+        action.type === "action" && action.state === "pending" &&
+        action.caller.from === "agent" && action.caller.chatId === chatId);
+    if (waiting || this.hasPendingAgentCalls(chatId) || this.storage.pendingResumes.get(chatId)) return;
+    store.end(delegate.delegateId, "succeeded");
+  }
+
+  /**
+   * FAC-134 capability 3: launches the delegate action `record` declared, for `profileId`, who is
+   * approving it here now (ApprovedEffects.launchDelegate; applyPendingAction mints one only for an
+   * action that declared it). Only in that person's own live operate session, never for an action a
+   * delegate's own chat proposed, and once per action. Its ceiling is fixed now: of this session's
+   * connections, those of a declared type that an operate chat may use, and the declared tools (or
+   * the default ones). Its chat runs on the person's own account, starting from the prompt.
+   */
+  async #launchApprovedDelegate(profileId: string, declared: unknown, record: Extract<ActionRecord, {type: "action"}>)
+      : Promise<ApprovedDelegate> {
+    let store = this.delegateStore();
+    let already = store.forAction(record.id);
+    if (already) return {status: "launched", runId: already.runId, delegateId: already.delegateId};
+    if (!this.ownerId || !this.storage.operateSession.get() || this.isRetiredOperateSession() ||
+        this.ownerProfileId !== profileId) {
+      return {status: "refused", kind: "permission", reason: DELEGATE_OWN_SESSION};
+    }
+    if (record.caller.from === "agent" && store.forChat(record.caller.chatId)) {
+      return {status: "refused", kind: "policy", reason: DELEGATE_NO_RELAUNCH};
+    }
+    let declaration;
+    try {
+      let {reportOutcome: _report, ...shape} = declared as Record<string, unknown>;
+      declaration = parseDelegateDeclaration(shape);
+    } catch {
+      return {status: "refused", kind: "invalid", reason: DELEGATE_INVALID};
+    }
+    let reportOutcome = (declared as {reportOutcome?: unknown}).reportOutcome === true;
+    // Read before any await: the ceiling is held to the generation the approval is checked at.
+    let generation = this.authzGeneration();
+    let connections: Record<string, WorkpieceId> = Object.create(null);
+    for (let gatekeeper of this.storage.gatekeepers.list()) {
+      let vendorId = gatekeeperVendorId(gatekeeper);
+      if (!vendorId || !declaration.connections.includes(vendorId)) continue;
+      if (await this.#excludedFromOperateChat(gatekeeper.id)) continue;
+      let name = `${vendorId.replace(/[^A-Za-z0-9_]/g, "_").toUpperCase()}_${gatekeeper.id}`;
+      connections[name] = gatekeeper.id;
+    }
+    let user = this.users.get(this.users.idFromString(this.ownerId));
+    let userMeta;
+    try {
+      userMeta = await user.getChatContext(null);
+    } catch (error) {
+      this.logger.warn("a delegate couldn't be launched", {event: "operate.delegate.launch_failed", operation: String(record.id), error});
+      return {status: "unknown", reason: DELEGATE_NO_MODEL};
+    }
+    if (!userMeta.aiModel) return {status: "refused", kind: "unavailable", reason: DELEGATE_NO_MODEL};
+    // Checked again after the awaits: the approval holds only at the generation it was checked at.
+    if (this.authzGeneration() !== generation || this.isRetiredOperateSession() || this.ownerProfileId !== profileId ||
+        store.forAction(record.id)) {
+      let launched = store.forAction(record.id);
+      if (launched) return {status: "launched", runId: launched.runId, delegateId: launched.delegateId};
+      return {status: "refused", kind: "permission", reason: DELEGATE_OWN_SESSION};
+    }
+    let chatId = this.nextChatId();
+    let timestamp = this.getChatTimestamp();
+    let meta: AiChatMetadata = {id: chatId, title: declaration.title, started: timestamp, lastActive: timestamp,
+      activeAgent: userMeta.aiModel.profile};
+    let delegate: StoredDelegate = {
+      delegateId: crypto.randomUUID(), runId: crypto.randomUUID(), actionId: record.id, starterProfileId: profileId,
+      chatId, title: declaration.title, ceiling: {connections, tools: delegateTools(declaration)},
+      declared: declaration.connections, authzGeneration: generation, state: "running", reportOutcome,
+      reportTries: 0, launchedAt: new Date(),
+    };
+    let author = this.gadgetAuthorFor(userMeta.profile);
+    this.storage.transaction(() => {
+      this.storage.chatMeta.put(meta);
+      // The seed binding layer is the ceiling's connections only, never the workspace's default list.
+      this.storage.chatContext.put({chatId, bindings: {...connections}});
+      this.storage.chats.put({chatId, sequence: this.nextChatSequence(chatId), timestamp, author,
+        type: "message", message: declaration.prompt});
+      store.launch(delegate);
+    });
+    this.logger.info("a delegate was launched", {
+      event: "operate.delegate.launched", operation: delegate.delegateId, sequence: Object.keys(connections).length,
+    });
+    this.startAgent(chatId, userMeta.aiModel, author, this.ownerId);
+    return {status: "launched", runId: delegate.runId, delegateId: delegate.delegateId};
+  }
+
+  /**
+   * `profileId`'s delegates, newest first, as they read them: only in their own live operate session,
+   * and an empty list anywhere else. Never what a delegate's chat said or returned.
+   */
+  delegatesOf(profileId: string): DelegateSummary[] {
+    if (!this.ownerId || !this.storage.operateSession.get() || this.isRetiredOperateSession() ||
+        this.ownerProfileId !== profileId) {
+      return [];
+    }
+    return this.delegateStore().listFor(profileId).map(delegate => ({
+      delegateId: delegate.delegateId, title: delegate.title, state: delegate.state,
+      ...(delegate.reason ? {reason: delegate.reason} : {}),
+      connections: [...delegate.declared], tools: [...delegate.ceiling.tools], chatId: delegate.chatId,
+      launchedAt: delegate.launchedAt.toISOString(), ...(delegate.endedAt ? {endedAt: delegate.endedAt.toISOString()} : {}),
+    }));
+  }
+
+  /**
+   * Stops `profileId`'s running delegate `delegateId`: it ends `failed`, `cancelled`, and its turn is
+   * cancelled. Only their own, in their own live operate session; anything else is refused.
+   */
+  stopDelegate(profileId: string, delegateId: string): void {
+    if (!this.ownerId || !this.storage.operateSession.get() || this.isRetiredOperateSession() ||
+        this.ownerProfileId !== profileId) {
+      throw new Error(DELEGATE_OWN_SESSION);
+    }
+    let store = this.delegateStore();
+    let delegate = typeof delegateId === "string" ? store.get(delegateId) : undefined;
+    if (!delegate || delegate.starterProfileId !== profileId) throw new Error("No such delegate.");
+    this.#cancelDelegate(store, delegate, "cancelled");
+  }
+
+  /**
+   * Hands each ended delegate's outcome to the action that launched it, while owed (FAC-134
+   * capability 3): `kind: "delegate"`, `ranAs: "person"`, through `#handOnRunOutcome`'s rules. From the
+   * alarm, retried with a growing delay like a personal workflow run's.
+   */
+  async reportDelegates(now = Date.now()): Promise<void> {
+    if (!this.storage.operateSession.get()) return;
+    let store = this.delegateStore();
+    for (let delegate of store.active()) {
+      if (delegate.reportDue === undefined || delegate.reportDue > now || delegate.state === "running") continue;
+      let record = this.storage.actions.get(delegate.actionId);
+      let answer: "delivered" | "retry" | "refused";
+      if (record?.type !== "action" || !record.description.delegate?.reportOutcome) {
+        answer = "refused";
+      } else {
+        try {
+          answer = await this.#handOnRunOutcome(record, {
+            kind: "delegate", runId: delegate.runId, outcome: delegate.state,
+            ...(delegate.reason ? {reason: delegate.reason} : {}), requestedBy: delegate.starterProfileId, ranAs: "person",
+          });
+        } catch (error) {
+          this.logger.warn("a delegate's outcome didn't reach its action", {
+            event: "operate.delegate.report_failed", operation: delegate.delegateId, failureCount: delegate.reportTries + 1, error,
+          });
+          answer = "retry";
+        }
+      }
+      let current = store.get(delegate.delegateId) ?? delegate;
+      if (answer === "retry" && current.reportTries + 1 < RUN_CHAT_REPORT_TRIES) {
+        store.put({...current, reportTries: current.reportTries + 1, reportDue: now + 30_000 * 2 ** current.reportTries});
+        continue;
+      }
+      let done = {...current, reportTries: current.reportTries + 1};
+      delete done.reportDue;
+      store.put(done);
+    }
+  }
+
   // `profileId`'s personal workflows: only in their own live operate session (not retired), never
   // an ordinary workspace or someone else's session. Otherwise null.
   #ownPersonalWorkflows(profileId: string): PersonalWorkflowStore | null {
@@ -16702,6 +17039,15 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   // session (OverseerImpl.personalWorkflowsOf); an empty list anywhere else. Reads only.
   async listPersonalWorkflows(): Promise<PersonalWorkflow[]> {
     return this.impl.personalWorkflowsOf(this.clientProfileId);
+  }
+  // FAC-134 capability 3: the client's own delegates, only in their own live operate session
+  // (OverseerImpl.delegatesOf); an empty list anywhere else. Never what a delegate's chat said.
+  async listDelegates(): Promise<DelegateSummary[]> {
+    return this.impl.delegatesOf(this.clientProfileId);
+  }
+  // Stops one of the client's own running delegates, in their own live operate session.
+  async stopDelegate(delegateId: string): Promise<void> {
+    this.impl.stopDelegate(this.clientProfileId, delegateId);
   }
   async getTemporaryCanvas(id: string): Promise<TemporaryCanvas> {
     return this.impl.temporaryCanvasesOf(this.clientUserId).get(id);
@@ -19742,6 +20088,8 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // FAC-137: a use-role operator holds no temporary canvases in someone else's workspace.
   async listTemporaryCanvases(): Promise<TemporaryCanvas[]> { this.#deny(); }
   async listPersonalWorkflows(): Promise<PersonalWorkflow[]> { this.#deny(); }
+  async listDelegates(): Promise<DelegateSummary[]> { this.#deny(); }
+  async stopDelegate(_delegateId: string): Promise<void> { this.#deny(); }
   async getTemporaryCanvas(_id: string): Promise<TemporaryCanvas> { this.#deny(); }
   async saveTemporaryCanvas(_id: string, _expectedRevision: number): Promise<TemporaryCanvas> { this.#deny(); }
   async removeTemporaryCanvas(_id: string, _expectedRevision: number): Promise<void> { this.#deny(); }
@@ -20329,6 +20677,9 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   // FAC-137: the owner's own temporary canvases, in this their operate session.
   async listTemporaryCanvases(): Promise<TemporaryCanvas[]> { this.#live(); return this.owner.listTemporaryCanvases(); }
   async listPersonalWorkflows(): Promise<PersonalWorkflow[]> { this.#live(); return this.owner.listPersonalWorkflows(); }
+  // FAC-134 capability 3: the owner's own delegates, in this their operate session.
+  async listDelegates(): Promise<DelegateSummary[]> { this.#live(); return this.owner.listDelegates(); }
+  async stopDelegate(delegateId: string): Promise<void> { this.#live(); return this.owner.stopDelegate(delegateId); }
   async getTemporaryCanvas(id: string): Promise<TemporaryCanvas> { this.#live(); return this.owner.getTemporaryCanvas(id); }
   async saveTemporaryCanvas(id: string, expectedRevision: number): Promise<TemporaryCanvas> {
     this.#live(); return this.owner.saveTemporaryCanvas(id, expectedRevision);
@@ -21706,22 +22057,26 @@ class ApprovedEffectsImpl extends RpcTarget implements ApprovedEffects {
   #create: (() => Promise<ApprovedPersonalWorkflow>) | null;
   #run: (() => Promise<ApprovedWorkflowRun>) | null;
   #createCanvas: (() => Promise<ApprovedTemporaryCanvas>) | null;
+  #launch: (() => Promise<ApprovedDelegate>) | null;
   #invoked: Promise<ApprovedWorkflowRun> | null = null;
+  #launched: Promise<ApprovedDelegate> | null = null;
   #created: Promise<ApprovedPersonalWorkflow> | null = null;
   #ran: Promise<ApprovedWorkflowRun> | null = null;
   #canvas: Promise<ApprovedTemporaryCanvas> | null = null;
 
   /**
-   * Only what the action declared: a run to start (FAC-120), a canvas to create (FAC-137), or a
-   * personal workflow to create or run (FAC-134); everything else absent.
+   * Only what the action declared: a run to start (FAC-120), a canvas to create (FAC-137), a
+   * personal workflow to create or run, or a delegate to launch (FAC-134); everything else absent.
    */
   constructor(effects: {
     invoke?: () => Promise<ApprovedWorkflowRun>,
     createCanvas?: () => Promise<ApprovedTemporaryCanvas>,
     create?: () => Promise<ApprovedPersonalWorkflow>,
     run?: () => Promise<ApprovedWorkflowRun>,
+    launch?: () => Promise<ApprovedDelegate>,
   }) {
     super();
+    this.#launch = effects.launch ?? null;
     this.#invoke = effects.invoke ?? null;
     this.#createCanvas = effects.createCanvas ?? null;
     this.#create = effects.create ?? null;
@@ -21734,6 +22089,7 @@ class ApprovedEffectsImpl extends RpcTarget implements ApprovedEffects {
     this.#create = null;
     this.#run = null;
     this.#createCanvas = null;
+    this.#launch = null;
   }
 
   async invokeWorkflow(): Promise<ApprovedWorkflowRun> {
@@ -21755,6 +22111,13 @@ class ApprovedEffectsImpl extends RpcTarget implements ApprovedEffects {
     if (!run) return {status: "refused", kind: "policy", reason: PERSONAL_WORKFLOW_NEEDS_APPROVAL};
     this.#ran ??= run();
     return await this.#ran;
+  }
+
+  async launchDelegate(): Promise<ApprovedDelegate> {
+    let launch = this.#launch;
+    if (!launch) return {status: "refused", kind: "policy", reason: DELEGATE_NEEDS_APPROVAL};
+    this.#launched ??= launch();
+    return await this.#launched;
   }
 
   async createTemporaryCanvas(): Promise<ApprovedTemporaryCanvas> {

@@ -74,6 +74,8 @@ export function autoApprovalRule(
   if (description.temporaryCanvas !== undefined) return undefined;
   // Nor a personal workflow to create or run (FAC-134 capability 2).
   if (description.personalWorkflow !== undefined || description.personalWorkflowRun !== undefined) return undefined;
+  // Nor a delegate (FAC-134 capability 3, ADR 0020): only the person's own approval launches one.
+  if (description.delegate !== undefined) return undefined;
   let tag = description.actionKind?.tag;
   if (tag === undefined) return undefined;
   if (storage.containsRestrictedData.get()) return undefined;
