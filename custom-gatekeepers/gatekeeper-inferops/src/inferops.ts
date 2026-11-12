@@ -4291,22 +4291,11 @@ const DOT_CANVAS_SIZES = { small: { w: 4, h: 4 }, half: { w: 6, h: 6 }, large: {
 const DOT_CANVAS_PLACEMENT_KEYS: ReadonlySet<string> = new Set(["ref", "layout", "filters"]);
 
 /**
- * An `inferops://<tenant>.<workspace>/<domain>/<widget>/<id>` reference as a built-in widget's ref.
- * Interim (FAC-137): until inferops #2649 sends the kernel's typed ref, a string is read this way, and
- * the kernel checks it like any other. A reference identifies its target; it authorizes nothing.
- */
-function dotCanvasRef(ref: unknown): unknown {
-  if (typeof ref !== "string") return ref;
-  const match = /^inferops:\/\/[^/]+\/([a-z0-9-]+)\/([a-z0-9-]+)\/[^/]+$/u.exec(ref);
-  if (!match) throw new Error("A placement names an inferops:// widget reference.");
-  return { type: "builtin", kind: `${match[1]}/${match[2]}`, target: ref };
-}
-
-/**
- * The Dot's proposed canvas (inferops `inferos_canvas_compose`: a title and placements, each a
- * reference, an optional size and filters) as the kernel takes it: each size becomes grid cells,
- * packed left to right and then down (`large` when absent). The kernel's own check runs last. Any
- * placement it can't take refuses the whole proposal: never a partial canvas.
+ * The Dot's proposed canvas (inferops `inferos_canvas_compose`: a title and placements, each the
+ * kernel's typed widget reference, an optional size and string filters) as the kernel takes it: each
+ * size becomes grid cells, packed left to right and then down (`large` when absent); the reference and
+ * filters pass through unchanged, and the kernel's own check runs last. Any placement it can't take
+ * refuses the whole proposal: never a partial canvas.
  */
 export function dotCanvasInput(input: unknown): TemporaryCanvasInput {
   if (typeof input !== "object" || input === null) throw new Error("A canvas proposal has a title and placements.");
@@ -4330,7 +4319,7 @@ export function dotCanvasInput(input: unknown): TemporaryCanvasInput {
     const layout = { x, y, w, h };
     x += w;
     rowHeight = Math.max(rowHeight, h);
-    return { ref: dotCanvasRef(fields.ref), layout, ...(fields.filters === undefined ? {} : { filters: fields.filters }) };
+    return { ref: fields.ref, layout, ...(fields.filters === undefined ? {} : { filters: fields.filters }) };
   });
   return parseTemporaryCanvasInput({ title: raw.title, placements });
 }
@@ -4741,7 +4730,13 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
       // staged with no declaration, so approving it creates nothing and declining it is the way out.
       const canvas = dotCanvasOf(proposal.input);
       const widgets = canvas
-        ? canvas.placements.map(({ ref }) => ref.type === "builtin" ? `${ref.kind}: ${ref.target}` : `console ${ref.consoleId} widget ${ref.sourceGadgetId} (${ref.blueprintId}@${ref.version})`).join("\n")
+        ? canvas.placements.map(({ ref, filters }) => {
+          const widget = ref.type === "builtin" ? `${ref.kind}: ${ref.target}`
+            : `console ${ref.consoleId} widget ${ref.sourceGadgetId} (${ref.blueprintId}@${ref.version})`;
+          // Each placement's filters, so the person approves exactly what the canvas will show.
+          const shown = Object.entries(filters ?? {}).map(([name, value]) => `${name} = ${JSON.stringify(value)}`);
+          return shown.length > 0 ? `${widget}, filtered by ${shown.join(", ")}` : widget;
+        }).join("\n")
         : "";
       this.#receipts.set(proposal.id, await this.binding.submit(this.queue, actionId, {
         title: sanitizeTitle("Your Dot proposes a temporary canvas"),

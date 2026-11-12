@@ -312,9 +312,12 @@ describe("deciding a temporary canvas proposal", () => {
   const BOARD = "inferops://acme.operations/project/board/ENG";
   const CARD = "inferops://acme.operations/project/issue-card/ENG-7";
   const GONE = "This canvas expired or was removed since it was created. Ask your Dot for it again.";
+  // The kernel's typed references, as inferops #2649 sends them.
+  const board = { type: "builtin", kind: "project/board", target: BOARD };
+  const card = { type: "builtin", kind: "project/issue-card", target: CARD };
   const compose = (input: Record<string, unknown> = {
     title: "Release week",
-    placements: [{ ref: BOARD, layout: "small", filters: { status: "open" } }, { ref: CARD, layout: "half" }, { ref: BOARD }],
+    placements: [{ ref: board, layout: "small", filters: { status: "open" } }, { ref: card, layout: "half" }, { ref: board }],
   }) => proposal({ tool: "inferos_canvas_compose", input });
 
   it("is staged as its own kind, declaring to the kernel the canvas it will create, sizes as packed grid cells", async () => {
@@ -329,17 +332,19 @@ describe("deciding a temporary canvas proposal", () => {
         { ref: { type: "builtin", kind: "project/board", target: BOARD }, layout: { x: 0, y: 6, w: 12, h: 8 }, filters: {} },
       ] },
     });
-    expect(JSON.stringify(action)).toContain("project/issue-card: " + CARD);
+    // Each placement on the card, with its filters, so the person approves exactly what it will show.
+    expect(JSON.stringify(action)).toContain(`project/board: ${BOARD}, filtered by status = \\"open\\"`);
+    expect(JSON.stringify(action)).toContain(`project/issue-card: ${CARD}\\n`);
   });
 
   it.each([
-    ["a list filter, which the kernel has no place for", { ref: BOARD, filters: { status: ["open", "closed"] } }],
-    ["a number filter", { ref: BOARD, filters: { limit: 5 } }],
-    ["a reference that isn't an inferops:// widget", { ref: "https://example.com/board" }],
-    ["an unknown size", { ref: BOARD, layout: "huge" }],
-    ["an unknown field", { ref: BOARD, position: { x: 0 } }],
+    ["a list filter, which the kernel has no place for", { ref: board, filters: { status: ["open", "closed"] } }],
+    ["a number filter", { ref: board, filters: { limit: 5 } }],
+    ["a string reference (inferops #2649's earlier shape)", { ref: BOARD }],
+    ["an unknown size", { ref: board, layout: "huge" }],
+    ["an unknown field", { ref: board, position: { x: 0 } }],
   ])("is unreadable whole with %s: never a partial canvas, and approving it asks the kernel nothing", async (_what, odd) => {
-    const { hooks, actionId } = await staged(script({ proposals: [compose({ title: "Mixed", placements: [{ ref: CARD }, odd] })] }));
+    const { hooks, actionId } = await staged(script({ proposals: [compose({ title: "Mixed", placements: [{ ref: card }, odd] })] }));
     const [action] = (await hooks.log()).actions;
     expect(action).not.toHaveProperty("temporaryCanvas");
     expect(JSON.stringify(action)).toContain("a canvas InferOS can't read");
