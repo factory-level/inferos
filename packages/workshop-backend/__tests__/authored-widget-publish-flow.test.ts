@@ -30,12 +30,21 @@ async function withClient<T>(run: (impl: any, client: Overseer, instance: Overse
       impl.requireSharedConfiguration = async () => {};
       impl.recordGadgetAnalytics = () => {};
       const owner = impl.users.idFromString(ownerId);
-      impl.users.get = () => ({
-        id: owner,
-        whoami: async () => ({id: "owner-profile", name: "Owner"}),
-        operateSessionWorkspaceId: async () => stub.id.toString(),
-        recordSharedGadgetOpen: async () => {},
-      });
+      // The owner's user, for this workspace only. `impl.users` is the User namespace every Durable
+      // Object in this pool worker shares (`ctx.exports.UserDurableObject`), so a `get` assigned onto
+      // it would answer every later file's user lookups with this stand-in.
+      const users = impl.users;
+      impl.users = {
+        idFromString: (id: string) => users.idFromString(id),
+        idFromName: (name: string) => users.idFromName(name),
+        newUniqueId: () => users.newUniqueId(),
+        get: () => ({
+          id: owner,
+          whoami: async () => ({id: "owner-profile", name: "Owner"}),
+          operateSessionWorkspaceId: async () => stub.id.toString(),
+          recordSharedGadgetOpen: async () => {},
+        }),
+      };
       const index = new Map<string, string>();
       const versions = new Map<string, {body: Uint8Array, metadata?: Record<string, string>}>();
       impl.env = {
