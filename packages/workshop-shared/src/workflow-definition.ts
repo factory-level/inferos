@@ -405,10 +405,12 @@ export type WorkflowRunResult = {
 };
 
 /**
- * The places a run's result is delivered: run history (FAC-114), and the requester's open page when
- * the published page they were shown wires its result to a navigation (FAC-116, `canvas`).
+ * The places a run's result is delivered: run history (FAC-114); the requester's open page when
+ * the published page they were shown wires its result to a navigation (FAC-116, `canvas`); and,
+ * for a run a person started by approving an action that asked for its outcome, that action's
+ * gatekeeper, which shows it where the action came from (FAC-134, `chat`: the Dot's conversation).
  */
-export type WorkflowRunDestination = "history" | "canvas";
+export type WorkflowRunDestination = "history" | "canvas" | "chat";
 
 /** Per destination: not yet, done, or given up on. Separate from the outcome (ADR 0012 §2). */
 export type WorkflowRunDelivery = Partial<Record<WorkflowRunDestination, "pending" | "delivered" | "undelivered">>;

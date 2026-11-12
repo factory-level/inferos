@@ -83,6 +83,26 @@ const WORKFLOW_OCCURRENCE_EXPIRY_SWEEP_LIMIT = 100;
 export type QueuedWorkflowRun = { deliveryId: number; hookId: number; method: string | null; args: unknown[] };
 
 /**
+ * Where a run started by a person's approval of an action reports its outcome (FAC-134): that
+ * person's operate session workspace and the action there, both taken by the kernel from the
+ * approval itself (`invokeTriggerAs`), never from anything a caller or the run supplies.
+ */
+export type RunReportTo = { sessionWorkspaceId: string; actionId: number };
+
+/**
+ * A run's outcome still to report to the action that started it (FAC-134; the `chat` destination):
+ * written as the run is admitted, made due once the run has a final outcome (`due`), retried by the
+ * alarm until it is delivered or given up on, then removed.
+ */
+export type RunChatReport = RunReportTo & {
+  deliveryId: number;
+  /** When it may next be tried; absent until the run's outcome is final. */
+  due?: number;
+  /** Failed tries so far. */
+  attempts: number;
+};
+
+/**
  * How the store tells time and how long a dynamic definition lasts (FAC-124). `dynamicTtlMs` is read
  * only when a dynamic definition is created, so a misconfigured deployment refuses just that.
  * `onChange` is called after anything that can change what is due to expire (a save, a pin added
@@ -119,6 +139,13 @@ export type StoredWorkflowInvocation = WorkflowInvocation & {
    * deployment names no such authority. Absent on requests admitted before FAC-111: read as null.
    */
   company?: string | null;
+  /** Where its run reports its outcome, for a run started by an approved action that asked (FAC-134). */
+  reportTo?: RunReportTo;
+  /**
+   * The id its run will have (FAC-134), minted with the request so the person approving it is told
+   * the run's own id at once, whenever the trigger's gatekeeper fires it. Absent on older requests.
+   */
+  runId?: string;
 };
 
 /** Most admitted requests one trigger may have waiting for delivery. */
@@ -157,7 +184,7 @@ export class WorkspaceWorkflowDefinitionStore {
           "workflowOccurrenceExpiries" | "workflowOccurrenceCounts" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
           "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired" |
-          "workflowRunQueue" | "workflowDefinitionShares">,
+          "workflowRunQueue" | "workflowDefinitionShares" | "runChatReports">,
       private retention: DefinitionRetention = DEFAULT_RETENTION,
       private audience: WorkflowDefinitionAudience = WORKSPACE_AUDIENCE,
       private bindingsNeededOf: BindingsNeededOf = () => []) {}
@@ -838,7 +865,7 @@ export class WorkspaceWorkflowDefinitionStore {
       let assignment = invocation ? this.storage.workflowTriggerAssignments.get(hookId) : undefined;
       // The durable run (FAC-111): minted here, in the delivery's own transaction, so a run exists
       // exactly when its delivery does, with the authority it was admitted under.
-      let runId = crypto.randomUUID();
+      let runId = invocation?.runId ?? crypto.randomUUID();
       let delivery: StoredWorkflowDelivery = {
         id, hookId, definitionId: pin.definitionId, revision: revision.revision,
         historyOwnerProfileId: stored.owner.id,
@@ -856,6 +883,10 @@ export class WorkspaceWorkflowDefinitionStore {
         },
       };
       if (invocation) this.storage.workflowInvocations.delete(invocation.id);
+      // Its outcome is owed to the approved action that asked for it (FAC-134), from admission on.
+      if (invocation?.reportTo) {
+        this.storage.runChatReports.put({ deliveryId: id, ...invocation.reportTo, attempts: 0 });
+      }
       this.#putDelivery(delivery);
       let count = this.storage.workflowDeliveryCount.get();
       this.storage.workflowDeliveryCount.put({ count: (count?.count ?? 0) + 1, indexed: true });
@@ -1077,7 +1108,7 @@ export class WorkspaceWorkflowDefinitionStore {
    * transaction that mints, so nothing awaited can move it in between.
    */
   beginInvocation(profileId: string, hookId: number, company: string | null = null,
-      expected?: { definitionId: string; revision: number }): WorkflowInvocation {
+      expected?: { definitionId: string; revision: number; reportTo?: RunReportTo }): WorkflowInvocation {
     return this.durableStorage.transactionSync(() => {
       let control = this.storage.workflowTriggerControls.get(hookId);
       let pin = this.storage.workflowTriggerPins.get(hookId);
@@ -1100,9 +1131,11 @@ export class WorkspaceWorkflowDefinitionStore {
       let invocation: StoredWorkflowInvocation = {
         id: crypto.randomUUID(), hookId, definitionId: pin.definitionId, revision,
         requestedAt: new Date(now), requestedBy: profileId, company,
+        ...(expected?.reportTo ? { reportTo: { ...expected.reportTo } } : {}),
+        runId: crypto.randomUUID(),
       };
       this.storage.workflowInvocations.put(invocation);
-      let { requestedBy: _, company: __, ...shown } = invocation;
+      let { requestedBy: _, company: __, reportTo: ___, runId: ____, ...shown } = invocation;
       return shown;
     });
   }
@@ -1262,6 +1295,15 @@ export class WorkspaceWorkflowDefinitionStore {
     this.#changed();
   }
 
+  /**
+   * The id of the run a person's request `invocationId` makes (FAC-134): minted with the request,
+   * so known while it waits for the trigger's gatekeeper and after its delivery, or null.
+   */
+  runIdOfInvocation(invocationId: string): string | null {
+    return this.storage.workflowInvocations.get(invocationId)?.runId ??
+        this.deliveryOfInvocation(invocationId)?.run?.runId ?? null;
+  }
+
   /** The delivery a person's request `invocationId` made, or null (FAC-114): at most one, ever. */
   deliveryOfInvocation(invocationId: string): StoredWorkflowDelivery | null {
     for (let delivery of this.storage.workflowDeliveries.list()) {
@@ -1292,6 +1334,18 @@ export class WorkspaceWorkflowDefinitionStore {
       if (!delivery) return;
       let { canvas: _, ...rest } = delivery.delivery ?? {};
       this.#putDelivery({ ...delivery, delivery: { ...rest, ...(state === undefined ? {} : { canvas: state }) } });
+    });
+  }
+
+  /**
+   * Record where delivery `deliveryId`'s outcome stands with the approved action that started it
+   * (FAC-134, the `chat` destination): owed, delivered, or given up on.
+   */
+  setChatDelivery(deliveryId: number, state: "pending" | "delivered" | "undelivered"): void {
+    this.durableStorage.transactionSync(() => {
+      let delivery = this.storage.workflowDeliveries.get(deliveryId);
+      if (!delivery) return;
+      this.#putDelivery({ ...delivery, delivery: { ...delivery.delivery, chat: state } });
     });
   }
 
