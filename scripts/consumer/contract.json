@@ -1,0 +1,6 @@
+{
+  "$comment": "What InferOS consumes from InferOps, declared once (FAC-142). check-contract.ts holds this repository to it, and InferOps' CI reads it from main to hold the producer to it. The board DTO is pinned by the generated schema at the gatekeeper's revision; AG-UI by the one version both sides install.",
+  "agui": { "package": "@ag-ui/core", "version": "1.0.2" },
+  "boardSchema": "scripts/consumer/project-board.schema.json",
+  "pin": "custom-gatekeepers/gatekeeper-inferops/connection.json"
+}

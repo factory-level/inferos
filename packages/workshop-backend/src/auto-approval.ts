@@ -43,28 +43,32 @@ export function enablerHasBuild(rule: AutoApproveTagRecord, roleOf: EffectiveRol
 }
 
 /**
- * Whether no auto-approval rule may approve `record` (FAC-102, FAC-112): a write an assigned run
- * proposed, one a requested run proposed on a later attempt, after a restart ran it again, or a
- * replay's copy of a write shown to a person to reject.
+ * Whether no auto-approval rule may approve `record` (FAC-102, FAC-112, FAC-14): a write an assigned
+ * run proposed, one a requested run proposed on a later attempt, after a restart ran it again, a
+ * replay's copy of a write shown to a person to reject, or a command the operate agent requested
+ * for a person, which a person always decides.
  */
 export function manualOnly(record: {
   caller: { from: string }; workflowRun?: { attempt: number }; replayDuplicateOf?: number;
 }): boolean {
-  return record.caller.from === "systemRun" || record.replayDuplicateOf !== undefined ||
+  return record.caller.from === "systemRun" || record.caller.from === "operateAgent" ||
+      record.replayDuplicateOf !== undefined ||
       (record.workflowRun !== undefined && record.workflowRun.attempt > 1);
 }
 
 /**
  * The single authority on whether an action may be applied without a human: the enabling rule if
- * the author marked the action `autoApprovable`, a user enabled a rule for its `actionKind` on
- * this gatekeeper and still has Build access, and the workspace has not latched restricted mode;
- * else undefined.
+ * the author marked the action `autoApprovable`, it declares no workflow run (FAC-120), a user
+ * enabled a rule for its `actionKind` on this gatekeeper and still has Build access, and the
+ * workspace has not latched restricted mode; else undefined.
  */
 export function autoApprovalRule(
     storage: AutoApprovalStorage, roleOf: EffectiveRoleLookup, gatekeeperId: number,
     description: ActionDescription)
     : AutoApproveTagRecord | undefined {
   if (description.autoApprovable !== true) return undefined;
+  // A declared workflow run (FAC-120) starts only on a person's own approval: no rule approves it.
+  if (description.workflowRun !== undefined) return undefined;
   let tag = description.actionKind?.tag;
   if (tag === undefined) return undefined;
   if (storage.containsRestrictedData.get()) return undefined;

@@ -224,6 +224,8 @@ export type DotConfirmAction = ActionBase & {
   expiresAt: string;
   /** What InferOps' confirm answered, bounded for the receipt's result. */
   confirmedOutcome?: Record<string, string | number | boolean | null>;
+  /** FAC-120: the InferOS run an approved workflow-run proposal started, for the receipt. */
+  runId?: string;
 };
 
 /** Any recorded action. */

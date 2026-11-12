@@ -9,11 +9,22 @@
 // prefix. They are not torn down here: `reset()` and `abortAllDurableObjects()` crash workerd when a
 // gadget's tail event is still being delivered to an overseer they abort, and
 // `evictAllDurableObjects()` waits on requests that never finish (subscriptions, held sessions).
+//
+// The User namespace every overseer holds as `impl.users` is one object for the whole worker, too, so
+// a file that assigns onto it (`impl.users.get = ...`) would hand its stand-in to every later file's
+// user lookups. As each file ends, anything it added there is removed and the file fails, naming it.
 
 import { afterAll, beforeAll } from "vitest";
-import { beginTestFile } from "../test-worker.js";
+import { beginTestFile, takeSharedUsersChanges } from "../test-worker.js";
 
 beforeAll(() => beginTestFile());
 // And again as it ends, so an alarm that fires while the next file is still loading is not
 // attributed to this one.
-afterAll(() => beginTestFile());
+afterAll(() => {
+  beginTestFile();
+  let changed = takeSharedUsersChanges();
+  if (changed.length > 0) {
+    throw new Error(`This file assigned ${changed.join(", ")} onto the User namespace every overseer shares; `
+      + "give the workspace its own stand-in (impl.users = {...}) instead.");
+  }
+});

@@ -76,7 +76,7 @@ export function summarizeDotOutcome(outcome: unknown): Record<string, string | n
 
 /**
  * A proposal's status in FAC-97's words, from InferOps' own status (derived at read time there):
- * proposed is waiting, confirming is running, confirmed succeeded, failed failed (with the receipt
+ * proposed is waiting, confirming is running, confirmed and handed-off succeeded, failed failed (with the receipt
  * code for InferOps' refusal), declined rejected, expired failed `EXPIRED`, and a confirming one
  * past its bound unknown. A failure's reason is the receipt's fixed sentence, never InferOps' words.
  */
@@ -87,6 +87,11 @@ export function dotProposalStatus(proposal: DotProposalWire): WriteStatus {
     case "confirming":
       return { outcome: "running" };
     case "confirmed":
+      return { outcome: "succeeded", result: summarizeDotOutcome(proposal.outcome) };
+    // FAC-120: an InferOS workflow-run proposal, confirmed in InferOps only once InferOS admitted
+    // the run as the person who approved it here. The hand-off is the write; the run's own
+    // outcome is InferOS's (its run record and receipt), never this proposal's.
+    case "handed-off":
       return { outcome: "succeeded", result: summarizeDotOutcome(proposal.outcome) };
     case "declined":
       return { outcome: "rejected" };
@@ -115,3 +120,28 @@ export const DOT_REF_MAX = 2_000;
 export const DOT_ERROR_MAX = 300;
 /** What the caller is told when the Dot's reply couldn't be read (a malformed or oversized event). */
 export const DOT_UNREADABLE = "The Dot's reply couldn't be read. Ask again.";
+
+/**
+ * The Dot's knowledge writes (inferops FAC-136): a page edit or create the person's confirm makes as
+ * them, live, as from the Wiki editor. Never publication: no Dot tool publishes.
+ */
+export const DOT_KNOWLEDGE_WRITE_TOOLS = new Set(["knowledge_page_edit", "knowledge_page_create"]);
+
+/** What a page edit's card says the change does (FAC-136), word for word. */
+export const DOT_KNOWLEDGE_WRITE_WORDS = "Your Dot will change this page as you, and readers see it right away.";
+
+/** What a new page's card says instead: the page doesn't exist until the change is made. */
+export const DOT_KNOWLEDGE_CREATE_WORDS = "Your Dot will create this page as you, and readers see it right away.";
+
+/**
+ * The page (an edit) or the workspace (a create) a knowledge write proposal names by its link, or
+ * null when `tool` isn't one or names none. Shown on the card as InferOps stored it; it identifies
+ * the target and grants nothing.
+ */
+export function dotKnowledgeTarget(tool: string, input: unknown): { label: string; link: string } | null {
+  if (!DOT_KNOWLEDGE_WRITE_TOOLS.has(tool) || typeof input !== "object" || input === null) return null;
+  let fields = input as Record<string, unknown>;
+  let link = tool === "knowledge_page_edit" ? fields.page : fields.workspace;
+  if (typeof link !== "string" || !link.startsWith("inferops://")) return null;
+  return { label: tool === "knowledge_page_edit" ? "Page" : "New page in", link };
+}

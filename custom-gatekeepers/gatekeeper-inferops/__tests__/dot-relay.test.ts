@@ -118,7 +118,8 @@ describe("the Dot's answers, parsed strictly", () => {
   };
 
   it("reads every status InferOps names, its derived ones included", () => {
-    for (const status of ["proposed", "confirming", "confirmed", "declined", "failed", "expired", "unknown"]) {
+    // `handed-off` (FAC-120, inferops#2627): a confirmed InferOS workflow-run proposal.
+    for (const status of ["proposed", "confirming", "confirmed", "handed-off", "declined", "failed", "expired", "unknown"]) {
       expect(parseDotProposal({ ...proposal, status }).status).toBe(status);
     }
   });

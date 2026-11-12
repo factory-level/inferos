@@ -4,7 +4,7 @@
 // conversation back from InferOps whenever it is shown. Each change the Dot proposes is decided
 // where every other write is, under Needs your approval; this gadget decides nothing.
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import { classify, shown } from "./lib/dot.ts";
+import { classify, shown, shownProgress } from "./lib/dot.ts";
 import type {
   AskResult, DotConversationSession, Failure, GadgetStub, InferOpsDotSession, OpenResult, ProgressTarget,
 } from "./lib/protocol.ts";
@@ -58,8 +58,9 @@ export class Gadget extends DurableObject<GadgetEnv, unknown> implements GadgetS
     if (!dot) return NOT_CONNECTED;
     try {
       const conversation = (await this.#conversation(dot, true))!;
-      // Each step reaches the client as it happens; one it can't take stops nothing here.
-      const turn = await conversation.ask(prompt, { onProgress: event => progress.progress(event) });
+      // Each step reaches the client as it happens, a proposed change only as shown (never its
+      // receipt or arguments); one it can't take stops nothing here.
+      const turn = await conversation.ask(prompt, { onProgress: event => progress.progress(shownProgress(event)) });
       return { ok: true, status: turn.status, conversation: shown(await conversation.read()) };
     } catch (error) {
       return classify(error);

@@ -10,9 +10,10 @@
 // prototype, so a restarted instance reaches the same stand-ins: a real dynamic worker and git
 // commit can't be made from a test. Everything the run is checked and executed from is the
 // workspace's own storage.
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
+import { onlyExplicitAlarms, takeSkippedFiring } from "./test-worker.js";
 import { RUN_REQUESTER_REVOKED, WORKFLOW_RUN_CANCELLED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
 import { DEFAULT_WORKFLOW_RUN_LIMITS, TRIGGER_LIFECYCLE_REFUSED, WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS } from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
@@ -51,6 +52,12 @@ const callsIn = (name: string) => callWorkspaces.filter(id => id === env.TEST_OV
  * test that resets mid-run re-executes at once. The tests of the limits themselves set their own.
  */
 let testLimits: Record<string, number> = { ...DEFAULT_WORKFLOW_RUN_LIMITS, backoffSeconds: 0 };
+
+// Each test runs its workspace's alarm itself (`runAlarm`, below). One workerd fired on its own
+// would race the test's calls (a replay's withdrawal is due at once) or wake an earlier test's
+// workspace during a later one, through the stand-ins that test put on the shared prototype and
+// into `calls` and `gatekeeper`.
+beforeAll(() => onlyExplicitAlarms());
 
 afterEach(() => {
   for (let undo of restore.splice(0)) undo();
@@ -206,14 +213,38 @@ function runsAs(impl: any, kind: "gadget-bindings" | "assigned",
 }
 const actionsOf = (impl: any) => [...impl.storage.actions.list()].filter((a: any) => a.type === "action");
 
+/**
+ * Runs the workspace's alarm handler now, as workerd would have: workerd's own firing never runs it
+ * in this file (`onlyExplicitAlarms`, above), so each test runs it exactly when it means to. The
+ * alarm must have been armed, still or until workerd fired it, so a run queued without arming its
+ * alarm, which would never start in production, fails here. workerd can take an armed alarm before
+ * its firing reaches the gate (`takeSkippedFiring`), so the check waits a moment for either.
+ */
+async function runAlarm(name: string) {
+  let stub = env.TEST_OVERSEER.getByName(name);
+  let id = stub.id.toString();
+  let fired = false;
+  await vi.waitFor(async () => {
+    fired ||= takeSkippedFiring(id);
+    let armed = await runInDurableObject(stub, async (_: OverseerDurableObject, state: DurableObjectState) =>
+      (await state.storage.getAlarm()) !== null);
+    expect(armed || fired, "the workspace's alarm was never armed").toBe(true);
+  }, { timeout: 2_000 });
+  await runInDurableObject(stub, async (instance: OverseerDurableObject, state: DurableObjectState) => {
+    // Whatever was armed or fired until now, this run is it.
+    await state.storage.deleteAlarm();
+    takeSkippedFiring(id);
+    await instance.alarm();
+  });
+}
+
 /** Runs the workspace's alarm once more: what withdraws a replay's staged copies (retryReplayWithdrawals). */
 async function nextAlarm(name: string) {
-  await runDurableObjectAlarm(env.TEST_OVERSEER.getByName(name));
+  await runAlarm(name);
 }
 
 async function settled(name: string, id: number) {
-  let stub = env.TEST_OVERSEER.getByName(name);
-  await runDurableObjectAlarm(stub);
+  await runAlarm(name);
   return withImpl(name, impl => vi.waitFor(() => {
     let execution = deliveryOf(impl, id)?.execution;
     expect(["finished", "failed"]).toContain(execution?.state);
@@ -904,7 +935,7 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
       await impl.cancelWorkflowRun(second.invocationId, ADA, "build");
       return second.deliveryId;
     });
-    await runDurableObjectAlarm(env.TEST_OVERSEER.getByName(name));
+    await runAlarm(name);
     expect(callsIn(name)).toBe(0);
     await withImpl(name, impl => expect(deliveryOf(impl, id).execution.failure).toBe("cancelled"));
   });
@@ -1013,7 +1044,7 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
       deliveries.put({ ...backing, execution: { ...backing.execution, state: "running", attempts: 1, startedAt: new Date() } });
       return [first.deliveryId, second.deliveryId];
     });
-    await runDurableObjectAlarm(env.TEST_OVERSEER.getByName(name));
+    await runAlarm(name);
     expect(callsIn(name)).toBe(0);
     await withImpl(name, async impl => {
       expect(deliveryOf(impl, ids[0]).execution).toMatchObject({ state: "failed", failure: "attempts-exhausted" });

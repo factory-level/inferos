@@ -13,6 +13,7 @@
 export const UNIT_NODE: readonly string[] = [
   "admin-config.test.ts",
   "agent-catalog.test.ts",
+  "rpc-target-validation.test.ts",
   "agent-compaction.test.ts",
   "agent-tool-results.test.ts",
   "ai-gateway.test.ts",
@@ -121,6 +122,7 @@ export const WORKERD_LIGHT: readonly string[] = [
  */
 export const BACKEND: readonly string[] = [
   "agent-spawner-config.test.ts",
+  "approved-workflow-run.test.ts",
   "operate-flow-start.test.ts",
   "widget-state.test.ts",
   "widget-event-navigation.test.ts",
@@ -141,6 +143,7 @@ export const BACKEND: readonly string[] = [
   "console-bound-views.test.ts",
   "console-revision-notice.test.ts",
   "console-tool-invocation.test.ts",
+  "console-commands.test.ts",
   "describe-binding.test.ts",
   "execution-bound-loopbacks.test.ts",
   "gadget-restore.test.ts",

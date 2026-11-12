@@ -91,7 +91,7 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     // wiki-embedded-widget.test.ts).
     "resolveEmbeddedWidget" | "getEmbeddedWidget" | "listWidgetInstances" |
     // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
-    "listWorkflowDefinitions" |
+    "listWorkflowDefinitions" | "listReadableWorkflowSchedules" |
     // A use collaborator listed on a trigger's control may run it, and sees only those controls
     // (workflow-invocation.test.ts covers both, and that nothing else opens to them).
     "listTriggerControls" | "invokeTrigger" |
@@ -135,6 +135,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
+  // Run-history discovery is a build-only read; use collaborators cannot enumerate definitions.
+  listReadableWorkflowHistories: ws => ws.listReadableWorkflowHistories(),
   setTriggerControl: ws => ws.setTriggerControl(1, null),
   // Choosing what a trigger's runs execute as is building, and Admin-only (FAC-102).
   setTriggerAssignment: ws => ws.setTriggerAssignment(1, null),

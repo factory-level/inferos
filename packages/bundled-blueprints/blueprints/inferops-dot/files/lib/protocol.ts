@@ -69,11 +69,23 @@ export interface InferOpsDotSession {
 // ---------------------------------------------------------------------------
 // This gadget's own protocol.
 
+/**
+ * A knowledge write the Dot proposed (inferops FAC-136), as the client draws it: what it targets, by
+ * the canonical link InferOps gave it (a link names a target and grants nothing), and the page's
+ * title where the proposal carries one. An edit carries only its page's link (and a new title,
+ * when it renames the page); a create carries the workspace's link and the new page's title.
+ */
+export type KnowledgeWrite =
+  | { kind: "edit"; page: string; newTitle?: string }
+  | { kind: "create"; workspace: string; title?: string };
+
 /** A change as the client draws it: only what it needs, never its receipt or raw arguments. */
 export interface ShownProposal {
   id: string;
   tool: string;
   status: WriteStatus;
+  /** Set for a knowledge write (FAC-136): what it changes, from its arguments, read on the server. */
+  knowledge?: KnowledgeWrite;
 }
 
 export interface ShownMessage {
@@ -112,9 +124,14 @@ export type AskResult =
   | { ok: true; status: DotTurn["status"]; conversation: ShownConversation }
   | Failure;
 
+/** Something that happened while the Dot answered, as the client hears it: a change only as shown. */
+export type ShownProgress =
+  | Exclude<DotProgress, { type: "proposal" }>
+  | { type: "proposal"; proposal: ShownProposal };
+
 /** What the client hands the Durable Object to hear the answer as it comes. */
 export interface ProgressTarget {
-  progress(event: DotProgress): void;
+  progress(event: ShownProgress): void;
 }
 
 /** The Durable Object's RPC surface, as the client's `gadget` stub sees it. */

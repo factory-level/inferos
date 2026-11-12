@@ -4,7 +4,8 @@ import {
   MAX_WORKSPACE_WORKFLOW_DEFINITIONS, TRIGGER_RUNS_PER_INVOKER, TRIGGER_RUNS_PER_TRIGGER,
   WORKFLOW_DEFINITION_EXPIRED, WORKFLOW_INVOCATION_TTL_MS, dynamicDefinitionTtlMs, parseTriggerControlSettings, parseWorkflowDefinitionTitle,
   type TriggerAssignment, type TriggerControl, type WorkflowDefinition, type WorkflowDefinitionDelivery,
-  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowInvocation, type WorkflowRunFailure, type WorkflowRunResult,
+  type WorkflowDefinitionRevision, type WorkflowDefinitionSave, type WorkflowDefinitionHistoryRef,
+  type WorkflowInvocation, type WorkflowRunFailure, type WorkflowRunResult,
   type WorkflowTriggerDefinitionRef, isLiveWorkflowDelivery, WORKFLOW_OCCURRENCE_LIMIT_ERROR_NAME,
   MAX_WORKFLOW_DEFINITION_SHARES, parseWorkflowDefinitionRights,
   type WorkflowDefinitionRights, type WorkflowDefinitionShare,
@@ -128,6 +129,12 @@ const MAX_WAITING_INVOCATIONS = 20;
  * may not run the definition it is pinned to (FAC-122).
  */
 export const CANNOT_RUN = "You can't run this trigger.";
+/**
+ * Refuses an approved run (FAC-120) whose trigger no longer runs the definition and revision the
+ * person approved: repinned, or a follow-latest definition published again, since.
+ */
+export const WORKFLOW_REVISION_CHANGED =
+  "The workflow changed since it was proposed: its trigger no longer runs that revision. Ask the Dot again.";
 
 /** Refused, without saying whether the definition exists, to anyone it isn't visible to. */
 const NOT_FOUND = "Workflow definition not found.";
@@ -361,6 +368,13 @@ export class WorkspaceWorkflowDefinitionStore {
   get(viewer: string, id: string, role: CollaboratorRole | null): WorkflowDefinition | null {
     let stored = this.storage.workflowDefinitions.get(id);
     return stored && this.#available(stored, this.retention.now()) ? this.#viewOf(stored, viewer, role) : null;
+  }
+
+  /** Whether the viewer can read this definition through the same projection used by list/get. */
+  canReadDefinition(viewer: string, id: string, role: CollaboratorRole | null): boolean {
+    let stored = this.storage.workflowDefinitions.get(id);
+    return !!stored && this.#available(stored, this.retention.now(), this.#pinnedIds()) &&
+      this.#viewOf(stored, viewer, role) !== null;
   }
 
   /**
@@ -1067,12 +1081,22 @@ export class WorkspaceWorkflowDefinitionStore {
    * Admits `profileId`'s request to run trigger `hookId` now: its control must list them and the
    * trigger must still be pinned. Mints the invocation, which the trigger's delivery must name
    * (`fire`). Every refusal reads the same, whether there's no control, no pin or no listing.
+   * With `expected` (an approved run, FAC-120), the revision it would start on must be that
+   * definition and revision, or it refuses with `WORKFLOW_REVISION_CHANGED`, in the same
+   * transaction that mints, so nothing awaited can move it in between.
    */
-  beginInvocation(profileId: string, hookId: number, company: string | null = null): WorkflowInvocation {
+  beginInvocation(profileId: string, hookId: number, company: string | null = null,
+      expected?: { definitionId: string; revision: number }): WorkflowInvocation {
     return this.durableStorage.transactionSync(() => {
       let control = this.storage.workflowTriggerControls.get(hookId);
       let pin = this.storage.workflowTriggerPins.get(hookId);
       if (!control || !pin || !control.invokers.includes(profileId)) throw new Error(CANNOT_RUN);
+      let revision = pin.mode === "follow-latest"
+        ? this.storage.workflowDefinitions.get(pin.definitionId)?.published?.revision ?? pin.revision
+        : pin.revision;
+      if (expected && (expected.definitionId !== pin.definitionId || expected.revision !== revision)) {
+        throw new Error(WORKFLOW_REVISION_CHANGED);
+      }
       let waiting = 0;
       for (let invocation of this.storage.workflowInvocations.list()) if (invocation.hookId === hookId) waiting++;
       if (waiting >= MAX_WAITING_INVOCATIONS) throw new Error("This trigger already has too many runs waiting to start.");
@@ -1083,10 +1107,7 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowInvocationLog.put({ id: logId, hookId, requestedBy: profileId, at: now });
       if (logId >= MAX_WORKFLOW_INVOCATIONS) this.storage.workflowInvocationLog.delete(logId - MAX_WORKFLOW_INVOCATIONS);
       let invocation: StoredWorkflowInvocation = {
-        id: crypto.randomUUID(), hookId, definitionId: pin.definitionId,
-        revision: pin.mode === "follow-latest"
-          ? this.storage.workflowDefinitions.get(pin.definitionId)?.published?.revision ?? pin.revision
-          : pin.revision,
+        id: crypto.randomUUID(), hookId, definitionId: pin.definitionId, revision,
         requestedAt: new Date(now), requestedBy: profileId, company,
       };
       this.storage.workflowInvocations.put(invocation);
@@ -1382,18 +1403,54 @@ export class WorkspaceWorkflowDefinitionStore {
    * from their own records (`run`).
    */
   deliveries(viewer: string, definitionId: string, role: CollaboratorRole | null): WorkflowDefinitionDelivery[] {
-    let stored = this.storage.workflowDefinitions.get(definitionId);
     let matches = Array.from(this.storage.workflowDeliveries.list()).filter(delivery => delivery.definitionId === definitionId);
-    let owner = stored?.owner.id ?? matches.find(delivery => delivery.historyOwnerProfileId)?.historyOwnerProfileId;
-    let editShare = role === "build" && this.storage.workflowDefinitionShares.get(shareKey(definitionId, viewer))?.rights.edit === true;
-    if (stored ? !this.#rights(stored, viewer, role).edit : (!owner || (owner !== viewer && !editShare))) {
-      throw new Error(NOT_FOUND);
-    }
+    let sweptOwner = this.#sweptHistoryOwner(matches);
+    if (!this.#canReadHistory(viewer, definitionId, role, sweptOwner)) throw new Error(NOT_FOUND);
     let shown: WorkflowDefinitionDelivery[] = [];
     for (let { id: _, historyOwnerProfileId: __, ...delivery } of matches) {
-      if (delivery.definitionId === definitionId) shown.push(delivery);
+      if (delivery.definitionId === definitionId) {
+        let stored = { id: _, ...delivery };
+        // The expiry index schedules never-started deliveries at their start-window boundary so
+        // they can eventually be swept. That index entry is not user-facing expiry while live.
+        let expiry = isLiveWorkflowDelivery(stored, this.retention.now())
+          ? undefined
+          : this.#historyExpiry(stored);
+        shown.push({ ...delivery, historyExpiresAt: expiry === undefined ? null : new Date(expiry) });
+      }
     }
     return shown;
+  }
+
+  /** Discover only histories the caller can already read; swept definitions use retained owner IDs. */
+  listReadableWorkflowHistories(viewer: string, role: CollaboratorRole | null): WorkflowDefinitionHistoryRef[] {
+    let deliveriesByDefinition = new Map<string, StoredWorkflowDelivery[]>();
+    for (let delivery of this.storage.workflowDeliveries.list()) {
+      let deliveries = deliveriesByDefinition.get(delivery.definitionId);
+      if (deliveries) deliveries.push(delivery);
+      else deliveriesByDefinition.set(delivery.definitionId, [delivery]);
+    }
+    return Array.from(deliveriesByDefinition, ([definitionId, deliveries]) =>
+      this.#canReadHistory(viewer, definitionId, role, this.#sweptHistoryOwner(deliveries))
+        ? { definitionId }
+        : null)
+      .filter((history): history is WorkflowDefinitionHistoryRef => history !== null)
+      .toSorted((left, right) => left.definitionId.localeCompare(right.definitionId));
+  }
+
+  /** Use one owner selection rule for direct reads and swept-history discovery. */
+  #sweptHistoryOwner(deliveries: Iterable<StoredWorkflowDelivery>): string | undefined {
+    for (let delivery of deliveries) {
+      if (delivery.historyOwnerProfileId) return delivery.historyOwnerProfileId;
+    }
+    return undefined;
+  }
+
+  #canReadHistory(viewer: string, definitionId: string, role: CollaboratorRole | null,
+      sweptOwner?: string): boolean {
+    let stored = this.storage.workflowDefinitions.get(definitionId);
+    if (stored) return this.#rights(stored, viewer, role).edit;
+    let editShare = role === "build" && this.storage.workflowDefinitionShares.get(shareKey(definitionId, viewer))?.rights.edit === true;
+    return !!sweptOwner && (sweptOwner === viewer || editShare);
   }
 
   #owned(profileId: string, id: string): StoredWorkflowDefinition {

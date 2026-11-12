@@ -34,7 +34,7 @@ import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
-  WorkflowDefinitionRights, WorkflowDefinitionShare,
+  WorkflowDefinitionRights, WorkflowDefinitionShare, WorkflowDefinitionHistoryRef, WorkflowScheduleSummary,
   WorkflowTriggerDefinitionRef,
   WorkflowDefinitionSave, WorkflowDefinitionDuplicate, WorkflowInvocation, RequestedRun, TriggerLifecycle,
 } from "./workflow-definition.js";
@@ -2650,11 +2650,24 @@ export type ActionRequester = "agent" | "person" | "gadget" | "hook";
  * assigned service account (FAC-102) rather than as the person who asked; `requestedBy` is the
  * profile id of the person who asked for the run, or null when the trigger fired it itself;
  * `triggerLabel` is the trigger's run-control label, when it has one. `agent-turn`: an agent's turn
- * in a chat proposed it, the chat itself not named.
+ * in a chat proposed it, the chat itself not named; for the operate agent's request of a widget's
+ * command (FAC-14 K2), `onBehalfOf` names the person it asked for, by profile id and the display
+ * name their profile had then, so the decider knows whose request it is. A name, never authority.
  */
-export type ActionContext =
+export type ActionContext = (
   | { kind: "workflow-run"; hookId: WorkpieceId; assigned: boolean; runId?: string; requestedBy?: string | null; triggerLabel?: string }
-  | { kind: "agent-turn" };
+  | { kind: "agent-turn"; onBehalfOf?: { profileId: string; name: string } }
+  | { kind: "declared-run" }
+) & {
+  /**
+   * The workflow run approving this action starts (FAC-120, round 6), when the action declared one
+   * (`ActionDescription.workflowRun`): the trigger reference the kernel validated at submit and binds
+   * the approval's effects to. Set only by the kernel from its own record, never by a gatekeeper, so
+   * a surface that shows no fields (a notification's Approve, a collapsed row) can still say a run
+   * will start. A `declared-run` context is one whose only origin to report is this.
+   */
+  declaredRun?: { reference: string };
+};
 
 export type ActionLogEntry = {
   /** Sequential ID number for the action. Counts up from when the workspace was created. */
@@ -2988,6 +3001,13 @@ export interface Overseer extends RpcTarget {
   getTriggerDefinition(hookId: number): Promise<WorkflowTriggerDefinitionRef | null>;
   /** The recorded firings of a definition the caller may see, oldest first. Build only. */
   listWorkflowDeliveries(definitionId: string): Promise<WorkflowDefinitionDelivery[]>;
+  /**
+   * IDs with retained history the caller may read (owner or persisted editor share), including
+   * swept definitions. Build only.
+   */
+  listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]>;
+  /** Read safe cadence/status for schedules attached to definitions visible to this caller. */
+  listReadableWorkflowSchedules(): Promise<WorkflowScheduleSummary[]>;
 
   /**
    * Let the named people ask pinned trigger `hookId` to run now, or remove its control with null.

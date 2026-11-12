@@ -113,6 +113,34 @@ describe("a Dot turn", () => {
     expect((await hooks.log()).actions).toHaveLength(1);
   });
 
+  it("says a knowledge write changes the page as the person, live, names its page, and never says it publishes (FAC-136)", async () => {
+    const page = "inferops://acme.handbook/knowledge/page/00000000-0000-4000-8000-0000000000aa";
+    const { hooks, conversation } = await setup(script({
+      proposals: [proposal({ tool: "knowledge_page_edit", input: { page, expectedVersion: 3, body: "Refunds take 5 days." } })],
+    }));
+    await conversation.read();
+    const [card] = (await hooks.log()).actions;
+    expect(card).toMatchObject({ kind: "inferops.dot-confirm", title: "Your Dot proposes a change to a wiki page" });
+    expect(card!.description).toContain("Your Dot will change this page as you, and readers see it right away.");
+    expect(card!.description).not.toMatch(/publish/i);
+    expect(card!.fields.Page).toBe(page);
+    expect(card!.fields.Operation).toBe("knowledge_page_edit");
+  });
+
+  it("says a new page is created as the person, live, in the workspace it names, and never that it publishes (FAC-136)", async () => {
+    const workspace = "inferops://acme.handbook/knowledge/page";
+    const { hooks, conversation } = await setup(script({
+      proposals: [proposal({ tool: "knowledge_page_create", input: { workspace, title: "Refunds", body: "Take 5 days." } })],
+    }));
+    await conversation.read();
+    const [card] = (await hooks.log()).actions;
+    expect(card).toMatchObject({ kind: "inferops.dot-confirm", title: "Your Dot proposes a new wiki page" });
+    expect(card!.description).toContain("Your Dot will create this page as you, and readers see it right away.");
+    expect(card!.description).toContain("checked again now in that workspace");
+    expect(card!.description).not.toMatch(/change this page|that page's workspace|publish/i);
+    expect(card!.fields["New page in"]).toBe(workspace);
+  });
+
   it("stages on reading a proposal no relay saw, so a cut turn's change is still decided here", async () => {
     const { hooks, conversation } = await setup(script({ proposals: [proposal()] }));
     const read = await conversation.read();
@@ -223,6 +251,60 @@ describe("deciding a proposal", () => {
   });
 });
 
+// FAC-120: the Dot's proposal to run an InferOS workflow. The run is the kernel's to start, as the
+// person approving it (its approved effects, scripted here); InferOps runs nothing for it.
+describe("deciding a workflow-run proposal", () => {
+  const REFERENCE = 'inferops://acme.operations/inferos/workflow-trigger/ws-1/7?definition="def-1"&revision="2"';
+  const workflow = () => proposal({ tool: "inferos_workflow_invoke", input: { reference: REFERENCE } });
+
+  it("is staged as its own kind, naming the trigger and revision, never as an InferOps change", async () => {
+    const { hooks } = await staged(script({ proposals: [workflow()] }));
+    const [action] = (await hooks.log()).actions;
+    expect(action).toMatchObject({ kind: "inferops.dot-workflow-invoke", title: "Your Dot proposes running a workflow", implementsRevert: false });
+    // Declared to the kernel at submit, which binds the approval's run to exactly this reference.
+    expect(action).toMatchObject({ workflowRun: { reference: REFERENCE } });
+    expect(JSON.stringify(action)).toContain("trigger 7 of InferOS workspace ws-1, revision 2");
+  });
+
+  it("starts nothing, and asks InferOps nothing, without a person's approval", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [workflow()] }));
+    const { failure } = await hooks.applyDot(actionId);
+    expect(failure).toMatchObject({ outcome: "notApplied", kind: "policy", message: "Starting a workflow run needs your own approval here." });
+    expect(await hooks.dotEffectsAsked()).toEqual([]);
+    expect((await hooks.dotCalls()).some(c => c.path.endsWith("/confirm"))).toBe(false);
+  });
+
+  it("starts the run through the kernel, then confirms the hand-off keyed by the proposal id, with the run on the receipt", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [workflow()], confirm: { outcome: { handedOff: true } } }));
+    const applied = await hooks.applyDot(actionId, { status: "started", runId: "run-1" });
+    expect(applied.failure).toBeNull();
+    expect(applied.result).toMatchObject({ kind: "dot-confirm", proposalId: PROPOSAL, runId: "run-1" });
+    expect(await hooks.dotEffectsAsked()).toEqual(["invoked"]);
+    expect((await hooks.dotCalls()).find(c => c.path.endsWith("/confirm"))?.key).toBe(PROPOSAL);
+    // Applied once: approving again starts nothing more.
+    await hooks.applyDot(actionId, { status: "started", runId: "run-2" });
+    expect(await hooks.dotEffectsAsked()).toEqual(["invoked"]);
+  });
+
+  it("a run that may have started is uncertain: never retried as a refusal, never declined, never confirmed", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [workflow()] }));
+    const { failure } = await hooks.applyDot(actionId, { status: "unknown", reason: "It isn't known whether the workflow run started." });
+    expect(failure).toMatchObject({ outcome: "unknown", retryable: false });
+    const calls = await hooks.dotCalls();
+    expect(calls.some(c => c.path.endsWith("/decline"))).toBe(false);
+    expect(calls.some(c => c.path.endsWith("/confirm"))).toBe(false);
+  });
+
+  it("refused by the kernel, it is not applied, in the refusal's kind, and is declined in InferOps, never confirmed", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [workflow()] }));
+    const { failure } = await hooks.applyDot(actionId, { status: "refused", kind: "permission", reason: "You can't run this trigger." });
+    expect(failure).toMatchObject({ outcome: "notApplied", kind: "permission", message: "You can't run this trigger." });
+    const calls = await hooks.dotCalls();
+    expect(calls.some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`))).toBe(true);
+    expect(calls.some(c => c.path.endsWith("/confirm"))).toBe(false);
+  });
+});
+
 describe("declining a proposal records only what InferOps confirmed (r2)", () => {
   it("keeps a decline InferOps didn't answer pending, says so, and can decline it again", async () => {
     const { hooks, actionId } = await staged(script({ proposals: [proposal()], decline: { status: 503, code: "UNAVAILABLE" } }));
@@ -288,10 +370,26 @@ describe("a proposal's status, in FAC-97's words", () => {
     expect(JSON.stringify(failed)).not.toContain("Ada");
     expect(dotProposalStatus(proposal({ status: "confirmed", outcome: { issue: { identifier: "ENG-7" } } })))
       .toEqual({ outcome: "succeeded", result: { "issue.identifier": "ENG-7" } });
+    // FAC-120: the hand-off to InferOS is the write that succeeded; the run is InferOS's to report.
+    expect(dotProposalStatus(proposal({ status: "handed-off", outcome: { handedOff: true, proposalId: "p-1" } })))
+      .toMatchObject({ outcome: "succeeded" });
   });
 
   it("summarizes an answer to identifying scalars only, bounded", () => {
     const summary = summarizeDotOutcome({ issue: { identifier: "ENG-7", description: "body", title: "t".repeat(500) }, deliveries: [{ id: 1 }] });
     expect(summary).toEqual({ "issue.identifier": "ENG-7", "issue.title": "t".repeat(200) });
+  });
+});
+
+describe("a knowledge write's target (FAC-136)", () => {
+  it("names an edit's page and a create's workspace by link, and nothing for any other tool or a non-link", async () => {
+    const { dotKnowledgeTarget } = await import("../src/dot");
+    const link = "inferops://acme.handbook/knowledge/page/00000000-0000-4000-8000-0000000000aa";
+    expect(dotKnowledgeTarget("knowledge_page_edit", { page: link })).toEqual({ label: "Page", link });
+    expect(dotKnowledgeTarget("knowledge_page_create", { workspace: "inferops://acme.handbook/knowledge/page" }))
+      .toEqual({ label: "New page in", link: "inferops://acme.handbook/knowledge/page" });
+    expect(dotKnowledgeTarget("issue_create", { page: link })).toBeNull();
+    expect(dotKnowledgeTarget("knowledge_page_edit", { page: "https://example.com" })).toBeNull();
+    expect(dotKnowledgeTarget("knowledge_page_edit", null)).toBeNull();
   });
 });
