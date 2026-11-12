@@ -6,6 +6,7 @@ import type { Overseer } from '@gadgets/workshop-shared/api'
 import { CountBadge } from './components/CountBadge'
 import { IncompleteDescriptionNotice, isDescriptionIncomplete } from './components/IncompleteDescriptionNotice'
 import { ActionFields, entryFields, fieldCountLabel } from './components/ActionFields'
+import { DeclaredRunNotice } from './components/DeclaredRunNotice'
 import { ResolveButton } from './components/ResolveButton'
 import { RestrictedApprovalNotice } from './components/RestrictedApprovalNotice'
 import {
@@ -96,14 +97,18 @@ export default function ActivityNotifications({
               const incompleteId = `${noticeId}-incomplete-${action.id}`
               const fields = entryFields(action)
               const incomplete = isDescriptionIncomplete(action)
+              // FAC-120: a declared run, from the kernel's marker, said beside Approve too.
+              const runId = `${noticeId}-run-${action.id}`
+              const declaredRun = action.type === 'action' ? action.context?.declaredRun : undefined
               const describedBy = restricted
                 ? [
                   noticeId,
+                  ...(declaredRun ? [runId] : []),
                   requestId,
                   ...(fields.length > 0 ? [fieldsId] : []),
                   ...(incomplete ? [incompleteId] : []),
                 ].join(' ')
-                : undefined
+                : declaredRun ? runId : undefined
               return (
                 <div
                   key={action.id}
@@ -123,6 +128,9 @@ export default function ActivityNotifications({
                         <span className="px-1">·</span>
                         {formatRelativeTime(action.createdAt)}
                       </span>
+                      {action.type === 'action' && (
+                        <DeclaredRunNotice context={action.context} id={runId} className="mt-1" />
+                      )}
                       <span id={requestId} className={`mt-1.5 block whitespace-pre-wrap text-[12.5px] leading-[18px] tracking-[-0.2px] text-kumo-subtle ${restricted ? '' : 'line-clamp-2'}`}>
                         {action.description.description}
                       </span>

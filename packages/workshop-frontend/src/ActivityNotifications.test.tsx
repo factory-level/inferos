@@ -68,6 +68,23 @@ function approveDescribedBy(): string | null {
 }
 
 describe('ActivityNotifications', () => {
+  // FAC-120: the dropdown's Approve starts a declared run too, so it names the run, from the kernel's
+  // marker, as InferOS's, and says so to a screen reader with Approve.
+  it("names a declared run beside Approve, from the kernel's marker, shown by InferOS", async () => {
+    const reference = 'inferops://acme.operations/inferos/workflow-trigger/abc/11?definition="d"&revision="2"'
+    const server = makeOverseer()
+    await view.render(<ActivityNotifications overseer={server.overseer} onViewActivity={() => {}} />)
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [entry(1, {
+      description: { title: 'Run the refund workflow', description: 'Starts it.', implementsRevert: false },
+      context: { kind: 'declared-run', declaredRun: { reference } },
+    })] })
+    flushFrames()
+    expect(document.body.textContent).toContain(`Workflow run this approval starts:${reference}`)
+    expect(document.body.textContent).toContain('Shown by InferOS')
+    expect(approveDescribedBy()).toContain(reference)
+  })
+
   it('shows the review notice and the untruncated request while restricted', async () => {
     const description = await renderPending(true)
     expect(document.body.textContent).toContain(RESTRICTED_APPROVAL_COPY)
