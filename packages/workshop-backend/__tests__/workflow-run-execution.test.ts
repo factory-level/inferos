@@ -14,8 +14,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { onlyExplicitAlarms, takeSkippedFiring } from "./test-worker.js";
-import { RUN_REQUESTER_REVOKED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
-import { WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS } from "@gadgets/workshop-shared/workflow-definition";
+import { RUN_REQUESTER_REVOKED, WORKFLOW_RUN_CANCELLED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
+import { DEFAULT_WORKFLOW_RUN_LIMITS, TRIGGER_LIFECYCLE_REFUSED, WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS } from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
 import { actionDescriptionDigest } from "../src/system-run.js";
 
@@ -40,6 +40,18 @@ let statesSeen: unknown[] = [];
 /** How the stand-in answers its next call; a test can hold it. */
 let answer: () => Promise<unknown> = async () => "done";
 let restore: (() => void)[] = [];
+/**
+ * Which workspace each entry of `calls` ran in (FAC-117): a run an earlier test left queued can be
+ * started by its own workspace's alarm during a later test, so a test counting runs counts its own.
+ */
+let callWorkspaces: string[] = [];
+/** How many runs the stand-in code ran in workspace `name`. */
+const callsIn = (name: string) => callWorkspaces.filter(id => id === env.TEST_OVERSEER.getByName(name).id.toString()).length;
+/**
+ * The run limits the workspace sees (FAC-117): the deployment defaults, but with no backoff, so a
+ * test that resets mid-run re-executes at once. The tests of the limits themselves set their own.
+ */
+let testLimits: Record<string, number> = { ...DEFAULT_WORKFLOW_RUN_LIMITS, backoffSeconds: 0 };
 
 // Each test runs its workspace's alarm itself (`runAlarm`, below). One workerd fired on its own
 // would race the test's calls (a replay's withdrawal is due at once) or wake an earlier test's
@@ -50,11 +62,13 @@ beforeAll(() => onlyExplicitAlarms());
 afterEach(() => {
   for (let undo of restore.splice(0)) undo();
   calls = [];
+  callWorkspaces = [];
   statesSeen = [];
   loaded = { commitIds: [], envs: [] };
   gatekeeper = { next: 1, staged: new Map(), withdrawn: [], failWithdraws: 0 };
   workflowRun = defaultWorkflowRun;
   answer = async () => "done";
+  testLimits = { ...DEFAULT_WORKFLOW_RUN_LIMITS, backoffSeconds: 0 };
 });
 
 /** Replaces `name` on the Overseer implementation's prototype until the test ends. */
@@ -80,6 +94,7 @@ let workflowRun = defaultWorkflowRun;
 /** By default the pinned code records each call, and the run's state when it came, then answers. */
 async function defaultWorkflowRun(workerEnv: Record<string, any>, args: unknown[]): Promise<unknown> {
   calls.push({ method: "onSchedule", args });
+  callWorkspaces.push(workerEnv.BOARD.workspace.ctx.id.toString());
   statesSeen.push(structuredClone([...workerEnv.BOARD.workspace.storage.workflowDeliveries.list()].at(-1)?.execution));
   return answer();
 }
@@ -106,6 +121,7 @@ function workerSeams(impl: any) {
   // The person who asked is a collaborator here (FAC-122's run right reads their role).
   onPrototype(impl, "definitionRoles", async () => () => "use");
   onPrototype(impl, "getGadgetRecord", () => ({}));
+  onPrototype(impl, "runLimits", () => testLimits);
 }
 
 /**
@@ -756,6 +772,354 @@ describe("a duplicate's connections, at admission, at run start and at a write (
         .then(() => "applied", (e: Error) => e.message);
       expect(refused).toBe(WORKFLOW_BINDINGS_NEEDED);
       expect(impl.storage.actions.get(actionId)).toMatchObject({ state: "pending", blocked: { reason: WORKFLOW_BINDINGS_NEEDED } });
+    });
+  });
+});
+
+// FAC-117: a trigger's lifecycle (pause drains, retire only once drained), cancelling one run, and
+// the run limits (concurrency, time, bounded attempts with a backoff). Over a real Overseer.
+describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", () => {
+  const head = (id: number) => (id === GADGET ? commit(1) : undefined);
+  /** Another run PERSON asks for, fired and queued; its delivery id and invocation id. */
+  function another(impl: any) {
+    let store = impl.workflowDefinitionStore();
+    let invocation = store.beginInvocation(PERSON, HOOK, null);
+    let delivery = store.fire(HOOK, GADGET, head, () => "build" as const, invocation.id)!;
+    impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+    return { deliveryId: delivery.deliveryId, invocationId: invocation.id };
+  }
+  /** The first admitted run, queued; its delivery and invocation ids. */
+  function queuedFirst(impl: any) {
+    let delivery = admitted(impl);
+    impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+    return { deliveryId: delivery.deliveryId, invocationId: deliveryOf(impl, delivery.deliveryId).invocation.id };
+  }
+  /**
+   * Leaves no queued run and no alarm in this workspace: a run left queued would be started by its
+   * alarm during a later test, and its stand-in code would record into that test's `calls`.
+   */
+  async function quiesce(impl: any) {
+    for (let queued of Array.from(impl.storage.workflowRunQueue.list()) as { deliveryId: number }[]) {
+      impl.storage.workflowRunQueue.delete(queued.deliveryId);
+    }
+    await impl.ctx.storage.deleteAlarm();
+  }
+  /**
+   * The hook's controller, a stand-in the pause can disable: given on each read and dropped on each
+   * write, since storage can't hold functions (a real controller is a stub it can).
+   */
+  function withController(impl: any) {
+    let hooks = impl.storage.boundHooks;
+    let get = hooks.get.bind(hooks);
+    let put = hooks.put.bind(hooks);
+    hooks.get = (id: number) => {
+      let record = get(id);
+      return record && { ...record, controller: { disable: async () => {}, enable: async () => {} } };
+    };
+    hooks.put = (record: any) => put({ ...record, controller: null });
+    restore.push(() => { hooks.get = get; hooks.put = put; });
+  }
+
+  it("pausing drains: no new start, the run admitted before it finishes, and then it is paused", async () => {
+    let name = `life-drain-${crypto.randomUUID()}`;
+    let id = await withImpl(name, async impl => {
+      let { deliveryId } = queuedFirst(impl);
+      withController(impl);
+      // Admitted strictly before the pause: a run admitted in its very millisecond isn't.
+      await new Promise(resolve => setTimeout(resolve, 5));
+      let lifecycle = await impl.pauseTrigger(HOOK, ADA);
+      expect(lifecycle).toMatchObject({ state: "draining", changedBy: ADA });
+      expect(impl.storage.boundHooks.get(HOOK).enabled).toBe(false);
+      await expect(invokeWorkflowTrigger(impl, "operator-user", PERSON, HOOK)).rejects.toThrow();
+      return deliveryId;
+    });
+    let done = await settled(name, id);
+    expect(done.execution).toMatchObject({ state: "finished" });
+    expect(callsIn(name)).toBe(1);
+    await withImpl(name, impl => expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "paused" }));
+  });
+
+  it("refuses a run admitted after the pause's recorded time, and its write, while earlier ones go on", async () => {
+    await withImpl(`life-narrow-${crypto.randomUUID()}`, async impl => {
+      let { deliveryId } = queuedFirst(impl);
+      withController(impl);
+      await impl.pauseTrigger(HOOK, ADA);
+      let lifecycle = impl.triggerLifecycleOf(HOOK);
+      let admittedAt = deliveryOf(impl, deliveryId).at.getTime();
+      // Recorded as paused just before this run was admitted: it may not go on.
+      impl.storage.workflowTriggerLifecycles.put({ ...lifecycle, pausedAt: new Date(admittedAt - 1) });
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId } };
+      impl.workflowDefinitionStore().startRun(deliveryId);
+      impl.gadgetRuns.begin(deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(deliveryId);
+      let actionId = await submitted(impl, caller);
+      impl.getGatekeeperFacet = () => { throw new Error("the write was sent"); };
+      let refused = await impl.applyPendingAction(impl.storage.actions.get(actionId), ADA, false)
+        .then(() => "applied", (e: Error) => e.message);
+      expect(refused).toBe(RUN_REQUESTER_REVOKED);
+      // Paused just after it instead: the same write is decidable (it reaches the connection).
+      impl.storage.workflowTriggerLifecycles.put({ ...lifecycle, pausedAt: new Date(admittedAt + 1) });
+      impl.authorizeCollaborator = async () => true;
+      let decided = await impl.applyPendingAction(impl.storage.actions.get(actionId), ADA, false)
+        .then(() => "applied", (e: Error) => e.message);
+      expect(decided).toBe("the write was sent");
+      await quiesce(impl);
+    });
+  });
+
+  it("retires only once drained, keeps the run's history, and a retired trigger never activates", async () => {
+    let name = `life-retire-${crypto.randomUUID()}`;
+    let id = await withImpl(name, async impl => {
+      let { deliveryId } = queuedFirst(impl);
+      withController(impl);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      await impl.pauseTrigger(HOOK, ADA);
+      await expect(impl.retireTrigger(HOOK, ADA)).rejects.toThrow(TRIGGER_LIFECYCLE_REFUSED.retire);
+      return deliveryId;
+    });
+    await settled(name, id);
+    await withImpl(name, async impl => {
+      expect(await impl.retireTrigger(HOOK, ADA)).toMatchObject({ state: "retired" });
+      expect(impl.storage.boundHooks.get(HOOK)).toBeUndefined();
+      expect(deliveryOf(impl, id).execution.state).toBe("finished");
+    });
+  });
+
+  // Round 2 (r1 MEDIUM): an ended `uncertain` run is history, not executing work, so it never holds
+  // the drain; the write it left pending stays decidable while paused, then the trigger retires.
+  it("pauses and retires a trigger whose earlier run ended uncertain, its pending write still decidable", async () => {
+    await withImpl(`life-uncertain-${crypto.randomUUID()}`, async impl => {
+      let { deliveryId } = queuedFirst(impl);
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId } };
+      let store = impl.workflowDefinitionStore();
+      store.startRun(deliveryId);
+      impl.gadgetRuns.begin(deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(deliveryId);
+      let actionId = await submitted(impl, caller);
+      impl.gadgetRuns.end(deliveryId);
+      store.endRun(deliveryId, "runtime-error");
+      impl.settleRunOfAction(actionId);
+      expect(deliveryOf(impl, deliveryId).result).toMatchObject({ outcome: "uncertain", reason: "lost-after-write" });
+      withController(impl);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      await impl.pauseTrigger(HOOK, ADA);
+      expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "paused" });
+      // Paused, the earlier run's write is still decided: it reaches the connection.
+      impl.authorizeCollaborator = async () => true;
+      impl.getGatekeeperFacet = () => { throw new Error("the write was sent"); };
+      let decided = await impl.applyPendingAction(impl.storage.actions.get(actionId), ADA, false)
+        .then(() => "applied", (e: Error) => e.message);
+      expect(decided).toBe("the write was sent");
+      expect(await impl.retireTrigger(HOOK, ADA)).toMatchObject({ state: "retired" });
+      expect(deliveryOf(impl, deliveryId).result.outcome).toBe("uncertain");
+      await quiesce(impl);
+    });
+  });
+
+  it("cancels a queued run for the person who asked or the owner, never anyone else, and nothing of it runs", async () => {
+    let name = `life-cancel-queued-${crypto.randomUUID()}`;
+    let id = await withImpl(name, async impl => {
+      let first = queuedFirst(impl);
+      let stranger = { type: "user" as const, id: "stranger-profile", name: "Stranger" };
+      await expect(impl.cancelWorkflowRun(first.invocationId, stranger, "build")).rejects.toThrow("No such run.");
+      await impl.cancelWorkflowRun(first.invocationId, { type: "user", id: PERSON, name: "Operator" }, "use");
+      expect(deliveryOf(impl, first.deliveryId).execution).toMatchObject({
+        state: "failed", failure: "cancelled", cancelled: { by: { id: PERSON } },
+      });
+      expect(deliveryOf(impl, first.deliveryId).result).toMatchObject({ outcome: "failed", reason: "cancelled" });
+      // It is ended history, so FAC-125's retention indexes it for removal like any other.
+      expect([...impl.storage.workflowDeliveryExpiries.list()].map(pointer => pointer.deliveryId))
+        .toContain(first.deliveryId);
+      await expect(impl.cancelWorkflowRun(first.invocationId, ADA, "build")).rejects.toThrow("already ended");
+      let second = another(impl);
+      await impl.cancelWorkflowRun(second.invocationId, ADA, "build");
+      return second.deliveryId;
+    });
+    await runAlarm(name);
+    expect(callsIn(name)).toBe(0);
+    await withImpl(name, impl => expect(deliveryOf(impl, id).execution.failure).toBe("cancelled"));
+  });
+
+  it("cancels a running run: its pending write is rejected as cancelled, never sent, and it fails as cancelled", async () => {
+    await withImpl(`life-cancel-running-${crypto.randomUUID()}`, async impl => {
+      let first = queuedFirst(impl);
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: first.deliveryId } };
+      impl.workflowDefinitionStore().startRun(first.deliveryId);
+      impl.gadgetRuns.begin(first.deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(first.deliveryId);
+      let actionId = await submitted(impl, caller);
+      impl.getGatekeeperFacet = () => ({ rejectAction: async () => {} });
+      await impl.cancelWorkflowRun(first.invocationId, ADA, "build");
+      expect(impl.storage.actions.get(actionId)).toMatchObject({ state: "rejected", rejectedBecause: "cancelled" });
+      expect(impl.gadgetRuns.has(first.deliveryId)).toBe(false);
+      impl.workflowDefinitionStore().endRun(first.deliveryId, "runtime-error");
+      expect(deliveryOf(impl, first.deliveryId).execution.failure).toBe("cancelled");
+      await quiesce(impl);
+    });
+  });
+
+  // Round 2 (r1 MEDIUM): the cancel's rejection loop is cleanup; the apply path refuses a cancelled
+  // run's write itself, so one approved while an earlier rejection is still awaited is never sent.
+  it("refuses a write approved while a cancel's rejection is held, and rejects it as cancelled, never sent", async () => {
+    await withImpl(`life-cancel-race-${crypto.randomUUID()}`, async impl => {
+      let first = queuedFirst(impl);
+      let caller = { from: "gadget", gadgetId: GADGET, run: { hookId: HOOK, deliveryId: first.deliveryId } };
+      impl.workflowDefinitionStore().startRun(first.deliveryId);
+      impl.gadgetRuns.begin(first.deliveryId, { hookId: HOOK, gadgetId: GADGET });
+      impl.startWorkflowRunProposals(first.deliveryId);
+      let one = await submitted(impl, caller);
+      let two = await submitted(impl, caller);
+      let release!: () => void;
+      let held = new Promise<void>(resolve => { release = resolve; });
+      let rejected: unknown[] = [];
+      let sent: unknown[] = [];
+      // The connection: the first rejection is held; anything but a rejection is the write sent.
+      impl.getGatekeeperFacet = () => new Proxy({}, {
+        get(_target, prop) {
+          if (prop === "then") return undefined;
+          if (prop === "rejectAction") {
+            return async (key: unknown) => {
+              rejected.push(key);
+              if (rejected.length === 1) await held;
+            };
+          }
+          return async () => {
+            sent.push(prop);
+            throw new Error("the write was sent");
+          };
+        },
+      });
+      // The person may use the workspace: nothing but the cancel stands between the write and its connection.
+      impl.authorizeCollaborator = async () => true;
+      let cancelling = impl.cancelWorkflowRun(first.invocationId, ADA, "build");
+      await vi.waitFor(() => expect(rejected).toHaveLength(1));
+      expect(impl.storage.actions.get(two).state).toBe("pending");
+      let approved = await impl.applyPendingAction(impl.storage.actions.get(two), ADA, false)
+        .then(() => "applied", (e: Error) => e.message);
+      expect(approved).toBe(WORKFLOW_RUN_CANCELLED);
+      expect(sent).toEqual([]);
+      expect(impl.storage.actions.get(two)).toMatchObject({ state: "rejected", rejectedBecause: "cancelled" });
+      release();
+      await cancelling;
+      expect(impl.storage.actions.get(one)).toMatchObject({ state: "rejected", rejectedBecause: "cancelled" });
+      expect(sent).toEqual([]);
+      impl.workflowDefinitionStore().endRun(first.deliveryId, "runtime-error");
+      impl.settleRunOfAction(one);
+      expect(deliveryOf(impl, first.deliveryId).result).toMatchObject({ outcome: "failed", reason: "cancelled" });
+      await quiesce(impl);
+    });
+  });
+
+  // Paused, an earlier run that never started (a firing delivered late) doesn't start: only an
+  // ended run's writes go on.
+  it("never starts a run admitted before the pause once the trigger is paused", async () => {
+    let name = `life-paused-late-${crypto.randomUUID()}`;
+    let id = await withImpl(name, async impl => {
+      let delivery = admitted(impl);
+      withController(impl);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      let lifecycle = await impl.pauseTrigger(HOOK, ADA);
+      // Its start window passed, so the drain let go of it.
+      impl.storage.workflowTriggerLifecycles.put({ ...lifecycle, state: "paused" });
+      impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+      return delivery.deliveryId;
+    });
+    let done = await settled(name, id);
+    expect(done.execution).toMatchObject({ state: "failed" });
+    expect(callsIn(name)).toBe(0);
+  });
+
+  it("bounds re-execution after resets: past its attempts it fails, and inside its backoff it waits", async () => {
+    let name = `life-attempts-${crypto.randomUUID()}`;
+    let ids = await withImpl(name, impl => {
+      let first = queuedFirst(impl);
+      // The deployment's own backoff, which this test is about.
+      testLimits = { ...DEFAULT_WORKFLOW_RUN_LIMITS };
+      let second = another(impl);
+      let deliveries = impl.storage.workflowDeliveries;
+      let exhausted = deliveries.get(first.deliveryId);
+      deliveries.put({ ...exhausted, execution: { ...exhausted.execution, state: "running",
+        attempts: DEFAULT_WORKFLOW_RUN_LIMITS.attempts, startedAt: new Date(0) } });
+      let backing = deliveries.get(second.deliveryId);
+      deliveries.put({ ...backing, execution: { ...backing.execution, state: "running", attempts: 1, startedAt: new Date() } });
+      return [first.deliveryId, second.deliveryId];
+    });
+    await runAlarm(name);
+    expect(callsIn(name)).toBe(0);
+    await withImpl(name, async impl => {
+      expect(deliveryOf(impl, ids[0]).execution).toMatchObject({ state: "failed", failure: "attempts-exhausted" });
+      expect(deliveryOf(impl, ids[1]).execution).toMatchObject({ state: "running", attempts: 1 });
+      let alarm = await impl.ctx.storage.getAlarm();
+      expect(alarm).toBeGreaterThan(Date.now() + 20_000);
+      await quiesce(impl);
+    });
+  });
+
+  it("runs one run of a trigger at a time; the next waits queued until it ends", async () => {
+    let name = `life-concurrency-${crypto.randomUUID()}`;
+    let seenWhileFirstRan: unknown[] = [];
+    let ran = 0;
+    let active = 0;
+    let mostActive = 0;
+    let first = 0;
+    let second = await withImpl(name, impl => {
+      let waiting: number | undefined;
+      // While the first run's code runs, the second waits queued: the trigger's limit is one. Only
+      // this workspace's runs count (a run another test left queued may be started meanwhile). Each
+      // alarm pass starts what the limit allows: the first, then, on the next pass the first's end
+      // armed, the second (this file runs each pass itself: onlyExplicitAlarms).
+      workflowRun = async workerEnv => {
+        if (workerEnv.BOARD.workspace.ctx.id.toString() !== impl.ctx.id.toString()) return "done";
+        let mine = ++ran;
+        active++;
+        mostActive = Math.max(mostActive, active);
+        // Looked at once the first has been running a while: by then a second start would have happened.
+        await scheduler.wait(50);
+        if (mine === 1 && waiting !== undefined) {
+          seenWhileFirstRan.push(deliveryOf(workerEnv.BOARD.workspace, waiting).execution.state);
+        }
+        active--;
+        return "done";
+      };
+      first = queuedFirst(impl).deliveryId;
+      waiting = another(impl).deliveryId;
+      return waiting;
+    });
+    expect((await settled(name, first)).execution.state).toBe("finished");
+    let done = await settled(name, second);
+    expect(done.execution.state).toBe("finished");
+    expect(ran).toBe(2);
+    // Never both at once, and the second was still queued while the first ran.
+    expect(mostActive).toBe(1);
+    expect(seenWhileFirstRan).toEqual(["queued"]);
+  });
+
+  it("stops a run past its time limit, as timed out", async () => {
+    let name = `life-timeout-${crypto.randomUUID()}`;
+    let id = await withImpl(name, impl => {
+      let first = queuedFirst(impl);
+      testLimits = { ...DEFAULT_WORKFLOW_RUN_LIMITS, runMinutes: 0.001 };
+      // Settles well after the limit, so nothing is left pending once the test ends.
+      answer = () => new Promise(resolve => setTimeout(() => resolve("too late"), 1500));
+      return first.deliveryId;
+    });
+    let done = await settled(name, id);
+    expect(done.execution).toMatchObject({ state: "failed", failure: "timed-out" });
+    expect(done.result).toMatchObject({ outcome: "failed", reason: "timed-out" });
+  });
+
+  it("pausing in one workspace changes nothing in another", async () => {
+    // Two workspaces with the same trigger id; nothing is queued, so no alarm outlives the test.
+    let other = `life-other-${crypto.randomUUID()}`;
+    await withImpl(other, impl => { admitted(impl); });
+    await withImpl(`life-paused-${crypto.randomUUID()}`, async impl => {
+      admitted(impl);
+      withController(impl);
+      await impl.pauseTrigger(HOOK, ADA);
+    });
+    await withImpl(other, impl => {
+      expect(impl.triggerLifecycleOf(HOOK)).toBeNull();
+      expect(impl.storage.boundHooks.get(HOOK).enabled).toBe(true);
     });
   });
 });

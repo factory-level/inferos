@@ -98,7 +98,9 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     // The person who asked reads their own run's result (FAC-114; workflow-run-results.test.ts).
     "getRequestedRun" |
     // And the runs they asked one trigger for, newest first (FAC-116; workflow-requested-runs.test.ts).
-    "listRequestedRuns";
+    "listRequestedRuns" |
+    // A run they asked for, which they may cancel (FAC-117; workflow-run-execution.test.ts covers who may).
+    "cancelWorkflowRun";
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {
@@ -126,9 +128,15 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   listWorkflowDefinitionShares: ws => ws.listWorkflowDefinitionShares("definition"),
   duplicateWorkflowDefinition: ws => ws.duplicateWorkflowDefinition({ sourceId: "definition", title: "Copy" }),
   rebindWorkflowDefinition: ws => ws.rebindWorkflowDefinition("definition", {}),
+  pauseTrigger: ws => ws.pauseTrigger(1),
+  activateTrigger: ws => ws.activateTrigger(1),
+  retireTrigger: ws => ws.retireTrigger(1),
+  listTriggerLifecycles: ws => ws.listTriggerLifecycles(),
   pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
+  // Deployment readiness (FAC-144) is a build-only read; a use collaborator is told nothing of it.
+  getWorkspaceReadiness: ws => ws.getWorkspaceReadiness(),
   // Run-history discovery is a build-only read; use collaborators cannot enumerate definitions.
   listReadableWorkflowHistories: ws => ws.listReadableWorkflowHistories(),
   setTriggerControl: ws => ws.setTriggerControl(1, null),

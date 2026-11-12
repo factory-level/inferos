@@ -12,6 +12,7 @@ import { WorkshopButton } from '../../components/WorkshopControls'
 import { reportIssue } from '../../errorReporting'
 import { type AssignableConnection, TriggerAssignmentEditor } from './TriggerAssignmentEditor'
 import { TriggerControlEditor } from './TriggerControlEditor'
+import { WorkflowHistorySection } from './WorkflowHistorySection'
 import { WorkflowDefinitionsSection } from './WorkflowDefinitionsSection'
 
 type Props = {
@@ -80,7 +81,11 @@ const connectionsOf = async (overseer: RpcStub<Overseer>, gadgetId: number): Pro
  * hooks, which is where both event hooks and scheduled tasks land (the scheduler binds each
  * schedule as a hook), with the same enable toggle as Connections, and the workflow's saved
  * definitions (WorkflowDefinitionsSection). Readable schedules are shown with their safe cadence,
- * status, and next fire time. The server filters these to definitions this viewer can read.
+ * status, and next fire time. The server filters these to definitions this viewer can read. A
+ * trigger pinned to a definition revision says so, and can be pinned to a published revision for
+ * its gadget or unpinned; the server decides whether it may. Retained run history is discovered
+ * separately through the server's authorized ID list, including when a temporary definition
+ * record was swept.
  */
 export const WorkflowTriggersPanel = ({
   overseer,
@@ -323,6 +328,8 @@ export const WorkflowTriggersPanel = ({
             )}
           </div>
         </section>
+
+        {loaded.status === 'ready' && <WorkflowHistorySection overseer={overseer} />}
 
         {loaded.status === 'ready' && (
           <section aria-label="Workflow views" className="mt-8">

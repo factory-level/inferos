@@ -36,7 +36,7 @@ import type {
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionRights, WorkflowDefinitionShare, WorkflowDefinitionHistoryRef, WorkflowScheduleSummary,
   WorkflowTriggerDefinitionRef,
-  WorkflowDefinitionSave, WorkflowDefinitionDuplicate, WorkflowInvocation, RequestedRun,
+  WorkflowDefinitionSave, WorkflowDefinitionDuplicate, WorkflowInvocation, RequestedRun, TriggerLifecycle,
 } from "./workflow-definition.js";
 import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
 import type { AgentViewOverlay } from "./agent-widgets.js";
@@ -1479,6 +1479,31 @@ export type AdminResourceVendor = {
 );
 
 /**
+ * One item of a workspace's deployment readiness (FAC-144, `Overseer.getWorkspaceReadiness`):
+ * `ready`; `attention`, something a builder here can do (`action` says what); or `blocked`, which
+ * waits on the deployment itself, such as an InferOps resource kind turned off. Computed from what
+ * the workspace holds when asked, never from what a page shows.
+ */
+export type WorkspaceReadinessItem = {
+  name: "inferops-connection" | "records-binding" | "workflow-policy-binding" | "published-console";
+  status: "ready" | "attention" | "blocked";
+  /** What the server found, in its own words. */
+  detail: string;
+  /** What to do next, or null when the item is ready. */
+  action: string | null;
+};
+
+/**
+ * A workspace's deployment readiness (FAC-144): its items, and `deploymentReady` only when every
+ * item is ready. It is this InferOS workspace's side only; the company's InferOps side (people,
+ * model, flags) is InferOps' own `company.readiness`.
+ */
+export type WorkspaceReadiness = {
+  deploymentReady: boolean;
+  items: WorkspaceReadinessItem[];
+};
+
+/**
  * A connectable third-party service: its vendor id, display metadata, and the resource types it
  * offers (empty for an auto-provisioning gatekeeper like the Context Library). Returned by both
  * listGatekeeperVendors and listAddableGatekeepers so the connect UI treats both uniformly.
@@ -2585,14 +2610,18 @@ export const READ_FILES_RESPONSE_BUDGET = 8 * 1024 * 1024;
 export type ActionState = "pending" | "approved" | "rejected" | "failed";
 
 /**
+ * Why the workspace rejected an action itself, with no person deciding (FAC-118, FAC-117; see
+ * `ActionLogEntry.rejectedBecause`): past its run's wait, its run's definition changed, or its run
+ * was cancelled.
+ */
+export type ActionRejectedBecause = "expired" | "definition-changed" | "cancelled";
+
+/**
  * Why a pending action's approved apply was refused before anything was sent (FAC-118): a re-check
  * at resume found that the authority it was proposed under no longer holds (the person who asked a
  * run, their role or grant, the run's assignment or company). It stays pending, and can be decided
  * again once that is fixed; the next apply that passes clears it.
  */
-/** Why the workspace rejected an action itself (FAC-118; see `ActionLogEntry.rejectedBecause`). */
-export type ActionRejectedBecause = "expired" | "definition-changed";
-
 export type ActionBlocked = {
   /** The refusal, in the words the re-check gave it. */
   reason: string;
@@ -2737,6 +2766,7 @@ export type ActionLogEntry = {
    * is then absent and nothing was sent. `expired`: nobody decided it within its workflow run's wait
    * (7 days from when the run proposed it). `definition-changed`: approved after the run's workflow
    * definition changed, which can't be fixed, so a fresh proposal is needed (run it again).
+   * `cancelled`: its run was cancelled (FAC-117), so none of its writes is applied.
    */
   rejectedBecause?: ActionRejectedBecause;
 
@@ -3060,6 +3090,30 @@ export interface Overseer extends RpcTarget {
    */
   getRequestedRun(invocationId: string): Promise<RequestedRun | null>;
   /**
+   * Cancel the run the request `invocationId` made (FAC-117): the person who asked, or the
+   * definition's owner or someone it is shared with to edit. A queued run ends now; a running one
+   * ends at its next guarded call. Every pending write it proposed is rejected, never applied; its
+   * result reads `failed` (`cancelled`), or `uncertain` when a write may have landed. Who cancelled
+   * and when are kept on the run. A run already ended is refused; anyone else is told it doesn't exist.
+   */
+  cancelWorkflowRun(invocationId: string): Promise<void>;
+  /**
+   * Pause trigger `hookId` (FAC-117): it drains. It starts no new run and its waiting requests are
+   * dropped; runs admitted before the pause finish, their pending writes still decidable, and the
+   * last one ending makes it `paused`. The same as `disableHook`. Build only; in a shared workspace
+   * it also takes the deployment's `build` authority.
+   */
+  pauseTrigger(hookId: number): Promise<TriggerLifecycle>;
+  /** Activate trigger `hookId` again (FAC-117), as `enableHook` does; a retired one is refused. */
+  activateTrigger(hookId: number): Promise<TriggerLifecycle | null>;
+  /**
+   * Retire paused trigger `hookId` (FAC-117): deleted as `deleteHook` deletes it, recorded retired,
+   * its runs and their history kept. Refused until it has drained. Build only, as `pauseTrigger`.
+   */
+  retireTrigger(hookId: number): Promise<TriggerLifecycle>;
+  /** Every trigger lifecycle recorded here (FAC-117): a trigger with none is active. */
+  listTriggerLifecycles(): Promise<TriggerLifecycle[]>;
+  /**
    * The runs the caller asked trigger `hookId` for (FAC-116; inferos ADR 0012, proposed): the
    * newest `REQUESTED_RUNS_MAX`, newest first, each exactly as `getRequestedRun` reads it, so the
    * person sees their runs' outcomes after any reconnect. Only the caller's own requests, never
@@ -3077,6 +3131,15 @@ export interface Overseer extends RpcTarget {
    * (see `publishedConsole()`). Creating, replacing, publishing and deleting need build access.
    */
   listConsoles(): Promise<OperateConsole[]>;
+
+  /**
+   * This workspace's deployment readiness (FAC-144): whether a person's InferOps account is
+   * connected, whether a gadget is bound to an InferOps custom table and to a workflow policy (each
+   * `blocked` while the deployment turns that kind off), and whether a console is published. Read
+   * only, and the same answer again while nothing changed. Build only, with the shared workspace's
+   * `build` authority; use and operate are refused.
+   */
+  getWorkspaceReadiness(): Promise<WorkspaceReadiness>;
   /**
    * Every widget install of this workspace a console could register, each with its stable
    * version, what its current commit offers and, when a console can't offer it now, the reason a

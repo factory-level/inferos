@@ -106,7 +106,7 @@ export type OperateApprovalSnapshot = {
   /** Why a pending action can't be applied now, a re-check having refused it (FAC-118). */
   blocked?: {reason: string};
   /** Why the workspace itself rejected it (FAC-118): its deadline passed, or its workflow changed. */
-  rejectedBecause?: "expired" | "definition-changed";
+  rejectedBecause?: "expired" | "definition-changed" | "cancelled";
 };
 
 /**
