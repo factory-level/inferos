@@ -339,6 +339,20 @@ describe("creating a personal workflow (approval)", () => {
   });
 });
 
+describe("listing a person's personal workflows", () => {
+  it("lists only the owner's own, in their own session, and is refused to a use collaborator", async () => {
+    let w = await consoleWorkspace();
+    let s = await operateSession(w);
+    let id = await created(s, w);
+    expect((await withImpl(s.name, impl => impl.personalWorkflowsOf(PERSON))).map((x: any) => x.id)).toEqual([id]);
+    expect(await withImpl(s.name, impl => impl.personalWorkflowsOf(OTHER))).toEqual([]);
+    let plain = await operateSession(w, { operate: false });
+    expect(await withImpl(plain.name, impl => impl.personalWorkflowsOf(PERSON))).toEqual([]);
+    let viewer = await openFakeOverseer({}, { role: "use" });
+    await expect((viewer as any).listPersonalWorkflows()).rejects.toThrow();
+  });
+});
+
 describe("running a personal workflow", () => {
   it("requests each step in order, at the issue's revision read when it runs, pending for the builders; reports requests placed", async () => {
     let w = await consoleWorkspace();

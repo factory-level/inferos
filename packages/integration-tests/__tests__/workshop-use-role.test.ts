@@ -117,6 +117,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   deleteCanvas: ws => ws.deleteCanvas("view", "0"),
   // A use-role operator holds no temporary canvases in someone else's workspace (FAC-137).
   listTemporaryCanvases: ws => ws.listTemporaryCanvases(),
+  listPersonalWorkflows: ws => ws.listPersonalWorkflows(),
   getTemporaryCanvas: ws => ws.getTemporaryCanvas("canvas"),
   saveTemporaryCanvas: ws => ws.saveTemporaryCanvas("canvas", 1),
   removeTemporaryCanvas: ws => ws.removeTemporaryCanvas("canvas", 1),

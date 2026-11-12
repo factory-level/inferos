@@ -51,7 +51,7 @@ import {
 } from "./personal-workflow-store";
 import {
   parseConsoleCommandRef, parsePersonalWorkflowDeclaration, parsePersonalWorkflowRef, personalWorkflowFieldValue,
-  personalWorkflowStepInputProblem, type PersonalWorkflowStep,
+  personalWorkflowStepInputProblem, type PersonalWorkflow, type PersonalWorkflowStep,
 } from "@gadgets/workshop-shared/personal-workflow";
 import {
   TEMPORARY_CANVAS_ERROR_CODES, TemporaryCanvasError, parseTemporaryCanvasInput, temporaryCanvasTtlMs,
@@ -16405,6 +16405,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async listTemporaryCanvases(): Promise<TemporaryCanvas[]> {
     return this.impl.temporaryCanvasesOf(this.clientUserId).list();
   }
+  // FAC-134 capability 2: the client's own personal workflows, only in their own live operate
+  // session (OverseerImpl.personalWorkflowsOf); an empty list anywhere else. Reads only.
+  async listPersonalWorkflows(): Promise<PersonalWorkflow[]> {
+    return this.impl.personalWorkflowsOf(this.clientProfileId);
+  }
   async getTemporaryCanvas(id: string): Promise<TemporaryCanvas> {
     return this.impl.temporaryCanvasesOf(this.clientUserId).get(id);
   }
@@ -19429,6 +19434,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   }
   // FAC-137: a use-role operator holds no temporary canvases in someone else's workspace.
   async listTemporaryCanvases(): Promise<TemporaryCanvas[]> { this.#deny(); }
+  async listPersonalWorkflows(): Promise<PersonalWorkflow[]> { this.#deny(); }
   async getTemporaryCanvas(_id: string): Promise<TemporaryCanvas> { this.#deny(); }
   async saveTemporaryCanvas(_id: string, _expectedRevision: number): Promise<TemporaryCanvas> { this.#deny(); }
   async removeTemporaryCanvas(_id: string, _expectedRevision: number): Promise<void> { this.#deny(); }
@@ -20009,6 +20015,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getCanvas(id: string): Promise<CanvasDefinition | null> { this.#live(); return this.owner.getCanvas(id); }
   // FAC-137: the owner's own temporary canvases, in this their operate session.
   async listTemporaryCanvases(): Promise<TemporaryCanvas[]> { this.#live(); return this.owner.listTemporaryCanvases(); }
+  async listPersonalWorkflows(): Promise<PersonalWorkflow[]> { this.#live(); return this.owner.listPersonalWorkflows(); }
   async getTemporaryCanvas(id: string): Promise<TemporaryCanvas> { this.#live(); return this.owner.getTemporaryCanvas(id); }
   async saveTemporaryCanvas(id: string, expectedRevision: number): Promise<TemporaryCanvas> {
     this.#live(); return this.owner.saveTemporaryCanvas(id, expectedRevision);

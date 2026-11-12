@@ -42,6 +42,7 @@ import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "
 import type { AgentViewOverlay } from "./agent-widgets.js";
 import type { WidgetPlacementInput, WidgetPlacements } from "./widget-placements.js";
 import type { TemporaryCanvas } from "./temporary-canvas.js";
+import type { PersonalWorkflow } from "./personal-workflow.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
   ArtifactPin, ArtifactPublishResult, ArtifactQualification, ArtifactRef, ArtifactRefusal,
@@ -578,6 +579,12 @@ export interface OperateSession extends RpcTarget {
   saveTemporaryCanvas(id: string, expectedRevision: number): Promise<TemporaryCanvas>;
   /** Removes one, and nothing it shows (`Overseer.removeTemporaryCanvas`). */
   removeTemporaryCanvas(id: string, expectedRevision: number): Promise<void>;
+
+  /**
+   * This person's personal workflows (FAC-134 capability 2), in their own operate session workspace
+   * (`Overseer.listPersonalWorkflows`): each created by their own approval, not yet expired.
+   */
+  listPersonalWorkflows(): Promise<PersonalWorkflow[]>;
 
   /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
   listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;
@@ -2929,6 +2936,13 @@ export interface Overseer extends RpcTarget {
    * path every time, and none of them is shared or published configuration.
    */
   listTemporaryCanvases(): Promise<TemporaryCanvas[]>;
+  /**
+   * The caller's personal workflows (FAC-134 capability 2, personal-workflow.ts), not yet expired,
+   * oldest first: only in their own live operate session workspace, and an empty list anywhere else.
+   * Each was created by the caller's own approval; none is shared or published configuration, and
+   * nothing here creates, runs or changes one.
+   */
+  listPersonalWorkflows(): Promise<PersonalWorkflow[]>;
   /** One of the caller's temporary canvases; refused with `TEMPORARY_CANVAS_EXPIRED` past its expiry, else `TEMPORARY_CANVAS_NOT_FOUND`. */
   getTemporaryCanvas(id: string): Promise<TemporaryCanvas>;
   /**
