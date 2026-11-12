@@ -106,7 +106,7 @@ import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeepe
 import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gatekeeper-kit/observers";
 import { createLogger } from "@gadgets/observability/logger";
 import type {
-  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, ApprovedEffects, ApprovedRunOutcome, Gatekeeper, GatekeeperConnectCallback, GitCache,
+  AccountDescription, ActionApplied, ActionApplyFailure, ActionFailureKind, ActionKind, ApprovalQueue, ApprovedEffects, ApprovedRunOutcome, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
   WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchResult,
@@ -118,6 +118,7 @@ import {
   parseConsoleCommandRef, parsePersonalWorkflowDeclaration, parsePersonalWorkflowRef, personalWorkflowRef,
   type PersonalWorkflowDeclaration,
 } from "@gadgets/workshop-shared/personal-workflow";
+import { parseDelegateDeclaration, type DelegateDeclaration } from "@gadgets/workshop-shared/delegate";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
   CredentialSource, isCredentialsChanged, isCredentialsExpired, type CredentialRead,
@@ -129,7 +130,7 @@ import {
   type DotConversationWire, type DotProposalWire,
 } from "./inferops-client";
 import {
-  BOARD_WRITES, CheckRefused, KernelRefused, PROPOSAL_APPROVE, RECONCILE_ONLY, classifyAttempt, failureKind, type ApplyPolicy,
+  BOARD_WRITES, CheckRefused, KernelRefused, PROPOSAL_APPROVE, RECONCILE_ONLY, canPass, classifyAttempt, failureKind, type ApplyPolicy,
 } from "./apply-attempts";
 import {
   WIDGET_SEARCH_DENIED, WIKI_FORBIDDEN, connectionFromEnv, fetchBoardSnapshot, listWorkspaceSlugs, openHttpInferOpsClient,
@@ -4292,6 +4293,7 @@ async function applyDotAction(binding: DotBinding, actionId: number, effects?: D
   if (record.tool === DOT_WORKFLOW_INVOKE_TOOL) return applyDotWorkflowRun(binding, record, fields, effects);
   if (record.tool === DOT_CANVAS_COMPOSE_TOOL) return applyDotTemporaryCanvas(binding, record, fields, effects);
   if (record.tool === DOT_WORKFLOW_CREATE_TOOL) return applyDotWorkflowCreate(binding, record, fields, effects);
+  if (record.tool === DOT_DELEGATE_TOOL) return applyDotDelegate(binding, record, fields, effects);
   return binding.applyOnce(record, {
     policy: DOT_CONFIRM, fields,
     check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
@@ -4309,7 +4311,8 @@ async function applyDotAction(binding: DotBinding, actionId: number, effects?: D
 }
 
 /** The kernel's approved effects this facet uses: a workflow run (FAC-120) and a temporary canvas (FAC-137). */
-type DotApprovedEffects = Pick<ApprovedEffects, "invokeWorkflow" | "createTemporaryCanvas" | "createPersonalWorkflow" | "runPersonalWorkflow">;
+type DotApprovedEffects = Pick<ApprovedEffects,
+  "invokeWorkflow" | "createTemporaryCanvas" | "createPersonalWorkflow" | "runPersonalWorkflow" | "launchDelegate">;
 
 /** The Dot's InferOS workflow-run proposal (FAC-120, inferops#2627): InferOps runs nothing for it. */
 const DOT_WORKFLOW_INVOKE_TOOL = "inferos_workflow_invoke";
@@ -4372,6 +4375,26 @@ function dotCanvasOf(input: unknown): TemporaryCanvasInput | null {
 /** The Dot's personal workflow proposal (FAC-134 capability 2, inferops#2648): InferOps creates nothing for it. */
 const DOT_WORKFLOW_CREATE_TOOL = "inferos_workflow_create";
 
+/** The Dot's delegate proposal (FAC-134 capability 3, inferops#2653): InferOps launches nothing for it. */
+const DOT_DELEGATE_TOOL = "inferos_delegate_launch";
+
+/**
+ * A Dot delegate proposal's input (`{title, prompt, connections, tools?, note?}`, inferops#2653) as
+ * the kernel's delegate declaration (`ActionDescription.delegate`), or null when it isn't one: then
+ * nothing is declared, and the approval can't launch anything. The note is the Dot's words to the
+ * person and is never declared: it reaches the person only inside the "Arguments" field.
+ */
+function dotDelegate(input: Record<string, unknown>): DelegateDeclaration | null {
+  try {
+    return parseDelegateDeclaration({
+      title: input.title, prompt: input.prompt, connections: input.connections,
+      ...(input.tools !== undefined ? { tools: input.tools } : {}),
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * A Dot create proposal's input (`{title, steps: [{command, input}]}`, inferops#2648) as the kernel's
  * personal workflow declaration (`ActionDescription.personalWorkflow`), or null when it isn't one:
@@ -4399,6 +4422,22 @@ const runsPersonalWorkflow = (record: { input: Record<string, unknown> }) =>
 /** Why a workflow run can't start without the kernel's approved effects (an automatic approval, an older kernel). */
 const DOT_WORKFLOW_NEEDS_APPROVAL = "Starting a workflow run needs your own approval here.";
 
+/**
+ * Settles the kernel's refusal of a Dot run, personal workflow or delegate proposal (r1 on #488):
+ * thrown as a `CheckRefused` in its FAC-119 kind, so the action is not applied, retryable only when
+ * the refusal can pass (`canPass`: permission, sign-in, unavailable). Only a final refusal declines
+ * the proposal in InferOps: a retryable one leaves it pending there, so a later approval that does
+ * start it can still confirm it and name its run.
+ */
+async function refuseDotProposal(binding: DotBinding, record: DotConfirmAction, kind: ActionFailureKind, reason: string)
+    : Promise<never> {
+  const code = RUN_REFUSAL_CODES[kind] ?? "UNAVAILABLE";
+  if (!canPass(code, false)) {
+    await binding.client.declineDotProposal(record.conversationId, record.proposalId).catch(() => undefined);
+  }
+  throw new CheckRefused(code, reason);
+}
+
 // A refused run's FAC-119 kind as the facet's error code, so it is settled and shown like any other.
 const RUN_REFUSAL_CODES = { permission: "FORBIDDEN", conflict: "CONFLICT", policy: "CONFLICT", invalid: "INVALID_REQUEST",
   "sign-in": "UNAUTHORIZED", unavailable: "UNAVAILABLE" } as const;
@@ -4407,7 +4446,7 @@ const RUN_REFUSAL_CODES = { permission: "FORBIDDEN", conflict: "CONFLICT", polic
  * Applies the Dot's proposal to run an InferOS workflow (FAC-120): the kernel starts the run as the
  * person approving it (`effects.invokeWorkflow`, present only for their own approval), then the
  * proposal is confirmed in InferOps as handed off. A refused run is not applied, in its own kind,
- * and the proposal is declined there; with no `effects` nothing is asked at all. Once the run has
+ * and the proposal is declined there only when the refusal stands (`refuseDotProposal`); with no `effects` nothing is asked at all. Once the run has
  * started, a confirm InferOps doesn't answer is logged and leaves its proposal to expire: the run
  * is recorded here, never started a second time by approving again.
  */
@@ -4428,8 +4467,7 @@ async function applyDotWorkflowRun(binding: DotBinding, record: DotConfirmAction
       // idempotent per action, so a retry can only return the same run).
       if (run.status === "unknown") throw new InferOpsError("UNAVAILABLE", run.reason);
       if (run.status === "refused") {
-        await binding.client.declineDotProposal(record.conversationId, record.proposalId).catch(() => undefined);
-        throw new CheckRefused(RUN_REFUSAL_CODES[run.kind] ?? "UNAVAILABLE", run.reason);
+        return await refuseDotProposal(binding, record, run.kind, run.reason);
       }
       let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true };
       try {
@@ -4492,7 +4530,7 @@ async function applyDotTemporaryCanvas(binding: DotBinding, record: DotConfirmAc
  * workflow the action declared in the person's own operate session (`effects.createPersonalWorkflow`,
  * present only for their own approval), after each step's console workspace said it is offered to
  * them; then the proposal is confirmed in InferOps as handed off. Refused, it is not applied and the
- * proposal is declined there; `unknown` (a step's check unanswered) created nothing, so it is
+ * proposal is declined there only when the refusal stands; `unknown` (a step's check unanswered) created nothing, so it is
  * `UNAVAILABLE`, to approve again. The created workflow's reference is kept on the action, built from
  * the InferOps company and workspace its steps were proposed in.
  */
@@ -4508,8 +4546,7 @@ async function applyDotWorkflowCreate(binding: DotBinding, record: DotConfirmAct
       const created = await effects.createPersonalWorkflow();
       if (created.status === "unknown") throw new InferOpsError("UNAVAILABLE", created.reason);
       if (created.status === "refused") {
-        await binding.client.declineDotProposal(record.conversationId, record.proposalId).catch(() => undefined);
-        throw new CheckRefused(RUN_REFUSAL_CODES[created.kind] ?? "UNAVAILABLE", created.reason);
+        return await refuseDotProposal(binding, record, created.kind, created.reason);
       }
       const step = dotPersonalWorkflow(record.input)?.steps[0];
       const where = step ? parseConsoleCommandRef(step.reference) : null;
@@ -4531,6 +4568,49 @@ async function applyDotWorkflowCreate(binding: DotBinding, record: DotConfirmAct
     },
   });
 }
+
+/**
+ * Applies the Dot's delegate proposal (FAC-134 capability 3, ADR 0020): the kernel launches the
+ * delegate the action declared in the person's own operate session (`effects.launchDelegate`,
+ * present only for their own approval), then the proposal is confirmed in InferOps as handed off,
+ * naming the delegate's run, whose outcome only it may report. Refused, it is not applied, in its
+ * FAC-119 kind, and declined there only when the refusal stands (`refuseDotProposal`); `unknown` may have launched it, so it is
+ * uncertain, never declined or retried. A confirm InferOps doesn't answer is logged; the delegate is
+ * recorded here and never launched twice.
+ */
+async function applyDotDelegate(binding: DotBinding, record: DotConfirmAction, fields: Partial<LogFields>,
+    effects?: Pick<ApprovedEffects, "launchDelegate">): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
+  if (!effects) {
+    return { failed: { outcome: "notApplied", retryable: false, message: DOT_DELEGATE_NEEDS_APPROVAL, kind: "policy" } };
+  }
+  return binding.applyOnce(record, {
+    policy: DOT_WORKFLOW_RUN, fields,
+    check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
+    send: async marked => {
+      const launched = await effects.launchDelegate();
+      if (launched.status === "unknown") throw new InferOpsError("UNAVAILABLE", launched.reason);
+      if (launched.status === "refused") {
+        return await refuseDotProposal(binding, record, launched.kind, launched.reason);
+      }
+      let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true };
+      try {
+        const confirmed = await binding.client.confirmDotProposal(
+          record.conversationId, record.proposalId, record.proposalId, { runId: launched.runId },
+        );
+        confirmedOutcome = { ...summarizeDotOutcome(confirmed.outcome), handedOff: true };
+      } catch (error) {
+        logger.warn("dot delegate launched; its InferOps confirm unanswered", {
+          event: "dot-confirm.delegate.confirm_unanswered", ...fields, code: inferOpsErrorCode(error) ?? "UNKNOWN",
+        });
+      }
+      return { ...(marked as DotConfirmAction), status: "applied", runId: launched.runId, confirmedOutcome,
+        delegate: { id: launched.delegateId } };
+    },
+  });
+}
+
+/** Why a delegate can't be launched without the kernel's approved effects. */
+const DOT_DELEGATE_NEEDS_APPROVAL = "Launching a delegate needs your own approval here.";
 
 /** Why a personal workflow can't be created without the kernel's approved effects. */
 const DOT_WORKFLOW_CREATE_NEEDS_APPROVAL = "Creating a personal workflow needs your own approval here.";
@@ -4629,11 +4709,14 @@ async function recordDotRunOutcome(binding: DotBinding, actionId: number, outcom
   const fields: Partial<LogFields> = { host: binding.host, action: actionId };
   const record = binding.action(actionId);
   // The kind must be the one the proposal started: a personal workflow's run, or a trigger's.
-  const kind = record && isDotAction(record) && runsPersonalWorkflow(record) ? "personal-workflow" : "workflow-run";
-  if (!record || !isDotAction(record) || record.tool !== DOT_WORKFLOW_INVOKE_TOOL ||
+  // A delegate's run (FAC-134 capability 3) is the person's, and only a delegate's is.
+  const kind = !record || !isDotAction(record) ? null
+    : record.tool === DOT_DELEGATE_TOOL ? "delegate"
+    : record.tool === DOT_WORKFLOW_INVOKE_TOOL ? (runsPersonalWorkflow(record) ? "personal-workflow" : "workflow-run")
+    : null;
+  if (!record || !isDotAction(record) || kind === null ||
       outcome?.kind !== kind || typeof outcome.runId !== "string" || outcome.runId === "" ||
-      // Only a delegate's run is the person's (FAC-134 capability 3): none this binding proposes yet.
-      outcome.ranAs === "person") {
+      (kind === "delegate") !== (outcome.ranAs === "person")) {
     logger.warn("dot run outcome for no workflow-run proposal of this binding", { event: "dot-run-outcome.ignored", ...fields });
     return;
   }
@@ -4862,6 +4945,31 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
       throw error;
     });
     if (joined) return;
+    if (proposal.tool === DOT_DELEGATE_TOOL) {
+      // FAC-134 capability 3 (ADR 0020): a delegate, its own kind. The prose is fixed: the Dot wrote
+      // the title, the prompt and the note, so each is only ever a field's value (r1 on inferops#2653).
+      // The kernel shows the ceiling and quotes the prompt in its own field, and launches it only for
+      // the person's own approval, with at most their authority.
+      const declaration = dotDelegate(proposal.input);
+      this.#receipts.set(proposal.id, await this.binding.submit(this.queue, actionId, {
+        title: sanitizeTitle("Your Dot proposes a delegate"),
+        ...(() => {
+          const described = this.binding.description(
+            `Your Dot proposes a delegate: a separate agent chat in your own operate session that works on ` +
+            `one task, with at most your own access there, narrowed to the connections and tools InferOS ` +
+            `shows below. Your access is checked again on every call it makes, and it stops if that changes. ` +
+            `It reports only whether it succeeded, failed or was cancelled, and can't launch another ` +
+            `delegate. Declining it launches nothing. It can't be approved after ${proposal.expiresAt}.`);
+          return (declaration ? described.inline("Title", declaration.title) : described)
+            .verbatim("Arguments", JSON.stringify(proposal.input, null, 2))
+            .finish();
+        })(),
+        implementsRevert: false,
+        ...(declaration ? { delegate: { ...declaration, reportOutcome: true } } : {}),
+        actionKind: { tag: "inferops.dot-delegate", label: "Approve a delegate your Dot proposed" },
+      }));
+      return;
+    }
     if (proposal.tool === DOT_WORKFLOW_CREATE_TOOL) {
       // FAC-134 capability 2: a personal workflow, its own kind. The kernel lists every step and
       // its input in its own field and creates it only from commands a console offers the person.

@@ -7,7 +7,7 @@ import type { TemporaryCanvasInput } from "@gadgets/workshop-shared/temporary-ca
 import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
-  ActionApplied, ActionApplyFailure, ActionFailureKind, ActionDescription, ApprovedRunOutcome, ApprovedPersonalWorkflow, ApprovedTemporaryCanvas, ApprovedWorkflowRun, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  ActionApplied, ActionApplyFailure, ActionFailureKind, ActionDescription, ApprovedRunOutcome, ApprovedPersonalWorkflow, ApprovedTemporaryCanvas, ApprovedWorkflowRun, ApprovedDelegate, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { dotBindingOver } from "../src/inferops.js";
@@ -250,6 +250,7 @@ export type QueueLog = {
     temporaryCanvas?: TemporaryCanvasInput;
     personalWorkflow?: { title: string; steps: { reference: string; input: { issueId: string; toStateId: string } }[] };
     personalWorkflowRun?: { reference: string; reportOutcome?: boolean };
+    delegate?: ActionDescription["delegate"];
     /** Each field's label and shown value. */
     fields: Record<string, string>;
     /** Each list field's label and shown items. */
@@ -292,6 +293,7 @@ class TestApprovalQueue extends RpcTarget {
       ...(description.temporaryCanvas ? { temporaryCanvas: description.temporaryCanvas } : {}),
       ...(description.personalWorkflow ? { personalWorkflow: description.personalWorkflow } : {}),
       ...(description.personalWorkflowRun ? { personalWorkflowRun: description.personalWorkflowRun } : {}),
+      ...(description.delegate ? { delegate: description.delegate } : {}),
       complete: description.descriptionIsComplete === true,
       truncated: (description.fields ?? []).filter(field => "truncated" in field && field.truncated !== undefined)
         .map(field => field.label),
@@ -1418,13 +1420,15 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
    * answers as given, and records that it was asked. The invoke effect is there too, never to be
    * asked for a personal workflow.
    */
-  async applyDotPersonal(actionId: number, answers: { created?: ApprovedPersonalWorkflow; run?: ApprovedWorkflowRun })
+  async applyDotPersonal(actionId: number,
+      answers: { created?: ApprovedPersonalWorkflow; run?: ApprovedWorkflowRun; launched?: ApprovedDelegate })
       : Promise<{ failure: ActionApplyFailure | null; asked: string[] }> {
     const asked: string[] = [];
     const effects = {
       invokeWorkflow: async () => { asked.push("invoked"); return answers.run; },
       createPersonalWorkflow: async () => { asked.push("created"); return answers.created; },
       runPersonalWorkflow: async () => { asked.push("ran"); return answers.run; },
+      launchDelegate: async () => { asked.push("launched"); return answers.launched; },
     } as never;
     const outcome = await this.#dotBinding().applyAction(actionId, effects);
     return { failure: outcome && "failed" in outcome ? outcome.failed : null, asked };
@@ -1433,6 +1437,11 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** A Dot action's recorded personal workflow (FAC-134 capability 2), if it created one. */
   async dotPersonalWorkflow(actionId: number): Promise<{ id: string; reference: string; expiresAt: string } | null> {
     return this.ctx.storage.kv.get<{ personalWorkflow?: { id: string; reference: string; expiresAt: string } }>(`action:${actionId}`)?.personalWorkflow ?? null;
+  }
+
+  /** A Dot action's recorded delegate (FAC-134 capability 3), if it launched one. */
+  async dotDelegate(actionId: number): Promise<{ id: string } | null> {
+    return this.ctx.storage.kv.get<{ delegate?: { id: string } }>(`action:${actionId}`)?.delegate ?? null;
   }
 
   /** The run outcomes a Dot action recorded (FAC-134). */

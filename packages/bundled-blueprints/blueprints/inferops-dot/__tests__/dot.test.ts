@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import {
-  DECIDE_WHERE, WORKFLOW_RUN_TOOL, classify, failureWords, knowledgeWrite, proposalHeading, proposalWords, shownProgress, shownProposal,
+  DECIDE_WHERE, RUN_TOOLS, WORKFLOW_RUN_TOOL, classify, failureWords, knowledgeWrite, proposalHeading, proposalWords, shownProgress, shownProposal,
   stepWords, workflowRunWords,
 } from "../files/lib/dot.ts";
 
@@ -143,6 +143,21 @@ describe("a workflow-run proposal's words", () => {
     expect(refused.detail).toContain("one of its steps was refused, so nothing after it was requested");
     // A published workflow's run still reads as before.
     expect(workflowRunWords({ outcome: "succeeded" }, { ...run("succeeded"), kind: "workflow-run" }).label).toBe("Run finished");
+  });
+
+  it("says how a delegate ended, as you, never what it did (FAC-134 capability 3)", () => {
+    const delegate = (outcome: "succeeded" | "failed" | "uncertain", extra: Record<string, string> = {}) =>
+      ({ runId: "run-d", outcome, ranAs: "person" as const, kind: "delegate" as const, ...extra });
+    expect(workflowRunWords({ outcome: "succeeded" }, delegate("succeeded"))).toEqual({
+      label: "Delegate finished", detail: "Check what it changed in your operate session. It ran as you, with at most what you approved.",
+      note: "Reported, not verified",
+    });
+    expect(workflowRunWords({ outcome: "succeeded" }, delegate("failed", { reasonCode: "requester-revoked" })).detail)
+      .toBe("It failed because your access in your operate session changed while it ran. It ran as you, with at most what you approved.");
+    expect(workflowRunWords({ outcome: "succeeded" }, delegate("failed", { reasonCode: "cancelled" })).detail).toContain("because it was stopped");
+    expect(workflowRunWords({ outcome: "succeeded" }, delegate("failed", { reasonCode: "runtime-error" })).detail)
+      .toContain("because its code stopped with an error");
+    expect(RUN_TOOLS.has("inferos_delegate_launch")).toBe(true);
   });
 
   it("has words for every reason InferOS gives a failed or uncertain run", () => {

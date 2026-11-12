@@ -1136,7 +1136,8 @@ FAC-134, capability 3 ([ADR 0020](https://github.com/factory-level/inferos/pull/
     - **Start:** no turn for a revoked starter.
     - **Tools:** in a scripted turn, only the ceiling's tools are offered, and a call after a generation bump is refused and cancels it.
     - **Outcome:** succeeded, runtime-error, still running while its action waits; reported once as the person's delegate run; listed and stopped only by its starter.
-- **Not covered:** the gatekeeper's action and the UI (the person's list and stopping one) are the next PR. A delegate's own console commands still place pending requests for the console's builders, as the person's would.
+- **Gatekeeper and UI:** the gatekeeper's action is in [InferOps gatekeeper](inferops-gatekeeper.md) ("Delegate proposals"), and the person's list and **Stop** (`Delegates`) in [InferOps canvas](inferops-canvas.md).
+- **Not covered:** A delegate's own console commands still place pending requests for the console's builders, as the person's would.
 
 ### Agent widget verbs
 
