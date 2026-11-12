@@ -8,6 +8,7 @@ import {
 } from '../actionDecision'
 import { openConnectWindow } from '../connectHandoff'
 import { ActionResultList } from './ActionReceipt'
+import { DeclaredRunNotice } from './DeclaredRunNotice'
 
 /** A reconnect's refusal: the kernel's one refusal in its own words, anything else in a fixed sentence. */
 const reconnectRefusal = (error: unknown): string => {
@@ -71,6 +72,7 @@ export const ActionDecision = ({ entry, showOutcome = true, viewerProfileId, onR
   const signIn = failure?.kind === 'sign-in' && pending && !closed
   return (
     <div className={`space-y-0.5 text-[11.5px] leading-4 ${className}`}>
+      <DeclaredRunNotice context={entry.context} className="mb-1" />
       {context && <p className="m-0 text-kumo-inactive">{context}</p>}
       {showOutcome && outcome !== 'waiting' && (
         <p className={`m-0 ${outcome === 'failed' || outcome === 'rejected' ? 'text-kumo-danger' : outcome === 'unknown' ? 'text-kumo-warning' : 'text-kumo-inactive'}`}>

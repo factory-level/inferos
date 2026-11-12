@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   invokeWorkflowTrigger, makeOverseerStorage, TRIGGER_AUTO_RETIRED, WORKFLOW_ASSIGNMENTS_DISABLED, WORKFLOW_INVOKE_REFUSED,
 } from "../src/overseer.js";
-import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
+import { SHARED_ONLY_AUDIENCE, WORKFLOW_REVISION_CHANGED, WORKSPACE_AUDIENCE, WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { openFakeOverseer } from "./fixtures.js";
 import { makeMockStorage } from "./mock-storage.js";
 
@@ -22,12 +22,12 @@ const headOf = (id: number) => (id === GADGET ? commit(1) : undefined);
 const everyoneBuilds = () => "build" as const;
 
 /** A workspace store with one published definition pinned to trigger HOOK. */
-function pinned() {
+function pinned(audience = WORKSPACE_AUDIENCE, publish = true) {
   let durable = makeMockStorage();
   let storage = makeOverseerStorage(durable);
-  let store = new WorkspaceWorkflowDefinitionStore(durable, storage);
+  let store = new WorkspaceWorkflowDefinitionStore(durable, storage, undefined, audience);
   let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
-  store.publish(ADA, saved.id, 1);
+  if (publish) store.publish(ADA, saved.id, 1);
   store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1, mode: "pinned" });
   return { durable, storage, store, definitionId: saved.id };
 }
@@ -98,11 +98,54 @@ describe("through the Overseer", () => {
   async function session(role: "build" | "use", opts: { invoke?: (...args: unknown[]) => Promise<void>;
                                                           canBuild?: boolean;
                                                           mayInvoke?: () => Promise<boolean | { holds: boolean; company: string | null }>;
-                                                          assignmentsEnabled?: boolean } = {}) {
-    let { durable, storage, store } = pinned();
-    store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
+                                                          assignmentsEnabled?: boolean;
+                                                          schedule?: boolean;
+                                                          scheduleTitle?: string;
+                                                          scheduleRead?: () => Promise<any>;
+                                                          secondSchedule?: boolean;
+                                                          extraScheduleCount?: number;
+                                                          scheduleReadCounter?: { value: number };
+                                                          hookEnabled?: boolean;
+                                                          shareRights?: { read?: boolean; run?: boolean; edit?: boolean };
+                                                          privateDefinition?: boolean;
+                                                          unpublished?: boolean;
+                                                          operate?: boolean;
+                                                          controlInvokers?: string[];
+                                                          workspaceId?: string } = {}) {
+    let { durable, storage, store, definitionId } = pinned(opts.privateDefinition ? SHARED_ONLY_AUDIENCE : WORKSPACE_AUDIENCE, !opts.unpublished);
+    if (opts.shareRights) store.share(ADA, definitionId, OPERATOR, opts.shareRights, "use");
+    store.setControl(ADA, HOOK, { label: "Issue refund", invokers: opts.controlInvokers ?? [OPERATOR] });
     let invoke = vi.fn(opts.invoke ?? (async () => {}));
-    let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
+    let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: opts.hookEnabled ?? true,
+      ...(opts.schedule ? { vendorId: "scheduler" } : {}),
+      controller: { invoke, getWorkflowSchedule: opts.scheduleRead ?? (async () => {
+        if (opts.schedule) { if (opts.scheduleReadCounter) opts.scheduleReadCounter.value++; return {
+        scheduleId: "schedule-1", title: opts.scheduleTitle ?? "Nightly report", description: "Run report",
+        cadence: { kind: "interval" as const, everyMs: 60_000, anchorMs: 0 }, status: "active" as const,
+        nextFire: 60_000, failureCode: "must-not-leak",
+        }; }
+        return null;
+      }) } };
+    let secondHook = opts.secondSchedule ? {
+      id: HOOK + 1, gadgetId: GADGET, gatekeeperId: 50, enabled: true, vendorId: "scheduler",
+      controller: { getWorkflowSchedule: async () => ({
+        scheduleId: "schedule-2", title: "Second schedule", description: "Independent result",
+        cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0, internalToken: "must-not-cross-rpc" }, status: "active",
+      }) },
+    } : undefined;
+    if (secondHook) store.pinTrigger(ADA.id, HOOK + 1, GADGET, { definitionId, revision: 1, mode: "pinned" });
+    let extraHooks = Array.from({ length: opts.extraScheduleCount ?? 0 }, (_, index) => {
+      let id = HOOK + 2 + index;
+      store.pinTrigger(ADA.id, id, GADGET, { definitionId, revision: 1, mode: "pinned" });
+      return { id, gadgetId: GADGET, gatekeeperId: 50, enabled: true, vendorId: "scheduler",
+        controller: { getWorkflowSchedule: async () => {
+          if (opts.scheduleReadCounter) opts.scheduleReadCounter.value++;
+          return ({
+          scheduleId: `schedule-${id}`, title: `Schedule ${id}`, description: "Test",
+          cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "active",
+          });
+        } } };
+    });
     let takenInvocations = new Map<string, boolean>();
     let impl = {
       takenInvocations,
@@ -123,14 +166,16 @@ describe("through the Overseer", () => {
       storage: Object.assign(storage, {
         containsRestrictedData: { get: () => false },
         title: { get: () => "Test Workspace" },
-        operateSession: { get: () => false },
-        boundHooks: { get: (id: number) => (id === HOOK ? hook : undefined), list: () => [hook] },
+        operateSession: { get: () => opts.operate ?? false },
+        boundHooks: { get: (id: number) => [hook, ...(secondHook ? [secondHook] : []), ...extraHooks].find(candidate => candidate.id === id),
+          list: () => [hook, ...(secondHook ? [secondHook] : []), ...extraHooks] },
         gatekeepers: { get: () => undefined },
       }),
       users: {
         idFromString: (id: string) => id,
         get: (id: string) => ({
-          whoami: async () => ADA, recordSharedGadgetOpen: async () => {},
+          whoami: async () => ADA, operateSessionWorkspaceId: async () => opts.workspaceId ?? "workspace-id",
+          recordSharedGadgetOpen: async () => {},
           holdsSharedConfiguration: async () => opts.canBuild ?? true,
           workflowInvokeAnswer: async () => {
             askedInvoke.push(id);
@@ -140,9 +185,9 @@ describe("through the Overseer", () => {
       },
     };
     let askedInvoke: string[] = [];
-    let overseer = await openFakeOverseer({}, { role, impl });
+    let overseer = await openFakeOverseer({}, { role, impl, workspaceId: opts.workspaceId });
     void durable;
-    return { overseer, store, invoke, hook, askedInvoke, takenInvocations };
+    return { overseer, store, definitionId, invoke, hook, askedInvoke, takenInvocations };
   }
 
   it("lets a listed Operator run the trigger, handing its gatekeeper only a server-made invocation", async () => {
@@ -313,6 +358,109 @@ describe("through the Overseer", () => {
     let demoted = await session("build", { canBuild: false });
     await expect(demoted.overseer.setTriggerControl(HOOK, null)).rejects.toThrow(/only has permission to use/);
   });
+
+  it("shows schedule metadata to workflow readers without granting management or trigger-control access", async () => {
+    for (let shareRights of [{ read: true }, { run: true }]) {
+      let reader = await session("use", { schedule: true, shareRights, controlInvokers: [BUILDER] });
+      expect(await reader.overseer.listReadableWorkflowSchedules()).toEqual([{
+        hookId: HOOK, scheduleId: "schedule-1", title: "Nightly report", description: "Run report",
+        cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "active", nextFire: 60_000,
+      }]);
+      expect(await reader.overseer.listTriggerControls()).toEqual([]);
+      await expect(reader.overseer.setTriggerControl(HOOK, null)).rejects.toThrow();
+    }
+
+    let unshared = await session("use", { schedule: true, privateDefinition: true });
+    expect(await unshared.overseer.listReadableWorkflowSchedules()).toEqual([]);
+    expect((await unshared.overseer.listReadableWorkflowSchedules()).some(({ title }) => title === "Nightly report")).toBe(false);
+  });
+
+  it("shows an unpublished schedule to its builder only", async () => {
+    let useReader = await session("use", { schedule: true, unpublished: true });
+    let builder = await session("build", { schedule: true, unpublished: true });
+    expect(await useReader.overseer.listReadableWorkflowSchedules()).toEqual([]);
+    expect((await builder.overseer.listReadableWorkflowSchedules()).map(({ title }) => title)).toEqual(["Nightly report"]);
+  });
+
+  it("does not expose disabled or expired definitions through stale scheduler hooks", async () => {
+    let disabled = await session("build", { schedule: true, hookEnabled: false });
+    expect(await disabled.overseer.listReadableWorkflowSchedules()).toEqual([]);
+
+    let expired = await session("build", { schedule: true });
+    let stored = expired.store.list(ADA.id, "build")[0];
+    expect(stored).toBeDefined();
+    // Remove the trigger pin, then make the retained record expired. A stale bound hook must not
+    // make the definition readable again.
+    expired.store.pinTrigger(ADA.id, HOOK, GADGET, null);
+    let record = (expired.store as unknown as { storage: { workflowDefinitions: { put(value: unknown): void } } }).storage.workflowDefinitions;
+    record.put({ ...stored, expiresAt: new Date(Date.now() - 1) });
+    expect(expired.store.canReadDefinition(BUILDER, stored.id, "build")).toBe(false);
+    expect(await expired.overseer.listReadableWorkflowSchedules()).toEqual([]);
+  });
+
+  it("omits nextFire for inactive schedules", async () => {
+    let reader = await session("build", { schedule: true, scheduleRead: async () => ({
+      scheduleId: "schedule-1", title: "Nightly report", description: "Run report",
+      cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "expired", nextFire: 60_000,
+    }) });
+    expect(await reader.overseer.listReadableWorkflowSchedules()).toEqual([{
+      hookId: HOOK, scheduleId: "schedule-1", title: "Nightly report", description: "Run report",
+      cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "expired",
+    }]);
+  });
+
+  it("denies schedule reads through the Operate interface", async () => {
+    let operate = await session("build", { schedule: true, operate: true });
+    await expect(operate.overseer.listReadableWorkflowSchedules()).rejects.toThrow(/operate session/i);
+  });
+
+  it("caps independent scheduler reads at the configured safety bound", async () => {
+    let reads = { value: 0 };
+    let capped = await session("build", { schedule: true, extraScheduleCount: 110, scheduleReadCounter: reads });
+    // Count actual controller reads at the boundary; the scheduler controller calls are bounded
+    // before they are started, not only filtered from the returned list afterward.
+    let result = await capped.overseer.listReadableWorkflowSchedules();
+    expect(result).toHaveLength(100);
+    expect(reads.value).toBe(100);
+  });
+
+  it("removes schedule metadata, including title, when a reader's share is revoked", async () => {
+    let reader = await session("use", { schedule: true, privateDefinition: true, shareRights: { read: true } });
+    expect((await reader.overseer.listReadableWorkflowSchedules()).map(({ title }) => title)).toEqual(["Nightly report"]);
+    reader.store.share(ADA, reader.definitionId, OPERATOR, null, "build");
+    expect(await reader.overseer.listReadableWorkflowSchedules()).toEqual([]);
+  });
+
+  it("omits a hanging or malformed schedule without blocking independent readable schedules", async () => {
+    let hanging = await session("use", {
+      schedule: true, secondSchedule: true,
+      scheduleRead: () => new Promise<never>(() => {}),
+    });
+    vi.useFakeTimers();
+    try {
+      let result = hanging.overseer.listReadableWorkflowSchedules();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(result).resolves.toEqual([{
+        hookId: HOOK + 1, scheduleId: "schedule-2", title: "Second schedule", description: "Independent result",
+        cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "active",
+      }]);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    let malformed = await session("use", {
+      schedule: true, secondSchedule: true,
+      scheduleRead: async () => ({ scheduleId: "bad", title: "x".repeat(121), description: "bad", cadence: {}, status: "unknown" }),
+    });
+    expect((await malformed.overseer.listReadableWorkflowSchedules()).map(({ title }) => title)).toEqual(["Second schedule"]);
+  });
+
+  it("keeps schedule reads inside each workspace context", async () => {
+    let first = await session("build", { schedule: true, scheduleTitle: "Workspace one", workspaceId: "workspace-one" });
+    let second = await session("build", { schedule: true, scheduleTitle: "Workspace two", workspaceId: "workspace-two" });
+    expect((await first.overseer.listReadableWorkflowSchedules()).map(item => item.title)).toEqual(["Workspace one"]);
+    expect((await second.overseer.listReadableWorkflowSchedules()).map(item => item.title)).toEqual(["Workspace two"]);
+  });
 });
 
 describe("a second workspace", () => {
@@ -438,7 +586,11 @@ describe("what an invoker sees, and what reaches the gatekeeper", () => {
       workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const, takenInvocations: new Map<string, boolean>(), getGadgetHead: headOf,
     };
     let direct = invokeWorkflowTrigger as unknown as (...args: unknown[]) => Promise<unknown>;
-    await direct(impl, "viewer-id", OPERATOR, HOOK, { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" });
+    let extra = { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" };
+    // In the place of an approved run's revision (FAC-120), it names none, so it refuses: nothing is handed on.
+    await expect(direct(impl, "viewer-id", OPERATOR, HOOK, extra)).rejects.toThrow(WORKFLOW_REVISION_CHANGED);
+    expect(invoke).not.toHaveBeenCalled();
+    await direct(impl, "viewer-id", OPERATOR, HOOK, undefined, extra);
     expect(invoke.mock.calls).toEqual([[{ invocationId: expect.any(String) }]]);
   });
 });
@@ -724,5 +876,102 @@ describe("admission refuses before anything reaches the runtime (FAC-111)", () =
     retired.store.markAutoRetired(HOOK);
     await expect(retired.overseer.invokeTrigger(HOOK)).rejects.toThrow(TRIGGER_AUTO_RETIRED);
     nothingRan(retired.store, retired.invoke, definitionOf(retired.store));
+  });
+});
+
+// FAC-120 (r2's HIGH): an approved run names the definition and revision the person reviewed, and
+// admission holds it to them after its last await, when it mints. The grant check is the await a
+// repin or a new publication can land in.
+describe("an approved run's revision is held through admission (FAC-120)", () => {
+  /** A session whose grant answer waits until `release()`, with the gadget's code at `code.head`. */
+  async function racing() {
+    let release!: () => void;
+    let asked = new Promise<void>(resolve => { release = resolve; });
+    let code = { head: commit(1) };
+    let pending = Promise.withResolvers<void>();
+    let session = await invokeSession(async () => {
+      pending.resolve();
+      await asked;
+      return true;
+    }, undefined, id => (id === GADGET ? code.head : undefined));
+    let definitionId = session.store.list(ADA.id, "build")[0]!.id;
+    /** Publishes revision 2 on new code. */
+    let publishTwo = () => {
+      code.head = commit(2);
+      session.store.save(ADA, { id: definitionId, title: "Refund", gadgetId: GADGET }, () => code.head, "build");
+      session.store.publish(ADA, definitionId, 2);
+    };
+    return { ...session, definitionId, release, waiting: pending.promise, publishTwo };
+  }
+  const run = (impl: unknown, expected?: { definitionId: string; revision: number; onAdmitted?: (id: string) => void }) =>
+    (invokeWorkflowTrigger as (...a: unknown[]) => Promise<{ revision: number }>)(impl, "viewer-id", OPERATOR, HOOK, expected);
+  // Nothing was minted: the per-person rate still has all its runs.
+  const nothingMinted = (store: WorkspaceWorkflowDefinitionStore) => {
+    for (let i = 0; i < 3; i++) store.cancelInvocation(store.beginInvocation(OPERATOR, HOOK).id);
+  };
+
+  it("refuses, starting nothing, when the trigger is repinned while the grant is asked", async () => {
+    let race = await racing();
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1 });
+    await race.waiting;
+    race.publishTwo();
+    race.store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: race.definitionId, revision: 2, mode: "pinned" });
+    race.release();
+    await expect(admitting).rejects.toThrow(WORKFLOW_REVISION_CHANGED);
+    expect(race.invoke).not.toHaveBeenCalled();
+    nothingMinted(race.store);
+  });
+
+  it("refuses, starting nothing, when a follow-latest trigger's definition is published again meanwhile", async () => {
+    let race = await racing();
+    race.store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: race.definitionId, revision: 1, mode: "follow-latest" });
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1 });
+    await race.waiting;
+    race.publishTwo();
+    race.release();
+    await expect(admitting).rejects.toThrow(WORKFLOW_REVISION_CHANGED);
+    expect(race.invoke).not.toHaveBeenCalled();
+    nothingMinted(race.store);
+  });
+
+  it("tells the approved call of its own admission only: not of another person's run minted while it waits", async () => {
+    let race = await racing();
+    let heard: string[] = [];
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1, onAdmitted: id => heard.push(id) });
+    await race.waiting;
+    // Another request is minted meanwhile; this call hasn't been admitted.
+    race.store.cancelInvocation(race.store.beginInvocation(OPERATOR, HOOK).id);
+    expect(heard).toEqual([]);
+    race.release();
+    let invocation = await admitting as unknown as { id: string };
+    expect(heard).toEqual([invocation.id]);
+  });
+
+  it("never reports an admission it refused", async () => {
+    let race = await racing();
+    let heard: string[] = [];
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1, onAdmitted: id => heard.push(id) });
+    await race.waiting;
+    race.publishTwo();
+    race.store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: race.definitionId, revision: 2, mode: "pinned" });
+    race.release();
+    await expect(admitting).rejects.toThrow(WORKFLOW_REVISION_CHANGED);
+    expect(heard).toEqual([]);
+  });
+
+  it("admits the approved revision when nothing moved, and a person's own request (no reference) as before", async () => {
+    let race = await racing();
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1 });
+    race.release();
+    expect(await admitting).toMatchObject({ revision: 1 });
+    expect(race.invoke).toHaveBeenCalledTimes(1);
+    // The on-request path names no revision: it runs what the trigger runs when it is admitted.
+    let own = await racing();
+    own.store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: own.definitionId, revision: 1, mode: "follow-latest" });
+    let manual = run(own.impl);
+    await own.waiting;
+    own.publishTwo();
+    own.release();
+    expect(await manual).toMatchObject({ revision: 2 });
   });
 });

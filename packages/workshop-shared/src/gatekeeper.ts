@@ -1049,6 +1049,35 @@ export interface GatekeeperUserVerifier extends WorkerEntrypoint {}
 export type ActionApplied = { applied: { result: ActionResult } };
 
 /**
+ * What the kernel does for a gatekeeper as the person approving one of its actions (FAC-120): passed
+ * to `applyAction()` only for that person's own approval of an action that declared
+ * `ActionDescription.workflowRun`, never for an automatic approval or an assigned run's write, and
+ * revoked when it returns. It runs as that person, with every check of the same request made by
+ * them directly, on the run the action declared and nothing else; its answer is kernel text.
+ */
+export interface ApprovedEffects extends RpcTarget {
+  /**
+   * Starts the run the action's `workflowRun.reference` names, as the approving person: in the
+   * trigger's own workspace, verified and with at least `use` there, only while its definition and
+   * published revision are the ones named, then through the workspace's on-request admission (its
+   * run control's invokers, `workflow:invoke` asked with the person's own account, the run right
+   * and the rate caps). Idempotent per approved action: asking again, in this apply or a retry of it,
+   * returns the run it started.
+   */
+  invokeWorkflow(): Promise<ApprovedWorkflowRun>;
+}
+
+/**
+ * An `ApprovedEffects.invokeWorkflow` answer: the run admitted; refused, so known not started, in a
+ * FAC-119 kind; or `unknown`, when the run may have started (an answer lost after the request), which
+ * a gatekeeper records as uncertain, never as a refusal it may retry or decline.
+ */
+export type ApprovedWorkflowRun =
+  | { status: "started"; runId: string }
+  | { status: "refused"; kind: ActionFailureKind; reason: string }
+  | { status: "unknown"; reason: string };
+
+/**
  * An apply that did not succeed, as `applyAction` reports it when it knows more than a thrown error
  * says. Returned rather than thrown, because RPC carries only an error's message.
  */
@@ -1280,8 +1309,14 @@ export interface Gatekeeper<Session> extends DurableObject {
    * in the action's `ActionDescription.pushedCommits`. Actions that don't interact with git can
    * ignore this parameter (and can even omit the parameter from their `applyAction()`
    * declaration).
+   *
+   * `effects` (FAC-120) is present only while a person's own approval of this action is being
+   * applied, never for an automatic one, and is revoked once `applyAction()` returns: what the
+   * kernel itself may do as that approving person, with every check of their own request
+   * (`ApprovedEffects`). A gatekeeper that has no use for it ignores it.
    */
-  applyAction(action: number, cache: RpcStub<GitCache>): Promise<void | { failed: ActionApplyFailure } | ActionApplied>;
+  applyAction(action: number, cache: RpcStub<GitCache>, effects?: RpcStub<ApprovedEffects>)
+      : Promise<void | { failed: ActionApplyFailure } | ActionApplied>;
 
   /**
    * Indicates that an action was rejected by the user. The gatekeeper should clean up any
@@ -1731,6 +1766,17 @@ export type ActionDescription = {
   descriptionIsComplete?: boolean;
 
   /**
+   * If present (FAC-120), approving this action asks the kernel to start the workflow run this
+   * InferOS trigger reference names (`inferops://<company>.<workspace>/inferos/workflow-trigger/...`,
+   * workflow-trigger-ref.ts), as the person approving it. The kernel checks its form when the action
+   * is submitted, shows it to every approver in its own words (it appends a last field naming the
+   * reference, whatever this description says), and, only for that person's own approval of this action,
+   * hands `applyAction()` the `ApprovedEffects` that start exactly this run. It is fixed at submit:
+   * nothing at apply time can name another.
+   */
+  workflowRun?: { reference: string };
+
+  /**
    * If present, applying this action will push the named commits to the remote resource this
    * gatekeeper fronts.
    *
@@ -1888,6 +1934,9 @@ export interface HookController<Hook extends RpcTarget> extends WorkerEntrypoint
    * now (disabled, finished). A gatekeeper without it can't be run on request.
    */
   invoke?(invocation: HookInvocation): Promise<void>;
+
+  /** Optional read-only metadata for this hook's own schedule; contains no management or refusal data. */
+  getWorkflowSchedule?(): Promise<Omit<import("./workflow-definition.js").WorkflowScheduleSummary, "hookId"> | null>;
 }
 
 /**

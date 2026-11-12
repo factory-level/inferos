@@ -16,6 +16,7 @@ import {
 import { obsContext } from "./observability.js";
 import { toScheduleCadence } from "./schedule-types.js";
 import type { ScheduleSummary, ScheduledFiring, ScheduledTaskHook } from "./types.js";
+import type { WorkflowScheduleSummary } from "@gadgets/workshop-shared/workflow-definition";
 import {
   paginateManagementSchedules,
   type ManagementListOptions,
@@ -224,6 +225,21 @@ export class ScheduleDriver extends DurableObject {
   async getSchedule(workspaceId: string, scheduleId: string): Promise<StoredSchedule | undefined> {
     if (this.#requireMetadata().revoked) return undefined;
     return this.#readSchedule(scheduleKey(workspaceId, scheduleId));
+  }
+
+  /** Safe metadata for one schedule, without account-wide state or refusal details. */
+  async getWorkflowSummary(workspaceId: string, scheduleId: string): Promise<Omit<WorkflowScheduleSummary, "hookId"> | null> {
+    let schedule = await this.getSchedule(workspaceId, scheduleId);
+    if (!schedule) return null;
+    let summary = toScheduleSummary(schedule);
+    return {
+      scheduleId: summary.scheduleId,
+      title: summary.title,
+      description: summary.description,
+      cadence: summary.cadence,
+      status: summary.status,
+      ...(summary.status === "active" && summary.nextFire !== undefined ? { nextFire: summary.nextFire } : {}),
+    };
   }
 
   async listWorkspace(workspaceId: string): Promise<ScheduleSummary[]> {

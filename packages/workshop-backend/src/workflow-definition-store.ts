@@ -129,6 +129,12 @@ const MAX_WAITING_INVOCATIONS = 20;
  * may not run the definition it is pinned to (FAC-122).
  */
 export const CANNOT_RUN = "You can't run this trigger.";
+/**
+ * Refuses an approved run (FAC-120) whose trigger no longer runs the definition and revision the
+ * person approved: repinned, or a follow-latest definition published again, since.
+ */
+export const WORKFLOW_REVISION_CHANGED =
+  "The workflow changed since it was proposed: its trigger no longer runs that revision. Ask the Dot again.";
 
 /** Refused, without saying whether the definition exists, to anyone it isn't visible to. */
 const NOT_FOUND = "Workflow definition not found.";
@@ -362,6 +368,13 @@ export class WorkspaceWorkflowDefinitionStore {
   get(viewer: string, id: string, role: CollaboratorRole | null): WorkflowDefinition | null {
     let stored = this.storage.workflowDefinitions.get(id);
     return stored && this.#available(stored, this.retention.now()) ? this.#viewOf(stored, viewer, role) : null;
+  }
+
+  /** Whether the viewer can read this definition through the same projection used by list/get. */
+  canReadDefinition(viewer: string, id: string, role: CollaboratorRole | null): boolean {
+    let stored = this.storage.workflowDefinitions.get(id);
+    return !!stored && this.#available(stored, this.retention.now(), this.#pinnedIds()) &&
+      this.#viewOf(stored, viewer, role) !== null;
   }
 
   /**
@@ -1059,12 +1072,22 @@ export class WorkspaceWorkflowDefinitionStore {
    * Admits `profileId`'s request to run trigger `hookId` now: its control must list them and the
    * trigger must still be pinned. Mints the invocation, which the trigger's delivery must name
    * (`fire`). Every refusal reads the same, whether there's no control, no pin or no listing.
+   * With `expected` (an approved run, FAC-120), the revision it would start on must be that
+   * definition and revision, or it refuses with `WORKFLOW_REVISION_CHANGED`, in the same
+   * transaction that mints, so nothing awaited can move it in between.
    */
-  beginInvocation(profileId: string, hookId: number, company: string | null = null): WorkflowInvocation {
+  beginInvocation(profileId: string, hookId: number, company: string | null = null,
+      expected?: { definitionId: string; revision: number }): WorkflowInvocation {
     return this.durableStorage.transactionSync(() => {
       let control = this.storage.workflowTriggerControls.get(hookId);
       let pin = this.storage.workflowTriggerPins.get(hookId);
       if (!control || !pin || !control.invokers.includes(profileId)) throw new Error(CANNOT_RUN);
+      let revision = pin.mode === "follow-latest"
+        ? this.storage.workflowDefinitions.get(pin.definitionId)?.published?.revision ?? pin.revision
+        : pin.revision;
+      if (expected && (expected.definitionId !== pin.definitionId || expected.revision !== revision)) {
+        throw new Error(WORKFLOW_REVISION_CHANGED);
+      }
       let waiting = 0;
       for (let invocation of this.storage.workflowInvocations.list()) if (invocation.hookId === hookId) waiting++;
       if (waiting >= MAX_WAITING_INVOCATIONS) throw new Error("This trigger already has too many runs waiting to start.");
@@ -1075,10 +1098,7 @@ export class WorkspaceWorkflowDefinitionStore {
       this.storage.workflowInvocationLog.put({ id: logId, hookId, requestedBy: profileId, at: now });
       if (logId >= MAX_WORKFLOW_INVOCATIONS) this.storage.workflowInvocationLog.delete(logId - MAX_WORKFLOW_INVOCATIONS);
       let invocation: StoredWorkflowInvocation = {
-        id: crypto.randomUUID(), hookId, definitionId: pin.definitionId,
-        revision: pin.mode === "follow-latest"
-          ? this.storage.workflowDefinitions.get(pin.definitionId)?.published?.revision ?? pin.revision
-          : pin.revision,
+        id: crypto.randomUUID(), hookId, definitionId: pin.definitionId, revision,
         requestedAt: new Date(now), requestedBy: profileId, company,
       };
       this.storage.workflowInvocations.put(invocation);

@@ -3,7 +3,7 @@ import type { WorkpieceId } from "./api.js";
 import type { WidgetIndexOutcome } from "./gatekeeper.js";
 import { MAX_WORKSPACE_FLOWS, type OperateFlow } from "./operate-flow.js";
 import { MAX_OPERATE_ID_LENGTH, type OperateConsoleRun, type OperateEvent } from "./operate-session.js";
-import type { WidgetToolDeclaration } from "./widget-tools.js";
+import type { WidgetCommandDeclaration, WidgetToolDeclaration } from "./widget-tools.js";
 import type { WidgetStateMachine } from "./widget-state.js";
 import type { CanvasProjectBoardWidget } from "./canvas.js";
 
@@ -146,6 +146,30 @@ export type ConsoleWidgetFreeze = {
    * declares none, or on entries published before publication recorded it.
    */
   states?: WidgetStateMachine;
+  /**
+   * The commands that commit declares which the builder bound (FAC-14 K2), each with the connection
+   * it was bound to, checked and snapshotted at publication like `tools`. A declared command left
+   * unbound is not here, so it is offered to no one. Present only while console tools are on.
+   */
+  commands?: ConsoleFrozenCommand[];
+};
+
+/**
+ * A builder's binding of one declared command to a connection (FAC-14 K2), set on a draft widget
+ * entry. Publication checks it: the command must be declared by the widget's commit, and the
+ * connection must be one of this workspace's own, of the kind the command's template needs.
+ */
+export type ConsoleCommandBinding = {
+  /** The command's name, as `tools.json` declares it. */
+  name: string;
+  /** The connection (gatekeeper) of the console's own workspace it runs on. */
+  gatekeeperId: WorkpieceId;
+};
+
+/** A bound command as a publication froze it: its declaration and its connection. */
+export type ConsoleFrozenCommand = WidgetCommandDeclaration & {
+  /** The connection it was bound to, which publication checked. */
+  gatekeeperId: WorkpieceId;
 };
 
 /**
@@ -169,6 +193,11 @@ export type ConsoleWidgetEntry = {
   state: ConsoleWidgetState;
   /** Set by publication only, `ui` and `tools` included; a client-supplied value is dropped. */
   frozen?: ConsoleWidgetFreeze;
+  /**
+   * The builder's bindings of the widget's declared commands (FAC-14 K2), at most one per command.
+   * Each grants nothing until a publication checks it and freezes it in `frozen.commands`.
+   */
+  commands?: ConsoleCommandBinding[];
 };
 
 /**
@@ -629,9 +658,33 @@ function parseWidgets(entries: ConsoleWidgetEntry[]): ConsoleWidgetEntry[] {
       throw new TypeError("A console widget must declare its state resettable: each publication " +
           "starts it with empty local state.");
     }
+    let commands = entry.commands === undefined ? undefined : parseCommandBindings(entry.commands);
     // `frozen` is publication's to set, so a client's is dropped rather than trusted.
     return { gadgetId: entry.gadgetId, blueprintId: blueprintId(entry.blueprintId, "console widget"),
-      version: entry.version, label: title(entry.label, "widget"), state: entry.state };
+      version: entry.version, label: title(entry.label, "widget"), state: entry.state,
+      ...(commands === undefined ? {} : { commands }) };
+  });
+}
+
+const COMMAND_NAME = /^[a-z][A-Za-z0-9]{0,47}$/;
+
+// A draft entry's command bindings: at most 8 (a tools.json's most entries), one per command name.
+function parseCommandBindings(bindings: ConsoleCommandBinding[]): ConsoleCommandBinding[] {
+  if (!Array.isArray(bindings) || bindings.length > 8) {
+    throw new TypeError("A console widget binds at most 8 commands.");
+  }
+  let names = new Set<string>();
+  return bindings.map(binding => {
+    if (typeof binding !== "object" || binding === null || typeof binding.name !== "string" ||
+        !COMMAND_NAME.test(binding.name)) {
+      throw new TypeError("A command binding must name a declared command.");
+    }
+    if (names.has(binding.name)) throw new TypeError(`Command ${binding.name} is bound twice.`);
+    names.add(binding.name);
+    if (!Number.isSafeInteger(binding.gatekeeperId) || binding.gatekeeperId < 0) {
+      throw new TypeError("A command binding must name a connection.");
+    }
+    return { name: binding.name, gatekeeperId: binding.gatekeeperId };
   });
 }
 

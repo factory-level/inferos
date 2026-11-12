@@ -129,12 +129,59 @@ export type WidgetToolDeclaration = {
   description: string;
   /** The `server.js` method the tool calls, by the same pattern as `name`, and never reserved. */
   method: string;
-  /** What the tool may do. Only reads exist; `"write"` is reserved. */
+  /** What the tool may do: it reads. A write is a `WidgetCommandDeclaration` instead. */
   effect: "read";
   /** Its input: none (`{type: "object", properties: {}}`) or builder-written choices. */
   input: WidgetToolSchema;
   /** The output it returns; the kernel checks every result against it. */
   output: WidgetToolSchema;
+};
+
+/**
+ * The command templates a widget may declare (FAC-14 K2), by name: each is a write the kernel
+ * performs as a request, on the console builder's own connection, never authored code. Each names
+ * the connection kind it needs and the input it takes, which the kernel checks
+ * (`commandInputProblem`). Only the InferOps board transition exists.
+ */
+export const WIDGET_COMMANDS = Object.freeze({
+  "inferops.issue.transition": Object.freeze({
+    /** What a builder binds it to: one of the console workspace's own InferOps board connections. */
+    connection: "inferops.project-board" as const,
+    /** Its input, as the operate agent sees it in the listing. */
+    input: Object.freeze({
+      issueId: "the issue's id (a UUID)",
+      toStateId: "the id of the workflow state to move it to (a UUID)",
+      expectedRevision: "the issue's revision as last read (a decimal string)",
+    }),
+  }),
+});
+
+/** A command template's name: a key of `WIDGET_COMMANDS`. */
+export type WidgetCommandName = keyof typeof WIDGET_COMMANDS;
+
+/**
+ * One command a callable widget declares in `tools.json` (FAC-14 K2): a write the operate agent
+ * may only request. It names a kernel template and nothing the widget runs: no `method`, `input` or
+ * `output`. The console's builder binds it to a connection at publication; unbound, it is offered
+ * to no one.
+ */
+export type WidgetCommandDeclaration = {
+  /** The command's name, unique in the file across tools and commands, by the tools' pattern. */
+  name: string;
+  /** What the command asks for: one line of plain text, untrusted when shown to the agent. */
+  description: string;
+  /** Always `"write"`: what tells a command from a read tool in `tools.json`. */
+  effect: "write";
+  /** The template the kernel performs. */
+  command: WidgetCommandName;
+};
+
+/** What `parseWidgetToolFile` reads from `tools.json`: its read tools and its commands. */
+export type WidgetToolFile = {
+  /** The read tools, as `parseWidgetTools` returns them. */
+  tools: WidgetToolDeclaration[];
+  /** The declared commands (FAC-14 K2). */
+  commands: WidgetCommandDeclaration[];
 };
 
 /** A tool call's result as its runner reports it: a value, or a capped error with its length. */
@@ -170,6 +217,16 @@ const NOT_ERROR_TEXT = /[^\n\P{Cc}]|[\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/gu;
  * The result is built afresh from the checked fields.
  */
 export function parseWidgetTools(text: string): WidgetToolDeclaration[] {
+  return parseWidgetToolFile(text).tools;
+}
+
+/**
+ * Parses `tools.json` as `parseWidgetTools` does, also reading its commands (FAC-14 K2): an entry
+ * whose `effect` is `"write"` has exactly the keys `name`, `description`, `effect` and `command`,
+ * and `command` names a template in `WIDGET_COMMANDS`. Names are unique across tools and commands,
+ * and both count towards the 8 entries a file may hold.
+ */
+export function parseWidgetToolFile(text: string): WidgetToolFile {
   if (utf8Length(text, WIDGET_TOOL_LIMITS.fileBytes) > WIDGET_TOOL_LIMITS.fileBytes) {
     throw new Error(`it is over ${WIDGET_TOOL_LIMITS.fileBytes} bytes`);
   }
@@ -185,9 +242,13 @@ export function parseWidgetTools(text: string): WidgetToolDeclaration[] {
     throw new Error(`it declares more than ${WIDGET_TOOL_LIMITS.tools} tools`);
   }
   let names = new Set<string>();
-  return parsed.map((raw, index) => {
-    let tool = fields(raw, `tool ${index + 1}`,
-        ["name", "description", "method", "effect", "input", "output"]);
+  let commands: WidgetCommandDeclaration[] = [];
+  let tools = parsed.flatMap((raw, index) => {
+    let isCommand = typeof raw === "object" && raw !== null && !Array.isArray(raw) &&
+        (raw as Record<string, unknown>).effect === "write";
+    let tool = isCommand
+        ? fields(raw, `tool ${index + 1}`, ["name", "description", "effect", "command"])
+        : fields(raw, `tool ${index + 1}`, ["name", "description", "method", "effect", "input", "output"]);
     let { name, description, method, effect } = tool;
     if (typeof name !== "string" || !NAME.test(name)) {
       throw new Error(`tool ${index + 1}'s name must be a lowercase letter, then at most ` +
@@ -199,17 +260,55 @@ export function parseWidgetTools(text: string): WidgetToolDeclaration[] {
     let problem = typeof description === "string"
         ? plainLineProblem(description, WIDGET_TOOL_LIMITS.descriptionLength) : "is not a string";
     if (problem !== null) throw new Error(`${at}'s description ${problem}`);
+    if (isCommand) {
+      let template = tool.command;
+      if (typeof template !== "string" || !Object.hasOwn(WIDGET_COMMANDS, template)) {
+        throw new Error(`${at}'s command must be one of ${Object.keys(WIDGET_COMMANDS).join(", ")}`);
+      }
+      commands.push({name, description: description as string, effect: "write",
+        command: template as WidgetCommandName});
+      return [];
+    }
     if (typeof method !== "string" || !NAME.test(method)) {
       throw new Error(`${at}'s method must be a lowercase letter, then letters and digits`);
     }
     if (isReservedToolMethod(method)) throw new Error(`${at}'s method "${method}" is reserved`);
-    if (effect !== "read") throw new Error(`${at}'s effect must be "read"`);
-    return {
+    if (effect !== "read") throw new Error(`${at}'s effect must be "read" or "write"`);
+    return [{
       name, description: description as string, method, effect,
       input: inputSchema(tool.input, `${at}'s input`),
       output: outputSchema(tool.output, `${at}'s output`, 0),
-    };
+    } satisfies WidgetToolDeclaration];
   });
+  return {tools, commands};
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DECIMAL_REVISION = /^(?:0|[1-9][0-9]{0,19})$/;
+
+/**
+ * Why `value` is not an input `command` takes, or `null` when it is (FAC-14 K2). The transition
+ * takes exactly `issueId` and `toStateId` (UUIDs) and `expectedRevision` (a decimal string without
+ * a leading zero, at most 20 digits). The kernel checks this before asking any connection, so
+ * nothing the agent chose reaches a gatekeeper unchecked. Like every problem here, the message
+ * names a field, never a value.
+ */
+export function commandInputProblem(command: WidgetCommandName, value: unknown): string | null {
+  if (command !== "inferops.issue.transition") return "it is not a known command";
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return "it is not an object";
+  let input = value as Record<string, unknown>;
+  let expected = Object.keys(WIDGET_COMMANDS[command].input);
+  let extra = Object.keys(input).find(key => !expected.includes(key));
+  if (extra !== undefined) {
+    return PROPERTY_NAME.test(extra) ? `"${extra}" is not part of it` : "it has a field that is not part of it";
+  }
+  for (let key of ["issueId", "toStateId"]) {
+    if (typeof input[key] !== "string" || !UUID.test(input[key])) return `"${key}" must be a UUID`;
+  }
+  if (typeof input.expectedRevision !== "string" || !DECIMAL_REVISION.test(input.expectedRevision)) {
+    return `"expectedRevision" must be a decimal string`;
+  }
+  return null;
 }
 
 /**

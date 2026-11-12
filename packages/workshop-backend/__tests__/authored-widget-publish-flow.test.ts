@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { env, RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { Overseer } from "@gadgets/workshop-shared/api";
@@ -30,12 +30,21 @@ async function withClient<T>(run: (impl: any, client: Overseer, instance: Overse
       impl.requireSharedConfiguration = async () => {};
       impl.recordGadgetAnalytics = () => {};
       const owner = impl.users.idFromString(ownerId);
-      impl.users.get = () => ({
-        id: owner,
-        whoami: async () => ({id: "owner-profile", name: "Owner"}),
-        operateSessionWorkspaceId: async () => stub.id.toString(),
-        recordSharedGadgetOpen: async () => {},
-      });
+      // The owner's user, for this workspace only. `impl.users` is the User namespace every Durable
+      // Object in this pool worker shares (`ctx.exports.UserDurableObject`), so a `get` assigned onto
+      // it would answer every later file's user lookups with this stand-in.
+      const users = impl.users;
+      impl.users = {
+        idFromString: (id: string) => users.idFromString(id),
+        idFromName: (name: string) => users.idFromName(name),
+        newUniqueId: () => users.newUniqueId(),
+        get: () => ({
+          id: owner,
+          whoami: async () => ({id: "owner-profile", name: "Owner"}),
+          operateSessionWorkspaceId: async () => stub.id.toString(),
+          recordSharedGadgetOpen: async () => {},
+        }),
+      };
       const index = new Map<string, string>();
       const versions = new Map<string, {body: Uint8Array, metadata?: Record<string, string>}>();
       impl.env = {
@@ -68,6 +77,18 @@ async function withClient<T>(run: (impl: any, client: Overseer, instance: Overse
 }
 
 describe("authored widget publication through the Overseer client", () => {
+  // Load the build runtime's modules once, before any test that builds. In this pool, the build
+  // Durable Object's dynamic `import()` of the runtime goes through Vite's on-demand transform of the
+  // esbuild-wasm wrapper and the generated 1.6 MB dependency module: 4-9 s on an idle 14-core
+  // machine (the build that follows takes under 1 s), and past the build test's 30 s on a CI runner
+  // running every package's tests at once. The deployed
+  // Worker is bundled, so it never pays that transform (the first preview on a local wrangler stack
+  // takes 1-2 s in total). It is the test pool's cost, not the build's, so it is timed here, on its
+  // own allowance, and each build test's own timeout covers only the build.
+  beforeAll(async () => {
+    await import("../src/authored-widget-build-runtime.js");
+  }, 180_000);
+
   it("builds a chat draft without changing its gadget head or published state", async () => {
     await withClient(async (impl, client) => {
       impl.env = { ...impl.env, AUTHORED_WIDGET_BUILD_ENABLED: "true" };
@@ -114,15 +135,9 @@ describe("authored widget publication through the Overseer client", () => {
         ["client.tsx", "export default function Widget(){ return <div>workerd preview</div> }"],
       ]));
 
-      // Load the build runtime's modules before the timed build. In this pool, the build Durable
-      // Object's dynamic `import()` of the runtime goes through Vite's on-demand transform of the
-      // esbuild-wasm wrapper and the generated 1.6 MB dependency module: about 9 s on an idle
-      // 14-core machine, and more than the 15 s preview deadline on a CI runner running every
-      // package's tests at once. The deployed Worker is bundled, so it never pays that transform
-      // (the first preview on a local wrangler stack takes 1-2 s in total). After this, the call
-      // below still runs the real build Durable Object, the esbuild-wasm initialization and the
-      // build itself, all inside the product's deadline (FAC-8).
-      await import("../src/authored-widget-build-runtime.js");
+      // The build runtime's modules were loaded before this test (`beforeAll` above), so the call
+      // below runs the real build Durable Object, the esbuild-wasm initialization and the build
+      // itself, all inside the product's deadline (FAC-8).
       await expect(client.previewAuthoredWidget(1, 51)).resolves.toMatchObject({
         jsCode: expect.stringContaining("workerd preview"),
         measurements: { clientBytes: expect.any(Number), durationMs: expect.any(Number) },
