@@ -94,7 +94,7 @@ import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId,
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, type HookOccurrence, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionFailureKind, type ApprovedEffects, type ApprovedWorkflowRun, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, type HookOccurrence, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionFailureKind, type ApprovedEffects, type ApprovedTemporaryCanvas, type ApprovedWorkflowRun, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
 import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionOutcome, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -1315,15 +1315,35 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
  */
 export const WORKFLOW_RUN_FIELD_LABEL = "Workflow run this approval starts (shown by InferOS)";
 
+/** FAC-137: a temporary canvas is created only by its own person's approval, in their own operate session. */
+export const TEMPORARY_CANVAS_NOT_YOURS = "Only the person this canvas is for can approve it, in their own operate session.";
+/** FAC-137: a widget on the declared canvas isn't offered to the approver now. */
+export const TEMPORARY_CANVAS_WIDGET_UNAVAILABLE = "A widget on this canvas isn't available to you now. Ask your Dot again.";
+/** FAC-137: the stored declaration no longer checks. */
+export const TEMPORARY_CANVAS_DECLARATION_INVALID = "This canvas proposal isn't valid.";
+/** FAC-137: the canvas could not be created just now; nothing was. */
+export const TEMPORARY_CANVAS_NOT_CREATED = "The canvas could not be created. Nothing was created; try again.";
+/** FAC-137: the effect asked for without a declared canvas, or after the apply ended. */
+export const TEMPORARY_CANVAS_NEEDS_APPROVAL = "A temporary canvas is created only by your own approval of one your Dot proposed.";
+
 // A label as `isReservedFieldLabel` compares it: compatibility forms folded (NFKC), invisible
 // default-ignorable code points (zero-width spaces, joiners, soft hyphens) removed, whitespace runs
 // collapsed to one space, trimmed, then lower-cased.
 const foldLabel = (label: string) => label.normalize("NFKC").replace(/\p{Default_Ignorable_Code_Point}/gu, "")
     .replace(/\s+/gu, " ").trim().toLowerCase();
-const RESERVED_LABEL_FOLDED = foldLabel(WORKFLOW_RUN_FIELD_LABEL);
+/**
+ * The label of the field the kernel appends to an action that declares a temporary canvas (FAC-137,
+ * `ActionDescription.temporaryCanvas`), whose value names the canvas and its widgets: how every
+ * approver is shown what approving creates, in the kernel's words. Reserved like
+ * `WORKFLOW_RUN_FIELD_LABEL`.
+ */
+export const TEMPORARY_CANVAS_FIELD_LABEL = "Temporary canvas this approval creates for you (shown by InferOS)";
+
+const RESERVED_LABELS_FOLDED = new Set([foldLabel(WORKFLOW_RUN_FIELD_LABEL), foldLabel(TEMPORARY_CANVAS_FIELD_LABEL)]);
 
 /**
- * Whether `label` is the kernel's reserved `WORKFLOW_RUN_FIELD_LABEL` (rounds 6 and 7), so a near-copy
+ * Whether `label` is one of the kernel's reserved labels, `WORKFLOW_RUN_FIELD_LABEL` (rounds 6 and 7)
+ * or `TEMPORARY_CANVAS_FIELD_LABEL` (FAC-137), so a near-copy
  * can't pass for it. Both are folded the same way first: NFKC (so fullwidth and other compatibility
  * forms match), every default-ignorable code point removed (zero-width and other invisible
  * characters), whitespace collapsed, trimmed and lower-cased. A gatekeeper's field so labelled is
@@ -1332,7 +1352,7 @@ const RESERVED_LABEL_FOLDED = foldLabel(WORKFLOW_RUN_FIELD_LABEL);
  * kernel's run by its provenance, `ActionContext.declaredRun`, never by a field label.
  */
 export function isReservedFieldLabel(label: unknown): boolean {
-  return typeof label === "string" && foldLabel(label) === RESERVED_LABEL_FOLDED;
+  return typeof label === "string" && RESERVED_LABELS_FOLDED.has(foldLabel(label));
 }
 
 /** Which requested run proposed a write, and where (FAC-112; `ActionRecord.workflowRun`). */
@@ -1730,8 +1750,13 @@ export function actionContextOf(record: ActionRecord & {type: "action"},
   // The declared run (round 6), from the kernel's own record of the reference it validated at
   // submit: never from anything else a gatekeeper wrote.
   let reference = record.description.workflowRun?.reference;
-  if (typeof reference !== "string") return origin;
-  return {...origin ?? {kind: "declared-run"}, declaredRun: {reference}};
+  if (typeof reference === "string") return {...origin ?? {kind: "declared-run"}, declaredRun: {reference}};
+  // A declared temporary canvas (FAC-137), from what the kernel checked and stored at submit.
+  let canvas = record.description.temporaryCanvas;
+  if (canvas !== undefined && typeof canvas.title === "string" && Array.isArray(canvas.placements)) {
+    return {...origin ?? {kind: "declared-canvas"}, declaredCanvas: {title: canvas.title, widgets: canvas.placements.length}};
+  }
+  return origin;
 }
 
 // Where an action came from, before its declared run (see actionContextOf).
@@ -7194,8 +7219,15 @@ class OverseerImpl implements AgentHooks {
     // kernel's own field shows the approver, see submitActionNow), and bound to that reference and
     // this action: nothing at apply names another.
     let declaredRun = record.description.workflowRun?.reference;
-    let effects = declaredRun !== undefined && !autoApproved && resolvedBy.type === "user" && !record.executedAs
-        ? new ApprovedEffectsImpl(() => this.#invokeApprovedWorkflow(resolvedBy.id, declaredRun, record.id))
+    // FAC-137: likewise a declared temporary canvas, created only for that person, in their own session.
+    let declaredCanvas = record.description.temporaryCanvas;
+    let ownApproval = !autoApproved && resolvedBy.type === "user" && !record.executedAs;
+    let effects = ownApproval && (declaredRun !== undefined || declaredCanvas !== undefined)
+        ? new ApprovedEffectsImpl({
+          ...(declaredRun !== undefined ? {invoke: () => this.#invokeApprovedWorkflow(resolvedBy.id, declaredRun, record.id)} : {}),
+          ...(declaredCanvas !== undefined
+            ? {createCanvas: () => this.#createApprovedTemporaryCanvas(resolvedBy.id, declaredCanvas, record.id)} : {}),
+        })
         : undefined;
     try {
       result = await gatekeeper.applyAction(record.action,
@@ -8542,7 +8574,24 @@ class OverseerImpl implements AgentHooks {
     // Only the kernel's own field may carry its label (round 6): a gatekeeper's field that takes it,
     // however it is cased or spaced, is refused, so no decoy ever stands beside or for the real one.
     if ((description.fields ?? []).some(field => isReservedFieldLabel(field?.label))) {
-      throw new Error(`The field label "${WORKFLOW_RUN_FIELD_LABEL}" is reserved for InferOS.`);
+      let label = (description.fields ?? []).find(field => isReservedFieldLabel(field?.label))?.label;
+      throw new Error(`The field label "${label}" is reserved for InferOS.`);
+    }
+    // FAC-137: a declared temporary canvas is checked and normalized here, and shown by the kernel's
+    // own last field; it is the only thing approval creates. One action declares a run or a canvas.
+    if (description.temporaryCanvas !== undefined) {
+      if (description.workflowRun !== undefined) {
+        throw new Error("An action declares a workflow run or a temporary canvas, not both.");
+      }
+      let canvas;
+      try {
+        canvas = parseTemporaryCanvasInput(description.temporaryCanvas);
+      } catch (error) {
+        throw new Error(`A declared temporary canvas isn't valid: ${error instanceof Error ? error.message : String(error)}`, {cause: error});
+      }
+      let widgets = canvas.placements.length === 1 ? "1 widget" : `${canvas.placements.length} widgets`;
+      description = {...description, temporaryCanvas: canvas, fields: [...description.fields ?? [],
+        {label: TEMPORARY_CANVAS_FIELD_LABEL, kind: "inline", value: `${canvas.title} (${widgets})`}]};
     }
     if (description.workflowRun !== undefined) {
       if (!parseWorkflowTriggerRef(description.workflowRun?.reference)) {
@@ -13409,6 +13458,60 @@ class OverseerImpl implements AgentHooks {
    * returns the same run. A call that may have reached it but didn't answer is `unknown`, never a
    * refusal. Every answer is kernel text.
    */
+  /**
+   * Creates the temporary canvas action `actionId` declared (FAC-137) for the person who approved it
+   * (`profileId`), in this workspace, which must be their own live operate session
+   * (`temporaryCanvasesOf`). Each widget is checked first as one offered to them now: a console
+   * widget by its own workspace (`listWidgetInstancesFor`, as `proposeSessionPlacement` checks), a
+   * built-in one by their own widget search returning its kind. One that isn't refuses the whole
+   * canvas. Idempotent per action: the first canvas created is the answer to every later ask.
+   */
+  async #createApprovedTemporaryCanvas(profileId: string, declared: unknown, actionId: number): Promise<ApprovedTemporaryCanvas> {
+    let refuse = (kind: ActionFailureKind, reason: string): ApprovedTemporaryCanvas => ({status: "refused", kind, reason});
+    let userId = this.users.idFromName(profileId).toString();
+    let key = `fac137:approvedCanvas:${actionId}`;
+    let earlier = this.ctx.storage.kv.get<{canvasId: string; expiresAt: number}>(key);
+    if (earlier) return {status: "created", canvasId: earlier.canvasId, expiresAt: new Date(earlier.expiresAt)};
+    let canvas;
+    try {
+      this.temporaryCanvasesOf(userId);
+      canvas = parseTemporaryCanvasInput(declared);
+    } catch (error) {
+      return error instanceof TemporaryCanvasError && error.code === TEMPORARY_CANVAS_ERROR_CODES.unavailable
+        ? refuse("permission", TEMPORARY_CANVAS_NOT_YOURS) : refuse("invalid", TEMPORARY_CANVAS_DECLARATION_INVALID);
+    }
+    let caller: ConsoleToolCaller = {userId, profileId, sessionWorkspaceId: this.ctx.id.toString()};
+    let owner = this.users.get(this.users.idFromString(userId));
+    for (let {ref} of canvas.placements) {
+      let offered = false;
+      if (ref.type === "console-widget") {
+        let found = await this.#workspaceStub(ref.workspaceId)
+            ?.listWidgetInstancesFor(caller, [{blueprintId: ref.blueprintId, version: ref.version}]).catch(() => null);
+        offered = !!found?.[0]?.some(instance => instance.consoleId === ref.consoleId && instance.sourceGadgetId === ref.sourceGadgetId);
+      } else {
+        let answer = await owner.searchWidgets(ref.kind, WIDGET_SEARCH_LIMIT).catch(() => null);
+        offered = answer?.status === "searched" && answer.hits.some(hit => hit.kind === ref.kind);
+      }
+      if (!offered) return refuse("permission", TEMPORARY_CANVAS_WIDGET_UNAVAILABLE);
+    }
+    // After the last await: an earlier ask that finished meanwhile is the answer.
+    let finished = this.ctx.storage.kv.get<{canvasId: string; expiresAt: number}>(key);
+    if (finished) return {status: "created", canvasId: finished.canvasId, expiresAt: new Date(finished.expiresAt)};
+    try {
+      let created = this.temporaryCanvasesOf(userId).create(canvas);
+      this.ctx.storage.kv.put(key, {canvasId: created.id, expiresAt: created.expiresAt!.getTime()});
+      return {status: "created", canvasId: created.id, expiresAt: created.expiresAt!};
+    } catch (error) {
+      if (error instanceof TemporaryCanvasError && error.code === TEMPORARY_CANVAS_ERROR_CODES.tooMany) {
+        return refuse("policy", error.message);
+      }
+      if (error instanceof TemporaryCanvasError && error.code === TEMPORARY_CANVAS_ERROR_CODES.unavailable) {
+        return refuse("permission", TEMPORARY_CANVAS_NOT_YOURS);
+      }
+      return refuse("unavailable", TEMPORARY_CANVAS_NOT_CREATED);
+    }
+  }
+
   async #invokeApprovedWorkflow(profileId: string, reference: string, actionId: number): Promise<ApprovedWorkflowRun> {
     let ref = parseWorkflowTriggerRef(reference);
     if (!ref) return {status: "refused", kind: "invalid", reason: WORKFLOW_REFERENCE_UNKNOWN};
@@ -20649,15 +20752,20 @@ function actionReceipt(impl: OverseerImpl, gatekeeperId: number, id: number): Ac
 class ApprovedEffectsImpl extends RpcTarget implements ApprovedEffects {
   #invoke: (() => Promise<ApprovedWorkflowRun>) | null;
   #answer: Promise<ApprovedWorkflowRun> | null = null;
+  #createCanvas: (() => Promise<ApprovedTemporaryCanvas>) | null;
+  #canvas: Promise<ApprovedTemporaryCanvas> | null = null;
 
-  constructor(invoke: () => Promise<ApprovedWorkflowRun>) {
+  /** Only what the action declared: a run to start (FAC-120), a canvas to create (FAC-137), or both absent. */
+  constructor(declared: {invoke?: () => Promise<ApprovedWorkflowRun>; createCanvas?: () => Promise<ApprovedTemporaryCanvas>}) {
     super();
-    this.#invoke = invoke;
+    this.#invoke = declared.invoke ?? null;
+    this.#createCanvas = declared.createCanvas ?? null;
   }
 
   /** Ends the capability: every later call is refused. */
   revoke(): void {
     this.#invoke = null;
+    this.#createCanvas = null;
   }
 
   async invokeWorkflow(): Promise<ApprovedWorkflowRun> {
@@ -20665,6 +20773,13 @@ class ApprovedEffectsImpl extends RpcTarget implements ApprovedEffects {
     if (!invoke) return {status: "refused", kind: "policy", reason: WORKFLOW_NEEDS_APPROVAL};
     this.#answer ??= invoke();
     return await this.#answer;
+  }
+
+  async createTemporaryCanvas(): Promise<ApprovedTemporaryCanvas> {
+    let create = this.#createCanvas;
+    if (!create) return {status: "refused", kind: "policy", reason: TEMPORARY_CANVAS_NEEDS_APPROVAL};
+    this.#canvas ??= create();
+    return await this.#canvas;
   }
 }
 

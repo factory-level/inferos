@@ -58,7 +58,8 @@ export function manualOnly(record: {
 
 /**
  * The single authority on whether an action may be applied without a human: the enabling rule if
- * the author marked the action `autoApprovable`, it declares no workflow run (FAC-120), a user
+ * the author marked the action `autoApprovable`, it declares no workflow run (FAC-120) and no
+ * temporary canvas (FAC-137), a user
  * enabled a rule for its `actionKind` on this gatekeeper and still has Build access, and the
  * workspace has not latched restricted mode; else undefined.
  */
@@ -69,6 +70,8 @@ export function autoApprovalRule(
   if (description.autoApprovable !== true) return undefined;
   // A declared workflow run (FAC-120) starts only on a person's own approval: no rule approves it.
   if (description.workflowRun !== undefined) return undefined;
+  // Nor a declared temporary canvas (FAC-137): it is created only on the person's own approval.
+  if (description.temporaryCanvas !== undefined) return undefined;
   let tag = description.actionKind?.tag;
   if (tag === undefined) return undefined;
   if (storage.containsRestrictedData.get()) return undefined;
