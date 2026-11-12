@@ -45,10 +45,10 @@ const useNowAtExpiry = (canvases: readonly TemporaryCanvas[]): number => {
   useEffect(() => {
     if (!Number.isFinite(next)) return
     // A delay past setTimeout's 32-bit limit (about 24.8 days) would fire at once: wait the most it
-    // takes, and look again then.
+    // takes, and look again then. That wake changes `now`, which re-arms this for what remains.
     const timer = setTimeout(() => setNow(Date.now()), Math.min(MAX_TIMEOUT_MS, Math.max(0, next - Date.now())))
     return () => clearTimeout(timer)
-  }, [next])
+  }, [next, now])
   return now
 }
 

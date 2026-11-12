@@ -184,7 +184,7 @@ it('shows a new session nothing of the last one, while its own list is still loa
 })
 
 // #489's review: an expiry past setTimeout's 32-bit limit must not fire at once.
-it('keeps a canvas that expires in 30 days temporary, not expired, as time passes', async () => {
+it('keeps a canvas that expires in 30 days temporary past the longest timer wait, then reads it as expired after its expiry', async () => {
   const later = new Date(NOW + 30 * 24 * 60 * 60 * 1000)
   listTemporaryCanvases.mockResolvedValue([canvas({ expiresAt: later })])
   // Real timers fire a delay past 2^31 - 1 ms at once (fake ones don't), so no delay may exceed it.
@@ -196,4 +196,11 @@ it('keeps a canvas that expires in 30 days temporary, not expired, as time passe
   expect(container.textContent).toContain(`Temporary · expires ${later.toLocaleString()} unless saved`)
   expect(container.textContent).not.toContain('Expired')
   expect(buttons()).toContain('Save')
+  // The longest wait passes (about 24.8 days): still temporary, and it waits again for the rest.
+  await act(async () => { vi.advanceTimersByTime(2_147_483_647) })
+  expect(container.textContent).toContain(`Temporary · expires ${later.toLocaleString()} unless saved`)
+  // Past its expiry, it reads as expired, as the server will treat it.
+  await act(async () => { vi.advanceTimersByTime(later.getTime() - Date.now()) })
+  expect(container.textContent).toContain('Expired')
+  expect(buttons()).toEqual(['Refresh'])
 })
