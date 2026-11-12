@@ -1065,8 +1065,9 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
     let second = await withImpl(name, impl => {
       let waiting: number | undefined;
       // While the first run's code runs, the second waits queued: the trigger's limit is one. Only
-      // this workspace's runs count (a run another test left queued may be started meanwhile). The
-      // workspace's own alarm runs both, so no pass of the test's own races it.
+      // this workspace's runs count (a run another test left queued may be started meanwhile). Each
+      // alarm pass starts what the limit allows: the first, then, on the next pass the first's end
+      // armed, the second (this file runs each pass itself: onlyExplicitAlarms).
       workflowRun = async workerEnv => {
         if (workerEnv.BOARD.workspace.ctx.id.toString() !== impl.ctx.id.toString()) return "done";
         let mine = ++ran;
@@ -1084,9 +1085,9 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
       waiting = another(impl).deliveryId;
       return waiting;
     });
+    expect((await settled(name, first)).execution.state).toBe("finished");
     let done = await settled(name, second);
     expect(done.execution.state).toBe("finished");
-    expect((await settled(name, first)).execution.state).toBe("finished");
     expect(ran).toBe(2);
     // Never both at once, and the second was still queued while the first ran.
     expect(mostActive).toBe(1);
