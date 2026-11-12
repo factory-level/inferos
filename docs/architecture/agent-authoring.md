@@ -88,7 +88,11 @@ the compiler. Paths ending in a dot or space and directory paths also refuse pub
 stored as a child GitStore commit,
 leaving the editable gadget head unchanged. `build:worker` also runs
 `build-bundled-blueprints.ts`. The closure generator resolves production package conditions to match
-the minified Worker build. The current dry-run bundle is recorded in the FAC-8 #362 PR; Cloudflare
+the minified Worker build. A module a package's `browser` field maps to `false` (esbuild's `(disabled):` module) is recorded
+by the generator as an empty, named entry of the closure's `disabled` list (its package, path and
+the reason `browser-field disabled`), never with the Node-only file of that name on disk; the compiler
+loads a disabled module only when that list names it, and refuses any other as outside the reviewed
+closure (FAC-15). Today the list is Refine's one: `object-inspect`'s `util.inspect`. The current dry-run bundle is recorded in the FAC-8 #362 PR; Cloudflare
 allows 64 MiB uncompressed per Worker, and the reported gzip size is informational. Per-build CPU
 reporting is not exposed through this Worker runtime path, and deployed memory headroom and continued
 work after timeout remain unmeasured; keep the flag off until those measurements are available.
