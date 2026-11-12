@@ -543,6 +543,9 @@ export const TRIGGER_LIFECYCLE_REFUSED = {
   paused: "This trigger is paused, so it starts no new runs.",
 } as const;
 
+/** Returned when a workflow trigger is paused but still draining an admitted run. */
+export const TRIGGER_DRAINING = "TRIGGER_DRAINING";
+
 /**
  * Who asked for a run (FAC-111, inferops ADR 0011's requester): the person whose control press
  * admitted it, or the trigger itself for a firing no person asked for. A record, never authority.

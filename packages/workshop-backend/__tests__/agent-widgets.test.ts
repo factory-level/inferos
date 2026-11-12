@@ -380,6 +380,25 @@ describe("the operate session asking, as its owner", () => {
       expect(s.owner.calls).toEqual(["search counts"]);
     }));
 
+  // FAC-15 R-6: revocation mid-session. The widget's workspace answers for the owner afresh on every
+  // ask, so once their role there is removed, a session that described and read the widget a moment
+  // ago describes, reads and suggests nothing more, in the same words as for a stranger.
+  it("stops describing, reading and suggesting the moment the owner's role in the widget's workspace is removed", () =>
+    withSession("use", async (s, h) => {
+      expect((await s.impl.describeSessionWidget(refOf(h))).status).toBe("ok");
+      await s.impl.readSessionWidgetState(refOf(h));
+      await runInDurableObject(env.TEST_OVERSEER.get(env.TEST_OVERSEER.idFromString(h.workspaceId)),
+        async (instance: OverseerDurableObject) => {
+          (instance as unknown as { impl: any }).impl.storage.collaborators.delete("p1");
+        });
+      let unavailable = { status: "unavailable", reason: AGENT_WIDGET_UNAVAILABLE };
+      expect(await s.impl.describeSessionWidget(refOf(h))).toEqual(unavailable);
+      expect(await refusal(s.impl.readSessionWidgetState(refOf(h)))).toBe(AGENT_WIDGET_UNAVAILABLE);
+      let ref = { type: "console-widget", workspaceId: h.workspaceId, consoleId: h.published.id, sourceGadgetId: h.source,
+        blueprintId: "bp-counter", version: 1 };
+      expect(await refusal(s.impl.proposeSessionPlacement({ ref }))).toBe(AGENT_WIDGET_UNAVAILABLE);
+    }));
+
   it("reads the owner's state with when and from what, and a placement's own state only for one of theirs", () =>
     withSession("use", async (s, h) => {
       let before = Date.now();

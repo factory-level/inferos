@@ -2714,6 +2714,8 @@ export type ActionContext = (
       personalWorkflowStep?: { runId: string; index: number };
     }
   | { kind: "declared-run" }
+  /** An action whose only origin to report is the canvas it declares (`declaredCanvas`, FAC-137). */
+  | { kind: "declared-canvas" }
 ) & {
   /**
    * The workflow run approving this action starts (FAC-120, round 6), when the action declared one
@@ -2723,6 +2725,12 @@ export type ActionContext = (
    * will start. A `declared-run` context is one whose only origin to report is this.
    */
   declaredRun?: { reference: string };
+  /**
+   * The temporary canvas approving this action creates for the approver (FAC-137), when the action
+   * declared one (`ActionDescription.temporaryCanvas`): its title and how many widgets it holds, from
+   * the kernel's own record of what it checked at submit, never from a gatekeeper's text.
+   */
+  declaredCanvas?: { title: string; widgets: number };
 };
 
 export type ActionLogEntry = {
