@@ -95,6 +95,13 @@ export async function openFakeOverseer(
       assertGatekeeperUsable: () => {},
       // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
       requireHookBound: () => {},
+      // A trigger's lifecycle (FAC-117), checked on a real Overseer (workflow-run-execution.test.ts):
+      // forged workspaces have every trigger active.
+      requireTriggerStarts: () => {},
+      triggerLifecycleOf: () => null,
+      beginPause: () => null,
+      settleDrain: () => {},
+      clearTriggerLifecycle: () => {},
       ensureAmbientCapsules: async () => {},
       markOutputsDirty: () => {},
       joinSession: () => () => {},

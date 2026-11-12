@@ -329,6 +329,7 @@ function overseerFor(store: WorkspaceWorkflowDefinitionStore, assignmentsEnabled
       assertGatekeeperUsable: () => {},
       // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
       requireHookBound: () => {},
+      requireTriggerStarts: () => {},
       // The operator who asks is a collaborator here (FAC-122's run right reads their role).
       getSharingManager: async () => ({ getEffectiveRole: (profileId: string) => (profileId === "operator" ? "use" : undefined) }),
       getOwnerProfileId: async () => ADA.id,
@@ -543,6 +544,7 @@ async function assignmentSession(role: "build" | "use", holdsPublish: boolean, e
     assertGatekeeperUsable: () => {},
     // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
     requireHookBound: () => {},
+    requireTriggerStarts: () => {},
     setTriggerAssignment(this: never, caller: typeof ADA, hookId: number, settings: { gatekeeperId: number } | null) {
       return setWorkflowTriggerAssignment(this, caller, hookId, settings);
     },
@@ -777,6 +779,7 @@ describe("retiring an assignment (#374 round 2)", () => {
       assertGatekeeperUsable: () => {},
       // A duplicate's connections (FAC-123) are checked on a real Overseer (workflow-run-execution.test.ts).
       requireHookBound: () => {},
+      requireTriggerStarts: () => {},
       retireTriggerAssignment(this: never, hookId: number) { retireTriggerAssignment(this, hookId); },
       users: {
         idFromString: (id: string) => id,
