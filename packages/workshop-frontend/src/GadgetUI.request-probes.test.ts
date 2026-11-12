@@ -31,6 +31,12 @@ afterEach(async () => {
 /** What one probe case did: it ran in the frame, and whether its request reached the listener. */
 type ProbeResult = { id: string; ran: boolean; requestReachedListener: boolean };
 
+/** What a probe run saw: each case's result, and every `/probe/` request the listener recorded. */
+type ProbeRun = { results: ProbeResult[]; requests: string[] };
+
+/** The production Gadget iframe sandbox (GadgetUI.tsx). */
+const GADGET_SANDBOX = "allow-scripts allow-popups allow-popups-to-escape-sandbox";
+
 /** The outbound request APIs the Gadget CSP blocks (ADR 0013 outward paths 1 and 2). */
 const REQUEST_CASES = [
   "worker-data",
@@ -50,9 +56,13 @@ const REQUEST_CASES = [
  * Runs each probe case in a real headless Chrome, inside the production sandboxed Gadget frame
  * (`createSandboxedHtml`, the same iframe sandbox as GadgetUI.tsx), after an outer-page positive
  * control proves the listener is reachable at all. With `click`, a real mouse click (CDP input, a user
- * gesture) lands inside the frame once each case has run. Returns what each case did.
+ * gesture) lands inside the frame once each case has run. `sandbox` replaces the frame's sandbox, to
+ * pin a check on the CSP alone. Returns what each case did and every probe request recorded.
  */
-async function runRequestProbes(cases: readonly string[], options: { click?: boolean } = {}): Promise<ProbeResult[]> {
+async function runRequestProbes(
+  cases: readonly string[],
+  options: { click?: boolean; sandbox?: string } = {},
+): Promise<ProbeRun> {
   const requests: string[] = [];
   const listener = createServer((request, response) => {
     if (request.url?.startsWith("/probe/")) requests.push(request.url);
@@ -82,7 +92,7 @@ async function runRequestProbes(cases: readonly string[], options: { click?: boo
 
   let currentPage = "";
   const outerPage = (frame: string, includePositiveControl: boolean) => `<!doctype html><html><body style="margin:0">
-    <iframe id="gadget" style="width:320px;height:120px;border:0" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"></iframe>
+    <iframe id="gadget" style="width:320px;height:120px;border:0" sandbox="${options.sandbox ?? GADGET_SANDBOX}"></iframe>
     <script>
       const frame = document.querySelector('#gadget');
       window.__ran = [];
@@ -131,7 +141,9 @@ async function runRequestProbes(cases: readonly string[], options: { click?: boo
       const probe = probeCode(id, target);
       currentPage = outerPage(createSandboxedHtml(`${compiled.clientJs}\n${probe}`), false);
       await cdp.send("Page.navigate", { url: `http://127.0.0.1:${appPort}/test?${id}` });
-      await waitFor(async () => (await evaluate(cdp!, "document.body.dataset.frameReady === 'yes'")) === true);
+      // The case's own marker is what proves it ran. The frame's load event can be withheld: a form
+      // submission the sandbox allows but the CSP then blocks leaves the srcdoc load unfinished.
+      await waitFor(async () => (await evaluate(cdp!, `document.body.dataset.frameReady === 'yes' || window.__ran.includes(${JSON.stringify(id)})`)) === true);
       await waitFor(async () => (await evaluate(cdp!, `window.__ran.includes(${JSON.stringify(id)})`)) === true);
       if (options.click) {
         stage = `user click for ${id}`;
@@ -144,12 +156,13 @@ async function runRequestProbes(cases: readonly string[], options: { click?: boo
       }
       stage = `listener settle for ${id}`;
       await settle(requests, 500);
-      results.push({ id, ran: true, requestReachedListener: requests.includes(`/probe/${id}`) });
+      // A GET form submission requests `/probe/<id>?` (an empty query), so match the path alone.
+      results.push({ id, ran: true, requestReachedListener: requests.some(path => path.split("?")[0] === `/probe/${id}`) });
     }
 
     expect(results).toHaveLength(cases.length);
     expect(results.filter(result => !result.ran).map(result => result.id)).toEqual([]);
-    return results;
+    return { results, requests: [...requests] };
   } catch (error) {
     const browserState = cdp ? await evaluate(cdp, "({url:location.href,html:document.documentElement.outerHTML.slice(0,500),ran:window.__ran,positive:document.body?.dataset.positiveControl})").catch(() => "unavailable") : "unavailable";
     throw new Error(`${stage}: ${error instanceof Error ? error.message : String(error)}\nRequests: ${JSON.stringify(requests)}\nState: ${JSON.stringify(browserState)}\nChrome: ${browserError}`, { cause: error });
@@ -166,8 +179,9 @@ async function runRequestProbes(cases: readonly string[], options: { click?: boo
 }
 
 it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs against an outer-page positive control", async () => {
-  const results = await runRequestProbes(REQUEST_CASES);
+  const { results, requests } = await runRequestProbes(REQUEST_CASES);
   expect(results.filter(result => result.requestReachedListener).map(result => result.id)).toEqual([]);
+  expect(requests.filter(path => path !== "/probe/positive-control")).toEqual([]);
 }, 180_000);
 
 // FAC-15 R-3: characterization tests of KNOWN P0 GAPS (inferops ADR 0013, "Outward paths from a
@@ -185,13 +199,20 @@ it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs a
 // it yet, on purpose: neither "open" nor "closed" is shown.
 
 it.skipIf(!existsSync(chrome))("known P0 gap (ADR 0013 outward path 3): a widget can navigate its own frame to an outside URL", async () => {
-  const [result] = await runRequestProbes(["navigate"]);
+  const { results: [result] } = await runRequestProbes(["navigate"]);
   expect(result).toEqual({ id: "navigate", ran: true, requestReachedListener: true });
 }, 180_000);
 
-// ADR 0013 outward path 5, closed today by the frame CSP's form-action 'none': a real security check.
-it.skipIf(!existsSync(chrome))("ADR 0013 outward path 5 is closed: a widget's form submission is blocked by form-action 'none'", async () => {
-  const [result] = await runRequestProbes(["form-submit"]);
+// ADR 0013 outward path 5 is closed today twice over: the production sandbox has no allow-forms, and
+// the frame CSP sets form-action 'none'. Real security checks. The second grants allow-forms, so it
+// pins the CSP on its own: it fails if form-action 'none' is ever dropped.
+it.skipIf(!existsSync(chrome))("ADR 0013 outward path 5 is closed: a widget's form submission is blocked by the sandbox (no allow-forms) and the CSP's form-action 'none'", async () => {
+  const { results: [result] } = await runRequestProbes(["form-submit"]);
+  expect(result).toEqual({ id: "form-submit", ran: true, requestReachedListener: false });
+}, 180_000);
+
+it.skipIf(!existsSync(chrome))("ADR 0013 outward path 5: the CSP's form-action 'none' blocks a form submission even in a frame that allows forms", async () => {
+  const { results: [result] } = await runRequestProbes(["form-submit"], { sandbox: `${GADGET_SANDBOX} allow-forms` });
   expect(result).toEqual({ id: "form-submit", ran: true, requestReachedListener: false });
 }, 180_000);
 
