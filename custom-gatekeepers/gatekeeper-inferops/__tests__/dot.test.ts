@@ -359,13 +359,30 @@ describe("deciding a workflow-run proposal", () => {
     expect(await runOutcomeCalls(hooks)).toEqual([]);
   });
 
-  it("refused by the kernel, it is not applied, in the refusal's kind, and is declined in InferOps, never confirmed", async () => {
+  it("refused by the kernel, it is not applied, in the refusal's kind; only a final refusal declines it in InferOps (r1 on #488)", async () => {
     const { hooks, actionId } = await staged(script({ proposals: [workflow()] }));
     const { failure } = await hooks.applyDot(actionId, { status: "refused", kind: "permission", reason: "You can't run this trigger." });
-    expect(failure).toMatchObject({ outcome: "notApplied", kind: "permission", message: "You can't run this trigger." });
-    const calls = await hooks.dotCalls();
+    expect(failure).toMatchObject({ outcome: "notApplied", kind: "permission", message: "You can't run this trigger.", retryable: true });
+    let calls = await hooks.dotCalls();
+    // A permission can be granted: the proposal stays pending in InferOps, for a later approval.
+    expect(calls.some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`))).toBe(false);
+    expect(calls.some(c => c.path.endsWith("/confirm"))).toBe(false);
+    const final = await staged(script({ proposals: [workflow()] }));
+    expect((await final.hooks.applyDot(final.actionId, { status: "refused", kind: "policy", reason: "Not allowed." })).failure)
+      .toMatchObject({ outcome: "notApplied", retryable: false });
+    calls = await final.hooks.dotCalls();
     expect(calls.some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`))).toBe(true);
     expect(calls.some(c => c.path.endsWith("/confirm"))).toBe(false);
+  });
+
+  it("refused for now, then approved again, it starts and is confirmed naming its run, never declined (r1 on #488)", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [workflow()], confirm: { outcome: { handedOff: true } } }));
+    expect((await hooks.applyDot(actionId, { status: "refused", kind: "unavailable", reason: "Try again." })).failure)
+      .toMatchObject({ retryable: true });
+    expect((await hooks.applyDot(actionId, { status: "started", runId: "run-9" })).failure).toBeNull();
+    const calls = await hooks.dotCalls();
+    expect(calls.some(c => c.path.endsWith("/decline"))).toBe(false);
+    expect(JSON.parse(calls.find(c => c.path.endsWith("/confirm"))?.body ?? "null")).toEqual({ runId: "run-9" });
   });
 });
 
@@ -412,11 +429,11 @@ describe("deciding a personal workflow proposal (FAC-134 capability 2)", () => {
     expect(JSON.parse(confirm?.body ?? "null")).toEqual({});
   });
 
-  it("is declined in InferOps when the kernel refuses it, and creates nothing when a step's check went unanswered", async () => {
+  it("is declined in InferOps when the kernel refuses it for good, and creates nothing when a step's check went unanswered", async () => {
     const refused = await staged(script({ proposals: [create()] }));
     const answer = await refused.hooks.applyDotPersonal(refused.actionId, {
-      created: { status: "refused", kind: "permission", reason: "Step 1 of this workflow isn't a command a console offers you now, as written. Nothing was created." } });
-    expect(answer.failure).toMatchObject({ outcome: "notApplied" });
+      created: { status: "refused", kind: "invalid", reason: "This personal workflow proposal isn't valid." } });
+    expect(answer.failure).toMatchObject({ outcome: "notApplied", retryable: false });
     expect((await refused.hooks.dotCalls()).some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`))).toBe(true);
     const unknown = await staged(script({ proposals: [create()] }));
     const lost = await unknown.hooks.applyDotPersonal(unknown.actionId, { created: { status: "unknown", reason: "unchecked" } });
@@ -438,13 +455,29 @@ describe("deciding a personal workflow proposal (FAC-134 capability 2)", () => {
         const refusal = { status: "refused", kind, reason: `Refused as ${kind}.` } as const;
         const { failure } = await hooks.applyDotPersonal(actionId, which === "create" ? { created: refusal } : { run: refusal });
         expect(failure, `${which} ${kind}`).toMatchObject({ outcome: "notApplied", retryable });
-        // Declined in InferOps either way: the kernel created or ran nothing.
-        expect((await hooks.dotCalls()).some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`)), `${which} ${kind}`).toBe(true);
+        // Declined in InferOps only when it stands: a retryable one stays pending there (r1 on #488).
+        expect((await hooks.dotCalls()).some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`)), `${which} ${kind}`).toBe(!retryable);
         expect((await hooks.dotCalls()).some(c => c.path.endsWith("/confirm")), `${which} ${kind}`).toBe(false);
         // A retryable refusal leaves the action to approve again; one that stands ends it failed.
         expect((await hooks.dotAction(actionId))?.status, `${which} ${kind}`).toBe(retryable ? "pending" : "failed");
       }
     }
+  });
+
+  it("refused for now, then approved again, is created or run and confirmed, never declined (r1 on #488)", async () => {
+    const made = await staged(script({ proposals: [create()], confirm: { outcome: { handedOff: true } } }));
+    await made.hooks.applyDotPersonal(made.actionId, { created: { status: "refused", kind: "unavailable", reason: "Try again." } });
+    expect((await made.hooks.applyDotPersonal(made.actionId, {
+      created: { status: "created", personalWorkflowId: "pw-1", sessionWorkspaceId: "ws-session", expiresAt: "2026-11-13T00:00:00.000Z" } })).failure)
+      .toBeNull();
+    expect((await made.hooks.dotCalls()).some(c => c.path.endsWith("/decline"))).toBe(false);
+    expect((await made.hooks.dotCalls()).some(c => c.path.endsWith("/confirm"))).toBe(true);
+    const ran = await staged(script({ proposals: [runMine()], confirm: { outcome: { handedOff: true } } }));
+    await ran.hooks.applyDotPersonal(ran.actionId, { run: { status: "refused", kind: "sign-in", reason: "Sign in again." } });
+    expect((await ran.hooks.applyDotPersonal(ran.actionId, { run: { status: "started", runId: "run-7" } })).failure).toBeNull();
+    const calls = await ran.hooks.dotCalls();
+    expect(calls.some(c => c.path.endsWith("/decline"))).toBe(false);
+    expect(JSON.parse(calls.find(c => c.path.endsWith("/confirm"))?.body ?? "null")).toEqual({ runId: "run-7" });
   });
 
   it("keeps the kernel's refusal when InferOps doesn't answer the decline", async () => {
@@ -525,15 +558,23 @@ describe("deciding a delegate proposal (FAC-134 capability 3)", () => {
     expect(JSON.parse(confirm?.body ?? "null")).toEqual({ runId: "run-d" });
   });
 
-  it("is declined when the kernel refuses it, retryable only for a refusal that can pass, and decides nothing when unknown", async () => {
+  it("is declined only when the kernel refuses it for good, retryable only for a refusal that can pass, and decides nothing when unknown", async () => {
     for (const [kind, retryable] of [["permission", true], ["unavailable", true], ["policy", false], ["invalid", false]] as const) {
       const { hooks, actionId } = await staged(script({ proposals: [delegate()] }));
       const { failure } = await hooks.applyDotPersonal(actionId, { launched: { status: "refused", kind, reason: `Refused as ${kind}.` } });
       expect(failure, kind).toMatchObject({ outcome: "notApplied", retryable });
-      expect((await hooks.dotCalls()).some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`)), kind).toBe(true);
+      // Only a refusal that stands declines it in InferOps (r1 on #488).
+      expect((await hooks.dotCalls()).some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`)), kind).toBe(!retryable);
       expect((await hooks.dotCalls()).some(c => c.path.endsWith("/confirm")), kind).toBe(false);
       expect((await hooks.dotAction(actionId))?.status, kind).toBe(retryable ? "pending" : "failed");
     }
+    // Refused for now, then approved again: launched and confirmed naming its run, never declined.
+    const again = await staged(script({ proposals: [delegate()], confirm: { outcome: { handedOff: true } } }));
+    await again.hooks.applyDotPersonal(again.actionId, { launched: { status: "refused", kind: "unavailable", reason: "Try again." } });
+    expect((await again.hooks.applyDotPersonal(again.actionId, { launched: LAUNCHED })).failure).toBeNull();
+    const calls = await again.hooks.dotCalls();
+    expect(calls.some(c => c.path.endsWith("/decline"))).toBe(false);
+    expect(JSON.parse(calls.find(c => c.path.endsWith("/confirm"))?.body ?? "null")).toEqual({ runId: "run-d" });
     const { hooks, actionId } = await staged(script({ proposals: [delegate()] }));
     const lost = await hooks.applyDotPersonal(actionId, { launched: { status: "unknown", reason: "lost" } });
     expect(lost.failure).not.toBeNull();
