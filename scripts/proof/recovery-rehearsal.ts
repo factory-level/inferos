@@ -1,0 +1,345 @@
+// FAC-141 acceptance 2, the cross-store half: a recovery rehearsal of one company's retained state.
+// InferOps Postgres (the pinned backend's own database) is restored together with this checkout's
+// InferOS Durable Object, KV and R2 state, and then each store is restored on its own to show
+// both skew directions are safe. The as-built runbook is docs/wiki/backup-and-recovery.md. The
+// InferOps half, a Postgres dump and restore checked table by table, is inferops `bun run
+// proof:recovery` (docs/agent/architecture/upgrade-and-recovery.md there).
+//
+//   node scripts/proof/recovery-rehearsal.ts --worktree <abs path of a pnpm wt worktree> [--report <file>]
+//
+// Local and disposable only. It refuses (`rehearsalRefusal`, each with a test):
+//   - a target that isn't a worktree under this repository's .worktrees/, or is the main checkout;
+//   - a target with uncommitted changes;
+//   - a target whose stack or backend is already running (it must be this run's own);
+//   - a shell holding cloud, deploy or model-provider credentials (`forbiddenCredentials`);
+//   - a Postgres host other than localhost, or any database but the backend's own `inferos_<port>`
+//     that this run started.
+// In a `finally`, it always stops the stack and the backend it started, and the report says
+// whether they stopped. It drops no database: the backend's own is left restored to the rehearsal's
+// last state, and the next `pnpm local inferops up` reuses it.
+//
+// The rehearsal, against the acme ENG board under the stopgap bearer:
+//   1. `inferops up`, `start --inferops --stopgap`, and `seed --approval`, which holds one pending
+//      move in the gatekeeper.
+//   2. Pair A, quiesced: stop both, then `pg_dump -Fc` the backend database and archive
+//      `.wrangler/state`.
+//   3. Start both, approve the move (it applies in InferOps), stop, and archive the state again
+//      (state B, newer).
+//   4. Joint restore of pair A: the database and the state equal pair A's, and the move is pending
+//      again.
+//   5. Skew 1, InferOS older than InferOps: approve (it applies), then restore only state A. The
+//      replayed approval is refused, and the issue moved exactly once.
+//   6. Skew 2, InferOS newer than InferOps: restore database A with state B. InferOS shows the
+//      board InferOps holds (the issue unmoved), and starting and reading writes nothing back.
+// It exits 1 on any mismatch and prints one JSON report.
+
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
+import { forbiddenCredentials } from "../local/inferops.ts";
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+/** The acme operations workspace the stopgap bearer reaches (inferops seeds). */
+const ACME_OPS = "00000000-0000-4000-8000-000000000011";
+const ENG_BOARD = "inferops://acme.operations/project/board/ENG";
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
+const DEFAULT_PG_ADMIN_URL = "postgres://postgres:postgres@localhost:5432/postgres";
+
+/** What the guards read about the target, injected for tests. */
+export type TargetFacts = {
+  /** The target's real path, or null when it doesn't exist. */
+  realPath: string | null;
+  /** This repository's real root. */
+  repoRoot: string;
+  /** `git status --porcelain --untracked-files=no` in the target, or null when git failed. */
+  trackedChanges: string | null;
+  /** `pnpm local status`'s `stack` value. */
+  stack: string;
+  /** `pnpm local inferops status`'s `backend` value. */
+  backend: string;
+  /** The shell's environment (names only are read for credentials). */
+  env: Record<string, string | undefined>;
+};
+
+/**
+ * Why the rehearsal must not run against `target`, or null when it may. Every refusal names what it
+ * found, never a credential's value.
+ */
+export function rehearsalRefusal(target: string, facts: TargetFacts): string | null {
+  if (!isAbsolute(target)) return `--worktree must be an absolute path, got ${target}`;
+  if (facts.realPath === null) return `${target} does not exist`;
+  const worktrees = join(facts.repoRoot, ".worktrees") + sep;
+  if (facts.realPath === facts.repoRoot) return "--worktree names the main checkout; give the rehearsal its own pnpm wt worktree";
+  if (!facts.realPath.startsWith(worktrees) || relative(worktrees, facts.realPath).includes(sep)) {
+    return `${target} is not a worktree directly under ${worktrees} (make one with pnpm wt new)`;
+  }
+  if (facts.trackedChanges === null) return `git status failed in ${target}`;
+  if (facts.trackedChanges !== "") return `${target} has uncommitted changes:\n${facts.trackedChanges}`;
+  if (facts.stack !== "not-running") return `${target}'s stack is ${facts.stack}; stop it first, so the one this rehearsal stops is its own`;
+  if (facts.backend !== "not-running") return `${target}'s InferOps backend is ${facts.backend}; run pnpm local inferops down first`;
+  const credentials = forbiddenCredentials(facts.env as NodeJS.ProcessEnv);
+  if (credentials.length > 0) return `the shell holds ${credentials.join(", ")}; run from a clean shell (env -i PATH="$PATH" HOME="$HOME" bash)`;
+  return null;
+}
+
+/** Why `adminUrl` or `database` must not be touched, or null: localhost, and only `expected`. */
+export function databaseRefusal(adminUrl: string, database: string, expected: string): string | null {
+  let host: string;
+  try {
+    host = new URL(adminUrl).hostname;
+  } catch {
+    return "the Postgres admin URL does not parse";
+  }
+  if (!LOCAL_HOSTS.has(host)) return `the Postgres host is ${host}; the rehearsal runs only against localhost`;
+  if (!/^inferos_\d{1,5}$/.test(database)) return `refusing database ${database}: only a backend's own inferos_<port>`;
+  if (database !== expected) return `refusing database ${database}: this run's backend uses ${expected}`;
+  return null;
+}
+
+/** Every file under `dir` with its sha256, sorted by path: what "the state equals" compares. */
+export function stateManifest(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (at: string) => {
+    for (const entry of readdirSync(at, { withFileTypes: true })) {
+      const path = join(at, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile()) out[relative(dir, path)] = createHash("sha256").update(readFileSync(path)).digest("hex");
+    }
+  };
+  if (existsSync(dir)) walk(dir);
+  return Object.fromEntries(Object.entries(out).toSorted(([a], [b]) => a.localeCompare(b)));
+}
+
+/** Whether two manifests are equal; when not, the paths that differ. */
+export function manifestDifferences(a: Record<string, string>, b: Record<string, string>): string[] {
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(path => a[path] !== b[path]).toSorted();
+}
+
+type Step = { step: string; ok: boolean; detail?: unknown };
+
+class RehearsalFailed extends Error {}
+
+async function main(): Promise<number> {
+  const { values } = parseArgs({ options: { worktree: { type: "string" }, report: { type: "string" } } });
+  const work = mkdtempSync(join(tmpdir(), "fac141-rehearsal-"));
+  const reportPath = values.report ?? join(work, "rehearsal-report.json");
+  mkdirSync(dirname(resolve(reportPath)), { recursive: true });
+  const steps: Step[] = [];
+  const report: Record<string, unknown> = { proof: "recovery-rehearsal", startedAt: new Date().toISOString(), steps };
+  let failure: string | null = null;
+  let startedStack = false;
+  let startedBackend = false;
+  const target = values.worktree ?? "";
+  const env = { ...process.env };
+
+  const run = (argv: string[], opts: { input?: string; extraEnv?: Record<string, string> } = {}) => {
+    const r = spawnSync(argv[0]!, argv.slice(1), { cwd: target, env: { ...env, ...opts.extraEnv }, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+    return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  };
+  const json = (argv: string[]) => {
+    const r = run(argv);
+    try {
+      return { code: r.code, report: JSON.parse(r.stdout) as Record<string, any>, stderr: r.stderr };
+    } catch {
+      return { code: r.code, report: null, stderr: r.stderr || r.stdout };
+    }
+  };
+  // Stops the stack, then the backend; each is only this run's own (the guards refused anything
+  // already running), and `down` never drops the database.
+  const stopAll = () => {
+    const stop = run(["pnpm", "-s", "local", "stop"]);
+    const down = run(["pnpm", "-s", "local", "inferops", "down"]);
+    return { stop: stop.code, down: down.code };
+  };
+  const record = (step: string, ok: boolean, detail?: unknown) => {
+    steps.push({ step, ok, ...(detail === undefined ? {} : { detail }) });
+    console.error(`${ok ? "✓" : "✗"} ${step}`);
+    if (!ok) throw new RehearsalFailed(step);
+  };
+
+  try {
+    // Guards, before anything starts.
+    const stack = json(["pnpm", "-s", "local", "status", "--json"]);
+    const backend = json(["pnpm", "-s", "local", "inferops", "status", "--json"]);
+    const refusal = rehearsalRefusal(target, {
+      realPath: existsSync(target) ? realpathSync(target) : null,
+      repoRoot: realpathSync(ROOT),
+      trackedChanges: target && existsSync(target) ? run(["git", "status", "--porcelain", "--untracked-files=no"]).stdout.trim() : null,
+      stack: String(stack.report?.stack ?? "unknown"),
+      backend: String(backend.report?.backend ?? "unknown"),
+      env,
+    });
+    report.worktree = target;
+    if (refusal) record(`guards: ${refusal}`, false);
+    record("guards: dedicated clean worktree, nothing running, no credentials", true);
+    const head = run(["git", "rev-parse", "HEAD"]).stdout.trim();
+    const stateDir = join(target, ".wrangler", "state");
+    report.inferosRevision = head;
+
+    // 1. Up, start, seed.
+    const up = json(["pnpm", "-s", "local", "inferops", "up", "--json"]);
+    startedBackend = up.report?.ok === true;
+    record("inferops up", startedBackend, { apiUrl: up.report?.apiUrl, database: up.report?.database, revision: up.report?.revision });
+    const database = String(up.report?.database);
+    report.inferopsRevision = up.report?.revision;
+    report.database = database;
+    const admin = env.INFEROPS_PG_ADMIN_URL || DEFAULT_PG_ADMIN_URL;
+    const dbRefusal = databaseRefusal(admin, database, String(up.report?.database));
+    if (dbRefusal) record(`guards: ${dbRefusal}`, false);
+    const dbUrl = (() => { const u = new URL(admin); u.pathname = `/${database}`; u.search = "sslmode=disable"; return u; })();
+    const pgEnv = { PGPASSWORD: decodeURIComponent(dbUrl.password) };
+    const pgConn = ["-h", dbUrl.hostname, "-p", dbUrl.port || "5432", "-U", decodeURIComponent(dbUrl.username)];
+    const issues = () => {
+      const r = run(["psql", ...pgConn, "-d", database, "-At", "-F", "|", "-c",
+        `SELECT identifier, head_seq, state_id FROM inferlab.project_issues WHERE workspace_id = '${ACME_OPS}' AND deleted_at IS NULL ORDER BY identifier`],
+        { extraEnv: pgEnv });
+      if (r.code !== 0) throw new RehearsalFailed(`psql: ${r.stderr.trim()}`);
+      return Object.fromEntries(r.stdout.trim().split("\n").filter(Boolean).map(line => {
+        const [identifier, headSeq, stateId] = line.split("|");
+        return [identifier!, { headSeq: Number(headSeq), stateId: stateId! }];
+      }));
+    };
+    const fingerprint = () => {
+      const r = run(["psql", ...pgConn, "-d", database, "-At", "-c",
+        `SELECT md5(string_agg(t::text, E'\\n' ORDER BY t::text)) FROM inferlab.project_issues t WHERE workspace_id = '${ACME_OPS}'`],
+        { extraEnv: pgEnv });
+      return r.stdout.trim();
+    };
+
+    const startStack = async () => {
+      const log = openSync(join(work, `stack-${steps.length}.log`), "a");
+      const child = spawn("pnpm", ["local", "start", "--inferops", "--stopgap", "--", "--no-ui-watchers"],
+        { cwd: target, env, stdio: ["ignore", log, log], detached: true });
+      child.unref();
+      startedStack = true;
+      for (let i = 0; i < 120; i++) {
+        await new Promise(ok => setTimeout(ok, 2_000));
+        const s = json(["pnpm", "-s", "local", "status", "--json"]);
+        if (s.report?.stack === "running" && s.report?.ok === true) return;
+      }
+      throw new RehearsalFailed("the stack did not come up within 240 s");
+    };
+    const upAgain = async () => {
+      const again = json(["pnpm", "-s", "local", "inferops", "up", "--json"]);
+      if (again.report?.ok !== true || again.report?.database !== database) throw new RehearsalFailed(`inferops up again: ${again.stderr}`);
+      startedBackend = true;
+      await startStack();
+    };
+    const operate = (verb: "pending" | "approve" | "all") => {
+      const r = json(["node", join(ROOT, "scripts", "proof", "rehearsal-operator.ts"), verb, "--url", String(stack.report?.url)]);
+      if (r.code !== 0 || !r.report) throw new RehearsalFailed(`operator ${verb}: ${r.stderr.trim()}`);
+      return r.report;
+    };
+    const archive = (name: string) => {
+      const file = join(work, `${name}.tgz`);
+      const r = run(["tar", "-C", target, "-czf", file, ".wrangler/state"]);
+      if (r.code !== 0) throw new RehearsalFailed(`tar ${name}: ${r.stderr}`);
+      return file;
+    };
+    const unarchive = (file: string) => {
+      const reset = run(["pnpm", "-s", "local", "reset", "--yes"]);
+      if (reset.code !== 0) throw new RehearsalFailed(`reset: ${reset.stderr || reset.stdout}`);
+      const r = run(["tar", "-C", target, "-xzf", file]);
+      if (r.code !== 0) throw new RehearsalFailed(`untar: ${r.stderr}`);
+    };
+    const dump = (name: string) => {
+      const file = join(work, `${name}.dump`);
+      const r = run(["pg_dump", ...pgConn, "-d", database, "-Fc", "-f", file], { extraEnv: pgEnv });
+      if (r.code !== 0) throw new RehearsalFailed(`pg_dump: ${r.stderr}`);
+      return file;
+    };
+    const restoreDb = (file: string) => {
+      const r = run(["pg_restore", ...pgConn, "-d", database, "--clean", "--if-exists", "--exit-on-error", file], { extraEnv: pgEnv });
+      if (r.code !== 0) throw new RehearsalFailed(`pg_restore: ${r.stderr}`);
+    };
+
+    await startStack();
+    const seeded = json(["pnpm", "-s", "local", "seed", "--approval", "--json"]);
+    record("seed: a pending move on the ENG board", seeded.report?.ok === true && Number(seeded.report?.verify?.agentView?.approvalQueue?.pending) >= 1,
+      seeded.report?.verify?.agentView ?? seeded.stderr);
+    const pendingA = operate("pending");
+    record("one pending move held in the gatekeeper", Array.isArray(pendingA.pending) && pendingA.pending.length >= 1, pendingA);
+
+    // 2. Pair A, quiesced.
+    report.stopsA = stopAll(); startedStack = false; startedBackend = false;
+    const issuesA = issues();
+    const printA = fingerprint();
+    const manifestA = stateManifest(stateDir);
+    const dumpA = dump("pair-a");
+    const stateA = archive("pair-a-state");
+    record("pair A taken with both stopped", true, { files: Object.keys(manifestA).length, takenAt: new Date().toISOString() });
+
+    // 3. Approve, then state B (newer).
+    await upAgain();
+    const approved = operate("approve");
+    const issuesAfter = issues();
+    const moved = Object.keys(issuesA).filter(id => issuesA[id]!.headSeq !== issuesAfter[id]?.headSeq);
+    record("the approval applies in InferOps: one issue moves", approved.applied === true && moved.length === 1,
+      { approved, moved });
+    const movedIssue = moved[0]!;
+    report.stopsB = stopAll(); startedStack = false; startedBackend = false;
+    const stateB = archive("state-b");
+
+    // 4. Joint restore of pair A.
+    restoreDb(dumpA);
+    unarchive(stateA);
+    record("joint restore: the database equals pair A", fingerprint() === printA);
+    record("joint restore: the state equals pair A", manifestDifferences(manifestA, stateManifest(stateDir)).length === 0,
+      manifestDifferences(manifestA, stateManifest(stateDir)));
+    await upAgain();
+    const pendingAgain = operate("pending");
+    record("joint restore: the move is pending again", pendingAgain.pending.length === pendingA.pending.length, pendingAgain);
+
+    // 5. Skew 1: InferOS older than InferOps.
+    const first = operate("approve");
+    record("skew 1: the approval applies", first.applied === true);
+    report.stopsSkew1 = stopAll(); startedStack = false; startedBackend = false;
+    unarchive(stateA);
+    await upAgain();
+    const replay = operate("approve");
+    const issuesSkew1 = issues();
+    record("skew 1: the replayed approval is refused", replay.applied === false, replay);
+    record("skew 1: the issue moved exactly once", issuesSkew1[movedIssue]!.headSeq === issuesAfter[movedIssue]!.headSeq,
+      { before: issuesA[movedIssue], once: issuesAfter[movedIssue], now: issuesSkew1[movedIssue] });
+
+    // 6. Skew 2: InferOS newer than InferOps.
+    report.stopsSkew2 = stopAll(); startedStack = false; startedBackend = false;
+    restoreDb(dumpA);
+    unarchive(stateB);
+    await upAgain();
+    const verify = json(["pnpm", "-s", "local", "verify", "--board", ENG_BOARD, "--json"]);
+    record("skew 2: InferOS reads the board InferOps holds", verify.report?.ok === true, verify.report?.agentView ?? verify.stderr);
+    const all = operate("all");
+    record("skew 2: InferOS writes nothing back", fingerprint() === printA && issues()[movedIssue]!.headSeq === issuesA[movedIssue]!.headSeq,
+      { issue: issues()[movedIssue], actions: all });
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  } finally {
+    // Only what this run started: when the guards refused, nothing of the target's is touched.
+    const stopped = startedStack || startedBackend ? stopAll() : null;
+    const after = stopped === null ? { stack: "not started", backend: "not started" } : {
+      stack: json(["pnpm", "-s", "local", "status", "--json"]).report?.stack,
+      backend: json(["pnpm", "-s", "local", "inferops", "status", "--json"]).report?.backend,
+    };
+    report.stopped = { ...stopped, ...after, startedStack, startedBackend,
+      bothStopped: stopped === null || (after.stack === "not-running" && after.backend === "not-running") };
+    if (!(report.stopped as { bothStopped: boolean }).bothStopped) failure ??= "the stack or the backend did not stop";
+    report.finishedAt = new Date().toISOString();
+    report.ok = failure === null;
+    report.failure = failure;
+    report.archives = work;
+    writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+    console.log(JSON.stringify(report, null, 2));
+    // The archives are copies of seeded local data; keep them only for a failing run's inspection.
+    if (failure === null) for (const name of readdirSync(work)) if (/\.(dump|tgz)$/.test(name)) rmSync(join(work, name));
+  }
+  return failure === null ? 0 : 1;
+}
+
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exit(await main());
+}

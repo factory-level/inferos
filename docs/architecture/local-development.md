@@ -13,6 +13,7 @@ covers:
   - packages/workshop-backend/scripts/dev-verify.ts
   - packages/workshop-backend/scripts/dev-workshop.ts
   - scripts/local
+  - scripts/proof
   - packages/workshop-shared/src/password-salt.ts
   - scripts/dev-server-config.ts
   - scripts/dev-gatekeepers.ts
@@ -54,6 +55,7 @@ The in-repo stack as of `main` at `4a4504c`: `pnpm dev-server`/`pnpm run-local` 
 | `scripts/vp/run.ts`, `scripts/vp/own-output.ts`, `scripts/vp/concurrency.ts` | The root `pnpm build`/`test`/`clean` runner: `vp run` with a machine-derived concurrency limit, its output captured to temp files and tailed, and termination relayed through `scripts/relay-termination.ts`. |
 | `scripts/local/lifecycle.ts`, `scripts/local/stack.ts` | `pnpm local <command>`: status, start, stop, seed, verify, reset and logs for this checkout's stack, with JSON reports and stable exit codes. |
 | `scripts/local/coding.ts`, `scripts/local/runner.ts` | `pnpm local runner start\|status\|stop` and `pnpm local coding doctor`: the InferOps coding runner for a wrapper (see [local coding workflows](local-coding-workflows.md#runner-lifecycle)). |
+| `scripts/proof/recovery-rehearsal.ts`, `scripts/proof/rehearsal-operator.ts` | FAC-141's recovery rehearsal: `node scripts/proof/recovery-rehearsal.ts --worktree <abs path>` restores the pinned InferOps backend's database and a dedicated worktree's `.wrangler/state` together from a quiesced pair, then each on its own, and checks both skew directions against the acme ENG board. It refuses the main checkout, a dirty or running worktree, credentials in the shell and any database but the backend's own `inferos_<port>`, and always stops what it started (see [backup and recovery](../wiki/backup-and-recovery.md)). |
 | `scripts/local/inferops.ts` | `pnpm local inferops up\|status\|down\|verify\|env\|logs` and `pnpm local start --inferops`: the test InferOps backend this checkout develops against (see [InferOps test backend](#inferops-test-backend)). |
 | `scripts/local/factory.ts`, `scripts/local/access-emulator.ts` | `pnpm local factory up\|status\|doctor\|down\|stage-smoke`: the software factory's sandboxes around this stack and that backend, and the local Cloudflare Access emulator (see [software factory](factory.md)). |
 | `packages/workshop-backend/scripts/dev-setup.ts` | `pnpm dev:setup`: prepares a running local Workshop (account, onboarding, mock model, InferOps, demo screen). |
