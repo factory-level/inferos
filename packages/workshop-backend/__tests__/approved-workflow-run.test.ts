@@ -285,13 +285,21 @@ describe("the approved effects a gatekeeper's apply receives", () => {
       impl.storage.gatekeepers.put({ id: 41, resourceTitle: "Connection", class: {} as any,
         creationSpec: { type: "gatekeeper", vendorId: "github", resourceUrl: "test://x", typeUrlPattern: "test://*" } });
       let decoy = (label: string) => ({ ...ISSUE, fields: [{ label, kind: "inline", value: "inferops://elsewhere" }] });
-      for (let label of [WORKFLOW_RUN_FIELD_LABEL, ` ${WORKFLOW_RUN_FIELD_LABEL.toUpperCase()}  `, WORKFLOW_RUN_FIELD_LABEL.toLowerCase()]) {
+      // Round 7: invisible characters, compatibility forms and collapsed spacing are folded first.
+      let words = WORKFLOW_RUN_FIELD_LABEL.split(" ");
+      let fullwidth = (text: string) => [...text].map(c => c >= "!" && c <= "~" ? String.fromCodePoint(c.codePointAt(0)! + 0xFEE0) : c).join("");
+      for (let label of [WORKFLOW_RUN_FIELD_LABEL, ` ${WORKFLOW_RUN_FIELD_LABEL.toUpperCase()}  `, WORKFLOW_RUN_FIELD_LABEL.toLowerCase(),
+        `Work\u200Bflow ${words.slice(1).join(" ")}`, `${fullwidth(words[0]!)} ${words.slice(1).join(" ")}`,
+        words.join("   \t "), `\u2060${WORKFLOW_RUN_FIELD_LABEL.replace("run", "R\u00ADUN")}`]) {
         await expect(impl.submitAction(41, 1, decoy(label), { from: "agent", chatId: 1 })).rejects.toThrow(/reserved for InferOS/);
         // With a declared run too: the decoy is refused, not shown beside the kernel's field.
         await expect(impl.submitAction(41, 1, { ...decoy(label), workflowRun: { reference: REFERENCE } }, { from: "agent", chatId: 1 }))
           .rejects.toThrow(/reserved for InferOS/);
       }
       expect(Array.from(impl.storage.actions.list())).toEqual([]);
+      // A genuinely different label still passes.
+      await impl.submitAction(41, 1, decoy("Workflow run notes"), { from: "agent", chatId: 1 });
+      expect(Array.from(impl.storage.actions.list()).filter((a: any) => a.type === "action")).toHaveLength(1);
     }));
 
   it("refuses at submit a declared run that isn't a workflow trigger reference", () =>

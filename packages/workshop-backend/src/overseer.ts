@@ -1288,14 +1288,24 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
  */
 export const WORKFLOW_RUN_FIELD_LABEL = "Workflow run this approval starts (shown by InferOS)";
 
+// A label as `isReservedFieldLabel` compares it: compatibility forms folded (NFKC), invisible
+// default-ignorable code points (zero-width spaces, joiners, soft hyphens) removed, whitespace runs
+// collapsed to one space, trimmed, then lower-cased.
+const foldLabel = (label: string) => label.normalize("NFKC").replace(/\p{Default_Ignorable_Code_Point}/gu, "")
+    .replace(/\s+/gu, " ").trim().toLowerCase();
+const RESERVED_LABEL_FOLDED = foldLabel(WORKFLOW_RUN_FIELD_LABEL);
+
 /**
- * Whether `label` is the kernel's reserved `WORKFLOW_RUN_FIELD_LABEL` (round 6), compared trimmed and
- * case-insensitively, so a near-copy can't pass for it. A gatekeeper's field so labelled is refused
- * at submit; only the kernel's own appended field carries it.
+ * Whether `label` is the kernel's reserved `WORKFLOW_RUN_FIELD_LABEL` (rounds 6 and 7), so a near-copy
+ * can't pass for it. Both are folded the same way first: NFKC (so fullwidth and other compatibility
+ * forms match), every default-ignorable code point removed (zero-width and other invisible
+ * characters), whitespace collapsed, trimmed and lower-cased. A gatekeeper's field so labelled is
+ * refused at submit; only the kernel's own appended field carries it. Look-alikes from another
+ * script (a Cyrillic "о" for a Latin "o") are not matched by design: the approver tells the
+ * kernel's run by its provenance, `ActionContext.declaredRun`, never by a field label.
  */
 export function isReservedFieldLabel(label: unknown): boolean {
-  return typeof label === "string" &&
-      label.trim().toLowerCase() === WORKFLOW_RUN_FIELD_LABEL.toLowerCase();
+  return typeof label === "string" && foldLabel(label) === RESERVED_LABEL_FOLDED;
 }
 
 /** Which requested run proposed a write, and where (FAC-112; `ActionRecord.workflowRun`). */
