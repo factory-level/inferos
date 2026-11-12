@@ -424,6 +424,40 @@ describe("deciding a personal workflow proposal (FAC-134 capability 2)", () => {
     expect(await unknown.hooks.dotPersonalWorkflow(unknown.actionId)).toBeNull();
   });
 
+  it("ends a refused create or run by the kernel's kind: a grantable refusal stays retryable, one that stands is final (QA's mutation 3)", async () => {
+    // Each FAC-119 kind, through RUN_REFUSAL_CODES: a missing permission, a sign-in or an
+    // unavailable check can pass later; a policy, conflict or invalid refusal stands.
+    const kinds = [
+      ["permission", true], ["sign-in", true], ["unavailable", true],
+      ["policy", false], ["conflict", false], ["invalid", false],
+    ] as const;
+    for (const [kind, retryable] of kinds) {
+      for (const which of ["create", "run"] as const) {
+        const { hooks, actionId } = await staged(script({ proposals: [which === "create" ? create() : runMine()] }));
+        const refusal = { status: "refused", kind, reason: `Refused as ${kind}.` } as const;
+        const { failure } = await hooks.applyDotPersonal(actionId, which === "create" ? { created: refusal } : { run: refusal });
+        expect(failure, `${which} ${kind}`).toMatchObject({ outcome: "notApplied", retryable });
+        // Declined in InferOps either way: the kernel created or ran nothing.
+        expect((await hooks.dotCalls()).some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`)), `${which} ${kind}`).toBe(true);
+        expect((await hooks.dotCalls()).some(c => c.path.endsWith("/confirm")), `${which} ${kind}`).toBe(false);
+        // A retryable refusal leaves the action to approve again; one that stands ends it failed.
+        expect((await hooks.dotAction(actionId))?.status, `${which} ${kind}`).toBe(retryable ? "pending" : "failed");
+      }
+    }
+  });
+
+  it("keeps the kernel's refusal when InferOps doesn't answer the decline", async () => {
+    for (const which of ["create", "run"] as const) {
+      const { hooks, actionId } = await staged(script({
+        proposals: [which === "create" ? create() : runMine()], decline: { status: 503, code: "UNAVAILABLE" },
+      }));
+      const refusal = { status: "refused", kind: "policy", reason: "Refused by policy." } as const;
+      const { failure } = await hooks.applyDotPersonal(actionId, which === "create" ? { created: refusal } : { run: refusal });
+      expect(failure, which).toMatchObject({ outcome: "notApplied", retryable: false });
+      expect((await hooks.dotAction(actionId))?.status, which).toBe("failed");
+    }
+  });
+
   it("runs one by its reference through the kernel's own effect, naming the run at the confirm", async () => {
     const { hooks, actionId } = await staged(script({ proposals: [runMine()], confirm: { outcome: { handedOff: true } } }));
     const [action] = (await hooks.log()).actions;
