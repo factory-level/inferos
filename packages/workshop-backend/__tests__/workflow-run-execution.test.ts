@@ -874,6 +874,8 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
       withController(impl);
       await impl.removeHookWithDrain(HOOK, ADA);
       expect(impl.storage.boundHooks.get(HOOK)).toBeUndefined();
+      expect(impl.triggerLifecycleOf(HOOK)).toBeNull();
+      expect(impl.storage.workflowTriggerLifecycles.get(HOOK)).toBeUndefined();
     });
   });
 
