@@ -106,12 +106,13 @@ import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeepe
 import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gatekeeper-kit/observers";
 import { createLogger } from "@gadgets/observability/logger";
 import type {
-  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, Gatekeeper, GatekeeperConnectCallback, GitCache,
+  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, ApprovedEffects, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
   WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchResult,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { mergeWidgetSearches } from "@gadgets/workshop-shared/gatekeeper";
+import { parseWorkflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
   CredentialSource, isCredentialsChanged, isCredentialsExpired, type CredentialRead,
@@ -4121,6 +4122,11 @@ const DOT_SCOPE = "chatbot/dot";
 
 /** Confirming a Dot proposal: InferOps refuses before anything changes, and keys it by the proposal. */
 const DOT_CONFIRM: ApplyPolicy = { refusalsProven: true, replayable: true };
+/**
+ * A workflow-run proposal (FAC-120): a refusal is proven (the kernel said nothing started), but a run
+ * that may have started is never sent again from here, so its outcome stays unknown, not retryable.
+ */
+const DOT_WORKFLOW_RUN: ApplyPolicy = { refusalsProven: true, replayable: false };
 
 /** A Dot binding: the person's own Dot in one workspace, and the decisions staged on its proposals. */
 class DotBinding extends ActionBinding {
@@ -4211,9 +4217,9 @@ export class InferOpsDotGatekeeper
    * InferOps applies at most once. A proposal InferOps says was already decided is read back and
    * settled to what it actually is, never assumed done.
    */
-  async applyAction(actionId: number, _cache: RpcStub<GitCache>):
+  async applyAction(actionId: number, _cache: RpcStub<GitCache>, effects?: RpcStub<ApprovedEffects>):
       Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
-    return applyDotAction(this.#binding(), actionId);
+    return applyDotAction(this.#binding(), actionId, effects);
   }
 
   /**
@@ -4234,12 +4240,13 @@ export class InferOpsDotGatekeeper
  * InferOps applies at most once. A proposal InferOps says was already decided is read back and
  * settled to what it actually is, never assumed done.
  */
-async function applyDotAction(binding: DotBinding, actionId: number):
+async function applyDotAction(binding: DotBinding, actionId: number, effects?: Pick<ApprovedEffects, "invokeWorkflow">):
     Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
   const record = binding.action(actionId);
   if (!record || !isDotAction(record)) throw new Error(`No such Dot action: ${actionId}.`);
   if (record.status === "applied") return { applied: { result: appliedResult(record) } };
   const fields: Partial<LogFields> = { host: binding.host, action: actionId };
+  if (record.tool === DOT_WORKFLOW_INVOKE_TOOL) return applyDotWorkflowRun(binding, record, fields, effects);
   return binding.applyOnce(record, {
     policy: DOT_CONFIRM, fields,
     check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
@@ -4252,6 +4259,56 @@ async function applyDotAction(binding: DotBinding, actionId: number):
         confirmed = await settledProposal(binding, record, error);
       }
       return { ...(marked as DotConfirmAction), status: "applied", confirmedOutcome: summarizeDotOutcome(confirmed.outcome) };
+    },
+  });
+}
+
+/** The Dot's InferOS workflow-run proposal (FAC-120, inferops#2627): InferOps runs nothing for it. */
+const DOT_WORKFLOW_INVOKE_TOOL = "inferos_workflow_invoke";
+
+/** Why a workflow run can't start without the kernel's approved effects (an automatic approval, an older kernel). */
+const DOT_WORKFLOW_NEEDS_APPROVAL = "Starting a workflow run needs your own approval here.";
+
+// A refused run's FAC-119 kind as the facet's error code, so it is settled and shown like any other.
+const RUN_REFUSAL_CODES = { permission: "FORBIDDEN", conflict: "CONFLICT", policy: "CONFLICT", invalid: "INVALID_REQUEST",
+  "sign-in": "UNAUTHORIZED", unavailable: "UNAVAILABLE" } as const;
+
+/**
+ * Applies the Dot's proposal to run an InferOS workflow (FAC-120): the kernel starts the run as the
+ * person approving it (`effects.invokeWorkflow`, present only for their own approval), then the
+ * proposal is confirmed in InferOps as handed off. A refused run is not applied, in its own kind,
+ * and the proposal is declined there; with no `effects` nothing is asked at all. Once the run has
+ * started, a confirm InferOps doesn't answer is logged and leaves its proposal to expire: the run
+ * is recorded here, never started a second time by approving again.
+ */
+async function applyDotWorkflowRun(binding: DotBinding, record: DotConfirmAction, fields: Partial<LogFields>,
+    effects?: Pick<ApprovedEffects, "invokeWorkflow">): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
+  if (!effects) {
+    return { failed: { outcome: "notApplied", retryable: false, message: DOT_WORKFLOW_NEEDS_APPROVAL, kind: "policy" } };
+  }
+  return binding.applyOnce(record, {
+    policy: DOT_WORKFLOW_RUN, fields,
+    check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
+    send: async marked => {
+      // The run the action declared at submit, which the person approved: no reference is passed here.
+      const run = await effects.invokeWorkflow();
+      // It may have started: uncertain, never a refusal to retry or decline (the kernel's start is
+      // idempotent per action, so a retry can only return the same run).
+      if (run.status === "unknown") throw new InferOpsError("UNAVAILABLE", run.reason);
+      if (run.status === "refused") {
+        await binding.client.declineDotProposal(record.conversationId, record.proposalId).catch(() => undefined);
+        throw new CheckRefused(RUN_REFUSAL_CODES[run.kind] ?? "UNAVAILABLE", run.reason);
+      }
+      let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true };
+      try {
+        const confirmed = await binding.client.confirmDotProposal(record.conversationId, record.proposalId, record.proposalId);
+        confirmedOutcome = { ...summarizeDotOutcome(confirmed.outcome), handedOff: true };
+      } catch (error) {
+        logger.warn("dot workflow run started; its InferOps confirm unanswered", {
+          event: "dot-confirm.workflow.confirm_unanswered", ...fields, code: inferOpsErrorCode(error) ?? "UNKNOWN",
+        });
+      }
+      return { ...(marked as DotConfirmAction), status: "applied", runId: run.runId, confirmedOutcome };
     },
   });
 }
@@ -4315,6 +4372,7 @@ async function rejectDotAction(binding: DotBinding, actionId: number): Promise<v
     case "failed":
       return settle("InferOps refused it; nothing was made.");
     case "confirmed":
+    case "handed-off":
       throw new Error(DOT_DECLINE_ALREADY_MADE);
     case "proposed":
     case "confirming":
@@ -4332,7 +4390,7 @@ export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, cli
   const binding = new DotBinding(props, { store: new ActionStore(kv), client, observers: () => [] });
   return {
     startSession: (queue: RpcStub<ApprovalQueue>): InferOpsDotSession => new DotSessionImpl(binding, queue.dup()),
-    applyAction: (actionId: number) => applyDotAction(binding, actionId),
+    applyAction: (actionId: number, effects?: Pick<ApprovedEffects, "invokeWorkflow">) => applyDotAction(binding, actionId, effects),
     rejectAction: (actionId: number) => rejectDotAction(binding, actionId),
   };
 }
@@ -4345,7 +4403,7 @@ export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, cli
 async function settledProposal(binding: DotBinding, record: DotConfirmAction, conflict: unknown): Promise<DotProposalWire> {
   const proposal = (await binding.client.listDotProposals(record.conversationId).catch(() => []))
     .find(p => p.id === record.proposalId);
-  if (proposal?.status === "confirmed") return proposal;
+  if (proposal?.status === "confirmed" || proposal?.status === "handed-off") return proposal;
   if (proposal?.status === "declined" || proposal?.status === "failed" || proposal?.status === "expired") {
     throw atStage(conflict, "refused");
   }
@@ -4540,6 +4598,26 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
       throw error;
     });
     if (joined) return;
+    if (proposal.tool === DOT_WORKFLOW_INVOKE_TOOL) {
+      // FAC-120: a workflow run, its own kind, so it is never mistaken for an InferOps change. The
+      // trigger and revision come from the reference; it names them and authorizes nothing.
+      const ref = parseWorkflowTriggerRef(proposal.input.reference);
+      const target = ref ? `trigger ${ref.hookId} of InferOS workspace ${ref.inferosWorkspaceId}, revision ${ref.revision}` : "an unreadable reference";
+      this.#receipts.set(proposal.id, await this.binding.submit(this.queue, actionId, {
+        title: sanitizeTitle("Your Dot proposes running a workflow"),
+        ...this.binding.description(
+          `Your Dot proposes running the workflow of ${target}. Approving it starts one run there, as you, ` +
+          `with your access to that trigger checked again now and only while it still runs that revision; ` +
+          `declining it starts nothing. It can't be approved after ${proposal.expiresAt}.`)
+          .verbatim("Reference", typeof proposal.input.reference === "string" ? proposal.input.reference : "")
+          .finish(),
+        implementsRevert: false,
+        // Declared to the kernel, which shows it and binds this approval's run to exactly it.
+        ...(ref ? { workflowRun: { reference: proposal.input.reference as string } } : {}),
+        actionKind: { tag: "inferops.dot-workflow-invoke", label: "Approve a workflow run your Dot proposed" },
+      }));
+      return;
+    }
     // A knowledge write (FAC-136) is the person's own edit, live once made: its card says so, and
     // names the page or workspace its link points at. No Dot tool publishes, so it never says that.
     const knowledge = dotKnowledgeTarget(proposal.tool, proposal.input);

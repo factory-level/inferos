@@ -293,9 +293,11 @@ export type TableSummary = { id: string; label: string };
 /**
  * Every status InferOps names for a Dot proposal, its derived `expired` and `unknown` included: the
  * one list the parser accepts (`parseDotProposal`) and the receipt mapping switches over
- * (`dotProposalStatus`), so a status InferOps adds is refused until both follow.
+ * (`dotProposalStatus`), so a status InferOps adds is refused until both follow. `handed-off`
+ * (FAC-120, inferops#2627) is a confirmed hand-off to InferOS: an InferOS workflow-run proposal,
+ * which InferOps itself never runs.
  */
-export const DOT_PROPOSAL_STATUSES = ["proposed", "confirming", "confirmed", "declined", "failed", "expired", "unknown"] as const;
+export const DOT_PROPOSAL_STATUSES = ["proposed", "confirming", "confirmed", "handed-off", "declined", "failed", "expired", "unknown"] as const;
 
 /** A Dot proposal as InferOps reads it (`chatbot.proposal_list`), its status derived at read time. */
 export type DotProposalWire = {
