@@ -46,6 +46,14 @@ import {
 import { collaboratorAccountName } from "./account-subject";
 import { TemporaryCanvasStore, type StoredTemporaryCanvas } from "./temporary-canvas-store";
 import {
+  PERSONAL_WORKFLOW_GONE, PersonalWorkflowStore, type PersonalWorkflowStepResult, type StoredPersonalWorkflow,
+  type StoredPersonalWorkflowRun,
+} from "./personal-workflow-store";
+import {
+  parseConsoleCommandRef, parsePersonalWorkflowDeclaration, parsePersonalWorkflowRef, personalWorkflowFieldValue,
+  personalWorkflowStepInputProblem, type PersonalWorkflowStep,
+} from "@gadgets/workshop-shared/personal-workflow";
+import {
   TEMPORARY_CANVAS_ERROR_CODES, TemporaryCanvasError, parseTemporaryCanvasInput, temporaryCanvasTtlMs,
   type TemporaryCanvas,
 } from "@gadgets/workshop-shared/temporary-canvas";
@@ -96,7 +104,7 @@ import { Overseer, GadgetMetadata, UiBundle, AuthoredWidgetPreview, WorkpieceId,
 import { applyCodeChange, changedGadgets, codeChangeSerializedSize, composeCodeChange, diffFiles,
   transformCodeChange, validateCodeChangeContent, validateCodeChangeSchema,
   type CodeContent, type CodeChange } from "@gadgets/workshop-shared/code-change";
-import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, type HookOccurrence, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionFailureKind, type ApprovedEffects, type ApprovedWorkflowRun, type ApprovedRunOutcome, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
+import { type AgentCatalog, Gatekeeper, HookInitiator, ResourceDescription, ApprovalQueue, ActionDescription, ObservationAuthorizer, ObservationDescription, VendorDescription, SupportedResource, matchesResourceUrlPattern, resolveRequestedResource, HookController, type HookInvocation, type HookOccurrence, HookDescription, ActionKind, GitCache, GitPullHints, type ActionApplied, type ActionFailureKind, type ApprovedEffects, type ApprovedWorkflowRun, type ApprovedPersonalWorkflow, type ApprovedRunOutcome, type ActionApplyFailure, type ActionReceipt, type ActionReceiptStatus, type GatekeeperVendor, type SharedConfigurationAction, type WidgetIndexWorkspace, actionFailureKind } from "@gadgets/workshop-shared/gatekeeper";
 import { ACTION_RECEIPT_REASON, ACTION_RECEIPT_UNKNOWN_REASON, actionOutcome, actionReceiptCode, actionResultProblem, type ActionOutcome, type ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import {
   DurableObject, WorkerEntrypoint, RpcStub as NativeRpcStub,
@@ -1317,15 +1325,31 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
  */
 export const WORKFLOW_RUN_FIELD_LABEL = "Workflow run this approval starts (shown by InferOS)";
 
+/**
+ * The label of the field the kernel appends to an action that declares a personal workflow to create
+ * (FAC-134 capability 2, `ActionDescription.personalWorkflow`), whose value lists every step and its
+ * input in the kernel's words (`personalWorkflowFieldValue`), since the gatekeeper's text was written
+ * by whoever proposed it.
+ */
+export const PERSONAL_WORKFLOW_FIELD_LABEL = "Personal workflow this approval creates (shown by InferOS)";
+
+/**
+ * The label of the field the kernel appends to an action that declares a personal workflow run
+ * (`ActionDescription.personalWorkflowRun`), whose value is the declared reference.
+ */
+export const PERSONAL_WORKFLOW_RUN_FIELD_LABEL = "Personal workflow this approval runs (shown by InferOS)";
+
 // A label as `isReservedFieldLabel` compares it: compatibility forms folded (NFKC), invisible
 // default-ignorable code points (zero-width spaces, joiners, soft hyphens) removed, whitespace runs
 // collapsed to one space, trimmed, then lower-cased.
 const foldLabel = (label: string) => label.normalize("NFKC").replace(/\p{Default_Ignorable_Code_Point}/gu, "")
     .replace(/\s+/gu, " ").trim().toLowerCase();
-const RESERVED_LABEL_FOLDED = foldLabel(WORKFLOW_RUN_FIELD_LABEL);
+const RESERVED_LABELS_FOLDED = new Set(
+    [WORKFLOW_RUN_FIELD_LABEL, PERSONAL_WORKFLOW_FIELD_LABEL, PERSONAL_WORKFLOW_RUN_FIELD_LABEL].map(foldLabel));
 
 /**
- * Whether `label` is the kernel's reserved `WORKFLOW_RUN_FIELD_LABEL` (rounds 6 and 7), so a near-copy
+ * Whether `label` is one of the kernel's reserved labels (`WORKFLOW_RUN_FIELD_LABEL`, rounds 6 and 7;
+ * and FAC-134's `PERSONAL_WORKFLOW_FIELD_LABEL` and `PERSONAL_WORKFLOW_RUN_FIELD_LABEL`), so a near-copy
  * can't pass for it. Both are folded the same way first: NFKC (so fullwidth and other compatibility
  * forms match), every default-ignorable code point removed (zero-width and other invisible
  * characters), whitespace collapsed, trimmed and lower-cased. A gatekeeper's field so labelled is
@@ -1334,7 +1358,7 @@ const RESERVED_LABEL_FOLDED = foldLabel(WORKFLOW_RUN_FIELD_LABEL);
  * kernel's run by its provenance, `ActionContext.declaredRun`, never by a field label.
  */
 export function isReservedFieldLabel(label: unknown): boolean {
-  return typeof label === "string" && foldLabel(label) === RESERVED_LABEL_FOLDED;
+  return typeof label === "string" && RESERVED_LABELS_FOLDED.has(foldLabel(label));
 }
 
 /** Which requested run proposed a write, and where (FAC-112; `ActionRecord.workflowRun`). */
@@ -2049,6 +2073,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // The owner's temporary canvases (FAC-137), only in an operate session workspace: references
       // only, each unsaved one expiring unless saved (see temporary-canvas-store.ts).
       temporaryCanvases: collection<StoredTemporaryCanvas>()({ primaryKey: "id" }),
+      // The owner's personal workflows (FAC-134, capability 2), only in an operate session
+      // workspace, each expiring; and their runs (see personal-workflow-store.ts).
+      personalWorkflows: collection<StoredPersonalWorkflow>()({ primaryKey: "id" }),
+      personalWorkflowRuns: collection<StoredPersonalWorkflowRun>()({ primaryKey: "runId" }),
       // Saved and published workflow definitions, the triggers pinned to them, and the deliveries
       // those triggers made (see workflow-definition-store.ts).
       workflowDefinitions: collection<StoredWorkflowDefinition>()({ primaryKey: "id" }),
@@ -2565,6 +2593,8 @@ type ConsoleToolAttempt = {verified: boolean, ran: boolean, commitId: string | n
 // the two calls it makes.
 type InferOpsBoardCommandSession = {
   openIssue(issueId: string): Promise<{
+    /** The issue as it is now, read as the requester (a personal workflow step's revision, FAC-134). */
+    read(): Promise<{ revision: string }>;
     transition(toStateId: string, expectedRevision: string): Promise<unknown>;
   } & Disposable>;
 } & Disposable;
@@ -2918,6 +2948,17 @@ class OverseerImpl implements AgentHooks {
     // And the next unsaved temporary canvas (FAC-137).
     let nextCanvasExpiry = this.temporaryCanvasStore().nextExpiry();
     if (nextCanvasExpiry !== undefined) times.push(nextCanvasExpiry);
+    // A personal workflow's next expiry, a run with steps still to go (now), and an ended run's
+    // outcome still owed (FAC-134 capability 2).
+    if (this.storage.operateSession.get()) {
+      let personal = this.personalWorkflowStore();
+      let nextPersonalExpiry = personal.nextExpiry();
+      if (nextPersonalExpiry !== undefined) times.push(nextPersonalExpiry);
+      for (let run of personal.activeRuns()) {
+        if (run.state === "running") times.push(Date.now());
+        else if (run.reportDue !== undefined) times.push(run.reportDue);
+      }
+    }
     let nextRunHistorySweep = this.workflowDefinitionStore().nextRunHistorySweep();
     if (nextRunHistorySweep !== undefined) times.push(nextRunHistorySweep);
 
@@ -2967,6 +3008,7 @@ class OverseerImpl implements AgentHooks {
       await this.#retryDueWidgetWithdrawals();
       await this.retryReplayWithdrawals();
       await this.reportRunsToChat();
+      await this.advancePersonalWorkflowRuns();
       await this.expireRunWrites();
       do {
         let results = await Promise.allSettled([
@@ -3010,6 +3052,15 @@ class OverseerImpl implements AgentHooks {
       if (swept > 0) this.logger.info("swept expired temporary canvases", { event: "operate.temporary_canvases.expired", canvasCount: swept });
     } catch (error) {
       this.logger.error("temporary canvas sweep failed", { event: "operate.temporary_canvases.expire.failed", error });
+    }
+    // FAC-134 capability 2: personal workflows past their expiry. A run in progress keeps its own
+    // copy of the steps and finishes.
+    if (!this.storage.operateSession.get()) return;
+    try {
+      let swept = this.personalWorkflowStore().sweepExpired();
+      if (swept > 0) this.logger.info("swept expired personal workflows", { event: "operate.personal_workflows.expired", definitionCount: swept });
+    } catch (error) {
+      this.logger.error("personal workflow sweep failed", { event: "operate.personal_workflows.expire.failed", error });
     }
   }
 
@@ -7212,10 +7263,20 @@ class OverseerImpl implements AgentHooks {
     // Only for an action that declared the run at submit (ActionDescription.workflowRun, which the
     // kernel's own field shows the approver, see submitActionNow), and bound to that reference and
     // this action: nothing at apply names another.
+    // FAC-134 capability 2: likewise for a declared personal workflow to create or run, each bound to
+    // what the action declared and minted only for its own marker.
     let declaredRun = record.description.workflowRun?.reference;
-    let effects = declaredRun !== undefined && !autoApproved && resolvedBy.type === "user" && !record.executedAs
-        ? new ApprovedEffectsImpl(() => this.#invokeApprovedWorkflow(resolvedBy.id, declaredRun, record.id,
-            record.description.workflowRun?.reportOutcome === true))
+    let declaredWorkflow = record.description.personalWorkflow;
+    let declaredWorkflowRun = record.description.personalWorkflowRun;
+    let personsOwn = !autoApproved && resolvedBy.type === "user" && !record.executedAs;
+    let effects = personsOwn && declaredRun !== undefined
+        ? new ApprovedEffectsImpl({invoke: () => this.#invokeApprovedWorkflow(resolvedBy.id, declaredRun, record.id,
+            record.description.workflowRun?.reportOutcome === true)})
+        : personsOwn && declaredWorkflow !== undefined
+        ? new ApprovedEffectsImpl({create: () => this.#createApprovedPersonalWorkflow(resolvedBy.id, declaredWorkflow, record.id)})
+        : personsOwn && declaredWorkflowRun !== undefined
+        ? new ApprovedEffectsImpl({run: () => this.#runApprovedPersonalWorkflow(resolvedBy.id, declaredWorkflowRun.reference,
+            record.id, declaredWorkflowRun.reportOutcome === true)})
         : undefined;
     try {
       result = await gatekeeper.applyAction(record.action,
@@ -8640,7 +8701,13 @@ class OverseerImpl implements AgentHooks {
     // Only the kernel's own field may carry its label (round 6): a gatekeeper's field that takes it,
     // however it is cased or spaced, is refused, so no decoy ever stands beside or for the real one.
     if ((description.fields ?? []).some(field => isReservedFieldLabel(field?.label))) {
-      throw new Error(`The field label "${WORKFLOW_RUN_FIELD_LABEL}" is reserved for InferOS.`);
+      let taken = (description.fields ?? []).find(field => isReservedFieldLabel(field?.label))!.label;
+      throw new Error(`The field label "${taken}" is reserved for InferOS.`);
+    }
+    // At most one thing the person's approval starts or creates (FAC-120, FAC-134).
+    if ([description.workflowRun, description.personalWorkflow, description.personalWorkflowRun]
+        .filter(declared => declared !== undefined).length > 1) {
+      throw new Error("An action declares at most one of a workflow run, a personal workflow and a personal workflow run.");
     }
     if (description.workflowRun !== undefined) {
       if (!parseWorkflowTriggerRef(description.workflowRun?.reference)) {
@@ -8654,6 +8721,26 @@ class OverseerImpl implements AgentHooks {
       description = {...description, workflowRun: {reference, ...(reportOutcome ? {reportOutcome: true} : {})}};
       description = {...description, fields: [...description.fields ?? [],
         {label: WORKFLOW_RUN_FIELD_LABEL, kind: "inline", value: reference}]};
+    }
+    // A declared personal workflow (FAC-134 capability 2) is checked for its shape here and listed,
+    // every step and its input, in the kernel's own last field: the Dot wrote the gatekeeper's text.
+    // Whether each command is offered to the approver is checked at approval, in its console's own
+    // workspace (createPersonalWorkflow).
+    if (description.personalWorkflow !== undefined) {
+      let declaration = parsePersonalWorkflowDeclaration(description.personalWorkflow);
+      description = {...description, personalWorkflow: declaration, fields: [...description.fields ?? [],
+        {label: PERSONAL_WORKFLOW_FIELD_LABEL, kind: "text", value: personalWorkflowFieldValue(declaration)}]};
+    }
+    if (description.personalWorkflowRun !== undefined) {
+      if (!parsePersonalWorkflowRef(description.personalWorkflowRun?.reference)) {
+        throw new Error("A declared personal workflow run must name an InferOS personal workflow reference.");
+      }
+      let {reference, reportOutcome} = description.personalWorkflowRun;
+      if (reportOutcome !== undefined && typeof reportOutcome !== "boolean") {
+        throw new Error("A declared personal workflow run's reportOutcome is true or false.");
+      }
+      description = {...description, personalWorkflowRun: {reference, ...(reportOutcome ? {reportOutcome: true} : {})},
+        fields: [...description.fields ?? [], {label: PERSONAL_WORKFLOW_RUN_FIELD_LABEL, kind: "inline", value: reference}]};
     }
 
     // Push authorization (see ActionDescription.pushedCommits): before anything is queued,
@@ -13571,6 +13658,22 @@ class OverseerImpl implements AgentHooks {
         (ranAs !== "gadget_bindings" && ranAs !== "service_account")) {
       return "refused";
     }
+    return await this.#handOnRunOutcome(record, {
+      kind: "workflow-run", runId, outcome: final, ...(reason !== undefined ? {reason} : {}), requestedBy, ranAs,
+    });
+  }
+
+  /**
+   * Hands a run's outcome to the gatekeeper of `record`, the approved action that started it
+   * (FAC-134): `reportApprovedRunOutcome` for a published workflow's run, reported from the
+   * workspace it ran in, and the personal workflow runner (capability 2) for one run here. Both keep
+   * the same rules: `retry` while the approval is still applying; `refused` unless the approval was
+   * that of the person the outcome names; and at least once, with the `fac134:runOutcome` mark.
+   */
+  async #handOnRunOutcome(record: Extract<ActionRecord, {type: "action"}>, outcome: Omit<ApprovedRunOutcome, "actionApplied">)
+      : Promise<"delivered" | "retry" | "refused"> {
+    let actionId = record.id;
+    let {runId, outcome: final, reason, requestedBy, ranAs} = outcome;
     if (record.state === "pending" && (record.applyStartedAt !== undefined || this.#claimedActions.has(record.id))) {
       return "retry";
     }
@@ -13591,7 +13694,7 @@ class OverseerImpl implements AgentHooks {
         Pick<Required<Gatekeeper<unknown>>, "workflowRunOutcome">;
     try {
       await facet.workflowRunOutcome(record.action, {
-        kind: "workflow-run", runId, outcome: final, ...(reason !== undefined ? {reason} : {}), requestedBy, ranAs,
+        kind: outcome.kind, runId, outcome: final, ...(reason !== undefined ? {reason} : {}), requestedBy, ranAs,
         actionApplied: record.state === "approved",
       });
     } catch (error) {
@@ -13600,6 +13703,373 @@ class OverseerImpl implements AgentHooks {
     }
     this.ctx.storage.kv.put(key, {state: "sent", runId, at: Date.now()});
     return "delivered";
+  }
+
+  /**
+   * This operate session's personal workflows (FAC-134, capability 2). Each lasts FAC-124's TTL for
+   * dynamic definitions, read only when one is created.
+   */
+  personalWorkflowStore(): PersonalWorkflowStore {
+    return new PersonalWorkflowStore(this.ctx.storage, this.storage, {
+      now: () => Date.now(),
+      ttlMs: () => dynamicDefinitionTtlMs(this.env.WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS),
+      onChange: () => {
+        if (this.toolLane) this.#updateAlarm();
+        else this.#alarmOwed = true;
+      },
+    });
+  }
+
+  // `profileId`'s personal workflows: only in their own live operate session (not retired), never
+  // an ordinary workspace or someone else's session. Otherwise null.
+  #ownPersonalWorkflows(profileId: string): PersonalWorkflowStore | null {
+    if (!this.ownerId || !this.storage.operateSession.get() || this.isRetiredOperateSession() ||
+        this.ownerProfileId !== profileId) {
+      return null;
+    }
+    return this.personalWorkflowStore();
+  }
+
+  /**
+   * `profileId`'s personal workflows, not yet expired, oldest first: only in their own live operate
+   * session, and an empty list anywhere else. For the kernel's own surfaces; no agent tool reads it.
+   */
+  personalWorkflowsOf(profileId: string): StoredPersonalWorkflow[] {
+    return this.#ownPersonalWorkflows(profileId)?.list() ?? [];
+  }
+
+  // The caller a step's console workspace is asked as: the session's owner, from this session.
+  #personalWorkflowCaller(profileId: string): ConsoleToolCaller {
+    return {userId: this.users.idFromName(profileId).toString(), profileId, sessionWorkspaceId: this.ctx.id.toString()};
+  }
+
+  /**
+   * FAC-134 capability 2: creates the personal workflow action `actionId` declared, for `profileId`,
+   * who is approving it here now (ApprovedEffects.createPersonalWorkflow; applyPendingAction mints
+   * one only for an action that declared it). Only in that person's own live operate session. Each
+   * step's console workspace first says, for this person now, that the command is one a console it
+   * published offers them at that revision, on the connection fixed at publication, in their own
+   * company, with an input that fits it (`checkPersonalWorkflowStep`, r1's obligations 1 and 2). One
+   * step refused refuses it all, in a fixed sentence naming the step, never which check; one that
+   * couldn't be asked is `unknown`, with nothing created. Once per action.
+   */
+  async #createApprovedPersonalWorkflow(profileId: string, declared: unknown, actionId: number)
+      : Promise<ApprovedPersonalWorkflow> {
+    let store = this.#ownPersonalWorkflows(profileId);
+    if (!store) return {status: "refused", kind: "permission", reason: PERSONAL_WORKFLOW_OWN_SESSION};
+    let declaration;
+    try {
+      declaration = parsePersonalWorkflowDeclaration(declared);
+    } catch {
+      return {status: "refused", kind: "invalid", reason: PERSONAL_WORKFLOW_INVALID};
+    }
+    let caller = this.#personalWorkflowCaller(profileId);
+    let ns = this.ctx.exports.OverseerDurableObject;
+    for (let [index, step] of declaration.steps.entries()) {
+      let ref = parseConsoleCommandRef(step.reference)!;
+      let refusal: string | null;
+      let workspaceId;
+      try {
+        workspaceId = ns.idFromString(ref.workspaceId);
+      } catch {
+        // An id that names no workspace of this deployment: not offered, like any other.
+        workspaceId = undefined;
+      }
+      if (workspaceId === undefined) {
+        refusal = PERSONAL_WORKFLOW_STEP_NOT_OFFERED;
+      } else {
+        try {
+          refusal = await ns.get(workspaceId).checkPersonalWorkflowStep(caller, {consoleId: ref.consoleId,
+            revision: ref.revision, gadgetId: ref.gadgetId, command: ref.command, input: step.input});
+        } catch (error) {
+          this.logger.warn("a personal workflow step couldn't be checked", {
+            event: "operate.personal_workflow.check_failed", operation: String(actionId), sequence: index, error,
+          });
+          return {status: "unknown", reason: PERSONAL_WORKFLOW_UNCHECKED};
+        }
+      }
+      if (refusal !== null) {
+        this.logger.info("a personal workflow step was refused", {
+          event: "operate.personal_workflow.step_refused", operation: String(actionId), sequence: index,
+        });
+        return {status: "refused", kind: "permission", reason: personalWorkflowStepRefused(index)};
+      }
+    }
+    let created;
+    try {
+      created = store.create(declaration, actionId);
+    } catch (error) {
+      return {status: "refused", kind: "conflict", reason: error instanceof Error ? error.message : PERSONAL_WORKFLOW_INVALID};
+    }
+    return {status: "created", personalWorkflowId: created.id, sessionWorkspaceId: this.ctx.id.toString(),
+      expiresAt: created.expiresAt.toISOString()};
+  }
+
+  /**
+   * FAC-134 capability 2: starts the run of the personal workflow `reference` names, for `profileId`,
+   * who is approving action `actionId` here now (ApprovedEffects.runPersonalWorkflow). Only one of
+   * their own, kept in this, their own live operate session (r1's obligation 3), and not expired.
+   * Its steps then run in order from the alarm (`advancePersonalWorkflowRuns`). Once per action.
+   */
+  async #runApprovedPersonalWorkflow(profileId: string, reference: string, actionId: number,
+      reportOutcome: boolean): Promise<ApprovedWorkflowRun> {
+    let ref = parsePersonalWorkflowRef(reference);
+    if (!ref || ref.sessionWorkspaceId !== this.ctx.id.toString()) {
+      return {status: "refused", kind: "invalid", reason: PERSONAL_WORKFLOW_GONE};
+    }
+    let store = this.#ownPersonalWorkflows(profileId);
+    if (!store) return {status: "refused", kind: "permission", reason: PERSONAL_WORKFLOW_OWN_SESSION};
+    let run = store.startRun(ref.personalWorkflowId, actionId, profileId, reportOutcome);
+    if (!run || run.workflowId !== ref.personalWorkflowId) {
+      return {status: "refused", kind: "invalid", reason: PERSONAL_WORKFLOW_GONE};
+    }
+    return {status: "started", runId: run.runId};
+  }
+
+  /**
+   * The step a console workspace is asked to request for run `runId` (FAC-134 capability 2), when
+   * this session is executing exactly that step of that run for `profileId` now: its owner, in this,
+   * their live operate session, with the step marked as sending. Otherwise null. This is how the
+   * console workspace knows the request comes from the owner's own approved run
+   * (requestPersonalWorkflowStep): nothing else in the kernel can make a session vouch for it.
+   */
+  personalWorkflowStepFor(runId: string, index: number, profileId: string): PersonalWorkflowStep | null {
+    if (typeof runId !== "string" || !Number.isSafeInteger(index) || !this.#ownPersonalWorkflows(profileId)) return null;
+    let run = this.personalWorkflowStore().getRun(runId);
+    if (!run || run.state !== "running" || run.sending !== index || run.ownerProfileId !== profileId) return null;
+    return run.steps[index] ?? null;
+  }
+
+  /**
+   * Runs the steps of this session's personal workflow runs, in order, and reports each ended run's
+   * outcome to the action that started it (FAC-134 capability 2). From the alarm. Each step asks its
+   * console's workspace (requestPersonalWorkflowStep) and is marked as sending first, so one found
+   * still sending (a restart mid-request) ends the run `uncertain` (`step-unknown`), never sent
+   * again. A refused step ends it `failed` (`step-refused`) with nothing after it sent; every step
+   * requested ends it `succeeded`, which means each request was placed, never that it was made.
+   * The cause of a refusal stays in the run's own record.
+   */
+  async advancePersonalWorkflowRuns(now = Date.now()): Promise<void> {
+    if (!this.storage.operateSession.get() || this.#advancingPersonalWorkflows) return;
+    this.#advancingPersonalWorkflows = true;
+    try {
+      let store = this.personalWorkflowStore();
+      for (let active of store.activeRuns()) {
+        if (active.state === "running") await this.#advancePersonalWorkflowRun(store, active);
+        let run = store.getRun(active.runId);
+        if (run?.reportDue !== undefined && run.reportDue <= now) await this.#reportPersonalWorkflowRun(store, run, now);
+      }
+    } finally {
+      this.#advancingPersonalWorkflows = false;
+    }
+  }
+
+  #advancingPersonalWorkflows = false;
+
+  async #advancePersonalWorkflowRun(store: PersonalWorkflowStore, run: StoredPersonalWorkflowRun): Promise<void> {
+    let end = (state: "succeeded" | "failed" | "uncertain", reason?: "step-refused" | "step-unknown") => {
+      run = {...run, state, ...(reason ? {reason} : {}), endedAt: new Date(),
+        ...(run.reportOutcome ? {reportDue: Date.now()} : {})};
+      delete run.sending;
+      store.putRun(run);
+    };
+    if (run.sending !== undefined) {
+      run = {...run, results: [...run.results, {status: "unknown", detail: PERSONAL_WORKFLOW_STEP_LOST}]};
+      end("uncertain", "step-unknown");
+      return;
+    }
+    let ns = this.ctx.exports.OverseerDurableObject;
+    let caller = this.#personalWorkflowCaller(run.ownerProfileId);
+    while (run.state === "running") {
+      let index = run.results.length;
+      if (index >= run.steps.length) {
+        end("succeeded");
+        return;
+      }
+      if (!this.#ownPersonalWorkflows(run.ownerProfileId)) {
+        run = {...run, results: [...run.results, {status: "refused", detail: PERSONAL_WORKFLOW_OWN_SESSION}]};
+        end("failed", "step-refused");
+        return;
+      }
+      // Marked before the request, so a restart never sends it again.
+      run = {...run, sending: index};
+      store.putRun(run);
+      let step = run.steps[index]!;
+      let result: PersonalWorkflowStepResult;
+      try {
+        let workspace = ns.get(ns.idFromString(step.workspaceId));
+        result = personalWorkflowStepResultOf(await workspace.requestPersonalWorkflowStep(caller, {runId: run.runId, index}));
+      } catch (error) {
+        this.logger.warn("a personal workflow step's request went unanswered", {
+          event: "operate.personal_workflow.step_unanswered", operation: run.runId, sequence: index, error,
+        });
+        result = {status: "unknown", detail: PERSONAL_WORKFLOW_STEP_LOST};
+      }
+      run = {...(store.getRun(run.runId) ?? run), results: [...run.results, result]};
+      delete run.sending;
+      if (result.status === "refused") {
+        end("failed", "step-refused");
+        return;
+      }
+      if (result.status === "unknown") {
+        end("uncertain", "step-unknown");
+        return;
+      }
+      store.putRun(run);
+    }
+  }
+
+  // One try at handing an ended run's outcome to the action that started it, retried with a growing
+  // delay `RUN_CHAT_REPORT_TRIES` times in all, as reportRunsToChat does.
+  async #reportPersonalWorkflowRun(store: PersonalWorkflowStore, run: StoredPersonalWorkflowRun, now: number)
+      : Promise<void> {
+    let record = this.storage.actions.get(run.actionId);
+    let answer: "delivered" | "retry" | "refused";
+    if (record?.type !== "action" || !record.description.personalWorkflowRun?.reportOutcome ||
+        (run.state !== "succeeded" && run.state !== "failed" && run.state !== "uncertain")) {
+      answer = "refused";
+    } else {
+      try {
+        answer = await this.#handOnRunOutcome(record, {
+          kind: "personal-workflow", runId: run.runId, outcome: run.state, ...(run.reason ? {reason: run.reason} : {}),
+          requestedBy: run.ownerProfileId, ranAs: "gadget_bindings",
+        });
+      } catch (error) {
+        this.logger.warn("a personal workflow run's outcome didn't reach its action", {
+          event: "operate.personal_workflow.report_failed", operation: run.runId, failureCount: run.reportTries + 1, error,
+        });
+        answer = "retry";
+      }
+    }
+    let current = store.getRun(run.runId) ?? run;
+    if (answer === "retry" && current.reportTries + 1 < RUN_CHAT_REPORT_TRIES) {
+      store.putRun({...current, reportTries: current.reportTries + 1, reportDue: now + 30_000 * 2 ** current.reportTries});
+      return;
+    }
+    let done = {...current, reportTries: current.reportTries + 1};
+    delete done.reportDue;
+    store.putRun(done);
+  }
+
+  /**
+   * Why `caller` may not have step `step` of a personal workflow from this workspace now, or null
+   * when they may (FAC-134 capability 2): every check a console command request makes (FAC-14 K2,
+   * #requestConsoleCommand) but the open page. The caller checks out as a console tool caller (their
+   * operate session is the one they name) with at least `use` here; the command is one a console this
+   * workspace published offers at exactly that revision (`offeredCommand`), still bound as fixed at
+   * publication (`consoleCommandRefusal`) on a connection of the person's own company
+   * (`COMMAND_OTHER_COMPANY`); and the input fits that command without its revision
+   * (`personalWorkflowStepInputProblem`). Asked at approval, before a workflow is created. Every
+   * answer is kernel text.
+   */
+  async checkPersonalWorkflowStep(caller: ConsoleToolCaller,
+      step: {consoleId: string, revision: string, gadgetId: number, command: string, input: unknown})
+      : Promise<string | null> {
+    let checked = await this.#personalWorkflowStepChecks(caller, step);
+    return "refusal" in checked ? checked.refusal : null;
+  }
+
+  // The checks of checkPersonalWorkflowStep, with what a request needs after them.
+  async #personalWorkflowStepChecks(caller: ConsoleToolCaller,
+      step: {consoleId: string, revision: string, gadgetId: number, command: string, input: unknown})
+      : Promise<{refusal: string} | {user: DurableObjectStub<UserDurableObject>, generation: number,
+        sharing: SharingManager, entry: ConsoleWidgetEntry, command: ConsoleFrozenCommand,
+        facet: Fetcher<Gatekeeper<InferOpsBoardCommandSession>>}> {
+    let refusal = this.#consoleToolsRefusal();
+    if (refusal) return {refusal};
+    if (typeof caller?.profileId !== "string" || this.users.idFromName(caller.profileId).toString() !== caller.userId) {
+      return {refusal: UNVERIFIED_CONSOLE_TOOL_CALLER};
+    }
+    let user = await this.#consoleToolUser(caller);
+    if (!user) return {refusal: UNVERIFIED_CONSOLE_TOOL_CALLER};
+    let role = await this.#consoleToolRole(caller, user);
+    if (!role) return {refusal: NO_CONSOLE_TOOL_ACCESS};
+    let generation = this.authzGeneration();
+    let sharing = await this.getSharingManager();
+    let offered;
+    try {
+      offered = this.#consoleStore().offeredCommand(step.consoleId, step.revision, step.gadgetId, step.command);
+    } catch (error) {
+      return {refusal: error instanceof Error ? error.message : PERSONAL_WORKFLOW_STEP_NOT_OFFERED};
+    }
+    let problem = personalWorkflowStepInputProblem(offered.command.command, step.input);
+    if (problem !== null) return {refusal: `The input does not match command ${offered.command.name}: ${problem}.`};
+    let binding = this.consoleCommandRefusal(offered.command.gatekeeperId, offered.command.command);
+    if (binding) return {refusal: `Command ${offered.command.name} cannot be requested now: ${binding}`};
+    let facet = this.getGatekeeperFacet(offered.command.gatekeeperId) as unknown as
+        Fetcher<Gatekeeper<InferOpsBoardCommandSession>> & {connectionCompany(): Promise<string | null>};
+    if (getSharedConfigurationGatekeeper(this.env)) {
+      let [personCompany, connectionCompany] = await Promise.all([user.currentPresentationCompany(), facet.connectionCompany()]);
+      if (!personCompany || !connectionCompany || personCompany !== connectionCompany) return {refusal: COMMAND_OTHER_COMPANY};
+    }
+    return {user, generation, sharing, entry: offered.entry, command: offered.command, facet};
+  }
+
+  /**
+   * Requests step `index` of the personal workflow run `runId` that `caller`'s operate session is
+   * executing (FAC-134 capability 2; the lead's D1 (B)): the kernel-only entry that replaces only
+   * FAC-14's open-page check (`consoleSessionCheck`). It is reached only from that session's runner:
+   * the session must vouch, now, that it is its owner's live session executing exactly this step of
+   * one of their own approved runs (`personalWorkflowStepFor`); no client, agent tool or gatekeeper
+   * reaches this, and another person's session vouches for none of it. Every other check of a console
+   * command request is made again here (`#personalWorkflowStepChecks`), then again with no await
+   * before the gatekeeper is asked (the authz generation, role, still offered as published). The
+   * issue's current revision is read as the person through the same connection (D2), and the
+   * transition is requested at it: a pending, manual-only action in this workspace, which shows the
+   * issue's current state and that revision, decided by the console's builders.
+   */
+  async requestPersonalWorkflowStep(caller: ConsoleToolCaller, request: {runId: string, index: number})
+      : Promise<PersonalWorkflowStepResult> {
+    let refused = (detail: string): PersonalWorkflowStepResult => ({status: "refused", detail});
+    let {runId, index} = request ?? {};
+    if (typeof caller?.sessionWorkspaceId !== "string" || typeof caller.profileId !== "string" ||
+        caller.sessionWorkspaceId === this.ctx.id.toString()) {
+      return refused(UNVERIFIED_CONSOLE_TOOL_CALLER);
+    }
+    let ns = this.ctx.exports.OverseerDurableObject;
+    let step: PersonalWorkflowStep | null;
+    try {
+      step = await ns.get(ns.idFromString(caller.sessionWorkspaceId)).personalWorkflowStepFor(runId, index, caller.profileId);
+    } catch {
+      return refused(PERSONAL_WORKFLOW_NOT_RUNNING);
+    }
+    if (!step || step.workspaceId !== this.ctx.id.toString()) return refused(PERSONAL_WORKFLOW_NOT_RUNNING);
+    let checked = await this.#personalWorkflowStepChecks(caller, step);
+    if ("refusal" in checked) return refused(checked.refusal);
+    let {user, generation, sharing, command, facet} = checked;
+    let personName = (await user.whoami()).name;
+    let requester: GatekeeperCaller = {from: "operateAgent", userId: caller.userId, profileId: caller.profileId,
+      sessionWorkspaceId: caller.sessionWorkspaceId, name: personName, personalWorkflowStep: {runId, index}};
+    let stillOffered = () => {
+      try {
+        let found = this.#consoleStore().offeredCommand(step.consoleId, step.revision, step.gadgetId, command.name).command;
+        return found.gatekeeperId === command.gatekeeperId && found.command === command.command;
+      } catch {
+        return false;
+      }
+    };
+    let finalCheck = () => {
+      let current = sharing.getEffectiveRole(caller.profileId);
+      return this.authzGeneration() === generation && !!current && roleRank(current) >= roleRank("use") && stillOffered();
+    };
+    if (!finalCheck()) return refused(CONSOLE_CHANGED_DURING_CALL);
+    let receipt;
+    try {
+      using session = await this.openGatekeeperSession(command.gatekeeperId, facet, requester) as unknown as
+          InferOpsBoardCommandSession;
+      using issue = await session.openIssue(step.input.issueId);
+      // D2: the revision as the issue is now, read as the person through the same connection.
+      let {revision} = await issue.read();
+      // The final check, with no await before the gatekeeper is asked.
+      if (!finalCheck()) return refused(CONSOLE_CHANGED_DURING_CALL);
+      receipt = await issue.transition(step.input.toStateId, revision);
+    } catch (error) {
+      // The board's or its gatekeeper's answer (an unknown state, a move already waiting): nothing
+      // was placed. Its words stay in the owner's own record.
+      let message = error instanceof Error ? error.message.slice(0, WIDGET_TOOL_LIMITS.errorLength) : "";
+      return refused(message || "The board refused the request.");
+    }
+    return receipt == null ? {status: "unchanged"} : {status: "requested"};
   }
 
   /**
@@ -14597,6 +15067,35 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   }
 
   /**
+   * See `OverseerImpl.checkPersonalWorkflowStep`. Worker-only: the operate session applying a
+   * person's approval asks it for them (ApprovedEffects.createPersonalWorkflow); no client
+   * interface reaches it.
+   */
+  async checkPersonalWorkflowStep(caller: ConsoleToolCaller,
+      step: {consoleId: string, revision: string, gadgetId: number, command: string, input: unknown})
+      : Promise<string | null> {
+    return this.impl.checkPersonalWorkflowStep(caller, step);
+  }
+
+  /**
+   * See `OverseerImpl.requestPersonalWorkflowStep`. Worker-only: only an operate session's personal
+   * workflow runner calls it, and only a step that session vouches for is requested
+   * (`personalWorkflowStepFor`); no client interface reaches it.
+   */
+  async requestPersonalWorkflowStep(caller: ConsoleToolCaller, request: {runId: string, index: number})
+      : Promise<PersonalWorkflowStepResult> {
+    return this.impl.requestPersonalWorkflowStep(caller, request);
+  }
+
+  /**
+   * See `OverseerImpl.personalWorkflowStepFor`. Worker-only: a console workspace asks it of the
+   * operate session that says it is running a step there.
+   */
+  async personalWorkflowStepFor(runId: string, index: number, profileId: string): Promise<PersonalWorkflowStep | null> {
+    return this.impl.personalWorkflowStepFor(runId, index, profileId);
+  }
+
+  /**
    * See `OverseerImpl.reportApprovedRunOutcome`. Worker-only: the workspace a run ran in calls it on
    * the operate session whose approved action started that run; no client interface reaches it.
    */
@@ -15366,6 +15865,12 @@ type GatekeeperCaller = {
    * (`ActionContext.onBehalfOf`), never authority. Absent on no record written before it was kept.
    */
   name?: string;
+  /**
+   * Set when the request is a step of the person's own approved personal workflow run (FAC-134
+   * capability 2; requestPersonalWorkflowStep), not the agent's: which run and step. A record of
+   * where it came from, never authority; it is still decided by the console's builders.
+   */
+  personalWorkflowStep?: { runId: string; index: number };
 };
 
 type GatekeeperLoopbackProps = {
@@ -15674,6 +16179,34 @@ function joinSessionPresence(
 // FAC-120: the words of an approved workflow run that isn't started.
 const WORKFLOW_REFERENCE_UNKNOWN = "That isn't a workflow trigger this workspace can find.";
 const WORKFLOW_NEEDS_APPROVAL = "Starting a workflow run needs a person's approval.";
+/** Refused: a personal workflow is created or run only by its owner's own approval of an action that declared it. */
+const PERSONAL_WORKFLOW_NEEDS_APPROVAL = "A personal workflow is created or run only by your own approval.";
+/** Refused: personal workflows live only in their owner's own live operate session. */
+const PERSONAL_WORKFLOW_OWN_SESSION = "Personal workflows are kept and run only in your own operate session.";
+/** Refused: the declared workflow isn't one (a gatekeeper's bad shape, past the submit check). */
+const PERSONAL_WORKFLOW_INVALID = "That personal workflow isn't one InferOS can create.";
+/** A step's refusal at a check: not a command a console offers the person now. */
+const PERSONAL_WORKFLOW_STEP_NOT_OFFERED = "It isn't a command a console of yours offers you now.";
+/** Unknown: a step's console workspace didn't answer its check; nothing was created. */
+const PERSONAL_WORKFLOW_UNCHECKED = "A step of this workflow couldn't be checked now. Nothing was created; approve it again later.";
+/** Recorded: a step's request may or may not have been placed. */
+const PERSONAL_WORKFLOW_STEP_LOST = "This step's request may or may not have been placed: its answer was lost.";
+/** Refused at a step: the session doesn't vouch that it is running this step. */
+const PERSONAL_WORKFLOW_NOT_RUNNING = "This step isn't one your operate session is running now.";
+/** The refusal of a personal workflow at approval, naming the step but never which check refused it. */
+const personalWorkflowStepRefused = (index: number) =>
+  `Step ${index + 1} of this workflow isn't a command a console offers you now, as written. Nothing was created.`;
+/** A step's answer from its console workspace, checked: anything else is unknown. */
+function personalWorkflowStepResultOf(value: unknown): PersonalWorkflowStepResult {
+  let answer = value as {status?: unknown, detail?: unknown} | null;
+  let detail = typeof answer?.detail === "string" ? answer.detail.slice(0, 500) : "";
+  switch (answer?.status) {
+    case "requested": return {status: "requested"};
+    case "unchanged": return {status: "unchanged"};
+    case "refused": return {status: "refused", detail: detail || "The step was refused."};
+    default: return {status: "unknown", detail: PERSONAL_WORKFLOW_STEP_LOST};
+  }
+}
 const WORKFLOW_RUN_UNKNOWN =
   "It isn't known whether the workflow run started: check the trigger's runs before approving it again.";
 // invokeWorkflowTrigger's own words for an invocation its gatekeeper never took: nothing started.
@@ -20837,24 +21370,52 @@ function actionReceipt(impl: OverseerImpl, gatekeeperId: number, id: number): Ac
 // run, and revoked once it returns. Repeats inside one apply get the first answer.
 @validateRpc()
 class ApprovedEffectsImpl extends RpcTarget implements ApprovedEffects {
+  // Each is the one effect the action declared (applyPendingAction mints one per marker), or null:
+  // never declared, or revoked. Each answer is memoised, so asking again returns the same.
   #invoke: (() => Promise<ApprovedWorkflowRun>) | null;
-  #answer: Promise<ApprovedWorkflowRun> | null = null;
+  #create: (() => Promise<ApprovedPersonalWorkflow>) | null;
+  #run: (() => Promise<ApprovedWorkflowRun>) | null;
+  #invoked: Promise<ApprovedWorkflowRun> | null = null;
+  #created: Promise<ApprovedPersonalWorkflow> | null = null;
+  #ran: Promise<ApprovedWorkflowRun> | null = null;
 
-  constructor(invoke: () => Promise<ApprovedWorkflowRun>) {
+  constructor(effects: {
+    invoke?: () => Promise<ApprovedWorkflowRun>,
+    create?: () => Promise<ApprovedPersonalWorkflow>,
+    run?: () => Promise<ApprovedWorkflowRun>,
+  }) {
     super();
-    this.#invoke = invoke;
+    this.#invoke = effects.invoke ?? null;
+    this.#create = effects.create ?? null;
+    this.#run = effects.run ?? null;
   }
 
   /** Ends the capability: every later call is refused. */
   revoke(): void {
     this.#invoke = null;
+    this.#create = null;
+    this.#run = null;
   }
 
   async invokeWorkflow(): Promise<ApprovedWorkflowRun> {
     let invoke = this.#invoke;
     if (!invoke) return {status: "refused", kind: "policy", reason: WORKFLOW_NEEDS_APPROVAL};
-    this.#answer ??= invoke();
-    return await this.#answer;
+    this.#invoked ??= invoke();
+    return await this.#invoked;
+  }
+
+  async createPersonalWorkflow(): Promise<ApprovedPersonalWorkflow> {
+    let create = this.#create;
+    if (!create) return {status: "refused", kind: "policy", reason: PERSONAL_WORKFLOW_NEEDS_APPROVAL};
+    this.#created ??= create();
+    return await this.#created;
+  }
+
+  async runPersonalWorkflow(): Promise<ApprovedWorkflowRun> {
+    let run = this.#run;
+    if (!run) return {status: "refused", kind: "policy", reason: PERSONAL_WORKFLOW_NEEDS_APPROVAL};
+    this.#ran ??= run();
+    return await this.#ran;
   }
 }
 

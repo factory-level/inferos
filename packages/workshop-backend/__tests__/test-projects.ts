@@ -146,6 +146,7 @@ export const BACKEND: readonly string[] = [
   "console-revision-notice.test.ts",
   "console-tool-invocation.test.ts",
   "console-commands.test.ts",
+  "personal-workflows.test.ts",
   "describe-binding.test.ts",
   "execution-bound-loopbacks.test.ts",
   "gadget-restore.test.ts",
