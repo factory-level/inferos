@@ -106,7 +106,7 @@ import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeepe
 import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gatekeeper-kit/observers";
 import { createLogger } from "@gadgets/observability/logger";
 import type {
-  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, ApprovedEffects, Gatekeeper, GatekeeperConnectCallback, GitCache,
+  AccountDescription, ActionApplied, ActionApplyFailure, ActionKind, ApprovalQueue, ApprovedEffects, ApprovedRunOutcome, Gatekeeper, GatekeeperConnectCallback, GitCache,
   GatekeeperConnectOptions, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, ObservationDescription, ResourceConfiguratorFrame,
   ResourceDescription, SupportedResource, VendorDescription, SharedConfigurationAction, SharedConfigurationAnswer,
   WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchResult,
@@ -180,7 +180,7 @@ import {
 import {
   appliedResult, fingerprintOf, isCodingAction, isDotAction, isIssueChange, isWikiAction, isWikiEdit, matchesFingerprint, readAction,
   sortedSources, type ActionRecord, type ActionScope, type CancelRunAction, type FingerprintScope, type CreateAction, type DispatchAction,
-  type DocumentUpdateAction, type DotConfirmAction, type ProposalApproveAction, type SectionUpdateAction, type StagedAction,
+  type DocumentUpdateAction, type DotConfirmAction, type DotReportedRun, type ProposalApproveAction, type SectionUpdateAction, type StagedAction,
   type StoredFailure, type UpdateAction, type WikiEditAction,
 } from "./actions";
 import {
@@ -4233,6 +4233,14 @@ export class InferOpsDotGatekeeper
   async revertAction(_actionId: number): Promise<{ message: string; canRetry: false }> {
     return { message: "A change the Dot made can't be undone from here: change it in InferOps.", canRetry: false };
   }
+
+  /**
+   * How the run a person's approval of action `actionId` started came out (FAC-134): recorded on
+   * the Dot's proposal in InferOps, under the person's own token, once per run id.
+   */
+  async workflowRunOutcome(actionId: number, outcome: ApprovedRunOutcome): Promise<void> {
+    await recordDotRunOutcome(this.#binding(), actionId, outcome);
+  }
 }
 
 /**
@@ -4301,7 +4309,10 @@ async function applyDotWorkflowRun(binding: DotBinding, record: DotConfirmAction
       }
       let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true };
       try {
-        const confirmed = await binding.client.confirmDotProposal(record.conversationId, record.proposalId, record.proposalId);
+        // Names the run it started, so InferOps accepts that run's outcome only (FAC-134).
+        const confirmed = await binding.client.confirmDotProposal(
+          record.conversationId, record.proposalId, record.proposalId, { runId: run.runId },
+        );
         confirmedOutcome = { ...summarizeDotOutcome(confirmed.outcome), handedOff: true };
       } catch (error) {
         logger.warn("dot workflow run started; its InferOps confirm unanswered", {
@@ -4392,7 +4403,46 @@ export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, cli
     startSession: (queue: RpcStub<ApprovalQueue>): InferOpsDotSession => new DotSessionImpl(binding, queue.dup()),
     applyAction: (actionId: number, effects?: Pick<ApprovedEffects, "invokeWorkflow">) => applyDotAction(binding, actionId, effects),
     rejectAction: (actionId: number) => rejectDotAction(binding, actionId),
+    workflowRunOutcome: (actionId: number, outcome: ApprovedRunOutcome) => recordDotRunOutcome(binding, actionId, outcome),
   };
+}
+
+/**
+ * Record how the run action `actionId`'s approval started came out (FAC-134) on its Dot proposal in
+ * InferOps (`chatbot.proposal_run_outcome`). The kernel delivers it at least once, so a run id this
+ * action already recorded changes nothing; a different run id is its own, recorded once too. Only
+ * for a workflow-run proposal this binding staged; anything else is logged and ignored, never thrown
+ * (a throw is retried). InferOps refusing it for good (CONFLICT: another run already there, or not
+ * handed off) is kept as refused, not retried; anything else is thrown for the kernel to retry.
+ */
+async function recordDotRunOutcome(binding: DotBinding, actionId: number, outcome: ApprovedRunOutcome): Promise<void> {
+  const fields: Partial<LogFields> = { host: binding.host, action: actionId };
+  const record = binding.action(actionId);
+  if (!record || !isDotAction(record) || record.tool !== DOT_WORKFLOW_INVOKE_TOOL ||
+      outcome?.kind !== "workflow-run" || typeof outcome.runId !== "string" || outcome.runId === "") {
+    logger.warn("dot run outcome for no workflow-run proposal of this binding", { event: "dot-run-outcome.ignored", ...fields });
+    return;
+  }
+  if (record.reportedRuns?.some(run => run.runId === outcome.runId)) return;
+  let inferops: DotReportedRun["inferops"] = "recorded";
+  try {
+    await binding.client.recordDotRunOutcome(record.conversationId, record.proposalId, {
+      kind: "workflow-run", runId: outcome.runId, outcome: outcome.outcome, ranAs: outcome.ranAs,
+      ...(outcome.reason ? { reasonCode: outcome.reason } : {}),
+    });
+  } catch (error) {
+    if (inferOpsErrorCode(error) !== "CONFLICT") throw error;
+    inferops = "refused";
+    logger.warn("dot run outcome refused by InferOps", { event: "dot-run-outcome.refused", ...fields });
+  }
+  // Read again after the await: another delivery may have recorded meanwhile.
+  const current = binding.action(actionId);
+  if (!current || !isDotAction(current) || current.reportedRuns?.some(run => run.runId === outcome.runId)) return;
+  const reported: DotReportedRun = {
+    runId: outcome.runId, outcome: outcome.outcome, ranAs: outcome.ranAs, actionApplied: outcome.actionApplied !== false,
+    ...(outcome.reason ? { reasonCode: outcome.reason } : {}), inferops,
+  };
+  binding.store.put({ ...current, reportedRuns: [...current.reportedRuns ?? [], reported] });
 }
 
 /**
@@ -4612,8 +4662,9 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
           .verbatim("Reference", typeof proposal.input.reference === "string" ? proposal.input.reference : "")
           .finish(),
         implementsRevert: false,
-        // Declared to the kernel, which shows it and binds this approval's run to exactly it.
-        ...(ref ? { workflowRun: { reference: proposal.input.reference as string } } : {}),
+        // Declared to the kernel, which shows it and binds this approval's run to exactly it, and
+        // asks for the run's outcome (FAC-134), which workflowRunOutcome records in InferOps.
+        ...(ref ? { workflowRun: { reference: proposal.input.reference as string, reportOutcome: true } } : {}),
         actionKind: { tag: "inferops.dot-workflow-invoke", label: "Approve a workflow run your Dot proposed" },
       }));
       return;
