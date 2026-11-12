@@ -28,7 +28,31 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))));
 });
 
-it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs against an outer-page positive control", async () => {
+/** What one probe case did: it ran in the frame, and whether its request reached the listener. */
+type ProbeResult = { id: string; ran: boolean; requestReachedListener: boolean };
+
+/** The outbound request APIs the Gadget CSP blocks (ADR 0013 outward paths 1 and 2). */
+const REQUEST_CASES = [
+  "worker-data",
+  "worker-blob",
+  "fetch",
+  "xhr",
+  "beacon",
+  "image",
+  "stylesheet",
+  "css-import",
+  "cssom-import",
+  "websocket",
+  "eventsource",
+] as const;
+
+/**
+ * Runs each probe case in a real headless Chrome, inside the production sandboxed Gadget frame
+ * (`createSandboxedHtml`, the same iframe sandbox as GadgetUI.tsx), after an outer-page positive
+ * control proves the listener is reachable at all. With `click`, a real mouse click (CDP input, a user
+ * gesture) lands inside the frame once each case has run. Returns what each case did.
+ */
+async function runRequestProbes(cases: readonly string[], options: { click?: boolean } = {}): Promise<ProbeResult[]> {
   const requests: string[] = [];
   const listener = createServer((request, response) => {
     if (request.url?.startsWith("/probe/")) requests.push(request.url);
@@ -56,19 +80,6 @@ it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs a
       }`,
   });
 
-  const cases = [
-    "worker-data",
-    "worker-blob",
-    "fetch",
-    "xhr",
-    "beacon",
-    "image",
-    "stylesheet",
-    "css-import",
-    "cssom-import",
-    "websocket",
-    "eventsource",
-  ] as const;
   let currentPage = "";
   const outerPage = (frame: string, includePositiveControl: boolean) => `<!doctype html><html><body style="margin:0">
     <iframe id="gadget" style="width:320px;height:120px;border:0" sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"></iframe>
@@ -114,7 +125,7 @@ it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs a
     await waitFor(async () => requests.includes("/probe/positive-control"));
     expect(requests.slice(positiveBaseline)).toContain("/probe/positive-control");
 
-    const results: { id: string; ran: boolean; requestReachedListener: boolean }[] = [];
+    const results: ProbeResult[] = [];
     for (const id of cases) {
       stage = `frame load for ${id}`;
       const probe = probeCode(id, target);
@@ -122,6 +133,15 @@ it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs a
       await cdp.send("Page.navigate", { url: `http://127.0.0.1:${appPort}/test?${id}` });
       await waitFor(async () => (await evaluate(cdp!, "document.body.dataset.frameReady === 'yes'")) === true);
       await waitFor(async () => (await evaluate(cdp!, `window.__ran.includes(${JSON.stringify(id)})`)) === true);
+      if (options.click) {
+        stage = `user click for ${id}`;
+        await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 40, y: 40 });
+        for (const type of ["mousePressed", "mouseReleased"]) {
+          await cdp.send("Input.dispatchMouseEvent", { type, x: 40, y: 40, button: "left", clickCount: 1 });
+        }
+        // The click reached the widget's own handler, or the probe proves nothing.
+        await waitFor(async () => (await evaluate(cdp!, "window.__ran.includes('clicked')")) === true);
+      }
       stage = `listener settle for ${id}`;
       await settle(requests, 500);
       results.push({ id, ran: true, requestReachedListener: requests.includes(`/probe/${id}`) });
@@ -129,8 +149,7 @@ it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs a
 
     expect(results).toHaveLength(cases.length);
     expect(results.filter(result => !result.ran).map(result => result.id)).toEqual([]);
-    expect(results.filter(result => result.requestReachedListener).map(result => result.id)).toEqual([]);
-    expect(requests.filter(path => path !== "/probe/positive-control")).toEqual([]);
+    return results;
   } catch (error) {
     const browserState = cdp ? await evaluate(cdp, "({url:location.href,html:document.documentElement.outerHTML.slice(0,500),ran:window.__ran,positive:document.body?.dataset.positiveControl})").catch(() => "unavailable") : "unavailable";
     throw new Error(`${stage}: ${error instanceof Error ? error.message : String(error)}\nRequests: ${JSON.stringify(requests)}\nState: ${JSON.stringify(browserState)}\nChrome: ${browserError}`, { cause: error });
@@ -144,6 +163,36 @@ it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs a
     }
     await rm(profile, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+it.skipIf(!existsSync(chrome))("Gadget CSP blocks tested outbound request APIs against an outer-page positive control", async () => {
+  const results = await runRequestProbes(REQUEST_CASES);
+  expect(results.filter(result => result.requestReachedListener).map(result => result.id)).toEqual([]);
+}, 180_000);
+
+// FAC-15 R-3: characterization tests of KNOWN P0 GAPS (inferops ADR 0013, "Outward paths from a
+// frame", which FAC-8 must close before a widget holds business data; "any route left open" is a
+// no-go). They assert what is OPEN today, in real Chrome, so they fail loudly the day a path closes;
+// then invert each into a security check. They are not security checks now. Safe today only because no
+// governed data reaches a code-running widget (FAC-15 gap G-1). The frame's sandbox allows popups that
+// escape it (GadgetUI.tsx); the CSP covers connect-src and form-action, not navigation.
+// Path 4 is NOT characterized yet. Chrome's popup blocker drops a window.open without a user gesture,
+// so the probe below gives one: a full-frame button whose click handler (proven to run) calls
+// window.open. In headless Chrome no request reached the listener even so. That doesn't show the path
+// is closed: headless Chrome may suppress or delay popup windows, and the frame's sandbox allows
+// popups that escape it (GadgetUI.tsx). Treat path 4 as open for the go/no-go until a headed-browser
+// probe settles it, using runRequestProbes(["window-open-click"], { click: true }). No test asserts
+// it yet, on purpose: neither "open" nor "closed" is shown.
+
+it.skipIf(!existsSync(chrome))("known P0 gap (ADR 0013 outward path 3): a widget can navigate its own frame to an outside URL", async () => {
+  const [result] = await runRequestProbes(["navigate"]);
+  expect(result).toEqual({ id: "navigate", ran: true, requestReachedListener: true });
+}, 180_000);
+
+// ADR 0013 outward path 5, closed today by the frame CSP's form-action 'none': a real security check.
+it.skipIf(!existsSync(chrome))("ADR 0013 outward path 5 is closed: a widget's form submission is blocked by form-action 'none'", async () => {
+  const [result] = await runRequestProbes(["form-submit"]);
+  expect(result).toEqual({ id: "form-submit", ran: true, requestReachedListener: false });
 }, 180_000);
 
 function probeCode(id: string, target: string): string {
@@ -164,6 +213,10 @@ function probeCode(id: string, target: string): string {
       case "cssom-import": return `try { const s=document.createElement('style');document.head.append(s);s.sheet?.insertRule('@import url(${url});'); } catch {}`;
       case "websocket": return `try { new WebSocket(${JSON.stringify(url.replace("http:", "ws:"))}); } catch {}`;
       case "eventsource": return `try { new EventSource(${JSON.stringify(url)}); } catch {}`;
+      // FAC-15 R-3: ADR 0013 outward paths 3 (the frame's own navigation), 4 (new windows), 5 (forms).
+      case "window-open-click": return `try { const b=document.createElement('button');b.textContent='Open';b.style.cssText='position:fixed;inset:0;width:100%;height:100%';b.onclick=()=>{parent.postMessage({type:'probe-ran',id:'clicked'},'*');window.open(${JSON.stringify(url)},'_blank');};document.body.append(b); } catch {}`;
+      case "navigate": return `try { setTimeout(() => { location.href = ${JSON.stringify(url)}; }, 0); } catch {}`;
+      case "form-submit": return `try { const f=document.createElement('form');f.method='GET';f.action=${JSON.stringify(url)};document.body.append(f);f.submit(); } catch {}`;
       default: return "";
     }
   })();
