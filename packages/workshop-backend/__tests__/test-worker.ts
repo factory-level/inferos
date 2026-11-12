@@ -71,6 +71,27 @@ export function takeSkippedFiring(id: string): boolean {
 }
 
 /**
+ * The User namespace every overseer in this pool worker holds as `impl.users`
+ * (`ctx.exports.UserDurableObject`): one object, shared by every Durable Object and every file the
+ * worker runs. With the keys it had of its own when first seen.
+ */
+let sharedUsers: { namespace: object; keys: PropertyKey[] } | undefined;
+
+/**
+ * What the file now ending added to the shared User namespace (say, `impl.users.get = ...` in a
+ * test), removed again so the next file gets the real namespace. A stand-in for one workspace goes on
+ * that workspace's `impl.users` instead (`impl.users = {...}`). Called as each file ends
+ * (`workerd/backend-file-boundary.ts`), which fails the file when this returns anything.
+ */
+export function takeSharedUsersChanges(): string[] {
+  if (!sharedUsers) return [];
+  let { namespace, keys } = sharedUsers;
+  let added = Reflect.ownKeys(namespace).filter(key => !keys.includes(key));
+  for (let key of added) Reflect.deleteProperty(namespace, key);
+  return added.map(String);
+}
+
+/**
  * The overseer, registered for the bridge above so tests can exercise `ctx.restore()`. Its alarm
  * runs only for the file that made it: an alarm a finished file left armed would otherwise wake its
  * overseer while a later file runs, resuming persisted agent calls through that file's `fetch` stub.
@@ -81,6 +102,8 @@ export class OverseerDurableObject extends RealOverseerDurableObject {
     restoreTargets.set(ctx, this);
     let id = ctx.id.toString();
     if (!overseerTestFile.has(id)) overseerTestFile.set(id, currentTestFile);
+    let users = (ctx as unknown as { exports?: { UserDurableObject?: object } }).exports?.UserDurableObject;
+    if (users && !sharedUsers) sharedUsers = { namespace: users, keys: Reflect.ownKeys(users) };
   }
 
   /** workerd passes its own firing an `AlarmInvocationInfo`; a test calling `alarm()` passes nothing. */
