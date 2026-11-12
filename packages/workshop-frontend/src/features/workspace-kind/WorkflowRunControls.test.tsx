@@ -263,3 +263,36 @@ it("shows the server's refusal of a retry verbatim, never a generic error", asyn
   await act(async () => { retryButton()!.click() })
   expect(container.querySelector('[role="alert"]')?.textContent).toBe("Couldn't retry this run.")
 })
+
+// r2 on #478: a press or retry answers for the workspace it was made in. After a workspace switch,
+// a late answer is dropped, and nothing pressed carries over to the same hook id in the new one.
+it("drops a retry's late answer after a workspace switch, showing nothing of it on the new workspace's control", async () => {
+  for (const outcome of ['resolved', 'rejected'] as const) {
+    let answer!: { resolve: (run: RequestedRun) => void; reject: (error: Error) => void }
+    const first = {
+      listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }],
+      listRequestedRuns: async () => [recent('failed', { reason: 'runtime-error' })],
+      retryWorkflowRun: () => new Promise<RequestedRun>((resolve, reject) => { answer = { resolve, reject } }),
+    }
+    await render(first)
+    await act(async () => { retryButton()!.click() })
+    expect(retryButton()!.disabled).toBe(true)
+    // Another workspace, whose control has the same hook id and its own failed run.
+    const second = {
+      listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }],
+      listRequestedRuns: async () => [recent('failed', { reason: 'runtime-error', invocationId: 'inv-other' })],
+      retryWorkflowRun: vi.fn<Overseer['retryWorkflowRun']>(),
+    }
+    await render(second)
+    // Nothing of the first workspace's press: Retry is free, and no requested line or refusal.
+    expect(retryButton()!.disabled).toBe(false)
+    await act(async () => {
+      if (outcome === 'resolved') answer.resolve(recent('queued'))
+      else answer.reject(new Error(WORKFLOW_RUN_RETRY_REFUSED.repinned))
+    })
+    expect(container.textContent).not.toContain(RUN_REQUESTED_TEXT)
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+    expect(retryButton()!.disabled).toBe(false)
+    expect([...container.querySelectorAll('[role="status"]')].map(n => n.textContent)[0]).toMatch(/^Last run: Didn't finish/)
+  }
+})

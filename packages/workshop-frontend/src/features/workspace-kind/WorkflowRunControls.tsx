@@ -108,6 +108,8 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
     live.current = overseer
     setNewest(new Map())
     setBlocked(new Map())
+    // A press or retry belongs to the workspace it was made in: none carries over to another.
+    setPressed(new Map())
     // A backend without controls, or any failure, shows none rather than breaking the page.
     Promise.resolve().then(() => overseer.listTriggerControls())
       .then(list => {
@@ -141,30 +143,38 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
   }, [following, answered])
 
   const retry = async (hookId: number, run: RequestedRun) => {
+    const asked = overseer
     setPressed(prev => new Map(prev).set(hookId, { status: 'sending' }))
     let next: Pressed
+    let queued: RequestedRun | undefined
     try {
-      const queued = await overseer.retryWorkflowRun(run.invocationId)
-      if (live.current === overseer) setNewest(prev => new Map(prev).set(hookId, queued))
+      queued = await asked.retryWorkflowRun(run.invocationId)
       next = { status: 'requested', outcome: 'running', at: new Date() }
     } catch (err) {
       next = { status: 'refused', message: errorText(err, "Couldn't retry this run.") }
     }
+    // An answer for a workspace this page has left (or a remount) is dropped: it would land on
+    // another workspace's control with the same hook id.
+    if (live.current !== asked) return
+    if (queued) setNewest(prev => new Map(prev).set(hookId, queued!))
     setPressed(prev => new Map(prev).set(hookId, next))
-    if (next.status === 'requested') readRuns(overseer, hookId)
+    if (next.status === 'requested') readRuns(asked, hookId)
   }
 
   const press = async (hookId: number) => {
+    const asked = overseer
     setPressed(prev => new Map(prev).set(hookId, { status: 'sending' }))
     let next: Pressed
     try {
-      await overseer.invokeTrigger(hookId)
+      await asked.invokeTrigger(hookId)
       next = { status: 'requested', outcome: 'running', at: new Date() }
     } catch (err) {
       next = { status: 'refused', message: errorText(err) }
     }
+    // As for a retry: an answer for a workspace this page has left is dropped.
+    if (live.current !== asked) return
     setPressed(prev => new Map(prev).set(hookId, next))
-    if (next.status === 'requested') readRuns(overseer, hookId)
+    if (next.status === 'requested') readRuns(asked, hookId)
   }
 
   if (controls.length === 0) return null
