@@ -265,13 +265,12 @@ export default defineConfig({
         plugins: backendPlugins(),
         test: {
           // Files that restart every Durable Object (`abortAllDurableObjects()`), which in the
-          // shared `backend` runtime would restart other files' objects too. Each file here gets its
+          // shared `backend` runtime would also restart other files' objects. Each file here gets its
           // own Miniflare (the default `isolate`), after `backend` has finished.
           name: 'backend-restart',
           include: tests(BACKEND_RESTART),
-          // One file at a time: a file's restart must reach no other file's objects.
-          maxWorkers: 1,
-          fileParallelism: false,
+          // Workers use separate Miniflare instances, so concurrent files cannot restart one another's objects.
+          maxWorkers: 2,
           sequence: { groupOrder: 2 },
           unstubGlobals: true,
           restoreMocks: true,
