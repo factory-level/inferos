@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { applyCanvasOperations, CANVAS_WIDGET_KINDS, parseCanvasDefinition, parseCanvasWidget, type CanvasDefinition, type CanvasWidget } from "./canvas";
+import { applyCanvasOperations, CANVAS_BOARD_WORKFLOWS, CANVAS_WIDGET_KINDS, parseCanvasDefinition, parseCanvasWidget, type CanvasDefinition, type CanvasWidget } from "./canvas";
 import {
   CANVAS_RUN_EVENTS, canvasPageEffects, canvasRunEffects, canvasRunEvent, canvasRunEventsHeard, parseCanvasRunEvent,
   canvasWidgetEventsHeard,
@@ -185,6 +185,32 @@ describe("valid fixtures", () => {
     }));
     expect(parseCanvasPage({ schemaVersion: 2, id: "p", revision: "0", title: "P", attachments: [],
       children: sections.map(section => section.id), nodes: [...sections, ...widgets] }).nodes).toHaveLength(60);
+  });
+});
+
+describe("a board's workflow (FAC-146)", () => {
+  const withWorkflow = (workflow: unknown) => ({ schemaVersion: 1, id: "p", revision: "0", title: "P", sections: [{
+    id: "s", title: "S", columns: 1, widgets: [{ id: "b", kind: "inferops.project-board", version: 1,
+      targetRef: "inferops://grokbot.operations/project/board/GRKS", size: "full", params: { workflow, showCompleted: false } }],
+  }] });
+  const shown = (definition: CanvasDefinition) => {
+    const widget = definition.sections[0]?.widgets[0];
+    return widget?.kind === "inferops.project-board" ? widget.params.workflow : undefined;
+  };
+
+  test("lists InferOps' three workflows", () => {
+    expect([...CANVAS_BOARD_WORKFLOWS]).toEqual(["software", "content", "service"]);
+  });
+
+  test("a service board parses and keeps its workflow, like software and content", () => {
+    for (const workflow of CANVAS_BOARD_WORKFLOWS) expect(shown(parseCanvasDefinition(withWorkflow(workflow)))).toBe(workflow);
+    expect(shown(parseCanvasDefinition(withWorkflow("service")))).toBe("service");
+  });
+
+  test("any other workflow is still refused", () => {
+    for (const workflow of ["billing", "Service", "", 1, null, undefined, ["service"]]) {
+      expect(() => parseCanvasDefinition(withWorkflow(workflow)), JSON.stringify(workflow)).toThrow("Invalid canvas workflow");
+    }
   });
 });
 

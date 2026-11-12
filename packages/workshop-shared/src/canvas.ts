@@ -32,6 +32,17 @@ export function governedResourceOf(ref: string): GovernedResource | null {
   return parseTicketsQueueRef(ref) ? "tickets/queue" : null;
 }
 
+/**
+ * The workflows a board widget can show, matching InferOps' own (`content`, `software`, `service`;
+ * the gatekeeper's `Workflow`). A board card shows the columns of one of them. It is a presentation
+ * filter only and authorizes nothing. `service` is the residential-service ladder (Enquiry, Quoted,
+ * Booked, …; FAC-146).
+ */
+export const CANVAS_BOARD_WORKFLOWS = ["software", "content", "service"] as const;
+
+/** One of {@link CANVAS_BOARD_WORKFLOWS}. */
+export type CanvasBoardWorkflow = (typeof CANVAS_BOARD_WORKFLOWS)[number];
+
 /** Registered, renderer-owned project board. A target reference never grants resource access. */
 export interface CanvasProjectBoardWidget {
   /** Stable instance ID, unique across this definition. */
@@ -48,8 +59,8 @@ export interface CanvasProjectBoardWidget {
   size: "normal" | "wide" | "full";
   /** Presentation filters, never authorization constraints. */
   params: {
-    /** Workflow whose cards are displayed. */
-    workflow: "software" | "content";
+    /** Workflow whose cards are displayed: one of {@link CANVAS_BOARD_WORKFLOWS}. */
+    workflow: CanvasBoardWorkflow;
     /** Whether completed/cancelled cards remain visible. */
     showCompleted: boolean;
   };
@@ -340,10 +351,10 @@ function widget(value: unknown, options: CanvasReadOptions = {}): CanvasWidget {
   if (!/^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/project\/board\/[A-Za-z0-9_-]+$/.test(w.targetRef)) return invalid("target reference");
   const dataBinding = parseDataBinding(w.dataBinding, "project/board", w.targetRef);
   const params = record(w.params, ["workflow", "showCompleted"], "widget parameters");
-  if (params.workflow !== "software" && params.workflow !== "content") return invalid("workflow");
+  if (!(CANVAS_BOARD_WORKFLOWS as readonly unknown[]).includes(params.workflow)) return invalid("workflow");
   if (typeof params.showCompleted !== "boolean") return invalid("completed filter");
   return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, dataBinding, size: w.size,
-    params: { workflow: params.workflow, showCompleted: params.showCompleted } };
+    params: { workflow: params.workflow as CanvasBoardWorkflow, showCompleted: params.showCompleted } };
 }
 
 function parseDataBinding(value: unknown, resource: CanvasDataBinding["resource"], ref: string): CanvasDataBinding {
