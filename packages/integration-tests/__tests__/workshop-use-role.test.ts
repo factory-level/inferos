@@ -115,6 +115,11 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   createCanvas: ws => ws.createCanvas({ title: "View", sections: [] }),
   editCanvas: ws => ws.editCanvas("view", "0", [{ type: "rename", title: "New" }]),
   deleteCanvas: ws => ws.deleteCanvas("view", "0"),
+  // A use-role operator holds no temporary canvases in someone else's workspace (FAC-137).
+  listTemporaryCanvases: ws => ws.listTemporaryCanvases(),
+  getTemporaryCanvas: ws => ws.getTemporaryCanvas("canvas"),
+  saveTemporaryCanvas: ws => ws.saveTemporaryCanvas("canvas", 1),
+  removeTemporaryCanvas: ws => ws.removeTemporaryCanvas("canvas", 1),
   // The nested page is the builder's (FAC-83): a non-builder can neither read nor edit it.
   getCanvasPage: ws => ws.getCanvasPage("view"),
   editCanvasPage: ws => ws.editCanvasPage("view", "0", [{ type: "renamePage", title: "New" }]),

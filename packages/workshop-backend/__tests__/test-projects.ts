@@ -133,6 +133,7 @@ export const BACKEND: readonly string[] = [
   "run-navigation.test.ts",
   "workflow-run-delivery.test.ts",
   "workflow-definition-expiry-alarm.test.ts",
+  "temporary-canvases.test.ts",
   "agent-tracing.test.ts",
   "authored-widget-publish-flow.test.ts",
   "authorize-observation-flags.test.ts",

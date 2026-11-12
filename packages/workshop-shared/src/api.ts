@@ -41,6 +41,7 @@ import type {
 import type { OperateWidgetRef, WidgetStateMachine, WidgetStateSnapshot } from "./widget-state.js";
 import type { AgentViewOverlay } from "./agent-widgets.js";
 import type { WidgetPlacementInput, WidgetPlacements } from "./widget-placements.js";
+import type { TemporaryCanvas } from "./temporary-canvas.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
   ArtifactPin, ArtifactPublishResult, ArtifactQualification, ArtifactRef, ArtifactRefusal,
@@ -563,6 +564,20 @@ export interface OperateSession extends RpcTarget {
   acceptAgentPlacement(proposalId: string, expectedRevision: number): Promise<WidgetPlacements>;
   /** Drops the agent's suggestion `proposalId` without placing it. */
   dismissAgentPlacement(proposalId: string): Promise<AgentViewOverlay>;
+
+  /**
+   * This person's temporary canvases (FAC-137), in their own operate session workspace, for the
+   * company they work in now (`Overseer.listTemporaryCanvases`): each a set of placements their Dot
+   * composed and they approved, unsaved ones with the `expiresAt` the server set. Gone when the
+   * company changes, like the rest of their presentation state.
+   */
+  listTemporaryCanvases(): Promise<TemporaryCanvas[]>;
+  /** One of them (`Overseer.getTemporaryCanvas`). */
+  getTemporaryCanvas(id: string): Promise<TemporaryCanvas>;
+  /** Saves one so it no longer expires (`Overseer.saveTemporaryCanvas`). */
+  saveTemporaryCanvas(id: string, expectedRevision: number): Promise<TemporaryCanvas>;
+  /** Removes one, and nothing it shows (`Overseer.removeTemporaryCanvas`). */
+  removeTemporaryCanvas(id: string, expectedRevision: number): Promise<void>;
 
   /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
   listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;
@@ -2906,6 +2921,24 @@ export interface Overseer extends RpcTarget {
    * of this workspace shows reads as null, like a missing one.
    */
   getCanvas(id: string): Promise<CanvasDefinition | null>;
+  /**
+   * The caller's temporary canvases (FAC-137, temporary-canvas.ts), saved and unsaved, oldest first:
+   * only in their own live operate session workspace, and refused anywhere else with
+   * `TEMPORARY_CANVASES_UNAVAILABLE`. Each unsaved one carries the `expiresAt` the server set; one
+   * past it is left out. References only: what each placement shows is opened on its own checked
+   * path every time, and none of them is shared or published configuration.
+   */
+  listTemporaryCanvases(): Promise<TemporaryCanvas[]>;
+  /** One of the caller's temporary canvases; refused with `TEMPORARY_CANVAS_EXPIRED` past its expiry, else `TEMPORARY_CANVAS_NOT_FOUND`. */
+  getTemporaryCanvas(id: string): Promise<TemporaryCanvas>;
+  /**
+   * Saves one of the caller's temporary canvases so it no longer expires, if `expectedRevision` is
+   * current. Refused, changing nothing, at or after its expiry (`TEMPORARY_CANVAS_EXPIRED`, swept or
+   * not), and with `TEMPORARY_CANVAS_CONFLICT` or `TEMPORARY_CANVAS_NOT_FOUND`.
+   */
+  saveTemporaryCanvas(id: string, expectedRevision: number): Promise<TemporaryCanvas>;
+  /** Removes one of the caller's temporary canvases, saved or not, and nothing it shows; refused as `saveTemporaryCanvas` is. */
+  removeTemporaryCanvas(id: string, expectedRevision: number): Promise<void>;
   /** Create content under a server-minted ID and revision zero. Requires build access and both flags; limit 64 per workspace. */
   createCanvas(content: CanvasContent): Promise<CanvasDefinition>;
   /** Compare revision and apply a batch atomically with build access and both flags. Never mutates domain rows. */
