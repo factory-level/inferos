@@ -130,10 +130,22 @@ describe("one person's placements", () => {
 
   it("hold at most the limit, and a removal frees a place and drops that placement's widget states", async () => {
     let user = await person({ now: "tenant-a" });
-    let revision = 0;
-    for (let i = 0; i < WIDGET_PLACEMENT_LIMITS.placements; i++) {
-      revision = (await user.saveWidgetPlacement({ ref: COUNTER, layout: at(0, i) } satisfies WidgetPlacementInput, revision)).revision;
-    }
+    const limit = WIDGET_PLACEMENT_LIMITS.placements;
+    // The first and the last placement under the limit are saved as the person saves them; the ones
+    // between are written straight into their storage, as a save writes each. Saved one after another
+    // (each needs the revision the last returned), the 64 took over 5 s on a loaded CI runner.
+    let revision = (await user.saveWidgetPlacement({ ref: COUNTER, layout: at(0, 0) } satisfies WidgetPlacementInput, 0)).revision;
+    revision = await runInDurableObject(user, (instance: UserDurableObject) => {
+      let storage = (instance as unknown as { storage: any }).storage;
+      for (let i = 1; i < limit - 1; i++) {
+        storage.widgetPlacements.put({ placementId: crypto.randomUUID(), ref: COUNTER, layout: at(0, i), filters: {}, updatedAt: Date.now() });
+      }
+      storage.widgetPlacementsRevision.put(revision + limit - 2);
+      return revision + limit - 2;
+    });
+    let full = await user.saveWidgetPlacement({ ref: COUNTER, layout: at(0, limit - 1) }, revision);
+    expect(full.placements).toHaveLength(limit);
+    revision = full.revision;
     expect(await refusal(user.saveWidgetPlacement({ ref: COUNTER, layout: at(0, 0) }, revision)))
       .toContain(WIDGET_PLACEMENT_ERROR_CODES.tooMany);
     let { placements } = await user.listWidgetPlacements();

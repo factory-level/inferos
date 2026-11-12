@@ -13,6 +13,23 @@ export const MAX_WORKSPACE_WORKFLOW_DEFINITIONS = 32;
 /** ID-only discovery result for a workflow whose retained run history the viewer may read. */
 export type WorkflowDefinitionHistoryRef = { definitionId: string };
 
+/** Safe schedule metadata shown beside a workflow definition its viewer may read. */
+export type WorkflowScheduleSummary = {
+  hookId: number;
+  scheduleId: string;
+  title: string;
+  description: string;
+  cadence:
+    | { kind: "interval"; everyMs: number; anchorMs: number }
+    | { kind: "once"; fireAt: number; timeZone: string }
+    | { kind: "calendar"; timeZone: string; rule:
+        | { freq: "hourly"; interval: number; minute: number; anchorMs: number }
+        | { freq: "daily"; interval: number; hour: number; minute: number; anchorMs: number }
+        | { freq: "weekly"; interval: number; byDay: string[]; hour: number; minute: number; anchorMs: number } };
+  status: "active" | "dead" | "completed" | "expired";
+  nextFire?: number;
+};
+
 /** Most saved revisions one workflow definition keeps. */
 export const MAX_WORKFLOW_DEFINITION_REVISIONS = 50;
 
@@ -428,6 +445,11 @@ export type WorkflowRunExecution = {
   startedAt?: Date;
   endedAt?: Date;
   failure?: WorkflowRunFailure;
+  /**
+   * Set when a person cancelled the run (FAC-117): who and when. A queued run ends at once; a running
+   * one ends at its next guarded call. Its pending writes are rejected, never applied.
+   */
+  cancelled?: { by: AiChatAuthorInfo; at: Date };
 };
 
 /**
@@ -437,10 +459,84 @@ export type WorkflowRunExecution = {
  * - `assignment-changed`: the trigger's assignment changed, ended or is off;
  * - `trigger-gone`: the trigger was disabled or deleted;
  * - `bindings-needed`: a connection its workflow needs isn't set up (FAC-123);
+ * - `cancelled`: a person cancelled it (FAC-117; who and when are on its execution);
+ * - `timed-out`: an attempt of it ran past the deployment's time per attempt (FAC-117);
+ * - `attempts-exhausted`: it was interrupted more times than the deployment's attempts allow (FAC-117);
  * - `runtime-error`: anything else the run threw.
+ * A run whose write may have landed reads `uncertain`, never failed, whatever stopped it.
  */
 export type WorkflowRunFailure =
-  "requester-revoked" | "assignment-changed" | "trigger-gone" | "bindings-needed" | "runtime-error";
+  "requester-revoked" | "assignment-changed" | "trigger-gone" | "bindings-needed" | "cancelled" | "timed-out" |
+  "attempts-exhausted" | "runtime-error";
+
+/**
+ * A trigger's lifecycle (FAC-117): `active` (no record), `draining` (paused: no new start, while the
+ * runs admitted before `pausedAt` finish or are cancelled), `paused` (none left), `retired` (deleted,
+ * from paused only). Pausing and activating are the hook's disable and enable.
+ */
+export type TriggerLifecycleState = "active" | "draining" | "paused" | "retired";
+
+/** A trigger's lifecycle as recorded: its state, and who last changed it and when. */
+export type TriggerLifecycle = {
+  hookId: number;
+  state: TriggerLifecycleState;
+  /** When it was paused: only runs admitted before this may still finish while it drains. */
+  pausedAt?: Date;
+  changedBy: AiChatAuthorInfo;
+  changedAt: Date;
+};
+
+/**
+ * The run limits (FAC-117), PROPOSED defaults: no number is agreed yet (inferops docs/human
+ * proposal). A deployment overrides each with a whole-number setting.
+ */
+export const DEFAULT_WORKFLOW_RUN_LIMITS = {
+  /** Runs of one trigger executing at once; more wait queued. */
+  perTrigger: 1,
+  /** Runs executing at once in one workspace; more wait queued. */
+  perWorkspace: 5,
+  /** Wall-clock time one attempt of a run may take, in minutes; each re-execution starts its own. */
+  runMinutes: 15,
+  /** Times a run may start in all, the first included: 3 is the first start and two re-executions after resets. */
+  attempts: 3,
+  /** The first re-execution's wait, in seconds, doubling each time. */
+  backoffSeconds: 30,
+} as const;
+export type WorkflowRunLimits = { -readonly [K in keyof typeof DEFAULT_WORKFLOW_RUN_LIMITS]: number };
+
+/** The deployment settings that override `DEFAULT_WORKFLOW_RUN_LIMITS`, by limit. */
+export const WORKFLOW_RUN_LIMIT_SETTINGS: Record<keyof WorkflowRunLimits, string> = {
+  perTrigger: "WORKFLOW_RUNS_PER_TRIGGER",
+  perWorkspace: "WORKFLOW_RUNS_PER_WORKSPACE",
+  runMinutes: "WORKFLOW_RUN_MAX_MINUTES",
+  attempts: "WORKFLOW_RUN_MAX_ATTEMPTS",
+  backoffSeconds: "WORKFLOW_RUN_BACKOFF_SECONDS",
+};
+
+/**
+ * The run limits from a deployment's settings: each unset one is its default, each set one a whole
+ * number from 1 to 1000. Anything else throws, naming the setting, so a misconfigured deployment
+ * refuses to start runs rather than run them under a limit nobody chose.
+ */
+export function workflowRunLimits(settings: Partial<Record<string, string | undefined>>): WorkflowRunLimits {
+  let limits = { ...DEFAULT_WORKFLOW_RUN_LIMITS } as WorkflowRunLimits;
+  for (let key of Object.keys(limits) as (keyof WorkflowRunLimits)[]) {
+    let name = WORKFLOW_RUN_LIMIT_SETTINGS[key];
+    let value = settings[name];
+    if (value === undefined) continue;
+    let n = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+    if (!(n >= 1 && n <= 1000)) throw new Error(`${name} must be a whole number from 1 to 1000.`);
+    limits[key] = n;
+  }
+  return limits;
+}
+
+/** Refused when a trigger isn't in the state a lifecycle change needs (FAC-117). */
+export const TRIGGER_LIFECYCLE_REFUSED = {
+  retire: "Pause this trigger, and let its runs finish, before retiring it.",
+  activate: "This trigger was retired; it can't be activated again.",
+  paused: "This trigger is paused, so it starts no new runs.",
+} as const;
 
 /**
  * Who asked for a run (FAC-111, inferops ADR 0011's requester): the person whose control press

@@ -123,6 +123,17 @@ describe('where a decision came from (FAC-119 K2)', () => {
     expect(contextText(entry())).toBeNull()
   })
 
+  // FAC-14: the operate agent's request applies on the connection's own account once approved, so
+  // every decider is told whose request it is, by name, and the person themselves is told it is theirs.
+  it("names the person an operate-agent request is for, or says it is the viewer's own", () => {
+    const forAda = run({ kind: 'agent-turn', onBehalfOf: { profileId: 'ada', name: 'Ada Lovelace' } })
+    expect(contextText(forAda, 'ben')).toBe('Requested by the operate agent for Ada Lovelace')
+    expect(contextText(forAda)).toBe('Requested by the operate agent for Ada Lovelace')
+    expect(contextText(forAda, 'ada')).toBe('Requested by the operate agent for you')
+    act(() => { root.render(<ActionDecision entry={forAda} viewerProfileId="ben" />) })
+    expect(container.textContent).toContain('Requested by the operate agent for Ada Lovelace')
+  })
+
   it("says a known run refusal in the kernel's words, and anything else in a fixed sentence", () => {
     expect(blockedText(RUN_DEFINITION_CHANGED)).toBe(RUN_DEFINITION_CHANGED)
     expect(blockedText(`Error: ${RUN_DEFINITION_CHANGED}`)).toBe(RUN_DEFINITION_CHANGED)

@@ -69,7 +69,7 @@ export function assignedActionProblem(
   }
   let gadgetId: number;
   try {
-    gadgetId = host.liveHookGadget(executedAs.hookId);
+    gadgetId = host.liveHookGadget(executedAs.hookId, executedAs.deliveryId);
   } catch {
     return ASSIGNED_ACTION_STALE;
   }
@@ -212,7 +212,8 @@ export interface SystemRunHost {
   /** The trigger's live assignment, or null. */
   assignmentOf(hookId: number): TriggerAssignment | null;
   /** Throws unless the hook is live. Returns the gadget it wakes. */
-  liveHookGadget(hookId: number): number;
+  /** The gadget run `deliveryId` of trigger `hookId` wakes, refused once it may not go on (FAC-117). */
+  liveHookGadget(hookId: number, deliveryId: number): number;
   /** The gadget's bindings, by name. */
   bindingsOf(gadgetId: number): Iterable<[string, { target: number }]>;
   /** The binding loopback a run's env holds for `gatekeeperId`. */
@@ -259,7 +260,7 @@ export async function runGadgetBindingsDelivery(host: SystemRunHost, hookId: num
                                                 requester: SystemRunRequester = NO_REQUESTER): Promise<unknown> {
   if (host.assignmentOf(hookId)) throw new Error(SYSTEM_RUN_ASSIGNMENT_CHANGED);
   if (host.gadgetRuns.has(delivery.deliveryId)) throw new Error("This run already started.");
-  let gadgetId = host.liveHookGadget(hookId);
+  let gadgetId = host.liveHookGadget(hookId, delivery.deliveryId);
   let caller: GadgetRunCaller = { from: "gadget", gadgetId, run: { hookId, deliveryId: delivery.deliveryId } };
   let env: Record<string, unknown> = {};
   for (let [name, edge] of host.bindingsOf(gadgetId)) {
@@ -293,7 +294,7 @@ export async function openGadgetRunSession(host: SystemRunHost, target: { type: 
     let gadgetId: number;
     try {
       host.gadgetRuns.require(caller);
-      gadgetId = host.liveHookGadget(caller.run.hookId);
+      gadgetId = host.liveHookGadget(caller.run.hookId, caller.run.deliveryId);
     } catch {
       throw new Error(SYSTEM_RUN_ENDED);
     }
@@ -314,7 +315,7 @@ function assertRunLive(host: SystemRunHost, caller: SystemRunCaller, run: System
   let gadgetId: number;
   try {
     host.systemRuns.require(caller);
-    gadgetId = host.liveHookGadget(run.hookId);
+    gadgetId = host.liveHookGadget(run.hookId, caller.deliveryId);
   } catch {
     throw new Error(SYSTEM_RUN_ENDED);
   }
@@ -378,7 +379,7 @@ export async function runAssignedDelivery(host: SystemRunHost, hookId: number, d
   let assignment = host.assignmentOf(hookId);
   if (!assignment || assignment.credentialRef !== delivery.credentialRef) throw new Error(SYSTEM_RUN_ASSIGNMENT_CHANGED);
   if (host.systemRuns.has(delivery.deliveryId)) throw new Error("This run already started.");
-  let gadgetId = host.liveHookGadget(hookId);
+  let gadgetId = host.liveHookGadget(hookId, delivery.deliveryId);
   let caller: SystemRunCaller = { from: "systemRun", hookId, deliveryId: delivery.deliveryId };
   let env: Record<string, unknown> = {};
   for (let name of systemRunBindingNames(host.bindingsOf(gadgetId), assignment.gatekeeperId)) {

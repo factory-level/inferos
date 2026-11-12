@@ -1934,6 +1934,9 @@ export interface HookController<Hook extends RpcTarget> extends WorkerEntrypoint
    * now (disabled, finished). A gatekeeper without it can't be run on request.
    */
   invoke?(invocation: HookInvocation): Promise<void>;
+
+  /** Optional read-only metadata for this hook's own schedule; contains no management or refusal data. */
+  getWorkflowSchedule?(): Promise<Omit<import("./workflow-definition.js").WorkflowScheduleSummary, "hookId"> | null>;
 }
 
 /**

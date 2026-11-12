@@ -168,6 +168,31 @@ describe("ScheduleDriver", () => {
     return reset();
   });
 
+  it("isolates equal schedule ids by workspace on one driver and hides a revoked account", async () => {
+    const driver = testEnv.SCHEDULE_DRIVER.getByName("workspace-summary-isolation");
+    const now = Date.now();
+    await enableSchedule(driver, {
+      workspaceId: "workspace-a", scheduleId: "same-id",
+      spec: { kind: "interval", everyMs: 60_000, anchorMs: now },
+      title: "Workspace A", description: "A only", gadgetId,
+    }, now);
+    await enableSchedule(driver, {
+      workspaceId: "workspace-b", scheduleId: "same-id",
+      spec: { kind: "interval", everyMs: 60_000, anchorMs: now },
+      title: "Workspace B", description: "B only", gadgetId,
+    }, now);
+
+    const workspaceA = await driver.getWorkflowSummary("workspace-a", "same-id");
+    const workspaceB = await driver.getWorkflowSummary("workspace-b", "same-id");
+    expect(workspaceA).toMatchObject({ title: "Workspace A" });
+    expect(workspaceB).toMatchObject({ title: "Workspace B" });
+    expect(Object.keys(workspaceA ?? {}).toSorted()).toEqual(["cadence", "description", "nextFire", "scheduleId", "status", "title"]);
+    expect(Object.keys(workspaceB ?? {}).toSorted()).toEqual(["cadence", "description", "nextFire", "scheduleId", "status", "title"]);
+    await driver.revoke();
+    expect(await driver.getWorkflowSummary("workspace-a", "same-id")).toBeNull();
+    expect(await driver.getWorkflowSummary("workspace-b", "same-id")).toBeNull();
+  });
+
   // FAC-102: a person's admitted request to run a schedule now (HookController.invoke).
   it("runs an enabled schedule once on request, naming the invocation, without touching its schedule", async () => {
     const driver = testEnv.SCHEDULE_DRIVER.getByName("requested");

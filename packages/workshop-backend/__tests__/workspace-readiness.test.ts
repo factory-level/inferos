@@ -7,8 +7,10 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { WorkspaceReadiness } from "@gadgets/workshop-shared/api";
 import {
-  RECORDS_PATTERN, WORKFLOW_POLICY_PATTERN, workspaceReadiness, type ReadinessInputs,
+  reachableHost, RECORDS_PATTERN, WORKFLOW_POLICY_PATTERN, workspaceReadiness, type ReadinessInputs,
 } from "../src/workspace-readiness";
+// The gatekeeper's own parsers: the readiness grammar is pinned to them below.
+import { parseProjectWorkflowUrl, parseTableUrl } from "../../../custom-gatekeepers/gatekeeper-inferops/src/resources";
 import type { OverseerDurableObject } from "../src/overseer.js";
 import { openFakeOverseer } from "./fixtures.js";
 
@@ -93,6 +95,99 @@ describe("the decision (workspaceReadiness)", () => {
     let off = workspaceReadiness({ ...complete(), publishedConsoles: null });
     expect(statuses(off)["published-console"]).toBe("blocked");
     expect(off.deploymentReady).toBe(false);
+  });
+
+  it("never counts the demo data as ready: a gadget bound only to the demo table and policy is attention", () => {
+    const DEMO_TABLE = "inferops://demo.local/object/table/70000000-0000-4000-8000-000000000001";
+    const DEMO_POLICY = "inferops://demo.local/project/workflow/DEMO";
+    let readiness = workspaceReadiness({
+      ...complete(),
+      connections: [
+        // A person's real board makes the account item ready; the bound kinds are demo only.
+        { id: 1, vendorId: "inferops", resourceUrl: BOARD, connected: true },
+        { id: 2, vendorId: "inferops", resourceUrl: DEMO_TABLE, connected: true },
+        { id: 3, vendorId: "inferops", resourceUrl: DEMO_POLICY, connected: true },
+      ],
+    });
+    expect(readiness.deploymentReady).toBe(false);
+    expect(statuses(readiness)).toMatchObject({
+      "inferops-connection": "ready", "records-binding": "attention", "workflow-policy-binding": "attention",
+    });
+    for (let name of ["records-binding", "workflow-policy-binding"]) {
+      expect(readiness.items.find(item => item.name === name)?.detail).toContain("only to the InferOps demo");
+    }
+    // A demo connection alone is not a person's account here either.
+    let demoOnly = workspaceReadiness({
+      ...complete(), connections: [{ id: 2, vendorId: "inferops", resourceUrl: DEMO_TABLE, connected: true }],
+      boundConnectionIds: new Set([2]),
+    });
+    expect(statuses(demoOnly)["inferops-connection"]).toBe("attention");
+  });
+
+  it("counts a binding only through a person's account, and a real binding beside a demo one", () => {
+    let unbacked = workspaceReadiness({
+      ...complete(), connections: complete().connections.map(c => c.id === 2 ? { ...c, connected: false } : c),
+    });
+    expect(unbacked.items.find(item => item.name === "records-binding")).toMatchObject({
+      status: "attention", detail: expect.stringContaining("no person's account backs"),
+    });
+    expect(unbacked.deploymentReady).toBe(false);
+
+    let both = workspaceReadiness({
+      ...complete(),
+      connections: [...complete().connections,
+        { id: 4, vendorId: "inferops", resourceUrl: "inferops://demo.local/object/table/x", connected: true }],
+      boundConnectionIds: new Set([2, 3, 4]),
+    });
+    expect(both.deploymentReady).toBe(true);
+  });
+
+  // Round 3 (r2 MEDIUM): a binding counts only if the gatekeeper would accept its URL at all.
+  const ID = "70000000-0000-4000-8000-000000000001";
+  const REFUSED_TABLES = [
+    `inferops://demo.local./object/table/${ID}`, // a terminal dot
+    `inferops://acme.operations.extra/object/table/${ID}`, // an extra label
+    `inferops://acme./object/table/${ID}`, // an empty label
+    `inferops://DEMO.LOCAL/object/table/${ID}`, // an uppercase demo host
+    `inferops://Acme.Operations/object/table/${ID}`, // an uppercase real host
+    "inferops://acme.operations/object/table/7000000A-0000-4000-8000-00000000000B", // an uppercase id
+    "inferops://acme.operations/object/table/not-a-uuid",
+  ];
+  const REFUSED_POLICIES = [
+    "inferops://acme.operations./project/workflow/ENG",
+    "inferops://acme/project/workflow/ENG",
+    "inferops://acme.operations/project/workflow/eng",
+  ];
+
+  it("reads a URL the gatekeeper would refuse as attention, never ready, and a canonical one as ready", () => {
+    for (let url of REFUSED_TABLES) {
+      let readiness = workspaceReadiness({
+        ...complete(), connections: complete().connections.map(c => c.id === 2 ? { ...c, resourceUrl: url } : c),
+      });
+      expect(readiness.items.find(item => item.name === "records-binding"), url).toMatchObject({
+        status: "attention", detail: expect.stringContaining("isn't an InferOps custom table InferOS can reach"),
+      });
+      expect(readiness.deploymentReady, url).toBe(false);
+    }
+    for (let url of REFUSED_POLICIES) {
+      let readiness = workspaceReadiness({
+        ...complete(), connections: complete().connections.map(c => c.id === 3 ? { ...c, resourceUrl: url } : c),
+      });
+      expect(readiness.items.find(item => item.name === "workflow-policy-binding")?.status, url).toBe("attention");
+      expect(readiness.deploymentReady, url).toBe(false);
+    }
+    expect(workspaceReadiness(complete()).deploymentReady).toBe(true);
+  });
+
+  it("agrees with the gatekeeper's own parsers on every input: accepted exactly when they accept", () => {
+    const accepts = (parse: (url: string) => unknown, url: string) => { try { parse(url); return true; } catch { return false; } };
+    for (let url of [...REFUSED_TABLES, TABLE, `inferops://demo.local/object/table/${ID}`, ` ${TABLE} `, `${TABLE}/`]) {
+      expect(reachableHost(url, RECORDS_PATTERN) !== null, url).toBe(accepts(parseTableUrl, url));
+    }
+    for (let url of [...REFUSED_POLICIES, POLICY, "inferops://demo.local/project/workflow/DEMO", `${POLICY}/`,
+      "inferops://acme.operations/project/workflow/E1234567890123456"]) {
+      expect(reachableHost(url, WORKFLOW_POLICY_PATTERN) !== null, url).toBe(accepts(parseProjectWorkflowUrl, url));
+    }
   });
 
   it("counts only an InferOps connection of the kind: another vendor's, or a board, binds nothing here", () => {
