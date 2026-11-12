@@ -155,7 +155,36 @@ describe('WorkflowTriggersPanel', () => {
     expect(container.textContent).toContain('Every 1 day at 09:30 (UTC)')
     expect(container.textContent).toContain('Active')
     expect(container.textContent).toContain('Next run')
+    const schedulePanel = container.querySelector('#workflow-schedules-panel')!
+    expect(schedulePanel.querySelector('button, [role="switch"], input, select')).toBeNull()
   })
+
+  it.each([
+    ['schedule list', 'listReadableWorkflowSchedules', "Couldn't load triggers.", 'No readable schedules.'],
+    ['history list', 'listReadableWorkflowHistories', 'Run history could not be loaded.', 'No recent runs.'],
+    ['delivery list', 'listWorkflowDeliveries', 'Run history could not be loaded.', 'No recent runs.'],
+  ] as const)(
+    'shows a failure instead of an empty state when the %s read fails',
+    async (_name, method, failureText, emptyText) => {
+      const rejectedRead = vi.fn<() => Promise<never>>(async () => {
+        throw new Error('backend unavailable')
+      })
+      await render({
+        ...(method === 'listWorkflowDeliveries'
+          ? { listReadableWorkflowHistories: async () => [{ definitionId: 'history' }] }
+          : {}),
+        [method]: rejectedRead,
+      } as Partial<Overseer>)
+
+      if (method !== 'listReadableWorkflowSchedules') {
+        await act(async () => { button('Recent')!.click() })
+      }
+
+      expect(rejectedRead).toHaveBeenCalled()
+      expect(container.textContent).toContain(failureText)
+      expect(container.textContent).not.toContain(emptyText)
+    },
+  )
 
   it('loads Recent runs only when selected and reads only server-discovered histories', async () => {
     const listReadableWorkflowHistories = vi.fn<Overseer['listReadableWorkflowHistories']>(async () => [
@@ -171,6 +200,43 @@ describe('WorkflowTriggersPanel', () => {
     expect(listWorkflowDeliveries).toHaveBeenCalledWith('readable-history')
     expect(container.textContent).toContain('Recent runs')
     expect(container.textContent).toContain('Workflow run · revision 2')
+  })
+
+  it('shows at most 50 recent run rows', async () => {
+    await render({
+      listReadableWorkflowHistories: async () => [{ definitionId: 'capped-history' }],
+      listWorkflowDeliveries: async id => Array.from({ length: 55 }, (_, index) => ({
+        definitionId: id, hookId: index, revision: 1, commitId: 'c'.repeat(40), at: new Date(index),
+      })),
+    })
+    await act(async () => { button('Recent')!.click() })
+    const recentRuns = container.querySelector('[aria-labelledby="workflow-recent-runs-heading"]')!
+    expect(recentRuns.querySelectorAll('li')).toHaveLength(50)
+  })
+
+  it('keeps recent history delivery reads to at most four concurrent requests', async () => {
+    let active = 0
+    let maximumActive = 0
+    const listWorkflowDeliveries = vi.fn<Overseer['listWorkflowDeliveries']>(async definitionId => {
+      active += 1
+      maximumActive = Math.max(maximumActive, active)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      active -= 1
+      return [{
+        definitionId, hookId: 1, revision: 1, commitId: 'd'.repeat(40), at: new Date(0),
+      }]
+    })
+    await render({
+      listReadableWorkflowHistories: async () =>
+        Array.from({ length: 9 }, (_, index) => ({ definitionId: `history-${index}` })),
+      listWorkflowDeliveries,
+    })
+    await act(async () => {
+      button('Recent')!.click()
+      await new Promise(resolve => setTimeout(resolve, 30))
+    })
+    expect(listWorkflowDeliveries).toHaveBeenCalledTimes(9)
+    expect(maximumActive).toBe(4)
   })
 
   it('says so when there are no triggers', async () => {
