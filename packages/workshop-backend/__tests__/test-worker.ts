@@ -51,11 +51,23 @@ let explicitAlarmsFile: number | undefined;
  * each alarm themselves calls this, so that an alarm a test left armed (a queued run, a withdrawal
  * due now) neither races the test's own calls nor fires during a later test, through the stand-ins
  * that test put on the shared prototype. workerd's firing is then spent, so such a file runs the
- * handler directly rather than through `runDurableObjectAlarm`, which runs only an armed alarm.
- * Reset as the next file starts.
+ * handler directly rather than through `runDurableObjectAlarm`, which runs only an armed alarm; it
+ * checks first that the alarm was armed, or that its firing was skipped (`takeSkippedFiring`), so
+ * whatever should arm the alarm is still shown to. Reset as the next file starts.
  */
 export function onlyExplicitAlarms(): void {
   explicitAlarmsFile = currentTestFile;
+}
+
+/** The overseers, by id, whose alarm workerd fired and the gate skipped since a test last ran it. */
+const skippedFirings = new Set<string>();
+
+/**
+ * Whether workerd fired the overseer `id`'s alarm, and the gate skipped it, since this was last
+ * asked: the alarm was armed then, though nothing is armed now. Clears the record.
+ */
+export function takeSkippedFiring(id: string): boolean {
+  return skippedFirings.delete(id);
 }
 
 /**
@@ -97,7 +109,10 @@ export class OverseerDurableObject extends RealOverseerDurableObject {
   /** workerd passes its own firing an `AlarmInvocationInfo`; a test calling `alarm()` passes nothing. */
   override async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
     if (overseerTestFile.get(this.ctx.id.toString()) !== currentTestFile) return;
-    if (alarmInfo !== undefined && explicitAlarmsFile === currentTestFile) return;
+    if (alarmInfo !== undefined && explicitAlarmsFile === currentTestFile) {
+      skippedFirings.add(this.ctx.id.toString());
+      return;
+    }
     await super.alarm();
   }
 }
