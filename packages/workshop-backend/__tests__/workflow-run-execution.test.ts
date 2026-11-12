@@ -14,7 +14,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { onlyExplicitAlarms, takeSkippedFiring } from "./test-worker.js";
-import { RUN_REQUESTER_REVOKED, WORKFLOW_RUN_CANCELLED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
+import { RUN_REQUESTER_REVOKED, TRIGGER_AUTO_RETIRED, WORKFLOW_RUN_CANCELLED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
 import {
   DEFAULT_WORKFLOW_RUN_LIMITS, TRIGGER_LIFECYCLE_REFUSED, WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS,
   WORKFLOW_RUN_RETRY_REFUSED, WORKFLOW_RUN_RETRY_WINDOW_MS, WORKFLOW_WRITE_SETTLE_REFUSED,
@@ -1327,6 +1327,16 @@ describe("retrying a failed run, and settling a write whose outcome is unknown (
         impl.env = realEnv;
         impl.users = realUsers;
       }
+      nothingQueued(impl, ids.deliveryId);
+    });
+  });
+
+  it("is refused at retry once the trigger's assignment was retired automatically, as a fresh request is", async () => {
+    let name = `k2-retry-auto-retired-${crypto.randomUUID()}`;
+    let ids = await ranOnce(name, lost);
+    await withImpl(name, async impl => {
+      impl.workflowDefinitionStore().markAutoRetired(HOOK);
+      await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow(TRIGGER_AUTO_RETIRED);
       nothingQueued(impl, ids.deliveryId);
     });
   });

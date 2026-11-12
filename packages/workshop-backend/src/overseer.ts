@@ -13411,8 +13411,8 @@ class OverseerImpl implements AgentHooks {
    * of the same run (`WorkspaceWorkflowDefinitionStore.retryRun`), so `attempts` bounds it and every
    * write it proposes again is matched to the one it made, never applied twice (`#runWrite`). Only the
    * person who asked; anyone else, and a run that doesn't exist, are told "No such run.". Before
-   * anything is queued: the trigger live, enabled and active (not draining, paused or retired), and
-   * with assignments off not assigned, as a fresh request is refused (FAC-102); the run's own state
+   * anything is queued: the trigger live, enabled and active (not draining, paused or retired), with
+   * assignments off not assigned, and not auto-retired, as a fresh request is refused (FAC-102); the run's own state
    * (failed, not cancelled, attempts left, its trigger still pinned to the run's own definition and
    * revision, admitted within `WORKFLOW_RUN_RETRY_WINDOW_MS`: `requireRetryable`, checked again in
    * `retryRun`'s transaction); no write of the run that a replay can't match (its description
@@ -13432,6 +13432,8 @@ class OverseerImpl implements AgentHooks {
       this.requireTriggerStarts(hookId);
       // Assignments off (FAC-102): refused here, as a fresh request is, never left to fail at its start.
       if (!workflowAssignmentsEnabled(this.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+      // Nor once its assignment was retired automatically, until an Admin acts (FAC-102 follow-up B).
+      if (store.autoRetiredOf(hookId)) throw new Error(TRIGGER_AUTO_RETIRED);
     };
     requireStarts();
     // Its own state first, so a cancelled, spent, repinned or old run is told so, never refused as admission.
