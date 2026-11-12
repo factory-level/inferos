@@ -1071,7 +1071,7 @@ FAC-134, capability 2 (the lead's decisions D1 (B), D2 (B) and D3, and r1's thre
     - a run reference of another session;
     - the step sending the stored revision.
 - **Not covered:**
-  - **UI and gatekeeper:** the gatekeeper's actions for both markers, and the person's list of their workflows, are capability 2's next PR.
+  - **UI and gatekeeper:** the gatekeeper's actions for both markers are in [InferOps gatekeeper](inferops-gatekeeper.md), and the person's list (`listPersonalWorkflows`, `PersonalWorkflows`) in [InferOps canvas](inferops-canvas.md).
   - **The decider's view:** the decider sees the step as the operate agent's request for the person (`onBehalfOf`). `personalWorkflowStep` is recorded on the caller but not shown yet.
   - **Kept rows:** `personalWorkflowRuns` keeps the latest `PERSONAL_WORKFLOW_RUNS_KEPT` (100) ended runs.
 

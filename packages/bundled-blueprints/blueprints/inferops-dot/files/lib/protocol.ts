@@ -13,6 +13,8 @@ export interface WriteStatus {
 
 /** How a workflow run a proposal handed to InferOS came out (FAC-134), as the gatekeeper reports it. */
 export interface DotProposalRun {
+  /** A published workflow's run, or one of the person's personal workflows' (FAC-134 capability 2). */
+  kind?: "workflow-run" | "personal-workflow";
   runId: string;
   outcome: "succeeded" | "failed" | "uncertain";
   reasonCode?: string;

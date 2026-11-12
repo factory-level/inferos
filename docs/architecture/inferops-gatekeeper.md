@@ -814,6 +814,16 @@ FAC-133 (inferos [ADR 0013](../adr/0013-dot-runtime.md) decision 3). A seventh r
     - **Parsing:** `parseDotProposal` reads its fixed fields only (kind, run id, outcome, ranAs, and a `reasonCode` that is one of InferOS's fixed reasons, the same set InferOps accepts). Anything else, or an older InferOps without the field, reads as `null`.
     - **The session API:** `DotProposal.run` (`types.d.ts`).
     - **The `inferops-dot` blueprint:** passes only those fields to its page. A workflow-run proposal never reads "Made": `workflowRunWords` gives *Started in InferOS* until its run ends, then *Run finished*, *Run failed* (with a fixed reason in words, never the code) or *Run uncertain*, each with what it ran as. Each recorded outcome is marked *Reported, not verified* (`RUN_REPORTED`): InferOps keeps what InferOS reported, and a person can produce one themself through InferOS's public sign-in client (inferops#2644's documented limit).
+- **Personal workflow proposals (FAC-134 capability 2, inferops#2648).**
+  - **A create** (`inferos_workflow_create`) is staged as `inferops.dot-workflow-create`. Its input becomes the kernel's `personalWorkflow` declaration (`dotPersonalWorkflow`: each step's `command` reference and input; one that isn't valid declares nothing, so its approval creates nothing). The kernel lists every step in its own field.
+  - **Approving a create** calls `ApprovedEffects.createPersonalWorkflow()` (`applyDotWorkflowCreate`):
+    - **created:** the proposal is confirmed in InferOps (no run named), and the action keeps `personalWorkflow: {id, reference, expiresAt}`, its reference built from the steps' InferOps company and workspace;
+    - **refused:** not applied, in its FAC-119 kind, and declined in InferOps;
+    - **unknown:** a step's check went unanswered, nothing was created, and it's `UNAVAILABLE` to approve again.
+  - **A run** of one, `inferos_workflow_invoke` with an `inferos/personal-workflow/…` reference, is staged as `inferops.dot-personal-workflow-run`, declaring `personalWorkflowRun: {reference, reportOutcome: true}` (never `workflowRun`). Approving it calls `runPersonalWorkflow()`, and the confirm names the run.
+  - **Its outcome** is recorded only as `kind: "personal-workflow"` for such a proposal, and a trigger run's only as `workflow-run`. Anything else is logged and ignored.
+  - **In the Dot,** `parseDotRun` reads both kinds and the step reasons (`step-refused`, `step-unknown`). A personal workflow whose run placed every request reads *Requests placed* / *Requests placed. Each waits for the console's builders.*, never done.
+  - **Tests:** `dot.test.ts`, "deciding a personal workflow proposal", and the blueprint's `dot.test.ts`.
 - **Receipts** (`dotProposalStatus`), in FAC-97's words from InferOps' own status, read when asked:
 
   | InferOps | Receipt |

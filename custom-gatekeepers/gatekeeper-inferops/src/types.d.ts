@@ -1101,6 +1101,8 @@ export interface DotProposal {
 
 /** How a workflow run your Dot's proposal started came out. */
 export interface DotProposalRun {
+  /** A published workflow's run, or one of your personal workflows' (whose `succeeded` means its requests were placed). */
+  kind: "workflow-run" | "personal-workflow";
   runId: string;
   outcome: "succeeded" | "failed" | "uncertain";
   /** Why it failed or is uncertain, as InferOS names it (for example "runtime-error"). */

@@ -135,13 +135,23 @@ describe("a workflow-run proposal's words", () => {
       .toBe("It ran on the workflow's own connections.");
   });
 
+  it("says a personal workflow's run placed requests, never that it was done (FAC-134 capability 2)", () => {
+    const placed = workflowRunWords({ outcome: "succeeded" }, { ...run("succeeded"), kind: "personal-workflow" });
+    expect(placed).toEqual({ label: "Requests placed", detail: "Requests placed. Each waits for the console's builders.", note: "Reported, not verified" });
+    expect(JSON.stringify(placed)).not.toMatch(/\b(done|made|finished)\b/i);
+    const refused = workflowRunWords({ outcome: "succeeded" }, { ...run("failed", { reasonCode: "step-refused" }), kind: "personal-workflow" });
+    expect(refused.detail).toContain("one of its steps was refused, so nothing after it was requested");
+    // A published workflow's run still reads as before.
+    expect(workflowRunWords({ outcome: "succeeded" }, { ...run("succeeded"), kind: "workflow-run" }).label).toBe("Run finished");
+  });
+
   it("has words for every reason InferOS gives a failed or uncertain run", () => {
     const failures = ["requester-revoked", "assignment-changed", "trigger-gone", "bindings-needed", "cancelled", "timed-out",
-      "attempts-exhausted", "runtime-error"];
+      "attempts-exhausted", "runtime-error", "step-refused"];
     for (const reasonCode of failures) {
       expect(workflowRunWords({ outcome: "succeeded" }, run("failed", { reasonCode })).detail).toMatch(/^It failed because /);
     }
-    for (const reasonCode of ["action-unknown", "lost-after-write", "not-started"]) {
+    for (const reasonCode of ["action-unknown", "lost-after-write", "not-started", "step-unknown"]) {
       expect(workflowRunWords({ outcome: "succeeded" }, run("uncertain", { reasonCode })).detail).toMatch(/^It's uncertain because /);
     }
   });
