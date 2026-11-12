@@ -13,7 +13,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
-import { onlyExplicitAlarms } from "./test-worker.js";
+import { onlyExplicitAlarms, takeSkippedFiring } from "./test-worker.js";
 import { RUN_REQUESTER_REVOKED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
 import { WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS } from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
@@ -198,11 +198,28 @@ function runsAs(impl: any, kind: "gadget-bindings" | "assigned",
 const actionsOf = (impl: any) => [...impl.storage.actions.list()].filter((a: any) => a.type === "action");
 
 /**
- * Runs the workspace's alarm handler now, armed or not: workerd's own firing never runs it in this
- * file (`onlyExplicitAlarms`, above), so each test runs it exactly when it means to.
+ * Runs the workspace's alarm handler now, as workerd would have: workerd's own firing never runs it
+ * in this file (`onlyExplicitAlarms`, above), so each test runs it exactly when it means to. The
+ * alarm must have been armed, still or until workerd fired it, so a run queued without arming its
+ * alarm, which would never start in production, fails here. workerd can take an armed alarm before
+ * its firing reaches the gate (`takeSkippedFiring`), so the check waits a moment for either.
  */
 async function runAlarm(name: string) {
-  await runInDurableObject(env.TEST_OVERSEER.getByName(name), (instance: OverseerDurableObject) => instance.alarm());
+  let stub = env.TEST_OVERSEER.getByName(name);
+  let id = stub.id.toString();
+  let fired = false;
+  await vi.waitFor(async () => {
+    fired ||= takeSkippedFiring(id);
+    let armed = await runInDurableObject(stub, async (_: OverseerDurableObject, state: DurableObjectState) =>
+      (await state.storage.getAlarm()) !== null);
+    expect(armed || fired, "the workspace's alarm was never armed").toBe(true);
+  }, { timeout: 2_000 });
+  await runInDurableObject(stub, async (instance: OverseerDurableObject, state: DurableObjectState) => {
+    // Whatever was armed or fired until now, this run is it.
+    await state.storage.deleteAlarm();
+    takeSkippedFiring(id);
+    await instance.alarm();
+  });
 }
 
 /** Runs the workspace's alarm once more: what withdraws a replay's staged copies (retryReplayWithdrawals). */
