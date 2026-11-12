@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   invokeWorkflowTrigger, makeOverseerStorage, TRIGGER_AUTO_RETIRED, WORKFLOW_ASSIGNMENTS_DISABLED, WORKFLOW_INVOKE_REFUSED,
 } from "../src/overseer.js";
-import { WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
+import { SHARED_ONLY_AUDIENCE, WORKSPACE_AUDIENCE, WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { openFakeOverseer } from "./fixtures.js";
 import { makeMockStorage } from "./mock-storage.js";
 
@@ -22,10 +22,10 @@ const headOf = (id: number) => (id === GADGET ? commit(1) : undefined);
 const everyoneBuilds = () => "build" as const;
 
 /** A workspace store with one published definition pinned to trigger HOOK. */
-function pinned() {
+function pinned(audience = WORKSPACE_AUDIENCE) {
   let durable = makeMockStorage();
   let storage = makeOverseerStorage(durable);
-  let store = new WorkspaceWorkflowDefinitionStore(durable, storage);
+  let store = new WorkspaceWorkflowDefinitionStore(durable, storage, undefined, audience);
   let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
   store.publish(ADA, saved.id, 1);
   store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1, mode: "pinned" });
@@ -98,11 +98,24 @@ describe("through the Overseer", () => {
   async function session(role: "build" | "use", opts: { invoke?: (...args: unknown[]) => Promise<void>;
                                                           canBuild?: boolean;
                                                           mayInvoke?: () => Promise<boolean | { holds: boolean; company: string | null }>;
-                                                          assignmentsEnabled?: boolean } = {}) {
-    let { durable, storage, store } = pinned();
-    store.setControl(ADA, HOOK, { label: "Issue refund", invokers: [OPERATOR] });
+                                                          assignmentsEnabled?: boolean;
+                                                          schedule?: boolean;
+                                                          scheduleTitle?: string;
+                                                          shareRights?: { read?: boolean; run?: boolean; edit?: boolean };
+                                                          privateDefinition?: boolean;
+                                                          controlInvokers?: string[];
+                                                          workspaceId?: string } = {}) {
+    let { durable, storage, store, definitionId } = pinned(opts.privateDefinition ? SHARED_ONLY_AUDIENCE : WORKSPACE_AUDIENCE);
+    if (opts.shareRights) store.share(ADA, definitionId, OPERATOR, opts.shareRights, "use");
+    store.setControl(ADA, HOOK, { label: "Issue refund", invokers: opts.controlInvokers ?? [OPERATOR] });
     let invoke = vi.fn(opts.invoke ?? (async () => {}));
-    let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true, controller: { invoke } };
+    let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true,
+      ...(opts.schedule ? { vendorId: "scheduler" } : {}),
+      controller: { invoke, getWorkflowSchedule: async () => opts.schedule ? {
+        scheduleId: "schedule-1", title: opts.scheduleTitle ?? "Nightly report", description: "Run report",
+        cadence: { kind: "interval" as const, everyMs: 60_000, anchorMs: 0 }, status: "active" as const,
+        nextFire: 60_000, failureCode: "must-not-leak",
+      } : null } };
     let takenInvocations = new Map<string, boolean>();
     let impl = {
       takenInvocations,
@@ -140,7 +153,7 @@ describe("through the Overseer", () => {
       },
     };
     let askedInvoke: string[] = [];
-    let overseer = await openFakeOverseer({}, { role, impl });
+    let overseer = await openFakeOverseer({}, { role, impl, workspaceId: opts.workspaceId });
     void durable;
     return { overseer, store, invoke, hook, askedInvoke, takenInvocations };
   }
@@ -312,6 +325,28 @@ describe("through the Overseer", () => {
     // Without the deployment's build authority a shared workspace opens read-only, which refuses it.
     let demoted = await session("build", { canBuild: false });
     await expect(demoted.overseer.setTriggerControl(HOOK, null)).rejects.toThrow(/only has permission to use/);
+  });
+
+  it("shows schedule metadata to workflow readers without granting management or trigger-control access", async () => {
+    for (let shareRights of [{ read: true }, { run: true }]) {
+      let reader = await session("use", { schedule: true, shareRights, controlInvokers: [BUILDER] });
+      expect(await reader.overseer.listReadableWorkflowSchedules()).toEqual([{
+        hookId: HOOK, scheduleId: "schedule-1", title: "Nightly report", description: "Run report",
+        cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "active", nextFire: 60_000,
+      }]);
+      expect(await reader.overseer.listTriggerControls()).toEqual([]);
+      await expect(reader.overseer.setTriggerControl(HOOK, null)).rejects.toThrow();
+    }
+
+    let unshared = await session("use", { schedule: true, privateDefinition: true });
+    expect(await unshared.overseer.listReadableWorkflowSchedules()).toEqual([]);
+  });
+
+  it("keeps schedule reads inside each workspace context", async () => {
+    let first = await session("build", { schedule: true, scheduleTitle: "Workspace one", workspaceId: "workspace-one" });
+    let second = await session("build", { schedule: true, scheduleTitle: "Workspace two", workspaceId: "workspace-two" });
+    expect((await first.overseer.listReadableWorkflowSchedules()).map(item => item.title)).toEqual(["Workspace one"]);
+    expect((await second.overseer.listReadableWorkflowSchedules()).map(item => item.title)).toEqual(["Workspace two"]);
   });
 });
 

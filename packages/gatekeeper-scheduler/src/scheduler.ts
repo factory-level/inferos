@@ -72,7 +72,7 @@ export type ScheduleControllerProps = {
 };
 
 type SessionDriver = Pick<ScheduleDriver, "listWorkspace">;
-type ControllerDriver = Pick<ScheduleDriver, "enable" | "disable">;
+type ControllerDriver = Pick<ScheduleDriver, "enable" | "disable" | "getWorkflowSummary">;
 type ControllerFactory = (
   props: ScheduleControllerProps,
 ) => Fetcher<HookController<ScheduleHookTarget>>;
@@ -218,6 +218,11 @@ export class ScheduleHookController
   /** Removes all driver state for this schedule activation. */
   disable(): Promise<void> {
     return disableScheduleController(this.ctx.props, this.#driver());
+  }
+
+  /** Reads only this controller's schedule in its captured workspace. */
+  getWorkflowSchedule() {
+    return this.#driver().getWorkflowSummary(this.ctx.props.workspaceId, this.ctx.props.scheduleId);
   }
 
   /**

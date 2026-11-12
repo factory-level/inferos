@@ -34,7 +34,7 @@ import type { OperateFlow, OperateFlowContent } from "./operate-flow.js";
 import type {
   TriggerAssignment, TriggerAssignmentSettings, TriggerAssignmentState,
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
-  WorkflowDefinitionRights, WorkflowDefinitionShare, WorkflowDefinitionHistoryRef,
+  WorkflowDefinitionRights, WorkflowDefinitionShare, WorkflowDefinitionHistoryRef, WorkflowScheduleSummary,
   WorkflowTriggerDefinitionRef,
   WorkflowDefinitionSave, WorkflowDefinitionDuplicate, WorkflowInvocation, RequestedRun,
 } from "./workflow-definition.js";
@@ -2990,6 +2990,8 @@ export interface Overseer extends RpcTarget {
    * swept definitions. Build only.
    */
   listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]>;
+  /** Read safe cadence/status for schedules attached to definitions visible to this caller. */
+  listReadableWorkflowSchedules(): Promise<WorkflowScheduleSummary[]>;
 
   /**
    * Let the named people ask pinned trigger `hookId` to run now, or remove its control with null.

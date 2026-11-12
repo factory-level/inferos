@@ -14,7 +14,7 @@ import type {
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionRights, WorkflowDefinitionShare, WorkflowDefinitionHistoryRef,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
-  WorkflowTriggerDefinitionRef, WorkflowDefinitionDuplicate, WorkflowRequiredBinding,
+  WorkflowTriggerDefinitionRef, WorkflowDefinitionDuplicate, WorkflowRequiredBinding, WorkflowScheduleSummary,
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
@@ -15396,6 +15396,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let viewer = await this.#getClientProfile();
     return this.impl.workflowDefinitionStore().listReadableWorkflowHistories(viewer.id, "build");
   }
+  async listReadableWorkflowSchedules(): Promise<WorkflowScheduleSummary[]> {
+    let viewer = await this.#getClientProfile();
+    return listReadableWorkflowSchedules(this.impl, viewer.id, "build");
+  }
   // A control lets named people run a pinned trigger now; setting one is building. Running one is
   // the listed person's own request, checked against the authenticated session's profile.
   async setTriggerControl(hookId: number, settings: TriggerControlSettings | null): Promise<TriggerControl | null> {
@@ -18194,6 +18198,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   async listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]> { this.#deny(); }
+  async listReadableWorkflowSchedules(): Promise<WorkflowScheduleSummary[]> {
+    return listReadableWorkflowSchedules(this.impl, this.clientProfileId, "use");
+  }
   // An operator listed on a trigger's control may ask it to run, and sees only those controls; it
   // configures nothing (FAC-102, inferops ADR 0011 S6).
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
@@ -18873,6 +18880,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   async listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]> { this.#deny(); }
+  async listReadableWorkflowSchedules(): Promise<WorkflowScheduleSummary[]> { this.#deny(); }
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
   async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
   async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }
@@ -19787,6 +19795,28 @@ export async function invokeWorkflowTrigger(
     impl.takenInvocations.delete(invocation.id);
   }
   return invocation;
+}
+
+/** Join workspace-bound scheduler hooks to their own summaries after applying definition read rights. */
+async function listReadableWorkflowSchedules(
+    impl: Pick<OverseerImpl, "storage" | "workflowDefinitionStore">,
+    viewer: string, role: CollaboratorRole): Promise<WorkflowScheduleSummary[]> {
+  let store = impl.workflowDefinitionStore();
+  let summaries: WorkflowScheduleSummary[] = [];
+  for (let hook of impl.storage.boundHooks.list()) {
+    if (hook.vendorId !== "scheduler" || !hook.enabled) continue;
+    let pin = store.pinOf(hook.id);
+    if (!pin || !store.canReadDefinition(viewer, pin.definitionId, role)) continue;
+    let read = (hook.controller as unknown as HookController<RpcTarget>).getWorkflowSchedule;
+    if (typeof read !== "function") continue;
+    let schedule = await read.call(hook.controller);
+    if (schedule) summaries.push({
+      hookId: hook.id, scheduleId: schedule.scheduleId, title: schedule.title,
+      description: schedule.description, cadence: schedule.cadence, status: schedule.status,
+      ...(schedule.status === "active" && schedule.nextFire !== undefined ? { nextFire: schedule.nextFire } : {}),
+    });
+  }
+  return summaries.toSorted((a, b) => a.hookId - b.hookId);
 }
 
 function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {
