@@ -15,7 +15,10 @@ import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { onlyExplicitAlarms, takeSkippedFiring } from "./test-worker.js";
 import { RUN_REQUESTER_REVOKED, WORKFLOW_RUN_CANCELLED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
-import { DEFAULT_WORKFLOW_RUN_LIMITS, TRIGGER_LIFECYCLE_REFUSED, WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS } from "@gadgets/workshop-shared/workflow-definition";
+import {
+  DEFAULT_WORKFLOW_RUN_LIMITS, TRIGGER_LIFECYCLE_REFUSED, WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS,
+  WORKFLOW_RUN_RETRY_REFUSED, WORKFLOW_WRITE_SETTLE_REFUSED,
+} from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
 import { actionDescriptionDigest } from "../src/system-run.js";
 
@@ -1121,5 +1124,207 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
       expect(impl.triggerLifecycleOf(HOOK)).toBeNull();
       expect(impl.storage.boundHooks.get(HOOK).enabled).toBe(true);
     });
+  });
+});
+
+// FAC-117 Kernel 2: a person retries a run that failed, as another attempt of the same run, and the
+// person deciding a write whose outcome is unknown settles it. Neither ever applies a write again.
+describe("retrying a failed run, and settling a write whose outcome is unknown (FAC-117 K2)", () => {
+  const OPERATOR = { type: "user" as const, id: PERSON, name: "Operator" };
+  /** The first admitted run, queued; its delivery and invocation ids. */
+  function queued(impl: any) {
+    let delivery = admitted(impl);
+    impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+    return { deliveryId: delivery.deliveryId, invocationId: deliveryOf(impl, delivery.deliveryId).invocation.id };
+  }
+  /** Leaves no queued run and no alarm, so nothing of this workspace runs during a later test. */
+  async function quiesce(impl: any) {
+    for (let entry of Array.from(impl.storage.workflowRunQueue.list()) as { deliveryId: number }[]) {
+      impl.storage.workflowRunQueue.delete(entry.deliveryId);
+    }
+    await impl.ctx.storage.deleteAlarm();
+  }
+  /**
+   * A gatekeeper facet that withdraws as `runsAs`'s does and counts applies: a test that asks for no
+   * apply checks the count stays where it started.
+   */
+  function countingFacet(impl: any, applies: { count: number }) {
+    const facet = {
+      rejectAction: async (key: number) => {
+        gatekeeper.staged.delete(key);
+        gatekeeper.withdrawn.push(key);
+      },
+      applyAction: async () => { applies.count++; },
+    };
+    onPrototype(impl, "getGatekeeperFacet", () => facet);
+  }
+  /** Runs run `ids` once with `body` as its pinned code, to its recorded end. */
+  async function ranOnce(name: string, body: (workspace: any, caller: unknown) => Promise<unknown>) {
+    let ids = await withImpl(name, impl => {
+      let first = queued(impl);
+      runsAs(impl, "gadget-bindings", body);
+      return first;
+    });
+    await settled(name, ids.deliveryId);
+    return ids;
+  }
+  const lost = async () => { throw new Error("worker lost"); };
+
+  it("retries a failed run as another attempt of the same run, for the person who asked, once", async () => {
+    let name = `k2-retry-${crypto.randomUUID()}`;
+    let ids = await ranOnce(name, lost);
+    let runId = await withImpl(name, async impl => {
+      let before = deliveryOf(impl, ids.deliveryId);
+      expect(before.result).toMatchObject({ outcome: "failed", reason: "runtime-error" });
+      let read = await impl.retryWorkflowRun(ids.invocationId, OPERATOR);
+      expect(read).toMatchObject({ runId: before.run.runId, outcome: "queued" });
+      expect(deliveryOf(impl, ids.deliveryId).execution).toMatchObject({
+        state: "queued", attempts: 1, retries: [{ by: { type: "user", id: PERSON, name: "Operator" } }],
+      });
+      // One retry: while it is queued, a second is refused.
+      await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_RUN_RETRY_REFUSED.notFailed);
+      return before.run.runId;
+    });
+    workflowRun = defaultWorkflowRun;
+    let done = await settled(name, ids.deliveryId);
+    expect(done.execution).toMatchObject({ state: "finished", attempts: 2 });
+    expect(done.run.runId).toBe(runId);
+    expect(done.result).toMatchObject({ outcome: "succeeded" });
+  });
+
+  it("is refused to anyone but the person who asked, and once the trigger can't start or they may no longer run it", async () => {
+    let name = `k2-retry-who-${crypto.randomUUID()}`;
+    let ids = await ranOnce(name, lost);
+    await withImpl(name, async impl => {
+      let stranger = { type: "user" as const, id: "stranger-profile", name: "Stranger" };
+      // The definition's owner may cancel a run, but not retry someone else's; nor may anyone else.
+      for (let caller of [stranger, ADA]) {
+        await expect(impl.retryWorkflowRun(ids.invocationId, caller)).rejects.toThrow("No such run.");
+      }
+      await expect(impl.retryWorkflowRun("no-such-invocation", OPERATOR)).rejects.toThrow("No such run.");
+      // Their admission again (FAC-104): the control no longer lists them.
+      let store = impl.workflowDefinitionStore();
+      store.setControl(ADA, HOOK, { label: "Run refunds", invokers: ["someone-else"] });
+      await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow(RUN_REQUESTER_REVOKED);
+      store.setControl(ADA, HOOK, { label: "Run refunds", invokers: [PERSON] });
+      // A paused or retired trigger starts nothing (FAC-117), and nor does a disabled one.
+      impl.storage.workflowTriggerLifecycles.put({ hookId: HOOK, state: "paused", by: ADA, at: new Date() });
+      await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow(TRIGGER_LIFECYCLE_REFUSED.paused);
+      impl.storage.workflowTriggerLifecycles.delete(HOOK);
+      impl.storage.boundHooks.put({ ...impl.storage.boundHooks.get(HOOK), enabled: false });
+      await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow("Hook has been deleted or disabled.");
+      // Nothing was queued by any of them.
+      expect(deliveryOf(impl, ids.deliveryId).execution).toMatchObject({ state: "failed" });
+      expect([...impl.storage.workflowRunQueue.list()]).toEqual([]);
+      await quiesce(impl);
+    });
+  });
+
+  it("is refused for a cancelled run, one out of attempts, an uncertain one, and one holding a write it can't match", async () => {
+    let cancelled = `k2-retry-cancelled-${crypto.randomUUID()}`;
+    await withImpl(cancelled, async impl => {
+      let first = queued(impl);
+      await impl.cancelWorkflowRun(first.invocationId, OPERATOR, "use");
+      await expect(impl.retryWorkflowRun(first.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_RUN_RETRY_REFUSED.cancelled);
+      await quiesce(impl);
+    });
+    testLimits = { ...testLimits, attempts: 1 };
+    let exhausted = `k2-retry-exhausted-${crypto.randomUUID()}`;
+    let once = await ranOnce(exhausted, lost);
+    await withImpl(exhausted, async impl => {
+      await expect(impl.retryWorkflowRun(once.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_RUN_RETRY_REFUSED.exhausted);
+    });
+    testLimits = { ...DEFAULT_WORKFLOW_RUN_LIMITS, backoffSeconds: 0 };
+    // A write still waiting after its run threw: uncertain, so it is settled or decided first.
+    let uncertain = `k2-retry-uncertain-${crypto.randomUUID()}`;
+    let waiting = await ranOnce(uncertain, async (workspace, caller) => { await stage(workspace, caller, DESCRIPTION); throw new Error("lost"); });
+    await withImpl(uncertain, async impl => {
+      expect(deliveryOf(impl, waiting.deliveryId).result).toMatchObject({ outcome: "uncertain", reason: "lost-after-write" });
+      await expect(impl.retryWorkflowRun(waiting.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_RUN_RETRY_REFUSED.notFailed);
+    });
+    // A write whose description isn't complete is never matched (FAC-112), so a retry could propose
+    // and apply it again: refused even once it is decided.
+    let unmatchable = `k2-retry-unmatchable-${crypto.randomUUID()}`;
+    let summary = await ranOnce(unmatchable, async (workspace, caller) => { await stage(workspace, caller, SUMMARY); throw new Error("lost"); });
+    await withImpl(unmatchable, async impl => {
+      let [write] = actionsOf(impl);
+      impl.storage.actions.put({ ...write, state: "rejected" });
+      impl.settleRunOfAction(write.id);
+      expect(deliveryOf(impl, summary.deliveryId).result).toMatchObject({ outcome: "failed" });
+      await expect(impl.retryWorkflowRun(summary.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_RUN_RETRY_REFUSED.unmatchable);
+    });
+  });
+
+  // The lead's addition: a person settles an unknown write as not applied, but it landed. The retry
+  // proposes it again; that is matched to the write already recorded (same run, same digest), so the
+  // gatekeeper's copy is withdrawn, no second action is made and nothing applies a second time.
+  it("never writes twice after a wrong 'not-applied': the retried write is matched, and the gatekeeper's apply count stays 1", async () => {
+    let name = `k2-wrong-not-applied-${crypto.randomUUID()}`;
+    let applies = { count: 1 }; // The gatekeeper already holds the write: it landed once.
+    let ids = await ranOnce(name, async (workspace, caller) => { await stage(workspace, caller, DESCRIPTION); throw new Error("lost"); });
+    await withImpl(name, async impl => {
+      countingFacet(impl, applies);
+      let [write] = actionsOf(impl);
+      // Its apply was cut off: it may or may not have happened.
+      impl.storage.actions.put({ ...write, lastAttempt: { outcome: "unknown", message: "lost response", at: new Date() } });
+      impl.settleRunOfAction(write.id);
+      expect(deliveryOf(impl, ids.deliveryId).result).toMatchObject({ outcome: "uncertain", reason: "action-unknown" });
+      await impl.resolveWorkflowRunWrite(write.id, "not-applied", ADA);
+      expect(impl.storage.actions.get(write.id)).toMatchObject({
+        state: "failed", settled: { outcome: "not-applied", by: { id: ADA.id } },
+      });
+      expect(deliveryOf(impl, ids.deliveryId).result).toMatchObject({ outcome: "failed", reason: "runtime-error" });
+      await impl.retryWorkflowRun(ids.invocationId, OPERATOR);
+    });
+    // The retry proposes the same write again, then finishes.
+    workflowRun = async workerEnv => {
+      let id = await stage(workerEnv.BOARD.workspace, workerEnv.BOARD.caller, DESCRIPTION);
+      return { proposed: id };
+    };
+    let done = await settled(name, ids.deliveryId);
+    await nextAlarm(name);
+    await withImpl(name, impl => {
+      let writes = actionsOf(impl);
+      expect(writes).toHaveLength(1);
+      expect(writes[0]).toMatchObject({ state: "failed", settled: { outcome: "not-applied" } });
+    });
+    expect(done.execution).toMatchObject({ attempts: 2 });
+    // The second attempt's staged copy was withdrawn, never applied.
+    expect(gatekeeper.withdrawn).toEqual([2]);
+    expect(applies.count).toBe(1);
+  });
+
+  it("settles only a run's write whose outcome is unknown, once, never applying it, and the run reads what it is", async () => {
+    let name = `k2-settle-${crypto.randomUUID()}`;
+    let applies = { count: 0 };
+    let ids = await ranOnce(name, async (workspace, caller) => { await stage(workspace, caller, DESCRIPTION); throw new Error("lost"); });
+    await withImpl(name, async impl => {
+      countingFacet(impl, applies);
+      let [write] = actionsOf(impl);
+      // Still waiting for a decision, it isn't unknown: refused.
+      await expect(impl.resolveWorkflowRunWrite(write.id, "applied", ADA)).rejects.toThrow(WORKFLOW_WRITE_SETTLE_REFUSED);
+      await expect(impl.resolveWorkflowRunWrite(write.id, "maybe" as never, ADA)).rejects.toThrow(TypeError);
+      await expect(impl.resolveWorkflowRunWrite(9999, "applied", ADA)).rejects.toThrow(WORKFLOW_WRITE_SETTLE_REFUSED);
+      impl.storage.actions.put({ ...write, lastAttempt: { outcome: "unknown", message: "lost response", at: new Date() } });
+      impl.settleRunOfAction(write.id);
+      // An uncertain run is live work: it keeps no history expiry until settled.
+      expect([...impl.storage.workflowDeliveryExpiries.list()].map((p: any) => p.deliveryId)).not.toContain(ids.deliveryId);
+      await impl.resolveWorkflowRunWrite(write.id, "applied", ADA);
+      expect(impl.storage.actions.get(write.id)).toMatchObject({
+        state: "approved", settled: { outcome: "applied", by: { type: "user", id: ADA.id, name: ADA.name } },
+      });
+      // Its code still threw, so the run failed; with nothing unknown left, it is history.
+      expect(deliveryOf(impl, ids.deliveryId).result).toMatchObject({ outcome: "failed", reason: "runtime-error" });
+      expect([...impl.storage.workflowDeliveryExpiries.list()].map((p: any) => p.deliveryId)).toContain(ids.deliveryId);
+      // Settled once: a second answer is refused, and the first stands.
+      await expect(impl.resolveWorkflowRunWrite(write.id, "not-applied", ADA)).rejects.toThrow(WORKFLOW_WRITE_SETTLE_REFUSED);
+      expect(impl.storage.actions.get(write.id).state).toBe("approved");
+      // A write no run proposed is refused, whatever its outcome.
+      let agentWrite = { ...write, id: write.id + 100, workflowRun: undefined, executedAs: undefined,
+        state: "pending", settled: undefined, lastAttempt: { outcome: "unknown", message: "lost", at: new Date() } };
+      impl.storage.actions.put(agentWrite);
+      await expect(impl.resolveWorkflowRunWrite(agentWrite.id, "applied", ADA)).rejects.toThrow(WORKFLOW_WRITE_SETTLE_REFUSED);
+    });
+    expect(applies.count).toBe(0);
   });
 });

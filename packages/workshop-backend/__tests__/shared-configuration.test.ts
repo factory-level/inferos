@@ -295,6 +295,26 @@ describe("a build session in a shared workspace", () => {
     expect(pending.state).toBe("pending");
   });
 
+  // FAC-117 K2: settling a run's unknown write is a decision on that action, so it takes the same
+  // decider as approving or rejecting it. Another company's build collaborator, to whom the
+  // deployment's service answers no for build in this workspace's company, is refused before anything
+  // is recorded, and so is a builder whose build is gone.
+  it("refuses settling a run's unknown write to another company's builder, as it refuses approving it (FAC-117 K2)", async () => {
+    let unknown = {
+      id: 1, type: "action", state: "pending", gatekeeperId: 7, caller: { from: "gadget" },
+      workflowRun: { runId: "run-1", hookId: 11, deliveryId: 1, attempt: 1, writeKey: "k" },
+      lastAttempt: { outcome: "unknown", message: "lost", at: new Date(0) },
+    };
+    let session = await shared({ build: false, publish: true }, {
+      actions: { get: () => unknown },
+      gatekeepers: { get: () => ({ creationSpec: { type: "custom" } }) },
+    });
+    session.asked.length = 0;
+    await expect(session.overseer.resolveWorkflowRunWrite(1, "not-applied")).rejects.toThrow(REFUSED);
+    expect(session.asked).toEqual(["build"]);
+    expect(unknown.state).toBe("pending");
+  });
+
   it("refuses when InferOps can't answer", async () => {
     let { overseer } = await shared({ build: new Error("down"), publish: new Error("down") });
     await expect(overseer.mergeChanges(1)).rejects.toThrow("down");
