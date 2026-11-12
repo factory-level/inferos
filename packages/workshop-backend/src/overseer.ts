@@ -1317,6 +1317,13 @@ async function exportRequester(caller: GatekeeperCaller | undefined, exportSalt:
  */
 export const WORKFLOW_RUN_FIELD_LABEL = "Workflow run this approval starts (shown by InferOS)";
 
+/**
+ * FAC-137: the once-per-action record of an approved temporary canvas (`fac137:approvedCanvas:<action>`):
+ * the canvas created, and the approver and operate session it was created for. A retry answers with
+ * it only for that approver in that session, still live (r2's HIGH).
+ */
+type ApprovedCanvasRecord = {approver: string; sessionId: string; canvasId: string; expiresAt: number};
+
 /** FAC-137: a temporary canvas is created only by its own person's approval, in their own operate session. */
 export const TEMPORARY_CANVAS_NOT_YOURS = "Only the person this canvas is for can approve it, in their own operate session.";
 /** FAC-137: a widget on the declared canvas isn't offered to the approver now. */
@@ -13560,21 +13567,37 @@ class OverseerImpl implements AgentHooks {
    * (`temporaryCanvasesOf`). Each widget is checked first as one offered to them now: a console
    * widget by its own workspace (`listWidgetInstancesFor`, as `proposeSessionPlacement` checks), a
    * built-in one by their own widget search returning its kind. One that isn't refuses the whole
-   * canvas. Idempotent per action: the first canvas created is the answer to every later ask.
+   * canvas. Idempotent per action, and only for the same person in the same live session: the
+   * first canvas created is recorded with the approver and the session it was created for
+   * (`ApprovedCanvasRecord`). A later ask answers with it only after the owner and live-session
+   * check passes again (r2's HIGH, check a) and only when the record names this approver and this
+   * session (check b); anyone or anything else is refused, never handed the stored canvas.
    */
   async #createApprovedTemporaryCanvas(profileId: string, declared: unknown, actionId: number): Promise<ApprovedTemporaryCanvas> {
     let refuse = (kind: ActionFailureKind, reason: string): ApprovedTemporaryCanvas => ({status: "refused", kind, reason});
     let userId = this.users.idFromName(profileId).toString();
     let key = `fac137:approvedCanvas:${actionId}`;
-    let earlier = this.ctx.storage.kv.get<{canvasId: string; expiresAt: number}>(key);
-    if (earlier) return {status: "created", canvasId: earlier.canvasId, expiresAt: new Date(earlier.expiresAt)};
-    let canvas;
+    let sessionId = this.ctx.id.toString();
+    // (a) The approver's own live session, checked before anything is answered, a stored canvas included.
     try {
       this.temporaryCanvasesOf(userId);
+    } catch {
+      return refuse("permission", TEMPORARY_CANVAS_NOT_YOURS);
+    }
+    // (b) A stored answer is this approver's, in this session, or nobody's.
+    let stored = (): ApprovedTemporaryCanvas | null => {
+      let earlier = this.ctx.storage.kv.get<ApprovedCanvasRecord>(key);
+      if (!earlier) return null;
+      if (earlier.approver !== userId || earlier.sessionId !== sessionId) return refuse("permission", TEMPORARY_CANVAS_NOT_YOURS);
+      return {status: "created", canvasId: earlier.canvasId, expiresAt: new Date(earlier.expiresAt)};
+    };
+    let earlier = stored();
+    if (earlier) return earlier;
+    let canvas;
+    try {
       canvas = parseTemporaryCanvasInput(declared);
-    } catch (error) {
-      return error instanceof TemporaryCanvasError && error.code === TEMPORARY_CANVAS_ERROR_CODES.unavailable
-        ? refuse("permission", TEMPORARY_CANVAS_NOT_YOURS) : refuse("invalid", TEMPORARY_CANVAS_DECLARATION_INVALID);
+    } catch {
+      return refuse("invalid", TEMPORARY_CANVAS_DECLARATION_INVALID);
     }
     let caller: ConsoleToolCaller = {userId, profileId, sessionWorkspaceId: this.ctx.id.toString()};
     let owner = this.users.get(this.users.idFromString(userId));
@@ -13590,12 +13613,14 @@ class OverseerImpl implements AgentHooks {
       }
       if (!offered) return refuse("permission", TEMPORARY_CANVAS_WIDGET_UNAVAILABLE);
     }
-    // After the last await: an earlier ask that finished meanwhile is the answer.
-    let finished = this.ctx.storage.kv.get<{canvasId: string; expiresAt: number}>(key);
-    if (finished) return {status: "created", canvasId: finished.canvasId, expiresAt: new Date(finished.expiresAt)};
+    // After the last await: an earlier ask that finished meanwhile is the answer, under the same
+    // two checks (create, below, runs temporaryCanvasesOf again).
+    let finished = stored();
+    if (finished) return finished;
     try {
       let created = this.temporaryCanvasesOf(userId).create(canvas);
-      this.ctx.storage.kv.put(key, {canvasId: created.id, expiresAt: created.expiresAt!.getTime()});
+      let record: ApprovedCanvasRecord = {approver: userId, sessionId, canvasId: created.id, expiresAt: created.expiresAt!.getTime()};
+      this.ctx.storage.kv.put(key, record);
       return {status: "created", canvasId: created.id, expiresAt: created.expiresAt!};
     } catch (error) {
       if (error instanceof TemporaryCanvasError && error.code === TEMPORARY_CANVAS_ERROR_CODES.tooMany) {

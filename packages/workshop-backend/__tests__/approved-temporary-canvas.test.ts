@@ -188,45 +188,83 @@ describe("the approved effect (FAC-137 K2)", () => {
   });
 });
 
-describe("once per action, across applies (FAC-137 K2, r1)", () => {
-  it("creates one canvas when an apply ends unknown but retryable after creating it, and the person approves again", () =>
-    runInDurableObject(env.TEST_OVERSEER.getByName(`approved-canvas-twice-${++counter}`), async (instance: OverseerDurableObject) => {
-      let impl = (instance as unknown as { impl: any }).impl;
-      impl.users = {
-        idFromName: (profileId: string) => ({ toString: () => uid(profileId) }),
-        idFromString: (id: string) => id,
-        get: () => ({ searchWidgets: async (query: string) => ({ status: "searched", ranking: "keyword", denied: 0,
-          unsearched: 0, definitions: [], hits: [BOARD.kind, ISSUES.kind].filter(kind => kind === query)
-            .map(kind => ({ kind, description: kind, score: 1 })) }) }),
-      };
-      impl.ownerId = uid(ADA.id);
-      impl.storage.operateSession.put(true);
-      impl.storage.gatekeepers.put({ id: 41, resourceTitle: "Your Dot", class: {} as any,
-        creationSpec: { type: "gatekeeper", vendorId: "inferops", resourceUrl: "test://x", typeUrlPattern: "test://*" } });
-      let answers: ApprovedTemporaryCanvas[] = [];
-      let applies = 0;
-      impl.getGatekeeperFacet = () => ({
-        applyAction: async (_action: number, _cache: unknown, effects?: ApprovedEffects) => {
-          answers.push(await effects!.createTemporaryCanvas());
-          // The first apply ends after the canvas was created with an outcome it can't be sure of,
-          // which it says may be tried again: the kernel lets the person approve it again.
-          if (++applies === 1) return { failed: { outcome: "unknown", retryable: true, message: "connection lost" } };
-          return undefined;
-        },
-      });
-      await impl.submitAction(41, 1, PROPOSAL, { from: "gatekeeper" });
-      let actionId = (Array.from(impl.storage.actions.list()).find((a: any) => a.type === "action") as any).id;
-      let current = () => impl.storage.actions.get(actionId);
-      try { await impl.applyPendingAction(current(), ADA, false); } catch { /* recorded as unknown, retryable */ }
-      try { await impl.applyPendingAction(current(), ADA, false); } catch { /* recorded */ }
+// Two applies of one action in Ada's own operate session: the first creates the canvas and then
+// ends unknown but retryable, which leaves the action pending, so it can be approved again (as
+// `second`). `between` runs in between; `before` before the first. Returns each answer and the
+// canvases stored afterwards, read inside the Durable Object.
+async function approvedTwice(second: object, options: {
+  between?: (impl: any) => void; before?: (impl: any, actionId: number) => void;
+} = {}): Promise<{ answers: ApprovedTemporaryCanvas[]; applies: number; canvases: any[] }> {
+  return runInDurableObject(env.TEST_OVERSEER.getByName(`approved-canvas-twice-${++counter}`), async (instance: OverseerDurableObject) => {
+    let impl = (instance as unknown as { impl: any }).impl;
+    impl.users = {
+      idFromName: (profileId: string) => ({ toString: () => uid(profileId) }),
+      idFromString: (id: string) => id,
+      get: () => ({ searchWidgets: async (query: string) => ({ status: "searched", ranking: "keyword", denied: 0,
+        unsearched: 0, definitions: [], hits: [BOARD.kind, ISSUES.kind].filter(kind => kind === query)
+          .map(kind => ({ kind, description: kind, score: 1 })) }) }),
+    };
+    impl.ownerId = uid(ADA.id);
+    impl.storage.operateSession.put(true);
+    impl.storage.gatekeepers.put({ id: 41, resourceTitle: "Your Dot", class: {} as any,
+      creationSpec: { type: "gatekeeper", vendorId: "inferops", resourceUrl: "test://x", typeUrlPattern: "test://*" } });
+    let answers: ApprovedTemporaryCanvas[] = [];
+    let applies = 0;
+    impl.getGatekeeperFacet = () => ({
+      applyAction: async (_action: number, _cache: unknown, effects?: ApprovedEffects) => {
+        answers.push(await effects!.createTemporaryCanvas());
+        // The first apply ends after the canvas was created with an outcome it can't be sure of,
+        // which it says may be tried again: the kernel lets someone approve it again.
+        if (++applies === 1) return { failed: { outcome: "unknown", retryable: true, message: "connection lost" } };
+        return undefined;
+      },
+    });
+    await impl.submitAction(41, 1, PROPOSAL, { from: "gatekeeper" });
+    let actionId = (Array.from(impl.storage.actions.list()).find((a: any) => a.type === "action") as any).id;
+    let current = () => impl.storage.actions.get(actionId);
+    options.before?.(impl, actionId);
+    try { await impl.applyPendingAction(current(), ADA, false); } catch { /* recorded as unknown, retryable */ }
+    options.between?.(impl);
+    try { await impl.applyPendingAction(current(), second, false); } catch { /* recorded */ }
+    return { answers, applies, canvases: Array.from(impl.storage.temporaryCanvases.list()) as any[] };
+  });
+}
 
-      expect(applies).toBe(2);
-      expect(answers).toHaveLength(2);
-      expect(answers[0]).toMatchObject({ status: "created" });
-      expect(answers[1]).toEqual(answers[0]);
-      let canvases = Array.from(impl.storage.temporaryCanvases.list()) as any[];
-      expect(canvases.map(canvas => canvas.id)).toEqual([(answers[0] as any).canvasId]);
-    }));
+const GRACE = { type: "user" as const, id: "grace", name: "Grace" };
+const NOT_YOURS = { status: "refused", kind: "permission", reason: TEMPORARY_CANVAS_NOT_YOURS };
+
+describe("once per action, across applies, for the same approver in the same live session (FAC-137 K2, r1 and r2)", () => {
+  it("answers the same approver's retry in the same session with the one canvas it created", async () => {
+    let { answers, applies, canvases } = await approvedTwice(ADA);
+    expect(applies).toBe(2);
+    expect(answers[0]).toMatchObject({ status: "created" });
+    expect(answers[1]).toEqual(answers[0]);
+    expect(canvases.map(canvas => canvas.id)).toEqual([(answers[0] as any).canvasId]);
+  });
+
+  it("refuses a second approver's retry of the same action, handing them no canvas", async () => {
+    let { answers, canvases } = await approvedTwice(GRACE);
+    expect(answers[0]).toMatchObject({ status: "created" });
+    expect(answers[1]).toEqual(NOT_YOURS);
+    expect(JSON.stringify(answers[1])).not.toContain((answers[0] as any).canvasId);
+    expect(canvases).toHaveLength(1);
+  });
+
+  it("refuses the approver's retry once a company change retired the session", async () => {
+    let { answers } = await approvedTwice(ADA, { between: impl => impl.storage.operateSessionRetired.put(true) });
+    expect(answers[0]).toMatchObject({ status: "created" });
+    expect(answers[1]).toEqual(NOT_YOURS);
+  });
+
+  it("never answers with a stored canvas recorded for another approver or session", async () => {
+    // A record this approval didn't make (another approver's, from another session).
+    let { answers, canvases } = await approvedTwice(ADA, { before: (impl, actionId) =>
+      impl.ctx.storage.kv.put(`fac137:approvedCanvas:${actionId}`,
+        { approver: uid(GRACE.id), sessionId: "another-session", canvasId: "graces-canvas", expiresAt: Date.now() + 60_000 }) });
+    expect(answers[0]).toEqual(NOT_YOURS);
+    expect(answers.every(answer => !JSON.stringify(answer).includes("graces-canvas"))).toBe(true);
+    expect(canvases).toEqual([]);
+  });
 });
 
 describe("who and what the approved canvas is for (FAC-137 K2: N2, N6, N7)", () => {
