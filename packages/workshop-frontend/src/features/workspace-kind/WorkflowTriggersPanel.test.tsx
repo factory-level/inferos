@@ -153,6 +153,7 @@ describe('WorkflowTriggersPanel', () => {
     const previousOverseer: Partial<Overseer> = {
       listHooks: async () => [],
       listWorkflowDefinitions: async () => [],
+      listReadableWorkflowSchedules: async () => [],
       listReadableWorkflowHistories: async () => [{ definitionId: 'previous-person-definition' }],
       listWorkflowDeliveries: async () => [
         { hookId: 3, definitionId: 'previous-person-definition', revision: 4, commitId: 'a'.repeat(40), at: new Date(0), result: { outcome: 'succeeded', settledAt: new Date(1) } },
@@ -186,6 +187,7 @@ describe('WorkflowTriggersPanel', () => {
     }
     const withDefaults: Partial<Overseer> = {
       listWorkflowDefinitions: async () => [],
+      listReadableWorkflowSchedules: async () => [],
       listReadableWorkflowHistories: async () => [],
       getTriggerDefinition: async () => null,
       listWorkflowDeliveries: async () => [],
@@ -272,21 +274,41 @@ describe('WorkflowTriggersPanel', () => {
   ] as const)(
     'shows a failure instead of an empty state when the %s read fails',
     async (_name, method, failureText, emptyText) => {
-      const rejectedRead = vi.fn<() => Promise<never>>(async () => {
-        throw new Error('backend unavailable')
-      })
+      const rejectedRead = vi.fn<() => Promise<never>>()
+        .mockRejectedValue(new Error('backend unavailable'))
+      const listReadableWorkflowSchedules = method === 'listReadableWorkflowSchedules'
+        ? rejectedRead
+        : async () => []
+      const listReadableWorkflowHistories = method === 'listReadableWorkflowHistories'
+        ? vi.fn<Overseer['listReadableWorkflowHistories']>()
+          .mockResolvedValueOnce([])
+          .mockRejectedValueOnce(new Error('backend unavailable'))
+        : method === 'listWorkflowDeliveries'
+          ? vi.fn<Overseer['listReadableWorkflowHistories']>()
+            .mockResolvedValueOnce([])
+            .mockResolvedValueOnce([{ definitionId: 'history' }])
+        : async () => []
+      const listWorkflowDeliveries = method === 'listWorkflowDeliveries'
+        ? vi.fn<Overseer['listWorkflowDeliveries']>()
+          .mockRejectedValueOnce(new Error('backend unavailable'))
+        : async () => []
+      const failingRead = method === 'listReadableWorkflowSchedules'
+        ? listReadableWorkflowSchedules
+        : method === 'listReadableWorkflowHistories'
+          ? listReadableWorkflowHistories
+          : listWorkflowDeliveries
       await render({
-        ...(method === 'listWorkflowDeliveries'
-          ? { listReadableWorkflowHistories: async () => [{ definitionId: 'history' }] }
-          : {}),
-        [method]: rejectedRead,
+        listReadableWorkflowSchedules,
+        listReadableWorkflowHistories,
+        listWorkflowDeliveries,
       } as Partial<Overseer>)
+      await act(async () => {})
 
       if (method !== 'listReadableWorkflowSchedules') {
         await act(async () => { button('Recent')!.click() })
       }
 
-      expect(rejectedRead).toHaveBeenCalled()
+      expect(failingRead).toHaveBeenCalled()
       expect(container.textContent).toContain(failureText)
       expect(container.textContent).not.toContain(emptyText)
     },
@@ -300,7 +322,9 @@ describe('WorkflowTriggersPanel', () => {
       definitionId: id, hookId: 3, revision: 2, commitId: 'b'.repeat(40), at: new Date('2026-11-12T01:00:00Z'),
     }])
     await render({ listReadableWorkflowHistories, listWorkflowDeliveries })
-    expect(listReadableWorkflowHistories).not.toHaveBeenCalled()
+    await act(async () => {})
+    expect(listReadableWorkflowHistories).toHaveBeenCalledOnce() // The independent history section.
+    listReadableWorkflowHistories.mockClear()
     await act(async () => { button('Recent')!.click() })
     expect(listReadableWorkflowHistories).toHaveBeenCalledOnce()
     expect(listWorkflowDeliveries).toHaveBeenCalledWith('readable-history')
@@ -332,11 +356,13 @@ describe('WorkflowTriggersPanel', () => {
         definitionId, hookId: 1, revision: 1, commitId: 'd'.repeat(40), at: new Date(0),
       }]
     })
-    await render({
-      listReadableWorkflowHistories: async () =>
-        Array.from({ length: 9 }, (_, index) => ({ definitionId: `history-${index}` })),
-      listWorkflowDeliveries,
-    })
+    const listReadableWorkflowHistories = vi.fn<Overseer['listReadableWorkflowHistories']>()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(Array.from({ length: 9 }, (_, index) => ({ definitionId: `history-${index}` })))
+    await render({ listReadableWorkflowHistories, listWorkflowDeliveries })
+    await act(async () => {})
+    listWorkflowDeliveries.mockClear()
+    maximumActive = 0
     await act(async () => {
       button('Recent')!.click()
       await new Promise(resolve => setTimeout(resolve, 30))
