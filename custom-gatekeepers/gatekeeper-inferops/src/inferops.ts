@@ -171,7 +171,7 @@ import {
   CHATBOT_DOT_RESOURCE, DEMO_HOST, INFEROPS_ACCOUNT_RESOURCE, KNOWLEDGE_WIKI_RESOURCE, OBJECT_TABLE_RESOURCE,
   PORTAL_MEMBERS_RESOURCE, PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, PROJECT_WORKFLOW_RESOURCE,
   accountUrl, dotUrl, hostInTenant, membersUrl, parseDotUrl, parseAccountUrl, parseHost, parseMembersUrl, parseProjectBoardUrl,
-  parseProjectDispatchUrl, parseProjectWorkflowUrl, parseTableUrl, parseWikiUrl, projectBoardUrl,
+  parseProjectDispatchUrl, parseProjectWorkflowUrl, parseTableUrl, parseWikiDocumentUrl, parseWikiUrl, projectBoardUrl,
   projectDispatchUrl, projectWorkflowUrl, resourceKind, tableUrl, wikiUrl, type ProjectBoardRef, type WikiRef,
 } from "./resources";
 import {
@@ -3772,12 +3772,27 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     };
   }
 
+  /**
+   * InferOps' own reference for each page of this Wiki (FAC-68), by page id: only references naming
+   * this Wiki's own host, so nothing of another workspace is passed on. Never built here.
+   */
+  async #refs(): Promise<ReadonlyMap<string, string>> {
+    const host = this.#binding.host.toLowerCase();
+    const refs = new Map<string, string>();
+    for (const [id, ref] of await this.#binding.client.listDocumentRefs()) {
+      if (parseWikiDocumentUrl(ref)?.host.toLowerCase() === host) refs.set(id, ref);
+    }
+    return refs;
+  }
+
   async readDocument(slugOrId: string): Promise<WikiDocument> {
-    const { head, body, pendingBody, sections } = await this.#page(slugOrId, false);
+    const [{ head, body, pendingBody, sections }, refs] = await Promise.all([this.#page(slugOrId, false), this.#refs()]);
+    const ref = refs.get(head.id);
     const page: WikiDocument = {
       id: head.id, slug: head.slug, title: head.title, body, version: head.version,
       masterRole: head.masterRole, ...(pendingBody ? { pendingBody: true as const } : {}), sections,
       references: embeddedReferences(authoredContent(head.title, { body, visibleSections: sections.map(s => s.body) })),
+      ...(ref ? { ref } : {}),
     };
     await this.#binding.observe(this.#queue, {
       title: `Read Wiki page ${plainInline(head.slug, 80)}`,
@@ -3842,9 +3857,12 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     }
     const binding = this.#binding;
     await binding.admitSearch();
-    const records = await binding.client.searchWiki(trimmed, limit);
+    const [records, refs] = await Promise.all([binding.client.searchWiki(trimmed, limit), this.#refs()]);
     const pending = new Set(binding.pendingEdits().flatMap(e => e.kind === "section-update" ? [e.sectionId] : []));
-    const hits: WikiSearchHit[] = records.map(hit => pending.has(hit.sectionId) ? { ...hit, pending: "update" } : hit);
+    const hits: WikiSearchHit[] = records.map(hit => {
+      const ref = refs.get(hit.documentId);
+      return { ...hit, ...(pending.has(hit.sectionId) ? { pending: "update" as const } : {}), ...(ref ? { ref } : {}) };
+    });
     const asked = [...trimmed].length > 100 ? `${[...trimmed].slice(0, 100).join("")}…` : trimmed;
     const found = hits.map(hit => `${plainInline(hit.tag, 80)} in ${plainInline(hit.documentSlug, 80)}`);
     await binding.observeWithheld(this.#queue, {

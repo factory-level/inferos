@@ -498,6 +498,13 @@ export interface InferOpsClient {
   readDocument(documentId: string): Promise<WikiDocumentHead>;
 
   /**
+   * Each page's canonical reference as InferOps names it (FAC-68, `document.company_list`'s `ref`),
+   * by page UUID, for the pages the account can read in its company. Never built here. Empty when
+   * InferOps can't answer (one from before FAC-68, or an outage): a page or hit then has no `ref`.
+   */
+  listDocumentRefs(): Promise<ReadonlyMap<string, string>>;
+
+  /**
    * The Wiki's root, pillars (with Masters and filed pages) and unfiled pages, listing only pages
    * `listDocuments` shows.
    */

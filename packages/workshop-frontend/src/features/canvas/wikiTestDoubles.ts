@@ -90,7 +90,9 @@ export const fakeWiki = (seed: { pages?: StoredPage[]; structure?: WikiStructure
       const { head, body, pendingBody, shownSections } = page(slug)
       return { id: head.id, slug: head.slug, title: head.title, body, version: head.version, masterRole: head.masterRole,
         ...(pendingBody ? { pendingBody: true as const } : {}), sections: shownSections,
-        references: embeddedReferences(authoredContent(head.title, { body, visibleSections: shownSections.map(s => s.body) })) } satisfies WikiDocument
+        references: embeddedReferences(authoredContent(head.title, { body, visibleSections: shownSections.map(s => s.body) })),
+        // InferOps' own reference (FAC-68), as the gatekeeper passes it on.
+        ref: `inferops://acme.kb/knowledge/document/${head.slug.replaceAll('/', '%2F')}` } satisfies WikiDocument
     }),
     readDocumentText: vi.fn<InferOpsWikiSession['readDocumentText']>(async slug => {
       const { head, body, shownSections } = page(slug)

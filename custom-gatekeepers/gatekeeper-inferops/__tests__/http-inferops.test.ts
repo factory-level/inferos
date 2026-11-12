@@ -1245,6 +1245,21 @@ describe("the InferMind Wiki over HTTP", () => {
     expect(inferOpsErrorCode(await wrapped.listDocuments().catch(e => e))).toBe("UNAVAILABLE");
   });
 
+  it("reads each page's reference from InferOps' company list, and none from an InferOps without it (FAC-68)", async () => {
+    const ref = "inferops://acme.knowledge/knowledge/document/handbook"
+    const { client, calls } = fakeWiki(call => call.path === "/knowledge/company/documents"
+      ? Response.json({ workspaces: [], documents: [
+        { id: DOC.toUpperCase(), ref }, { id: "not-a-uuid", ref }, { id: OTHER_DOC, ref: 7 }, { id: OTHER_DOC.replace(/.$/, "f") },
+      ] }) : undefined);
+    expect([...await client.listDocumentRefs()]).toEqual([[DOC.toLowerCase(), ref]]);
+    expect(calls.at(-1)).toMatchObject({ method: "GET", path: "/knowledge/company/documents" });
+    // An InferOps before FAC-68 answers 404, and a malformed answer is not trusted: no references.
+    const { client: older } = fakeWiki();
+    expect([...await older.listDocumentRefs()]).toEqual([]);
+    const { client: odd } = fakeWiki(call => call.path === "/knowledge/company/documents" ? Response.json({ nope: true }) : undefined);
+    expect([...await odd.listDocumentRefs()]).toEqual([]);
+  });
+
   it("reads a page's text from InferOps' document.text, passing its null, refusing anything else", async () => {
     const text = "# Handbook\n\nThe page body.\n\n<!-- generated: documentation coverage -->\n## Documentation coverage";
     const { client, calls } = fakeWiki(call => call.path === `/knowledge/documents/${DOC}/text`

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { applyCanvasOperations, CANVAS_BOARD_WORKFLOWS, CANVAS_WIDGET_KINDS, parseCanvasDefinition, type CanvasDefinition, type CanvasWidget } from "./canvas";
+import { applyCanvasOperations, CANVAS_BOARD_WORKFLOWS, CANVAS_WIDGET_KINDS, parseCanvasDefinition, parseCanvasWidget, type CanvasDefinition, type CanvasWidget } from "./canvas";
 import {
   CANVAS_RUN_EVENTS, canvasPageEffects, canvasRunEffects, canvasRunEvent, canvasRunEventsHeard, parseCanvasRunEvent,
   canvasWidgetEventsHeard,
@@ -733,5 +733,31 @@ describe("a widget from a newer InferOS (FAC-9)", () => {
     // Converting a tolerantly read definition keeps the placeholder.
     expect(canvasPageFromDefinition(v1(newer), { tolerateNewer: true }).nodes.find(node => node.id === "n"))
       .toEqual({ ...placeholder, nodeType: "widget", attachments: [] });
+  });
+});
+
+// FAC-68: a Wiki widget's page may be a slug, or a page reference of its own Wiki (a Dot citation
+// or a search hit), by slug or the alias; a reference to another Wiki, or a malformed one, is refused.
+describe("a Wiki widget's page", () => {
+  const TARGET = "inferops://acme.knowledge/knowledge/wiki";
+  const wiki = (page: string) => ({ id: "w", kind: "inferops.wiki", version: 1, targetRef: TARGET, size: "normal", params: { page } });
+  test("is a slug, or a reference of the same Wiki by slug or by the alias", () => {
+    for (const page of [
+      "handbook", "inferops://acme.knowledge/knowledge/document/handbook",
+      "inferops://acme.knowledge/knowledge/document/dispatch%2Fcrew",
+      "inferops://acme.knowledge/knowledge/page/0b7e2c3a-1f00-4a00-8000-00000000000a",
+    ]) {
+      expect(parseCanvasWidget(wiki(page)).params).toEqual({ page });
+    }
+  });
+  test("refuses another Wiki's reference and anything outside the grammar", () => {
+    for (const page of [
+      "inferops://acme.other/knowledge/document/handbook", "inferops://acme.knowledge/knowledge/document/a%2F..",
+      "inferops://acme.knowledge/knowledge/document/a%20b", "inferops://acme.knowledge/knowledge/document/handbook/",
+      "inferops://acme.knowledge/knowledge/page/0B7E2C3A-1F00-4A00-8000-00000000000A",
+      "inferops://acme.knowledge/knowledge/page/not-a-uuid", "https://acme.knowledge/knowledge/document/handbook",
+    ]) {
+      expect(() => parseCanvasWidget(wiki(page))).toThrow();
+    }
   });
 });
