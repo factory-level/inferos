@@ -38,14 +38,14 @@ The release evidence for governed React/Refine widgets: one approved authored wi
 | The scenario's clean evidence run | inferOS `48ee0bf1` (#466's head), squash-merged to main as `3c11c9db` | local, `wrangler createTestHarness` |
 | The scenario on main, after the S2 and S3 PRs | main SHA: **pending** (#468, #470) | local |
 | InferOps pinned by the gatekeeper | `custom-gatekeepers/gatekeeper-inferops/connection.json`, `9734f61a1` | not run: the scenario programs InferOps (`InferOpsFake`) |
-| CI | the merged PRs' runs, linked below; **pending** for #468 and #470 | CI |
+| CI | each PR's passing run on its final head, linked below; **pending** for #470 | CI |
 
 The FAC-15 PRs:
-- #465 (`b917e6c6`): the Refine closure fix;
-- #466 (`3c11c9db`): the scenario;
-- #467 (`45bb541a`): surface parity;
-- #468 (pending): red-team R-6 and R-4;
-- #470 (pending): R-3 and the probes required in CI.
+- #465 (`b917e6c6`): the Refine closure fix. CI: [https://github.com/factory-level/inferos/actions/runs/43201698115](https://github.com/factory-level/inferos/actions/runs/43201698115) at `f9385638`.
+- #466 (`3c11c9db`): the scenario. CI: [https://github.com/factory-level/inferos/actions/runs/43205349077](https://github.com/factory-level/inferos/actions/runs/43205349077) at `48ee0bf1`.
+- #467 (`45bb541a`): surface parity. CI: [https://github.com/factory-level/inferos/actions/runs/43204603236](https://github.com/factory-level/inferos/actions/runs/43204603236) at `27055b7c`.
+- #468 (`01c5ea75`): red-team R-6 and R-4. CI: [https://github.com/factory-level/inferos/actions/runs/43209356824](https://github.com/factory-level/inferos/actions/runs/43209356824) at `f22b53e8`. Its first attempt was killed at 900 s on `account-subject.test.ts`, a hang main's own runs show too; the rerun passed.
+- #470 (pending): R-3, the probes required in CI, and path 5 pinned on the CSP alone.
 
 ## The scenario: `widget-launch-gate` (version 2)
 
