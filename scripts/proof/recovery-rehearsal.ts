@@ -98,6 +98,13 @@ export function rehearsalRefusal(target: string, facts: TargetFacts): string | n
   return null;
 }
 
+/** The main checkout of this repository: the parent of git's common dir, real path. */
+function repositoryRoot(): string {
+  const common = spawnSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: ROOT, encoding: "utf8" });
+  if (common.status !== 0) throw new Error(`git rev-parse --git-common-dir failed in ${ROOT}`);
+  return realpathSync(dirname(common.stdout.trim()));
+}
+
 /** The variable files a target's stack reads, which must hold no credential (FAC-141). */
 export const ENV_FILES = [".env", ".dev.vars", ".env.worktree"] as const;
 
@@ -168,7 +175,9 @@ async function main(): Promise<number> {
   const json = (argv: string[]) => {
     const r = run(argv);
     try {
-      return { code: r.code, report: JSON.parse(r.stdout) as Record<string, any>, stderr: r.stderr };
+      // pnpm may echo the script line before the JSON; the report is the last line that is an object.
+      const line = r.stdout.split("\n").map(l => l.trim()).filter(l => l.startsWith("{")).at(-1) ?? r.stdout;
+      return { code: r.code, report: JSON.parse(line) as Record<string, any>, stderr: r.stderr };
     } catch {
       return { code: r.code, report: null, stderr: r.stderr || r.stdout };
     }
@@ -192,7 +201,9 @@ async function main(): Promise<number> {
     const backend = json(["pnpm", "-s", "local", "inferops", "status", "--json"]);
     const refusal = rehearsalRefusal(target, {
       realPath: existsSync(target) ? realpathSync(target) : null,
-      repoRoot: realpathSync(ROOT),
+      // The repository's main checkout, from git's common dir, so the guard holds whether this script
+      // runs from the main checkout or from another worktree.
+      repoRoot: repositoryRoot(),
       trackedChanges: target && existsSync(target) ? run(["git", "status", "--porcelain", "--untracked-files=no"]).stdout.trim() : null,
       stack: String(stack.report?.stack ?? "unknown"),
       backend: String(backend.report?.backend ?? "unknown"),

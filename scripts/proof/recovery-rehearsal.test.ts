@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { databaseRefusal, envFileVariables, manifestDifferences, rehearsalRefusal, stateManifest, type TargetFacts } from "./recovery-rehearsal.ts";
-import { isLocalStackUrl, summarize } from "./rehearsal-operator.ts";
+import { isLocalStackUrl, summarize } from "./rehearsal-summary.ts";
 
 const ROOT = "/repo/inferOS";
 const TARGET = `${ROOT}/.worktrees/rehearsal`;
