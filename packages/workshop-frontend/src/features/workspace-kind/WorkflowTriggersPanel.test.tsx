@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /* eslint-disable react/react-in-jsx-scope */
 
-import { act, type ReactNode } from 'react'
+import { act, useLayoutEffect, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
@@ -147,15 +147,31 @@ describe('WorkflowTriggersPanel', () => {
     expect(container.querySelector('[role="status"]')).toBeNull()
   })
 
-  it("never renders the previous overseer's history after an identity switch in the same workspace", async () => {
+  it("never commits the previous overseer's history on the first render after an identity switch", async () => {
     const previousOverseer: Partial<Overseer> = {
       listHooks: async () => [],
+      listWorkflowDefinitions: async () => [],
       listReadableWorkflowHistories: async () => [{ definitionId: 'previous-person-definition' }],
       listWorkflowDeliveries: async () => [
         { hookId: 3, definitionId: 'previous-person-definition', revision: 4, commitId: 'a'.repeat(40), at: new Date(0), result: { outcome: 'succeeded', settledAt: new Date(1) } },
       ],
+      getTriggerDefinition: async () => null,
+      listTriggerControls: async () => [],
+      listCollaborators: async () => [],
+      getTriggerAssignment: async () => ({ enabled: true, assignment: null }),
+      getGadget: (() => ({ listBindings: async () => [], [Symbol.dispose]: () => {} })) as unknown as Overseer['getGadget'],
     }
-    await render(previousOverseer)
+    let firstCommitAfterSwitch = ''
+    const IdentitySwitchProbe = ({ overseer }: { overseer: RpcStub<Overseer> }) => {
+      useLayoutEffect(() => {
+        firstCommitAfterSwitch = container.textContent ?? ''
+      }, [overseer])
+      return <WorkflowTriggersPanel overseer={overseer} gadgets={[]} refreshKey="" pendingActionCount={0} onOpenActivity={() => {}} />
+    }
+    await act(async () => {
+      root.render(<IdentitySwitchProbe overseer={previousOverseer as unknown as RpcStub<Overseer>} />)
+    })
+    await act(async () => {})
     expect(container.textContent).toContain('previous-person-definition')
     expect(container.textContent).toContain('Finished')
 
@@ -176,17 +192,12 @@ describe('WorkflowTriggersPanel', () => {
       ...nextOverseer,
     }
     await act(async () => {
-      root.render(
-        <WorkflowTriggersPanel
-          overseer={withDefaults as unknown as RpcStub<Overseer>}
-          gadgets={[]}
-          refreshKey=""
-          pendingActionCount={0}
-          onOpenActivity={() => {}}
-        />,
-      )
+      root.render(<IdentitySwitchProbe overseer={withDefaults as unknown as RpcStub<Overseer>} />)
     })
 
+    expect(firstCommitAfterSwitch).not.toContain('previous-person-definition')
+    expect(firstCommitAfterSwitch).not.toContain('Finished')
+    expect(firstCommitAfterSwitch).toContain('Loading available run histories…')
     expect(container.textContent).not.toContain('previous-person-definition')
     expect(container.textContent).not.toContain('Finished')
     expect(container.querySelector('[role="status"]')?.textContent).toBe('Loading available run histories…')
@@ -426,6 +437,7 @@ describe('a pinned trigger\'s run-on-request control', () => {
     expect(runs.querySelectorAll('li')).toHaveLength(2)
     expect(runs.textContent).toContain('Finished')
     expect(runs.textContent).toContain('Kept until')
+    expect(runs.querySelector('time')?.getAttribute('datetime')).toBe('2026-12-01T00:00:00.000Z')
     expect(runs.textContent).toContain('Waiting for approval')
     expect(runs.textContent).toContain("Kept while it's live, uncertain or waiting")
     expect(runs.textContent).toContain('Requested by Ben')
