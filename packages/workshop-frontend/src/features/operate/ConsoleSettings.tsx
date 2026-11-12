@@ -1,6 +1,8 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Button, Checkbox } from '@cloudflare/kumo'
-import { consoleScreens, DEFAULT_CONSOLE_CUSTOMIZATION, type BoundViewEntry, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
+import { canonicalHostBoardTarget, consoleScreens, DEFAULT_CONSOLE_CUSTOMIZATION, type BoundViewEntry, type HostBoardEntry } from '@gadgets/workshop-shared/operate-console'
+import { parseWidgetToolFile, WIDGET_TOOLS_FILE } from '@gadgets/workshop-shared/widget-tools'
+import type { BoardConnection } from './ConsoleCommandBindings'
 import { useServerConfig } from '../../ServerConfigContext'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
@@ -55,6 +57,29 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const editable = !!overseer && !!metadata && metadata.role !== 'use' && !accessError
+  // FAC-14: what binding a widget's declared commands reads. Stable per overseer, since each read is
+  // an effect's dependency. A command is declared in the commit's tools.json; a board resolves only
+  // through this workspace's own connections (getGatekeeperByResourceUrl), and only an InferOps
+  // board connection is offered. Publication checks every binding again.
+  const stub = overseer?.stub
+  const loadCommands = useCallback(async (commitId: string) => {
+    if (!stub) return []
+    const [[, file] = ['', { kind: 'absent' as const }]] = await stub.readFilesAtCommit(commitId, [WIDGET_TOOLS_FILE])
+    return file.kind === 'text' ? parseWidgetToolFile(file.text).commands : []
+  }, [stub])
+  const resolveBoard = useCallback(async (target: string): Promise<BoardConnection | null> => {
+    if (!stub) return null
+    const connection = await stub.getGatekeeperByResourceUrl(target)
+    if (!connection) return null
+    try {
+      const [gatekeeperId, spec] = await Promise.all([connection.getId(), connection.getCreationSpec()])
+      return spec.type === 'gatekeeper' && spec.vendorId.toLowerCase() === 'inferops' &&
+        canonicalHostBoardTarget(spec.resourceUrl) === target ? { gatekeeperId, target } : null
+    } finally {
+      connection[Symbol.dispose]()
+    }
+  }, [stub])
+  const boardTargets = shownHostBoards.map(board => board.requirement.target)
   const save = async () => {
     if (!overseer || !editable || saving) return
     setSaving(true); setError(null)
@@ -85,7 +110,8 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
       {!editable && <p role="status" className="text-sm text-kumo-subtle">Console owners and editors manage these settings.</p>}
     </div>
     <ConsoleWidgetRegistry widgets={widgets} published={entry.console.published?.content.widgets} candidates={widgetCandidates}
-      hostBoardCount={shownHostBoards.length + shownBoundViews.length} disabled={!editable || saving} onChange={setWidgets} />
+      hostBoardCount={shownHostBoards.length + shownBoundViews.length} disabled={!editable || saving}
+      commands={stub ? { boardTargets, editable, loadCommands, resolveBoard } : undefined} onChange={setWidgets} />
     {overseer && <ConsoleWidgetIndex overseer={overseer.stub} consoleId={entry.console.id}
       hasWidgets={(entry.console.published?.content.widgets ?? []).length > 0} editable={editable} />}
     {hostBoardsOn && <ConsoleHostBoardRegistry hostBoards={shownHostBoards} published={entry.console.published?.content.hostBoards}

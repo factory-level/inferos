@@ -39,6 +39,56 @@ const overseerTestFile = new Map<string, number>();
 /** Called as each test file starts (see `workerd/backend-file-boundary.ts`). */
 export function beginTestFile(): void {
   currentTestFile++;
+  explicitAlarmsFile = undefined;
+}
+
+/** The test file, if any, whose overseers run their alarm only when a test asks for it. */
+let explicitAlarmsFile: number | undefined;
+
+/**
+ * For the test file now running: an overseer's alarm handler runs only when a test calls it
+ * (`instance.alarm()`), never when workerd fires it on its own schedule. A file whose tests drive
+ * each alarm themselves calls this, so that an alarm a test left armed (a queued run, a withdrawal
+ * due now) neither races the test's own calls nor fires during a later test, through the stand-ins
+ * that test put on the shared prototype. workerd's firing is then spent, so such a file runs the
+ * handler directly rather than through `runDurableObjectAlarm`, which runs only an armed alarm; it
+ * checks first that the alarm was armed, or that its firing was skipped (`takeSkippedFiring`), so
+ * whatever should arm the alarm is still shown to. Reset as the next file starts.
+ */
+export function onlyExplicitAlarms(): void {
+  explicitAlarmsFile = currentTestFile;
+}
+
+/** The overseers, by id, whose alarm workerd fired and the gate skipped since a test last ran it. */
+const skippedFirings = new Set<string>();
+
+/**
+ * Whether workerd fired the overseer `id`'s alarm, and the gate skipped it, since this was last
+ * asked: the alarm was armed then, though nothing is armed now. Clears the record.
+ */
+export function takeSkippedFiring(id: string): boolean {
+  return skippedFirings.delete(id);
+}
+
+/**
+ * The User namespace every overseer in this pool worker holds as `impl.users`
+ * (`ctx.exports.UserDurableObject`): one object, shared by every Durable Object and every file the
+ * worker runs. With the keys it had of its own when first seen.
+ */
+let sharedUsers: { namespace: object; keys: PropertyKey[] } | undefined;
+
+/**
+ * What the file now ending added to the shared User namespace (say, `impl.users.get = ...` in a
+ * test), removed again so the next file gets the real namespace. A stand-in for one workspace goes on
+ * that workspace's `impl.users` instead (`impl.users = {...}`). Called as each file ends
+ * (`workerd/backend-file-boundary.ts`), which fails the file when this returns anything.
+ */
+export function takeSharedUsersChanges(): string[] {
+  if (!sharedUsers) return [];
+  let { namespace, keys } = sharedUsers;
+  let added = Reflect.ownKeys(namespace).filter(key => !keys.includes(key));
+  for (let key of added) Reflect.deleteProperty(namespace, key);
+  return added.map(String);
 }
 
 /**
@@ -52,10 +102,17 @@ export class OverseerDurableObject extends RealOverseerDurableObject {
     restoreTargets.set(ctx, this);
     let id = ctx.id.toString();
     if (!overseerTestFile.has(id)) overseerTestFile.set(id, currentTestFile);
+    let users = (ctx as unknown as { exports?: { UserDurableObject?: object } }).exports?.UserDurableObject;
+    if (users && !sharedUsers) sharedUsers = { namespace: users, keys: Reflect.ownKeys(users) };
   }
 
-  override async alarm(): Promise<void> {
+  /** workerd passes its own firing an `AlarmInvocationInfo`; a test calling `alarm()` passes nothing. */
+  override async alarm(alarmInfo?: AlarmInvocationInfo): Promise<void> {
     if (overseerTestFile.get(this.ctx.id.toString()) !== currentTestFile) return;
+    if (alarmInfo !== undefined && explicitAlarmsFile === currentTestFile) {
+      skippedFirings.add(this.ctx.id.toString());
+      return;
+    }
     await super.alarm();
   }
 }

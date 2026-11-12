@@ -370,6 +370,13 @@ export class WorkspaceWorkflowDefinitionStore {
     return stored && this.#available(stored, this.retention.now()) ? this.#viewOf(stored, viewer, role) : null;
   }
 
+  /** Whether the viewer can read this definition through the same projection used by list/get. */
+  canReadDefinition(viewer: string, id: string, role: CollaboratorRole | null): boolean {
+    let stored = this.storage.workflowDefinitions.get(id);
+    return !!stored && this.#available(stored, this.retention.now(), this.#pinnedIds()) &&
+      this.#viewOf(stored, viewer, role) !== null;
+  }
+
   /**
    * What `viewer`, whose role in this workspace is `role`, may do with `stored` (FAC-122). The owner
    * may do everything. Anyone else needs a role here (a share outlives a removed collaborator but
@@ -497,6 +504,15 @@ export class WorkspaceWorkflowDefinitionStore {
     let stored = this.#owned(caller, id);
     if (!this.#available(stored, this.retention.now())) throw new Error(WORKFLOW_DEFINITION_EXPIRED);
     return stored.revisions[stored.revisions.length - 1]!.source.gadgetId;
+  }
+
+  /**
+   * Whether `viewer` (role `role` here) owns definition `id` or may edit it (FAC-122): who, besides
+   * the person who asked, may cancel one of its runs (FAC-117).
+   */
+  mayEdit(viewer: string, id: string, role: CollaboratorRole | null): boolean {
+    let stored = this.storage.workflowDefinitions.get(id);
+    return stored !== undefined && this.#rights(stored, viewer, role).edit;
   }
 
   /**
@@ -1248,11 +1264,77 @@ export class WorkspaceWorkflowDefinitionStore {
         ...delivery,
         execution: {
           ...delivery.execution, state: failure === undefined ? "finished" : "failed", endedAt: new Date(),
-          ...(failure === undefined ? {} : { failure }),
+          // A cancelled run fails as cancelled, whatever its last call threw (FAC-117).
+          ...(failure === undefined ? {} : { failure: delivery.execution.cancelled ? "cancelled" : failure }),
         },
       });
     });
     this.#changed();
+  }
+
+  /**
+   * Cancel queued run `deliveryId` as `by` (FAC-117): one not yet started ends now, failed as
+   * cancelled; a running one is marked, and ends at its next guarded call. Who and when are kept on
+   * its execution. A run already ended, or one never queued here, is refused. The caller rejects its
+   * pending writes and ends its sessions.
+   */
+  cancelRun(deliveryId: number, by: AiChatAuthorInfo): "ended" | "stopping" {
+    let result = this.durableStorage.transactionSync(() => {
+      let delivery = this.storage.workflowDeliveries.get(deliveryId);
+      let execution = delivery?.execution;
+      if (!delivery || !execution) throw new Error("This run isn't one the workspace runs, so it can't be cancelled.");
+      if (execution.state === "finished" || execution.state === "failed") throw new Error("This run already ended.");
+      if (execution.cancelled) return "stopping" as const;
+      let cancelled = { by, at: new Date() };
+      if (execution.state === "queued") {
+        this.storage.workflowRunQueue.delete(deliveryId);
+        this.#putDelivery({
+          ...delivery,
+          execution: { ...execution, state: "failed", failure: "cancelled", cancelled, endedAt: cancelled.at },
+        });
+        return "ended" as const;
+      }
+      this.#putDelivery({ ...delivery, execution: { ...execution, cancelled } });
+      return "stopping" as const;
+    });
+    this.#changed();
+    return result;
+  }
+
+  /** When run `deliveryId` was admitted, or undefined when there's no record of it. */
+  admittedAt(deliveryId: number): Date | undefined {
+    return this.storage.workflowDeliveries.get(deliveryId)?.at;
+  }
+
+  /** Delivery `deliveryId` as stored, or null. */
+  delivery(deliveryId: number): StoredWorkflowDelivery | null {
+    return this.storage.workflowDeliveries.get(deliveryId) ?? null;
+  }
+
+  /**
+   * The runs of trigger `hookId` still executing (FAC-117, what a pause drains): live work
+   * (`isLiveWorkflowDelivery`) that hasn't ended, so queued, running, or admitted and not yet
+   * queued. A run that ended, `uncertain` included, isn't: its pending writes stay decidable
+   * (`hookContinuesRun`), and nothing it runs can start again.
+   */
+  executingDeliveriesOf(hookId: number): StoredWorkflowDelivery[] {
+    let now = this.retention.now();
+    return Array.from(this.storage.workflowDeliveries.list())
+      .filter(delivery => delivery.hookId === hookId && isLiveWorkflowDelivery(delivery, now) &&
+        delivery.execution?.state !== "finished" && delivery.execution?.state !== "failed");
+  }
+
+  /** Drops trigger `hookId`'s waiting invocations (FAC-117: it was paused), and says how many. */
+  dropWaitingInvocations(hookId: number): number {
+    let dropped = 0;
+    this.durableStorage.transactionSync(() => {
+      for (let invocation of Array.from(this.storage.workflowInvocations.list())) {
+        if (invocation.hookId !== hookId) continue;
+        this.storage.workflowInvocations.delete(invocation.id);
+        dropped++;
+      }
+    });
+    return dropped;
   }
 
   /** The delivery a person's request `invocationId` made, or null (FAC-114): at most one, ever. */
