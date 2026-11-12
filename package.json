@@ -17,6 +17,7 @@
     "stage:config": "node scripts/stage/stage.ts config",
     "stage:deploy": "node scripts/stage/stage.ts deploy",
     "stage:delete": "node scripts/stage/stage.ts delete",
+    "stage:company-storage": "node scripts/stage/company-storage-cli.ts",
     "dev-client": "cd packages/workshop-frontend && pnpm run dev",
     "dev-server": "node scripts/run-dev-server.ts",
     "canvas": "node scripts/consumer/canvas.ts .",
@@ -44,6 +45,7 @@
   "devDependencies": {
     "@gadgets/scripts": "workspace:*",
     "@types/node": "26.1.0",
+    "miniflare": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:",

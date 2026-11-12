@@ -278,12 +278,12 @@ async function pendingFor(overseer: Any, connectionId: number): Promise<{ id: nu
 }
 
 /** An action's state, found in the workspace's history. */
-async function actionState(overseer: Any, id: number): Promise<KnowledgeWriteOutcome> {
+async function actionState(overseer: Any, id: number, applyKind: "RECONCILE_ONLY"): Promise<KnowledgeWriteOutcome> {
   let beforeId: number | undefined;
   for (let page = 0; page < 10; page++) {
     const { entries, nextBeforeId } = await overseer.listActions({ beforeId, filter: "action" }) as { entries: { id: number; state?: string; lastAttempt?: { message?: string; code?: string; outcome?: string } }[]; nextBeforeId?: number };
     const found = entries.find(entry => entry.id === id);
-    if (found) return { state: found.state, lastAttempt: found.lastAttempt && { code: found.lastAttempt.code, outcome: found.lastAttempt.outcome } };
+    if (found) return { state: found.state, historyKind: "action", applyKind, lastAttempt: found.lastAttempt && { code: found.lastAttempt.code, outcome: found.lastAttempt.outcome } };
     if (nextBeforeId === undefined) break;
     beforeId = nextBeforeId;
   }
@@ -480,7 +480,7 @@ async function operateFlow(browser: Any): Promise<void> {
         pending: async () => (await pendingFor(overseer, connectionId))?.id,
         approve: async (id) => {
           await approveInBrowser(page, workspaceId, "operate-04-approve-knowledge-attempt.png");
-          return until(() => actionState(overseer, id),
+          return until(() => actionState(overseer, id, "RECONCILE_ONLY"),
             value => (value.state !== undefined && value.state !== "pending") || value.lastAttempt !== undefined, 30_000);
         },
         reject: async (id) => { await overseer.rejectAction(id); },

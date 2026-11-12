@@ -18,6 +18,9 @@ export interface WikiSnapshot extends WikiPageText { id: string; version: number
 /** The structured apply result recorded in Workshop action history. */
 export interface KnowledgeWriteOutcome {
   state?: string;
+  historyKind?: string;
+  /** Semantic policy of the attempted operation, not the generic action-history type. */
+  applyKind?: string;
   lastAttempt?: { code?: string; outcome?: string };
 }
 
@@ -25,7 +28,8 @@ export interface KnowledgeWriteOutcome {
 export function knowledgeWriteRefused(outcome: KnowledgeWriteOutcome): boolean {
   return (outcome.state === "pending" || outcome.state === "failed")
     && outcome.lastAttempt?.code === "FORBIDDEN"
-    && outcome.lastAttempt.outcome === "notApplied";
+    && (outcome.lastAttempt.outcome === "notApplied"
+      || (outcome.lastAttempt.outcome === "unknown" && outcome.applyKind === "RECONCILE_ONLY"));
 }
 
 /** A proposal may be rejected before queuing, but only an explicit FORBIDDEN proves authorization. */
@@ -72,7 +76,9 @@ export async function checkKnowledgeWrite(before: WikiSnapshot, steps: {
         } else {
           const outcome = await steps.approve(pendingId);
           refused = knowledgeWriteRefused(outcome);
-          reason = refused ? "knowledge write apply refused FORBIDDEN (notApplied)" : "knowledge write was not refused FORBIDDEN (notApplied)";
+          reason = refused
+            ? `knowledge write apply refused status=${outcome.state ?? "missing"} kind=${outcome.historyKind ?? "missing"} code=FORBIDDEN outcome=${outcome.lastAttempt?.outcome}${outcome.lastAttempt?.outcome === "unknown" ? ` applyKind=${outcome.applyKind} acceptanceBranch=RECONCILE_ONLY_unknown_with_unchanged_owner_snapshot` : " acceptanceBranch=FORBIDDEN_notApplied"}`
+            : `knowledge write not refused status=${outcome.state ?? "missing"} kind=${outcome.historyKind ?? "missing"} code=${outcome.lastAttempt?.code ?? "missing"} outcome=${outcome.lastAttempt?.outcome ?? "missing"} applyKind=${outcome.applyKind ?? "missing"}`;
         }
       }
     }

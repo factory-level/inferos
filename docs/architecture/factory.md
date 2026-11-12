@@ -1,5 +1,6 @@
 ---
 title: Software factory sandboxes and local CI
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md
 covers:
   - scripts/local/factory.ts
   - scripts/ci
@@ -48,11 +49,14 @@ restore. The nine required oracles are:
 8. `operate.wikiReads`
 9. `operate.knowledgeWriteRefused`
 
-The negative write oracle passes only when the proposal or apply is explicitly refused with
-`FORBIDDEN` (`notApplied` for an apply result), and an independent owner read matches the original
-page id, version, title, body, and sections. Network, HTTP, timeout, missing-page, auth, stale
-revision, uncertain action state, changed post-read, or failed cleanup is a failure. It never treats
-an unrelated authorization or infrastructure failure as proof of access control.
+The negative write oracle passes only when the proposal is explicitly refused with `FORBIDDEN`, or
+an apply result has `FORBIDDEN` with `notApplied`. Wiki edits use `RECONCILE_ONLY`, whose refusal
+does not prove non-application; for that kind only, `FORBIDDEN` with `unknown` is accepted when an
+independent owner read matches the original page id, version, title, body, and sections. The report
+records the observed status, kind, code, outcome, and the applicable branch. Network, HTTP, timeout,
+missing-page, auth, stale revision, uncertain action state for any other kind, changed post-read, or
+failed cleanup is a failure. It never treats an unrelated authorization or infrastructure failure
+as proof of access control.
 
 The stage smoke runs the browser flow and sign-in probe in the pinned Artillery/Playwright
 container. The container receives credential variable names, not values in command arguments or
@@ -62,6 +66,6 @@ model-provider, and production credentials remain forbidden.
 
 ## References
 
-- [Factory design](../design/factory.md)
+- [Design: local development](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md)
 - Historical source PR [#286](https://github.com/factory-level/inferos/pull/286)
 - [Stage setup runbook](../wiki/grokbot-dev-os.md)

@@ -254,7 +254,7 @@ test("stage smoke gates on every current persona oracle, not an old or incomplet
   assert.equal(smokeOraclesPass(pass.map(o => ({ ...o, name: o.name.replace("owner.", "operator.").replace("operate.", "viewer.") }))), false);
 });
 
-test("knowledge refusal requires FORBIDDEN/notApplied, never generic failed or pending actions", () => {
+test("knowledge refusal requires FORBIDDEN and only accepts unknown for RECONCILE_ONLY Wiki edits", () => {
   for (const state of ["pending", "failed"]) {
     assert.equal(knowledgeWriteRefused({ state, lastAttempt: { code: "FORBIDDEN", outcome: "notApplied" } }), true);
     for (const code of [undefined, "UNAUTHORIZED", "CONFLICT", "STALE_REVISION", "NOT_FOUND", "UNAVAILABLE", "INVALID_REQUEST", "DISABLED"]) {
@@ -264,6 +264,9 @@ test("knowledge refusal requires FORBIDDEN/notApplied, never generic failed or p
   for (const state of [undefined, "approved", "rejected"]) {
     assert.equal(knowledgeWriteRefused({ state, lastAttempt: { code: "FORBIDDEN", outcome: "notApplied" } }), false);
   }
+  assert.equal(knowledgeWriteRefused({ state: "pending", applyKind: "RECONCILE_ONLY", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } }), true);
+  assert.equal(knowledgeWriteRefused({ state: "failed", applyKind: "RECONCILE_ONLY", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } }), true);
+  assert.equal(knowledgeWriteRefused({ state: "pending", applyKind: "PROPOSAL_APPROVE", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } }), false);
   assert.equal(knowledgeWriteRefused({ state: "pending", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } }), false);
   assert.equal(forbiddenProposal(new Error("FORBIDDEN: knowledge:write is required")), true);
   assert.equal(forbiddenProposal({ code: "FORBIDDEN" }), true);
@@ -299,6 +302,20 @@ test("operate knowledge write: approve, verify owner read, then reject the refus
   const f = knowledgeFixture();
   assert.equal((await checkKnowledgeWrite(KNOWLEDGE_PAGE, f.steps)).ok, true);
   assert.deepEqual(f.calls, ["operate.proposeKnowledgeWrite", "owner.read", "operate.approve", "owner.read", "operate.reject"]);
+});
+
+test("RECONCILE_ONLY unknown refusal passes only with unchanged owner snapshot and records the policy branch", async () => {
+  const accepted = knowledgeFixture({ outcome: { state: "pending", historyKind: "action", applyKind: "RECONCILE_ONLY", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } } });
+  const result = await checkKnowledgeWrite(KNOWLEDGE_PAGE, accepted.steps);
+  assert.equal(result.ok, true);
+  assert.match(result.detail, /status=pending kind=action code=FORBIDDEN outcome=unknown applyKind=RECONCILE_ONLY/);
+  assert.match(result.detail, /acceptanceBranch=RECONCILE_ONLY_unknown_with_unchanged_owner_snapshot/);
+
+  const changed = knowledgeFixture({ outcome: { state: "pending", applyKind: "RECONCILE_ONLY", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } }, after: { ...KNOWLEDGE_PAGE, version: 8 } });
+  assert.equal((await checkKnowledgeWrite(KNOWLEDGE_PAGE, changed.steps)).ok, false);
+
+  const otherKind = knowledgeFixture({ outcome: { state: "pending", applyKind: "PROPOSAL_APPROVE", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } } });
+  assert.equal((await checkKnowledgeWrite(KNOWLEDGE_PAGE, otherKind.steps)).ok, false);
 });
 
 test("operate knowledge write: explicit proposal refusal still needs an unchanged owner read", async () => {
