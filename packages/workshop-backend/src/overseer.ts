@@ -1788,7 +1788,11 @@ function actionOriginOf(record: ActionRecord & {type: "action"},
   // (FAC-14 K2), which names that person for the decider.
   let caller = record.caller as GatekeeperCaller | undefined;
   if (caller?.from === "operateAgent") {
-    return {kind: "agent-turn", onBehalfOf: {profileId: caller.profileId, name: caller.name ?? caller.profileId}};
+    // FAC-134 capability 2 (r1's LOW 3): a step of the person's own approved personal workflow says
+    // so, for the decider, beside whom it is for.
+    return {kind: "agent-turn", onBehalfOf: {profileId: caller.profileId, name: caller.name ?? caller.profileId},
+      ...(caller.personalWorkflowStep ? {personalWorkflowStep: {runId: caller.personalWorkflowStep.runId,
+        index: caller.personalWorkflowStep.index}} : {})};
   }
   return caller?.from === "agent" ? {kind: "agent-turn"} : undefined;
 }
@@ -13866,6 +13870,12 @@ class OverseerImpl implements AgentHooks {
 
   #advancingPersonalWorkflows = false;
 
+  /**
+   * How long a personal workflow step may take in its console workspace (r1's LOW 1): the console
+   * tools' deadline. A test seam: a test shortens it rather than waiting.
+   */
+  personalWorkflowStepDeadlineMs = CONSOLE_TOOL_DEADLINE_MS;
+
   async #advancePersonalWorkflowRun(store: PersonalWorkflowStore, run: StoredPersonalWorkflowRun): Promise<void> {
     let end = (state: "succeeded" | "failed" | "uncertain", reason?: "step-refused" | "step-unknown") => {
       run = {...run, state, ...(reason ? {reason} : {}), endedAt: new Date(),
@@ -13898,7 +13908,11 @@ class OverseerImpl implements AgentHooks {
       let result: PersonalWorkflowStepResult;
       try {
         let workspace = ns.get(ns.idFromString(step.workspaceId));
-        result = personalWorkflowStepResultOf(await workspace.requestPersonalWorkflowStep(caller, {runId: run.runId, index}));
+        // r1's LOW 1: bounded, past the console workspace's own deadline, so one gatekeeper that
+        // never answers leaves this step unknown and never holds the session's other runs.
+        result = personalWorkflowStepResultOf(await beforeDeadline<unknown>(
+            workspace.requestPersonalWorkflowStep(caller, {runId: run.runId, index}) as Promise<unknown>,
+            Date.now() + this.personalWorkflowStepDeadlineMs + PERSONAL_WORKFLOW_STEP_MARGIN_MS));
       } catch (error) {
         this.logger.warn("a personal workflow step's request went unanswered", {
           event: "operate.personal_workflow.step_unanswered", operation: run.runId, sequence: index, error,
@@ -14023,26 +14037,33 @@ class OverseerImpl implements AgentHooks {
     let refused = (detail: string): PersonalWorkflowStepResult => ({status: "refused", detail});
     let {runId, index} = request ?? {};
     if (typeof caller?.sessionWorkspaceId !== "string" || typeof caller.profileId !== "string" ||
-        caller.sessionWorkspaceId === this.ctx.id.toString()) {
+        typeof runId !== "string" || !Number.isSafeInteger(index) || caller.sessionWorkspaceId === this.ctx.id.toString()) {
       return refused(UNVERIFIED_CONSOLE_TOOL_CALLER);
     }
+    // r1's LOW 1: every await is bounded, so a gatekeeper that never answers can't hold the step.
+    let deadlineAt = Date.now() + this.personalWorkflowStepDeadlineMs;
     let ns = this.ctx.exports.OverseerDurableObject;
     let step: PersonalWorkflowStep | null;
+    let checked;
+    let personName: string;
     try {
-      step = await ns.get(ns.idFromString(caller.sessionWorkspaceId)).personalWorkflowStepFor(runId, index, caller.profileId);
-    } catch {
-      return refused(PERSONAL_WORKFLOW_NOT_RUNNING);
+      step = await beforeDeadline(
+          ns.get(ns.idFromString(caller.sessionWorkspaceId)).personalWorkflowStepFor(runId, index, caller.profileId), deadlineAt);
+      if (!step || step.workspaceId !== this.ctx.id.toString()) return refused(PERSONAL_WORKFLOW_NOT_RUNNING);
+      checked = await beforeDeadline(this.#personalWorkflowStepChecks(caller, step), deadlineAt);
+      if ("refusal" in checked) return refused(checked.refusal);
+      personName = (await beforeDeadline(checked.user.whoami(), deadlineAt)).name;
+    } catch (error) {
+      // Nothing was asked of the board yet.
+      return refused(error instanceof ConsoleToolDeadlineError ? TOOL_TIMED_OUT : PERSONAL_WORKFLOW_NOT_RUNNING);
     }
-    if (!step || step.workspaceId !== this.ctx.id.toString()) return refused(PERSONAL_WORKFLOW_NOT_RUNNING);
-    let checked = await this.#personalWorkflowStepChecks(caller, step);
-    if ("refusal" in checked) return refused(checked.refusal);
-    let {user, generation, sharing, command, facet} = checked;
-    let personName = (await user.whoami()).name;
+    let {generation, sharing, command, facet} = checked;
+    let stepNow = step;
     let requester: GatekeeperCaller = {from: "operateAgent", userId: caller.userId, profileId: caller.profileId,
       sessionWorkspaceId: caller.sessionWorkspaceId, name: personName, personalWorkflowStep: {runId, index}};
     let stillOffered = () => {
       try {
-        let found = this.#consoleStore().offeredCommand(step.consoleId, step.revision, step.gadgetId, command.name).command;
+        let found = this.#consoleStore().offeredCommand(stepNow.consoleId, stepNow.revision, stepNow.gadgetId, command.name).command;
         return found.gatekeeperId === command.gatekeeperId && found.command === command.command;
       } catch {
         return false;
@@ -14053,17 +14074,24 @@ class OverseerImpl implements AgentHooks {
       return this.authzGeneration() === generation && !!current && roleRank(current) >= roleRank("use") && stillOffered();
     };
     if (!finalCheck()) return refused(CONSOLE_CHANGED_DURING_CALL);
+    // r1's LOW 2: once per (session, run, step), ever, marked with no await since the check, so a
+    // second request for the same step during its sending window places nothing.
+    let mark = `fac134:personalStep:${caller.sessionWorkspaceId}:${runId}:${index}`;
+    if (this.ctx.storage.kv.get(mark) !== undefined) return refused(PERSONAL_WORKFLOW_STEP_ASKED);
+    this.ctx.storage.kv.put(mark, {at: Date.now()});
     let receipt;
     try {
-      using session = await this.openGatekeeperSession(command.gatekeeperId, facet, requester) as unknown as
+      using session = await beforeDeadline(this.openGatekeeperSession(command.gatekeeperId, facet, requester), deadlineAt) as unknown as
           InferOpsBoardCommandSession;
-      using issue = await session.openIssue(step.input.issueId);
+      using issue = await beforeDeadline(session.openIssue(stepNow.input.issueId), deadlineAt);
       // D2: the revision as the issue is now, read as the person through the same connection.
-      let {revision} = await issue.read();
+      let {revision} = await beforeDeadline(issue.read(), deadlineAt);
       // The final check, with no await before the gatekeeper is asked.
       if (!finalCheck()) return refused(CONSOLE_CHANGED_DURING_CALL);
-      receipt = await issue.transition(step.input.toStateId, revision);
+      receipt = await beforeDeadline(issue.transition(stepNow.input.toStateId, revision), deadlineAt);
     } catch (error) {
+      // Past the deadline the request may or may not have been placed: unknown, never refused.
+      if (error instanceof ConsoleToolDeadlineError) return {status: "unknown", detail: PERSONAL_WORKFLOW_STEP_LOST};
       // The board's or its gatekeeper's answer (an unknown state, a move already waiting): nothing
       // was placed. Its words stay in the owner's own record.
       let message = error instanceof Error ? error.message.slice(0, WIDGET_TOOL_LIMITS.errorLength) : "";
@@ -16191,6 +16219,10 @@ const PERSONAL_WORKFLOW_STEP_NOT_OFFERED = "It isn't a command a console of your
 const PERSONAL_WORKFLOW_UNCHECKED = "A step of this workflow couldn't be checked now. Nothing was created; approve it again later.";
 /** Recorded: a step's request may or may not have been placed. */
 const PERSONAL_WORKFLOW_STEP_LOST = "This step's request may or may not have been placed: its answer was lost.";
+/** Refused at a step: its request was already asked for once, so it is never placed twice (r1's LOW 2). */
+const PERSONAL_WORKFLOW_STEP_ASKED = "This step's request was already asked for.";
+/** How much longer the session waits for a step than the console workspace's own deadline. */
+const PERSONAL_WORKFLOW_STEP_MARGIN_MS = 5_000;
 /** Refused at a step: the session doesn't vouch that it is running this step. */
 const PERSONAL_WORKFLOW_NOT_RUNNING = "This step isn't one your operate session is running now.";
 /** The refusal of a personal workflow at approval, naming the step but never which check refused it. */

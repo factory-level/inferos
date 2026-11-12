@@ -2703,7 +2703,16 @@ export type ActionRequester = "agent" | "person" | "gadget" | "hook";
  */
 export type ActionContext = (
   | { kind: "workflow-run"; hookId: WorkpieceId; assigned: boolean; runId?: string; requestedBy?: string | null; triggerLabel?: string }
-  | { kind: "agent-turn"; onBehalfOf?: { profileId: string; name: string } }
+  | {
+      kind: "agent-turn";
+      onBehalfOf?: { profileId: string; name: string };
+      /**
+       * Set when this request is a step of `onBehalfOf`'s own approved personal workflow (FAC-134
+       * capability 2), not the agent's: which run and step (from 0). A record of where it came from,
+       * for the decider; never authority.
+       */
+      personalWorkflowStep?: { runId: string; index: number };
+    }
   | { kind: "declared-run" }
 ) & {
   /**

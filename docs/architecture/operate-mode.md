@@ -1050,6 +1050,7 @@ FAC-134, capability 2 (the lead's decisions D1 (B), D2 (B) and D3, and r1's thre
   - **Asks its console workspace's kernel-only `requestPersonalWorkflowStep`,** which replaces only FAC-14's open-page check (`consoleSessionCheck`).
   - **Is vouched for by the session:** the console workspace calls back the session the caller names (`personalWorkflowStepFor`). That session answers only for its owner's live session running exactly that step of one of their runs, with it marked `sending`. Nothing else in the kernel can make a session vouch, and no client, agent tool or gatekeeper reaches the entry: it's on the Durable Object only, not on any `Overseer` interface.
   - **Makes every other check again** (`#personalWorkflowStepChecks`), then once more with no await before the gatekeeper is asked: the authz generation, role, still offered as published.
+  - **Is bounded and asked once** (r1's LOWs 1 and 2). Every await in the console workspace takes the console tools' deadline (`personalWorkflowStepDeadlineMs`, `CONSOLE_TOOL_DEADLINE_MS`). The session's runner waits for it, plus `PERSONAL_WORKFLOW_STEP_MARGIN_MS`. A step past the deadline once its request may have been sent is `unknown` (`step-unknown`), so a gatekeeper that never answers can't hold the session's other runs. Before the board is asked, the console workspace marks the step `fac134:personalStep:<session>:<run>:<index>`, with no await since its final check. A second request for the same step is refused and places nothing.
   - **Reads the issue's current revision** as the person, through the same connection (`issue.read()`, D2). It requests the transition at that revision as `{from: "operateAgent", …, personalWorkflowStep: {runId, index}}`: a pending, manual-only action in the console's workspace. It shows the issue's current state and that revision, and the console's builders decide it.
   - **Has a result:** `requested`, `unchanged` (already in that state), `refused` (its cause in kernel words, kept only in the run record) or `unknown`.
 - **Outcome** (D3). The run ends:
@@ -1064,6 +1065,7 @@ FAC-134, capability 2 (the lead's decisions D1 (B), D2 (B) and D3, and r1's thre
     - **Submit:** the kernel's field lists every step and says the revision is read when it runs; reserved labels, two markers, a revision in a step and 11 steps are refused; never auto-approved.
     - **Create:** created once after W's checks. It's refused, with nothing created and no check named, for a command not offered, another revision, another widget, a workspace id of none, another company's board, a binding no longer a board, no role, and a person of another company. There are no effects for an automatic or agent resolver, and it's refused for another person or outside an operate session.
     - **Run:** steps requested in order at the revision read when they run (the issue changed between approval and run), each a pending, manual-only request showing that revision, reported once as `succeeded`. A role ended after creation stops it at that step with nothing sent: `step-refused`, the cause only in the record. Each FAC-14 re-check refuses the step, with nothing placed: the generation, publication, binding, company and input. A step found still sending is `uncertain` and not sent again. Another session's reference, an unknown workflow and another person's approval are refused.
+    - **r1's LOWs:** a gatekeeper that never answers gives `step-unknown`, and the session's next run still runs; a second request for a sending step places nothing; the action context carries `personalWorkflowStep`; no operate agent tool is named for a personal workflow.
     - **The entry:** nothing is requested for a step the session isn't sending, another run or step, another person naming the session, a session running nothing, or the console workspace itself. No client interface has it. The console tools' own command path still requires the open page.
   - **Mutations** (each caught, then restored):
     - the session vouching for any step;
@@ -1072,7 +1074,7 @@ FAC-134, capability 2 (the lead's decisions D1 (B), D2 (B) and D3, and r1's thre
     - the step sending the stored revision.
 - **Not covered:**
   - **UI and gatekeeper:** the gatekeeper's actions for both markers, and the person's list of their workflows, are capability 2's next PR.
-  - **The decider's view:** the decider sees the step as the operate agent's request for the person (`onBehalfOf`). `personalWorkflowStep` is recorded on the caller but not shown yet.
+  - **The decider's view:** `actionContextOf` gives the step's action an `agent-turn` context with `onBehalfOf` and `personalWorkflowStep: {runId, index}` (r1's LOW 3). Saying "a step of <person>'s approved personal workflow" in words is the UI's (#475).
   - **Kept rows:** `personalWorkflowRuns` keeps the latest `PERSONAL_WORKFLOW_RUNS_KEPT` (100) ended runs.
 
 ### Agent widget verbs
