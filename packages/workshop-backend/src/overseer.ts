@@ -13451,14 +13451,6 @@ class OverseerImpl implements AgentHooks {
   }
 
   /**
-   * FAC-120: starts the run `reference` names, as `profileId`, who is approving action `actionId`
-   * here now (ApprovedEffects.invokeWorkflow; applyPendingAction mints one only for an action that
-   * declared it). The trigger's own workspace decides (`invokeTriggerAs`), with this workspace as
-   * the person's operate session, which it checks, keyed by this workspace and action so a retry
-   * returns the same run. A call that may have reached it but didn't answer is `unknown`, never a
-   * refusal. Every answer is kernel text.
-   */
-  /**
    * Creates the temporary canvas action `actionId` declared (FAC-137) for the person who approved it
    * (`profileId`), in this workspace, which must be their own live operate session
    * (`temporaryCanvasesOf`). Each widget is checked first as one offered to them now: a console
@@ -13512,6 +13504,14 @@ class OverseerImpl implements AgentHooks {
     }
   }
 
+  /**
+   * FAC-120: starts the run `reference` names, as `profileId`, who is approving action `actionId`
+   * here now (ApprovedEffects.invokeWorkflow; applyPendingAction mints one only for an action that
+   * declared it). The trigger's own workspace decides (`invokeTriggerAs`), with this workspace as
+   * the person's operate session, which it checks, keyed by this workspace and action so a retry
+   * returns the same run. A call that may have reached it but didn't answer is `unknown`, never a
+   * refusal. Every answer is kernel text.
+   */
   async #invokeApprovedWorkflow(profileId: string, reference: string, actionId: number): Promise<ApprovedWorkflowRun> {
     let ref = parseWorkflowTriggerRef(reference);
     if (!ref) return {status: "refused", kind: "invalid", reason: WORKFLOW_REFERENCE_UNKNOWN};

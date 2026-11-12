@@ -188,6 +188,47 @@ describe("the approved effect (FAC-137 K2)", () => {
   });
 });
 
+describe("once per action, across applies (FAC-137 K2, r1)", () => {
+  it("creates one canvas when an apply ends unknown but retryable after creating it, and the person approves again", () =>
+    runInDurableObject(env.TEST_OVERSEER.getByName(`approved-canvas-twice-${++counter}`), async (instance: OverseerDurableObject) => {
+      let impl = (instance as unknown as { impl: any }).impl;
+      impl.users = {
+        idFromName: (profileId: string) => ({ toString: () => uid(profileId) }),
+        idFromString: (id: string) => id,
+        get: () => ({ searchWidgets: async (query: string) => ({ status: "searched", ranking: "keyword", denied: 0,
+          unsearched: 0, definitions: [], hits: [BOARD.kind, ISSUES.kind].filter(kind => kind === query)
+            .map(kind => ({ kind, description: kind, score: 1 })) }) }),
+      };
+      impl.ownerId = uid(ADA.id);
+      impl.storage.operateSession.put(true);
+      impl.storage.gatekeepers.put({ id: 41, resourceTitle: "Your Dot", class: {} as any,
+        creationSpec: { type: "gatekeeper", vendorId: "inferops", resourceUrl: "test://x", typeUrlPattern: "test://*" } });
+      let answers: ApprovedTemporaryCanvas[] = [];
+      let applies = 0;
+      impl.getGatekeeperFacet = () => ({
+        applyAction: async (_action: number, _cache: unknown, effects?: ApprovedEffects) => {
+          answers.push(await effects!.createTemporaryCanvas());
+          // The first apply ends after the canvas was created with an outcome it can't be sure of,
+          // which it says may be tried again: the kernel lets the person approve it again.
+          if (++applies === 1) return { failed: { outcome: "unknown", retryable: true, message: "connection lost" } };
+          return undefined;
+        },
+      });
+      await impl.submitAction(41, 1, PROPOSAL, { from: "gatekeeper" });
+      let actionId = (Array.from(impl.storage.actions.list()).find((a: any) => a.type === "action") as any).id;
+      let current = () => impl.storage.actions.get(actionId);
+      try { await impl.applyPendingAction(current(), ADA, false); } catch { /* recorded as unknown, retryable */ }
+      try { await impl.applyPendingAction(current(), ADA, false); } catch { /* recorded */ }
+
+      expect(applies).toBe(2);
+      expect(answers).toHaveLength(2);
+      expect(answers[0]).toMatchObject({ status: "created" });
+      expect(answers[1]).toEqual(answers[0]);
+      let canvases = Array.from(impl.storage.temporaryCanvases.list()) as any[];
+      expect(canvases.map(canvas => canvas.id)).toEqual([(answers[0] as any).canvasId]);
+    }));
+});
+
 describe("who and what the approved canvas is for (FAC-137 K2: N2, N6, N7)", () => {
   it("creates nothing for anyone but the session's own person (N6)", async () => {
     let grace = { type: "user", id: "grace", name: "Grace" };
