@@ -13356,6 +13356,22 @@ class OverseerImpl implements AgentHooks {
   }
 
   /**
+   * Remove a workflow trigger without interrupting a run already admitted for it (FAC-121).
+   * The first request pauses the trigger and stops new starts. If a run is still executing, the
+   * caller gets a fixed retry message; after it drains, the next request retires the trigger and
+   * keeps the run's history. Non-workflow hooks retain the immediate delete behavior.
+   */
+  async removeHookWithDrain(hookId: number, by: AiChatAuthorInfo): Promise<void> {
+    if (!this.storage.boundHooks.get(hookId)) return;
+    if (!this.workflowDefinitionStore().pinOf(hookId)) return this.deleteHook(hookId);
+    let lifecycle = await this.pauseTrigger(hookId, by);
+    if (lifecycle.state !== "paused") {
+      throw new Error("This workflow is paused while its run finishes. Remove it again when the run is complete.");
+    }
+    await this.retireTrigger(hookId, by);
+  }
+
+  /**
    * Cancel the run person's request `invocationId` made, as `caller` (FAC-117): the person who asked,
    * or the definition's owner or someone it is shared with to edit (`role` is theirs here). Anyone
    * else is told it doesn't exist. A queued run ends now; a running one has its sessions ended, so
@@ -17921,9 +17937,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.impl.cancelWorkflowRun(invocationId, profile, roleOf(profile.id));
   }
 
+  /**
+   * Deletes an ordinary hook immediately; a workflow trigger is paused first and retired after
+   * its admitted runs finish, preserving their history (FAC-121).
+   */
   async deleteHook(id: number): Promise<void> {
     await this.#requireSharedConfiguration("build", "shared");
-    return this.impl.deleteHook(id);
+    return this.impl.removeHookWithDrain(id, await this.#getClientProfile());
   }
 
   // Resume a turn suspended on awaitDecision once approving `approvedId` leaves all of that turn's

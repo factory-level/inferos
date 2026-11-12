@@ -839,6 +839,32 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
     await withImpl(name, impl => expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "paused" }));
   });
 
+  it("removing a workflow trigger pauses new starts, lets its admitted run finish, then retires on retry", async () => {
+    let name = `life-remove-${crypto.randomUUID()}`;
+    let id = await withImpl(name, async impl => {
+      let { deliveryId } = queuedFirst(impl);
+      withController(impl);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      await expect(impl.removeHookWithDrain(HOOK, ADA)).rejects.toThrow(
+        "This workflow is paused while its run finishes. Remove it again when the run is complete.");
+      expect(impl.storage.boundHooks.get(HOOK).enabled).toBe(false);
+      expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "draining" });
+      await expect(invokeWorkflowTrigger(impl, "operator-user", PERSON, HOOK)).rejects.toThrow();
+      return deliveryId;
+    });
+
+    let completed = await settled(name, id);
+    expect(completed.execution).toMatchObject({ state: "finished" });
+    expect(callsIn(name)).toBe(1);
+    await withImpl(name, async impl => {
+      expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "paused" });
+      await impl.removeHookWithDrain(HOOK, ADA);
+      expect(impl.storage.boundHooks.get(HOOK)).toBeUndefined();
+      expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "retired" });
+      expect(deliveryOf(impl, id).execution).toMatchObject({ state: "finished" });
+    });
+  });
+
   it("refuses a run admitted after the pause's recorded time, and its write, while earlier ones go on", async () => {
     await withImpl(`life-narrow-${crypto.randomUUID()}`, async impl => {
       let { deliveryId } = queuedFirst(impl);
