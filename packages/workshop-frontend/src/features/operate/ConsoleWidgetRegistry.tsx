@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import { Button, Checkbox, Input, Select } from '@cloudflare/kumo'
 import { MAX_CONSOLE_WIDGETS, type ConsoleWidgetCandidate, type ConsoleWidgetEntry } from '@gadgets/workshop-shared/operate-console'
+import type { WidgetCommandDeclaration } from '@gadgets/workshop-shared/widget-tools'
+import { ConsoleCommandBindings, type BoardConnection } from './ConsoleCommandBindings'
 
 /** A widget install as the registry editor offers it: the kernel's description, with its title. */
 export type TitledWidgetCandidate = ConsoleWidgetCandidate & { title: string }
@@ -25,7 +27,7 @@ const surfacesText = (surfaces: ConsoleWidgetCandidate['surfaces']) => !surfaces
  * stable version, the commit its install is at and what it offers, and, once published, the commit
  * operators run. Publishing the console freezes it for operators; the kernel checks every entry again.
  */
-export const ConsoleWidgetRegistry = ({ widgets, published, candidates, hostBoardCount = 0, disabled, onChange }: {
+export const ConsoleWidgetRegistry = ({ widgets, published, candidates, hostBoardCount = 0, disabled, commands, onChange }: {
   widgets: ConsoleWidgetEntry[]
   /** The registry operators use now, or undefined if the console was never published. */
   published: ConsoleWidgetEntry[] | undefined
@@ -34,6 +36,16 @@ export const ConsoleWidgetRegistry = ({ widgets, published, candidates, hostBoar
   /** Host boards the console holds, which count toward the same limit. */
   hostBoardCount?: number
   disabled: boolean
+  /**
+   * What the builder needs to bind a widget's declared commands (FAC-14): the console's board
+   * references, whether this person may edit, and the two reads. Absent, commands aren't shown.
+   */
+  commands?: {
+    boardTargets: string[]
+    editable: boolean
+    loadCommands: (commitId: string) => Promise<WidgetCommandDeclaration[]>
+    resolveBoard: (target: string) => Promise<BoardConnection | null>
+  }
   onChange: (widgets: ConsoleWidgetEntry[]) => void
 }) => {
   const [selected, setSelected] = useState('')
@@ -88,6 +100,11 @@ export const ConsoleWidgetRegistry = ({ widgets, published, candidates, hostBoar
                 {live?.frozen ? ` · Operators run ${shortCommit(live.frozen.commitId)}` : ''}
               </p>
               {refusal && <p className="text-xs text-kumo-danger">Can't be offered: {refusal}</p>}
+              {commands && !entry.frozen && candidate && <ConsoleCommandBindings commitId={candidate.commitId ?? null}
+                bindings={entry.commands ?? []} boardTargets={commands.boardTargets} editable={commands.editable}
+                disabled={disabled} loadCommands={commands.loadCommands} resolveBoard={commands.resolveBoard}
+                onChange={bound => onChange(widgets.map(item => item.gadgetId !== entry.gadgetId ? item
+                  : bound.length > 0 ? { ...item, commands: bound } : (({ commands: _, ...rest }) => rest)(item)))} />}
             </div>
             <Button size="sm" variant="ghost" disabled={disabled} aria-label={`Remove ${entry.label}`}
               onClick={() => onChange(widgets.filter(item => item.gadgetId !== entry.gadgetId))}>Remove</Button>
