@@ -58,15 +58,17 @@ export function manualOnly(record: {
 
 /**
  * The single authority on whether an action may be applied without a human: the enabling rule if
- * the author marked the action `autoApprovable`, a user enabled a rule for its `actionKind` on
- * this gatekeeper and still has Build access, and the workspace has not latched restricted mode;
- * else undefined.
+ * the author marked the action `autoApprovable`, it declares no workflow run (FAC-120), a user
+ * enabled a rule for its `actionKind` on this gatekeeper and still has Build access, and the
+ * workspace has not latched restricted mode; else undefined.
  */
 export function autoApprovalRule(
     storage: AutoApprovalStorage, roleOf: EffectiveRoleLookup, gatekeeperId: number,
     description: ActionDescription)
     : AutoApproveTagRecord | undefined {
   if (description.autoApprovable !== true) return undefined;
+  // A declared workflow run (FAC-120) starts only on a person's own approval: no rule approves it.
+  if (description.workflowRun !== undefined) return undefined;
   let tag = description.actionKind?.tag;
   if (tag === undefined) return undefined;
   if (storage.containsRestrictedData.get()) return undefined;

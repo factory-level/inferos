@@ -13,6 +13,7 @@
 export const UNIT_NODE: readonly string[] = [
   "admin-config.test.ts",
   "agent-catalog.test.ts",
+  "rpc-target-validation.test.ts",
   "agent-compaction.test.ts",
   "agent-tool-results.test.ts",
   "ai-gateway.test.ts",
@@ -122,6 +123,7 @@ export const WORKERD_LIGHT: readonly string[] = [
 export const BACKEND: readonly string[] = [
   "workspace-readiness.test.ts",
   "agent-spawner-config.test.ts",
+  "approved-workflow-run.test.ts",
   "operate-flow-start.test.ts",
   "widget-state.test.ts",
   "widget-event-navigation.test.ts",
