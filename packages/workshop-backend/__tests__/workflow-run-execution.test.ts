@@ -21,6 +21,7 @@ import {
 } from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
 import { WORKFLOW_ASSIGNMENTS_DISABLED, actionDescriptionDigest } from "../src/system-run.js";
+import { UNPUBLISHED_REVISION_OWNER_CANT_BUILD } from "../src/workflow-definition-store.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -1258,10 +1259,16 @@ describe("retrying a failed run, and settling a write whose outcome is unknown (
   // r1 on FAC-117 K2: a retry re-runs the call as admitted, so it runs only what a fresh request
   // would: the trigger's current definition and revision, within a day of the run's admission, and
   // with assignments off never an assigned trigger's run.
-  /** Repins the trigger to revision 2, as a builder does when revision 1 was wrong. */
+  /**
+   * Repins the trigger to another published definition at the same code, as a builder does when the
+   * old one was wrong: still runnable (FAC-111), only not the run's own.
+   */
   const repin = (impl: any) => {
+    let store = impl.workflowDefinitionStore();
+    let other = store.save(ADA, { title: "Refund, fixed", gadgetId: GADGET }, (id: number) => (id === GADGET ? commit(1) : undefined), "build");
+    store.publish(ADA, other.id, 1);
     let pin = impl.storage.workflowTriggerPins.get(HOOK);
-    impl.storage.workflowTriggerPins.put({ ...pin, revision: 2, mode: "pinned" });
+    impl.storage.workflowTriggerPins.put({ ...pin, definitionId: other.id, revision: 1, mode: "pinned" });
   };
   const nothingQueued = (impl: any, deliveryId: number) => {
     expect(deliveryOf(impl, deliveryId).execution).toMatchObject({ state: "failed" });
@@ -1291,9 +1298,10 @@ describe("retrying a failed run, and settling a write whose outcome is unknown (
     let name = `k2-retry-repin-race-${crypto.randomUUID()}`;
     let ids = await ranOnce(name, lost);
     await withImpl(name, async impl => {
-      // The repin lands during requireRunRequester's await, after the early check passed.
+      // The repin lands during requireRunRequester's await (the second roles read), after the early check passed.
+      let reads = 0;
       onPrototype(impl, "definitionRoles", async function (this: any) {
-        repin(this);
+        if (++reads === 2) repin(this);
         return () => "use";
       });
       await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_RUN_RETRY_REFUSED.repinned);
@@ -1327,6 +1335,40 @@ describe("retrying a failed run, and settling a write whose outcome is unknown (
         impl.env = realEnv;
         impl.users = realUsers;
       }
+      nothingQueued(impl, ids.deliveryId);
+    });
+  });
+
+  it("is refused once the pinned revision can't run now, as a fresh request is (FAC-111)", async () => {
+    // The gadget's code moved past the revision's commit.
+    let moved = `k2-retry-head-moved-${crypto.randomUUID()}`;
+    let ids = await ranOnce(moved, lost);
+    await withImpl(moved, async impl => {
+      onPrototype(impl, "getGadgetHead", (id: number) => (id === GADGET ? commit(2) : undefined));
+      await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow("The workflow changed since revision 1 was saved");
+      nothingQueued(impl, ids.deliveryId);
+    });
+    // Pinned to a revision that isn't published, whose owner can no longer build here (the fixture
+    // answers "use" for everyone, the owner included).
+    let unpublished = `k2-retry-unpublished-${crypto.randomUUID()}`;
+    let run = await ranOnce(unpublished, lost);
+    await withImpl(unpublished, async impl => {
+      let pin = impl.storage.workflowTriggerPins.get(HOOK);
+      impl.storage.workflowTriggerPins.put({ ...pin, mode: "pinned" });
+      let definition = impl.storage.workflowDefinitions.get(pin.definitionId);
+      impl.storage.workflowDefinitions.put({ ...definition, published: undefined });
+      await expect(impl.retryWorkflowRun(run.invocationId, OPERATOR)).rejects.toThrow(UNPUBLISHED_REVISION_OWNER_CANT_BUILD);
+      nothingQueued(impl, run.deliveryId);
+    });
+  });
+
+  it("is refused at retry, not at its start, while the trigger's connections aren't set up (FAC-123)", async () => {
+    let name = `k2-retry-unbound-${crypto.randomUUID()}`;
+    let ids = await ranOnce(name, lost);
+    await withImpl(name, async impl => {
+      // The seam requireBound answers through; a duplicate with an unmet binding is refused so.
+      onPrototype(impl, "requireHookBound", () => { throw new Error("This workflow needs its connections set up before it can run."); });
+      await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow("needs its connections set up");
       nothingQueued(impl, ids.deliveryId);
     });
   });

@@ -18,6 +18,9 @@ import {
 import type { OverseerStorage } from "./overseer";
 import type { HookOccurrence } from "@gadgets/workshop-shared/gatekeeper";
 
+/** FAC-111: a trigger pinned to an unpublished revision runs only while that revision's owner can build here. */
+export const UNPUBLISHED_REVISION_OWNER_CANT_BUILD = "This trigger runs an unpublished revision whose owner can no longer build here.";
+
 /** A workflow definition as stored: every saved revision, whoever is looking. */
 export type StoredWorkflowDefinition = Omit<WorkflowDefinition, "revisions" | "duplicatedFrom" | "bindingsNeeded"> & {
   revisions: WorkflowDefinitionRevision[];
@@ -823,7 +826,7 @@ export class WorkspaceWorkflowDefinitionStore {
     }
     if (pin.mode !== "follow-latest" && stored.published?.revision !== pin.revision &&
         roleOf(stored.owner.id) !== "build") {
-      throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
+      throw new Error(UNPUBLISHED_REVISION_OWNER_CANT_BUILD);
     }
     // Keep expiry progress even when the subsequent admission is refused at the cap. That
     // transaction throws by design, which would otherwise roll back its own cleanup. One
@@ -932,6 +935,21 @@ export class WorkspaceWorkflowDefinitionStore {
     this.storage.workflowOccurrenceExpiries.delete(expiryKey);
     let count = this.storage.workflowOccurrenceCounts.get(hookId)?.count ?? 0;
     this.storage.workflowOccurrenceCounts.put({ hookId, count: Math.max(0, count - 1) });
+  }
+
+  /**
+   * Refuses, as `fire` does (FAC-111), when trigger `hookId` is pinned to a revision that isn't the
+   * published one and whose definition's owner can no longer build here (`roleOf`). For a caller that
+   * doesn't go through `fire`: a retry, which queues its kept call again (FAC-117 K2).
+   */
+  requireUnpublishedOwnerBuilds(hookId: number, roleOf: (profileId: string) => CollaboratorRole | null): void {
+    let pin = this.storage.workflowTriggerPins.get(hookId);
+    if (!pin) throw new Error(CANNOT_RUN);
+    let stored = this.storage.workflowDefinitions.get(pin.definitionId);
+    if (pin.mode !== "follow-latest" && stored && stored.published?.revision !== pin.revision &&
+        roleOf(stored.owner.id) !== "build") {
+      throw new Error(UNPUBLISHED_REVISION_OWNER_CANT_BUILD);
+    }
   }
 
   /**

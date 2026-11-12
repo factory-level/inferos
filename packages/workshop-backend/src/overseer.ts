@@ -13411,8 +13411,10 @@ class OverseerImpl implements AgentHooks {
    * of the same run (`WorkspaceWorkflowDefinitionStore.retryRun`), so `attempts` bounds it and every
    * write it proposes again is matched to the one it made, never applied twice (`#runWrite`). Only the
    * person who asked; anyone else, and a run that doesn't exist, are told "No such run.". Before
-   * anything is queued: the trigger live, enabled and active (not draining, paused or retired), with
-   * assignments off not assigned, and not auto-retired, as a fresh request is refused (FAC-102); the run's own state
+   * anything is queued, as a fresh request is refused: the trigger live, enabled and active (not
+   * draining, paused or retired), its connections set up (FAC-123), with assignments off not
+   * assigned and not auto-retired (FAC-102), and its pinned revision still runnable (FAC-111:
+   * `requireCurrentRevision`, and an unpublished revision's owner still able to build); the run's own state
    * (failed, not cancelled, attempts left, its trigger still pinned to the run's own definition and
    * revision, admitted within `WORKFLOW_RUN_RETRY_WINDOW_MS`: `requireRetryable`, checked again in
    * `retryRun`'s transaction); no write of the run that a replay can't match (its description
@@ -13427,13 +13429,22 @@ class OverseerImpl implements AgentHooks {
     let delivery = typeof invocationId === "string" ? store.deliveryOfInvocation(invocationId) : null;
     if (!delivery || delivery.invocation?.requestedBy !== caller.id) throw new Error("No such run.");
     let { hookId, id: deliveryId } = delivery;
+    // Who may build here, resolved before the other awaits and read after the last one (as a fresh request).
+    let roleOf = await this.definitionRoles();
     let requireStarts = () => {
-      requireLiveHook(this, hookId);
+      let record = requireLiveHook(this, hookId);
+      // A duplicate's connections set up (FAC-123), refused here rather than at the run's start.
+      this.requireHookBound(hookId);
       this.requireTriggerStarts(hookId);
       // Assignments off (FAC-102): refused here, as a fresh request is, never left to fail at its start.
       if (!workflowAssignmentsEnabled(this.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
       // Nor once its assignment was retired automatically, until an Admin acts (FAC-102 follow-up B).
       if (store.autoRetiredOf(hookId)) throw new Error(TRIGGER_AUTO_RETIRED);
+      // The pinned revision still runnable (FAC-111), as a fresh request checks it at admission: its
+      // commit still the gadget's head, and an unpublished one's owner still able to build here. A
+      // retry queues its kept call again without going through fire, which checks these too.
+      store.requireCurrentRevision(hookId, record.gadgetId ?? this.defaultGadgetId ?? null, gadgetId => this.getGadgetHead(gadgetId));
+      store.requireUnpublishedOwnerBuilds(hookId, roleOf);
     };
     requireStarts();
     // Its own state first, so a cancelled, spent, repinned or old run is told so, never refused as admission.
