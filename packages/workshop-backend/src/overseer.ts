@@ -1332,6 +1332,8 @@ export const TEMPORARY_CANVAS_WIDGET_UNAVAILABLE = "A widget on this canvas isn'
 export const TEMPORARY_CANVAS_DECLARATION_INVALID = "This canvas proposal isn't valid.";
 /** FAC-137: the canvas could not be created just now; nothing was. */
 export const TEMPORARY_CANVAS_NOT_CREATED = "The canvas could not be created. Nothing was created; try again.";
+/** FAC-137: the canvas this action created was removed or expired since; it isn't made again. */
+export const TEMPORARY_CANVAS_GONE = "This canvas expired or was removed since it was created. Ask your Dot for it again.";
 /** FAC-137: the effect asked for without a declared canvas, or after the apply ended. */
 export const TEMPORARY_CANVAS_NEEDS_APPROVAL = "A temporary canvas is created only by your own approval of one your Dot proposed.";
 
@@ -13570,8 +13572,10 @@ class OverseerImpl implements AgentHooks {
    * canvas. Idempotent per action, and only for the same person in the same live session: the
    * first canvas created is recorded with the approver and the session it was created for
    * (`ApprovedCanvasRecord`). A later ask answers with it only after the owner and live-session
-   * check passes again (r2's HIGH, check a) and only when the record names this approver and this
-   * session (check b); anyone or anything else is refused, never handed the stored canvas.
+   * check passes again (r2's HIGH, check a), only when the record names this approver and this
+   * session (check b), and only while that canvas is still there, neither removed nor expired (r2's
+   * second HIGH, check c); anyone or anything else is refused, never handed the stored canvas, and
+   * a canvas gone since is never created a second time.
    */
   async #createApprovedTemporaryCanvas(profileId: string, declared: unknown, actionId: number): Promise<ApprovedTemporaryCanvas> {
     let refuse = (kind: ActionFailureKind, reason: string): ApprovedTemporaryCanvas => ({status: "refused", kind, reason});
@@ -13589,7 +13593,15 @@ class OverseerImpl implements AgentHooks {
       let earlier = this.ctx.storage.kv.get<ApprovedCanvasRecord>(key);
       if (!earlier) return null;
       if (earlier.approver !== userId || earlier.sessionId !== sessionId) return refuse("permission", TEMPORARY_CANVAS_NOT_YOURS);
-      return {status: "created", canvasId: earlier.canvasId, expiresAt: new Date(earlier.expiresAt)};
+      // (c) The canvas must still be there (r2's second HIGH): one the person removed, or that expired
+      // and was swept or is past its expiry, is refused, never reported created, and never made again.
+      let current;
+      try {
+        current = this.temporaryCanvasStore().get(earlier.canvasId);
+      } catch {
+        return refuse("policy", TEMPORARY_CANVAS_GONE);
+      }
+      return {status: "created", canvasId: current.id, ...(current.expiresAt ? {expiresAt: current.expiresAt} : {})};
     };
     let earlier = stored();
     if (earlier) return earlier;

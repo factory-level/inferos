@@ -1081,10 +1081,12 @@ export interface ApprovedEffects extends RpcTarget {
 
 /**
  * An `ApprovedEffects.createTemporaryCanvas` answer: the canvas created, with the expiry the server
- * set; or refused, so known not created, in a FAC-119 kind with a fixed sentence.
+ * set (absent once the person has saved it, when a retry reads it back); or refused, so known not
+ * created, in a FAC-119 kind with a fixed sentence: also when the canvas this action created was
+ * removed or expired since, which is never created again.
  */
 export type ApprovedTemporaryCanvas =
-  | { status: "created"; canvasId: string; expiresAt: Date }
+  | { status: "created"; canvasId: string; expiresAt?: Date }
   | { status: "refused"; kind: ActionFailureKind; reason: string };
 
 /**

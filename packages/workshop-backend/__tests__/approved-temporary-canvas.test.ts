@@ -13,7 +13,7 @@ import type { ApprovedEffects, ApprovedTemporaryCanvas } from "@gadgets/workshop
 import { workflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
 import { autoApprovalRule } from "../src/auto-approval";
 import {
-  actionContextOf, TEMPORARY_CANVAS_FIELD_LABEL, TEMPORARY_CANVAS_NEEDS_APPROVAL, TEMPORARY_CANVAS_NOT_YOURS,
+  actionContextOf, TEMPORARY_CANVAS_FIELD_LABEL, TEMPORARY_CANVAS_GONE, TEMPORARY_CANVAS_NEEDS_APPROVAL, TEMPORARY_CANVAS_NOT_YOURS,
   TEMPORARY_CANVAS_WIDGET_UNAVAILABLE, type OverseerDurableObject,
 } from "../src/overseer.js";
 
@@ -254,6 +254,30 @@ describe("once per action, across applies, for the same approver in the same liv
     let { answers } = await approvedTwice(ADA, { between: impl => impl.storage.operateSessionRetired.put(true) });
     expect(answers[0]).toMatchObject({ status: "created" });
     expect(answers[1]).toEqual(NOT_YOURS);
+  });
+
+  // r2's second HIGH: the stored answer needs the canvas to still be there.
+  const GONE = { status: "refused", kind: "policy", reason: TEMPORARY_CANVAS_GONE };
+
+  it("refuses the same approver's retry once the canvas it created has expired, and makes no second one", async () => {
+    let { answers, canvases } = await approvedTwice(ADA, { between: impl => {
+      let [created] = Array.from(impl.storage.temporaryCanvases.list()) as any[];
+      impl.storage.temporaryCanvases.put({ ...created, expiresAt: new Date(Date.now() - 1_000) });
+    } });
+    let first = (answers[0] as any).canvasId;
+    expect(answers[0]).toMatchObject({ status: "created" });
+    expect(answers[1]).toEqual(GONE);
+    expect(canvases.filter(canvas => canvas.id !== first)).toEqual([]);
+  });
+
+  it("refuses the same approver's retry once they removed the canvas, and makes no second one", async () => {
+    let { answers, canvases } = await approvedTwice(ADA, { between: impl => {
+      let [created] = Array.from(impl.storage.temporaryCanvases.list()) as any[];
+      impl.temporaryCanvasesOf(uid(ADA.id)).remove(created.id, created.revision);
+    } });
+    expect(answers[0]).toMatchObject({ status: "created" });
+    expect(answers[1]).toEqual(GONE);
+    expect(canvases).toEqual([]);
   });
 
   it("never answers with a stored canvas recorded for another approver or session", async () => {
