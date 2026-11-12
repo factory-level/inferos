@@ -51,12 +51,15 @@ let reported: [string, number, ApprovedRunOutcome][] = [];
 /** What a session's gatekeeper does when its action is applied (round 2), and a gate its report waits on. */
 let applyWith: ((action: number, cache: unknown, effects?: any) => Promise<unknown>) | null = null;
 let outcomeGate: Promise<void> | null = null;
+/** How many of the next hand-offs the gatekeeper's workflowRunOutcome throws on (QA, mutation 3). */
+let outcomeThrows = 0;
 afterEach(() => {
   for (let undo of restore.splice(0)) undo();
   ran = [];
   reported = [];
   applyWith = null;
   outcomeGate = null;
+  outcomeThrows = 0;
 });
 
 /** Replaces `name` on the Overseer implementation's prototype until the test ends. */
@@ -116,6 +119,10 @@ function seams(impl: any) {
       applyAction: async (action: number, cache: unknown, effects?: unknown) => applyWith?.(action, cache, effects),
       workflowRunOutcome: async (action: number, outcome: ApprovedRunOutcome) => {
         await outcomeGate;
+        if (outcomeThrows > 0) {
+          outcomeThrows--;
+          throw new Error("the gatekeeper didn't answer");
+        }
         reported.push([session, action, outcome]);
       },
     };
@@ -475,6 +482,21 @@ describe("an outcome and the approval that started its run (FAC-134, round 2)", 
       expect(await impl.reportApprovedRunOutcome(ACTION, w.id, report)).toBe("retry");
       open();
       expect(await first).toBe("delivered");
+      expect(await impl.reportApprovedRunOutcome(ACTION, w.id, report)).toBe("delivered");
+    });
+    expect(reported).toHaveLength(1);
+  });
+
+  it("sends again at once after the gatekeeper threw: a failed send leaves no mark to answer retry", async () => {
+    let w = await triggerWorkspace();
+    let s = await sessionWith(w.reference);
+    let report = { kind: "workflow-run" as const, runId: "run-1", outcome: "succeeded" as const, requestedBy: PERSON, ranAs: "gadget_bindings" as const };
+    outcomeThrows = 1;
+    await withImpl(s, async impl => {
+      seams(impl);
+      // The sender's try fails, and it retries: the next try is sent, never told `retry`.
+      let first = await impl.reportApprovedRunOutcome(ACTION, w.id, report).then(() => "answered", (error: Error) => error.message);
+      expect(first).toBe("the gatekeeper didn't answer");
       expect(await impl.reportApprovedRunOutcome(ACTION, w.id, report)).toBe("delivered");
     });
     expect(reported).toHaveLength(1);
