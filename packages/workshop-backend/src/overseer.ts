@@ -21,7 +21,7 @@ import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
   maxWorkflowDeliveries, workflowRunHistoryRetentionMs,
   WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS, WORKFLOW_BINDINGS_UNATTRIBUTED, parseWorkflowDefinitionTitle,
-  TRIGGER_LIFECYCLE_REFUSED, workflowRunLimits, WORKFLOW_RUN_RETRY_REFUSED, WORKFLOW_WRITE_SETTLE_REFUSED,
+  TRIGGER_DRAINING, TRIGGER_LIFECYCLE_REFUSED, workflowRunLimits, WORKFLOW_RUN_RETRY_REFUSED, WORKFLOW_WRITE_SETTLE_REFUSED,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { checkAssignments, requireBound, requirementsOf, unmetBindings } from "./workflow-duplicate.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
@@ -3976,6 +3976,8 @@ class OverseerImpl implements AgentHooks {
   // related histories. (Chat docs may still hold content in the gadget's files root, and chats
   // may still pin the gadget; the pins stay because the chat's rows still fold on them. Both are
   // inert because the registry entry -- the enumeration source of truth -- is gone.)
+  // Removing a schedule drains its admitted run; deleting the gadget itself stops its runs because
+  // the code those runs execute is being removed.
   async removeWorkpiece(id: WorkpieceId): Promise<void> {
     let record = this.storage.gadgets.get(id);
     if (!record) {
@@ -13368,6 +13370,22 @@ class OverseerImpl implements AgentHooks {
   }
 
   /**
+   * Remove a workflow trigger without interrupting a run already admitted for it (FAC-121).
+   * The first request pauses the trigger and stops new starts. If a run is still executing, the
+   * caller gets a fixed `TRIGGER_DRAINING` retry message; after it drains, the next request retires
+   * the trigger and keeps the run's history. Non-workflow hooks retain immediate deletion behavior.
+   */
+  async removeHookWithDrain(hookId: number, by: AiChatAuthorInfo): Promise<void> {
+    if (!this.storage.boundHooks.get(hookId)) return;
+    if (!this.workflowDefinitionStore().pinOf(hookId)) return this.deleteHook(hookId);
+    let lifecycle = await this.pauseTrigger(hookId, by);
+    if (lifecycle.state !== "paused") {
+      throw new Error(`${TRIGGER_DRAINING}: This workflow is paused while its run finishes. Remove it again when the run is complete.`);
+    }
+    await this.retireTrigger(hookId, by);
+  }
+
+  /**
    * Cancel the run person's request `invocationId` made, as `caller` (FAC-117): the person who asked,
    * or the definition's owner or someone it is shared with to edit (`role` is theirs here). Anyone
    * else is told it doesn't exist. A queued run ends now; a running one has its sessions ended, so
@@ -18033,9 +18051,13 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     return this.impl.resolveWorkflowRunWrite(actionId, outcome, await this.#getClientProfile());
   }
 
+  /**
+   * Deletes an ordinary hook immediately; a workflow trigger is paused first and retired after
+   * its admitted runs finish, preserving their history (FAC-121).
+   */
   async deleteHook(id: number): Promise<void> {
     await this.#requireSharedConfiguration("build", "shared");
-    return this.impl.deleteHook(id);
+    return this.impl.removeHookWithDrain(id, await this.#getClientProfile());
   }
 
   // Resume a turn suspended on awaitDecision once approving `approvedId` leaves all of that turn's

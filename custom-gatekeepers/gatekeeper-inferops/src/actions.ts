@@ -226,6 +226,23 @@ export type DotConfirmAction = ActionBase & {
   confirmedOutcome?: Record<string, string | number | boolean | null>;
   /** FAC-120: the InferOS run an approved workflow-run proposal started, for the receipt. */
   runId?: string;
+  /**
+   * FAC-134: each run outcome the kernel reported for this action, once per run id (the kernel
+   * delivers at least once, so a repeat changes nothing), and what InferOps answered recording it.
+   */
+  reportedRuns?: DotReportedRun[];
+};
+
+/** One run outcome a Dot workflow-run action was told (FAC-134), as recorded here and in InferOps. */
+export type DotReportedRun = {
+  runId: string;
+  outcome: "succeeded" | "failed" | "uncertain";
+  reasonCode?: string;
+  ranAs: "gadget_bindings" | "service_account";
+  /** Whether the approval that started it was recorded as applied (the kernel's `actionApplied`). */
+  actionApplied: boolean;
+  /** InferOps recorded it on the proposal, or refused it there for good (another run, not handed off). */
+  inferops: "recorded" | "refused";
 };
 
 /** Any recorded action. */
