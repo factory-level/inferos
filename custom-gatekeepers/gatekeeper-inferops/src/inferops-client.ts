@@ -388,7 +388,7 @@ export interface InferOpsClient {
    * Confirm one proposal (`chatbot.proposal_confirm`) under the person's own token; InferOps keys
    * the write by the proposal id. EXPIRED once it expired, CONFLICT once it was decided.
    * `runId` names the InferOS run a workflow-run hand-off started (FAC-134): InferOps records it and
-   * later accepts that run's outcome only, and only from this gatekeeper's own session.
+   * later accepts that run's outcome only, from a session issued to InferOS's client (reported, not verified).
    */
   confirmDotProposal(
     conversationId: string, proposalId: string, idempotencyKey: string, opts?: { runId?: string },
