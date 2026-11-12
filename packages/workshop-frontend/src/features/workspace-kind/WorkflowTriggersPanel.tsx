@@ -4,7 +4,8 @@ import { LightningIcon } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { BoundHookInfo, CollaboratorInfo, GadgetSummary, Overseer } from '@gadgets/workshop-shared/api'
 import type {
-  TriggerAssignment, TriggerControl, WorkflowDefinition, WorkflowDefinitionRef,
+  TriggerAssignment, TriggerControl, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionHistoryRef,
+  WorkflowDefinitionRef, WorkflowScheduleSummary,
 } from '@gadgets/workshop-shared/workflow-definition'
 import { HookToggle } from '../../components/HookToggle'
 import { WorkshopButton } from '../../components/WorkshopControls'
@@ -31,6 +32,7 @@ type Loaded =
       status: 'ready'
       hooks: BoundHookInfo[]
       definitions: WorkflowDefinition[]
+      schedules: WorkflowScheduleSummary[]
       // Each hook's pinned definition revision, by hook id; absent when unpinned.
       pins: ReadonlyMap<number, WorkflowDefinitionRef>
       // Each pinned hook's run-on-request control, by hook id; absent when it has none.
@@ -78,10 +80,12 @@ const connectionsOf = async (overseer: RpcStub<Overseer>, gadgetId: number): Pro
  * A workflow's output pane: what wakes it, in place of an app preview. Lists the workspace's bound
  * hooks, which is where both event hooks and scheduled tasks land (the scheduler binds each
  * schedule as a hook), with the same enable toggle as Connections, and the workflow's saved
- * definitions (WorkflowDefinitionsSection). A trigger pinned to a definition revision says so, and
- * can be pinned to a published revision for its gadget or unpinned; the server decides whether it
- * may. Retained run history is discovered separately through the server's authorized ID list,
- * including when a temporary definition record was swept.
+ * definitions (WorkflowDefinitionsSection). Readable schedules are shown with their safe cadence,
+ * status, and next fire time. The server filters these to definitions this viewer can read. A
+ * trigger pinned to a definition revision says so, and can be pinned to a published revision for
+ * its gadget or unpinned; the server decides whether it may. Retained run history is discovered
+ * separately through the server's authorized ID list, including when a temporary definition
+ * record was swept.
  */
 export const WorkflowTriggersPanel = ({
   overseer,
@@ -94,13 +98,17 @@ export const WorkflowTriggersPanel = ({
   const [loaded, setLoaded] = useState<Loaded>({ status: 'loading' })
   const [reloadTick, setReloadTick] = useState(0)
   const [toggling, setToggling] = useState<ReadonlySet<number>>(new Set())
+  const [workflowView, setWorkflowView] = useState<'scheduled' | 'shared' | 'saved' | 'recent'>('saved')
+  const [recentRuns, setRecentRuns] = useState<WorkflowDefinitionDelivery[] | null>(null)
+  const [recentRunsError, setRecentRunsError] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     const load = async () => {
-      const [hooks, definitions, controlList, collaborators] = await Promise.all([
+      const [hooks, definitions, controlList, collaborators, schedules] = await Promise.all([
         overseer.listHooks(), overseer.listWorkflowDefinitions(), overseer.listTriggerControls(),
         overseer.listCollaborators().catch(() => [] as CollaboratorInfo[]),
+        overseer.listReadableWorkflowSchedules(),
       ])
       const refs = await Promise.all(hooks.map(h => overseer.getTriggerDefinition(h.id)))
       const pins = new Map<number, WorkflowDefinitionRef>()
@@ -116,7 +124,7 @@ export const WorkflowTriggersPanel = ({
       // One instance-wide switch; every read reports the same.
       const assignmentsEnabled = assignmentList.some(state => state.enabled)
       const connections = new Map(pinned.map((h, i) => [h.id, connectionList[i]!]))
-      return { hooks, definitions, pins, controls, collaborators, assignments, assignmentsEnabled, connections }
+      return { hooks, definitions, schedules, pins, controls, collaborators, assignments, assignmentsEnabled, connections }
     }
     load()
       .then(ready => {
@@ -128,6 +136,32 @@ export const WorkflowTriggersPanel = ({
       })
     return () => { cancelled = true }
   }, [overseer, refreshKey, reloadTick])
+
+  useEffect(() => {
+    if (workflowView !== 'recent' || loaded.status !== 'ready') return
+    let cancelled = false
+    setRecentRuns(null)
+    setRecentRunsError(false)
+    const loadRecentRuns = async () => {
+      const histories = await overseer.listReadableWorkflowHistories()
+      const deliveries: WorkflowDefinitionDelivery[] = []
+      // Keep RPC fan-out bounded while preserving the definition store's authorized ID list.
+      for (let index = 0; index < histories.length; index += 4) {
+        if (cancelled) break
+        const batch = histories.slice(index, index + 4)
+        const results = await Promise.all(batch.map((history: WorkflowDefinitionHistoryRef) =>
+          overseer.listWorkflowDeliveries(history.definitionId)))
+        deliveries.push(...results.flat())
+      }
+      return deliveries.toSorted((left, right) => right.at.getTime() - left.at.getTime())
+    }
+    loadRecentRuns().then(runs => {
+      if (!cancelled) setRecentRuns(runs)
+    }).catch(() => {
+      if (!cancelled) setRecentRunsError(true)
+    })
+    return () => { cancelled = true }
+  }, [loaded.status, overseer, workflowView])
 
   const setHookEnabled = (id: number, enabled: boolean) => {
     setLoaded(prev => prev.status === 'ready'
@@ -298,15 +332,112 @@ export const WorkflowTriggersPanel = ({
         {loaded.status === 'ready' && <WorkflowHistorySection overseer={overseer} />}
 
         {loaded.status === 'ready' && (
+          <section aria-label="Workflow views" className="mt-8">
+            <div role="group" aria-label="Workflow views" className="flex flex-wrap gap-2 border-b border-kumo-line">
+              {([
+                ['scheduled', 'Scheduled'], ['shared', 'Shared with me'], ['saved', 'Saved'], ['recent', 'Recent'],
+              ] as const).map(([view, label]) => (
+                <button
+                  key={view}
+                  type="button"
+                  aria-pressed={workflowView === view}
+                  className={`border-b-2 px-2 py-2 text-[13px] ${workflowView === view
+                    ? 'border-kumo-default font-medium text-kumo-default'
+                    : 'border-transparent text-kumo-subtle'}`}
+                  onClick={() => setWorkflowView(view)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {loaded.status === 'ready' && workflowView === 'scheduled' && (
+          <section id="workflow-schedules-panel" aria-labelledby="workflow-schedules-heading" className="mt-5">
+            <h2
+              id="workflow-schedules-heading"
+              className="m-0 text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default"
+            >
+              Scheduled
+            </h2>
+            <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
+              Schedules for workflows you can read. Only workspace schedule details are shown.
+            </p>
+            {loaded.schedules.length === 0 ? (
+              <p className="mt-3 mb-0 text-[13px] text-kumo-subtle">No readable schedules.</p>
+            ) : (
+              <ul className="mt-3 mb-0 list-none overflow-hidden rounded-xl border border-kumo-line bg-kumo-base p-0">
+                {loaded.schedules.map((schedule, index) => (
+                  <li key={`${schedule.hookId}:${schedule.scheduleId}`}
+                    className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''}`}>
+                    <p className="m-0 text-[13px] leading-[18px] font-medium text-kumo-default">
+                      {schedule.title}
+                    </p>
+                    {schedule.description && (
+                      <p className="mt-0.5 mb-0 text-[12px] leading-4 text-kumo-subtle">{schedule.description}</p>
+                    )}
+                    <p className="mt-1 mb-0 text-[12px] leading-4 text-kumo-subtle">
+                      {formatScheduleCadence(schedule)} · {schedule.status[0]?.toUpperCase()}{schedule.status.slice(1)}
+                      {schedule.nextFire !== undefined && schedule.status === 'active' && (
+                        <>
+                          {' '}· Next run{' '}
+                          <time dateTime={new Date(schedule.nextFire).toISOString()}>
+                            {new Date(schedule.nextFire).toLocaleString([], schedule.cadence.kind === 'interval'
+                              ? undefined
+                              : { timeZone: schedule.cadence.timeZone })}
+                          </time>
+                          {schedule.cadence.kind !== 'interval' && ` (${schedule.cadence.timeZone})`}
+                        </>
+                      )}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        )}
+
+        {loaded.status === 'ready' && workflowView !== 'scheduled' && (
           <WorkflowDefinitionsSection
             overseer={overseer}
             gadgets={gadgets}
             definitions={loaded.definitions}
             collaborators={loaded.collaborators}
+            view={workflowView}
+            recentRuns={workflowView === 'recent' ? recentRuns : undefined}
+            recentRunsError={workflowView === 'recent' && recentRunsError}
             onChanged={() => setReloadTick(t => t + 1)}
           />
         )}
       </div>
     </div>
   )
+}
+
+const formatScheduleCadence = (schedule: WorkflowScheduleSummary) => {
+  const { cadence } = schedule
+  if (cadence.kind === 'interval') {
+    const units = [
+      [86_400_000, 'day'], [3_600_000, 'hour'], [60_000, 'minute'], [1_000, 'second'],
+    ] as const
+    const unit = units.find(([size]) => cadence.everyMs >= size && cadence.everyMs % size === 0)
+    if (unit) {
+      const amount = cadence.everyMs / unit[0]
+      return `Every ${amount} ${unit[1]}${amount === 1 ? '' : 's'}`
+    }
+    return `Every ${cadence.everyMs} milliseconds`
+  }
+  if (cadence.kind === 'once') {
+    return `Once · ${new Date(cadence.fireAt).toLocaleString([], { timeZone: cadence.timeZone })} (${cadence.timeZone})`
+  }
+  const { rule } = cadence
+  if (rule.freq === 'hourly') return `Every ${rule.interval} hour${rule.interval === 1 ? '' : 's'} at minute ${rule.minute} (${cadence.timeZone})`
+  const time = `${String(rule.hour).padStart(2, '0')}:${String(rule.minute).padStart(2, '0')}`
+  if (rule.freq === 'daily') {
+    return `Every ${rule.interval} day${rule.interval === 1 ? '' : 's'} at ${time} (${cadence.timeZone})`
+  }
+  const weekdays: Record<string, string> = { SU: 'Sun', MO: 'Mon', TU: 'Tue', WE: 'Wed', TH: 'Thu', FR: 'Fri', SA: 'Sat' }
+  const days = rule.byDay.map(day => weekdays[day] ?? day).join(', ')
+  return `Every ${rule.interval} week${rule.interval === 1 ? '' : 's'} on ${days} at ${time} (${cadence.timeZone})`
 }
