@@ -23,7 +23,7 @@ The release evidence for governed React/Refine widgets: one approved authored wi
 | Known P0 gap | What's true today | Safe only while | Closes it |
 |---|---|---|---|
 | **R-4: a console install's own server state is shared across operators** (inferops ADR 0013, W3: "no writable state shared between viewers of a data widget"; "rows reach another viewer by any route" is a no-go) | A published console's widget is one frozen install for every operator, so its own server (its Gadget Durable Object) holds one state. Operator B reads what operator A wrote. Characterized by "known P0 gap (ADR 0013 W3)…" in `integration-tests/__tests__/wiki-embedded-widget.test.ts` (#468). | no governed data reaches a code-running widget (G-1) | Per-operator Gadget partitioning, then inverting that test |
-| **R-3: the frame's outward paths 3 and 4** (ADR 0013 "Outward paths from a frame"; "any route left open" is a no-go) | **Path 3 is open:** a widget can navigate its own frame to an outside URL. Characterized by "known P0 gap (ADR 0013 outward path 3)…" in `GadgetUI.request-probes.test.ts` (#470), in real Chrome. **Path 4 (`window.open` on a click) is not characterized:** headless Chrome showed no request even with a click proven to reach the widget's handler, but the sandbox allows popups that escape it (`GadgetUI.tsx`), so **treat it as open**. Path 5 (forms) is closed. | the same: G-1 | A sandbox and CSP change for navigation and popups, which is a product decision (links need popups), then inverting the path 3 test and adding a headed-browser probe for path 4 |
+| **R-3: the frame's outward paths 3 and 4** (ADR 0013 "Outward paths from a frame"; "any route left open" is a no-go) | **Path 3 is open:** a widget can navigate its own frame to an outside URL. Characterized by "known P0 gap (ADR 0013 outward path 3)…" in `GadgetUI.request-probes.test.ts` (#470), in real Chrome. **Path 4 (`window.open` on a click) is not characterized:** headless Chrome showed no request even with a click proven to reach the widget's handler, but the sandbox allows popups that escape it (`GadgetUI.tsx`), so **treat it as open**. Path 5 (forms) is closed, by the sandbox (no `allow-forms`) and by the CSP's `form-action 'none'`, which a second probe pins alone in a frame that allows forms. | the same: G-1 | A sandbox and CSP change for navigation and popups, which is a product decision (links need popups), then inverting the path 3 test and adding a headed-browser probe for path 4 |
 
 **Mitigations in force today:**
 - publishing a widget needs `configuration:publish` in InferOps (an Administrator's grant);
@@ -36,16 +36,16 @@ The release evidence for governed React/Refine widgets: one approved authored wi
 | What | Commit | Kind |
 |---|---|---|
 | The scenario's clean evidence run | inferOS `48ee0bf1` (#466's head), squash-merged to main as `3c11c9db` | local, `wrangler createTestHarness` |
-| The scenario on main, after the S2 and S3 PRs | main SHA: **pending** (#468, #470) | local |
+| The scenario on main, after the S2 and S3 PRs | inferOS main `b1dca5ac` (#470's merge), main's CI [https://github.com/factory-level/inferos/actions/runs/43223404590](https://github.com/factory-level/inferos/actions/runs/43223404590) passed | local, `wrangler createTestHarness` |
 | InferOps pinned by the gatekeeper | `custom-gatekeepers/gatekeeper-inferops/connection.json`, `9734f61a1` | not run: the scenario programs InferOps (`InferOpsFake`) |
-| CI | each PR's passing run on its final head, linked below; **pending** for #470 | CI |
+| CI | each PR's passing run on its final head, linked below | CI |
 
 The FAC-15 PRs:
 - #465 (`b917e6c6`): the Refine closure fix. CI: [https://github.com/factory-level/inferos/actions/runs/43201698115](https://github.com/factory-level/inferos/actions/runs/43201698115) at `f9385638`.
 - #466 (`3c11c9db`): the scenario. CI: [https://github.com/factory-level/inferos/actions/runs/43205349077](https://github.com/factory-level/inferos/actions/runs/43205349077) at `48ee0bf1`.
 - #467 (`45bb541a`): surface parity. CI: [https://github.com/factory-level/inferos/actions/runs/43204603236](https://github.com/factory-level/inferos/actions/runs/43204603236) at `27055b7c`.
 - #468 (`01c5ea75`): red-team R-6 and R-4. CI: [https://github.com/factory-level/inferos/actions/runs/43209356824](https://github.com/factory-level/inferos/actions/runs/43209356824) at `f22b53e8`. Its first attempt was killed at 900 s on `account-subject.test.ts`, a hang main's own runs show too; the rerun passed.
-- #470 (pending): R-3, the probes required in CI, and path 5 pinned on the CSP alone.
+- #470 (`b1dca5ac`): R-3, the probes required in CI, and path 5 pinned on the CSP alone. CI: [https://github.com/factory-level/inferos/actions/runs/43216305711](https://github.com/factory-level/inferos/actions/runs/43216305711) at `746d7ccc`, the first run with the probes required.
 
 ## The scenario: `widget-launch-gate` (version 2)
 
@@ -54,7 +54,7 @@ The contract is `packages/integration-tests/src/scenarios/widget-launch-gate.md`
 - **Everything else runs real code.**
 - **Isolation:** only the harness's own origin may use the real network.
 
-**The report at `48ee0bf1`:** verdict **PASS**, `dirty: false`, isolation checked, **0** unmocked requests, `source: "mock"`, `liveProviderProof: false`.
+**The report on main `b1dca5ac`:** verdict **PASS** (8/8), `dirty: false`, isolation checked, **0** unmocked requests, `source: "mock"`, `liveProviderProof: false`. Every case observed the same as the first clean run at `48ee0bf1` (#466's head).
 
 | Case | Shows | Observed |
 |---|---|---|
