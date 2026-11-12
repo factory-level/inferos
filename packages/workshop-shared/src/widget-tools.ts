@@ -205,6 +205,30 @@ const INDEX = /^(?:0|[1-9][0-9]*)$/;
 // Control and format characters (bidi overrides, zero-width), line and paragraph separators, and
 // lone surrogates: what keeps authored text to one visible line.
 const NOT_PLAIN_LINE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
+/**
+ * Whether `text` is one visible line of plain text: no control or format character (bidi
+ * overrides, zero-width), no line or paragraph separator, no lone surrogate (`NOT_PLAIN_LINE`).
+ * For text shown inside the kernel's own words, such as a declared title in its appended field, so
+ * it can't add a line there (FAC-134).
+ */
+export const isPlainLine = (text: string): boolean => !NOT_PLAIN_LINE.test(text);
+// Blank space a title may not hold: every whitespace character but the ASCII space (no-break,
+// ideographic, en to hair spaces, ...), and the characters that draw as blank space without being
+// whitespace (Hangul fillers, the braille blank, the combining grapheme joiner, Khmer inherent vowels).
+const NOT_TITLE_SPACE = /(?! )[\p{White_Space}\u034F\u115F\u1160\u17B4\u17B5\u2800\u3164\uFFA0]/u;
+/**
+ * `raw` as a title the kernel shows inside its own words, or null when it isn't one: only its
+ * leading and trailing ASCII spaces are trimmed, and what is left must be one line of plain text
+ * (`isPlainLine`), with a single ASCII space as its only blank space (`NOT_TITLE_SPACE`, and no run
+ * of spaces). Checked before anything else is trimmed, so a forbidden character at either end is
+ * refused rather than stripped, and blank space can't wrap a title onto a line of its own in a field
+ * shown with its whitespace kept (FAC-134). Refused, never flattened: callers treat null as an
+ * invalid declaration.
+ */
+export function plainTitle(raw: string): string | null {
+  let title = raw.replace(/^ +| +$/g, "");
+  return isPlainLine(title) && !NOT_TITLE_SPACE.test(title) && !title.includes("  ") ? title : null;
+}
 // What an error message may not keep: `NOT_PLAIN_LINE` less line feed.
 const NOT_ERROR_TEXT = /[^\n\P{Cc}]|[\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/gu;
 

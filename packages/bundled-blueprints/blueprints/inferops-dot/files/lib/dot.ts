@@ -65,7 +65,8 @@ export function shownProposal({ id, tool, status, input, run }: DotProposal): Sh
   return {
     id, tool, status, ...(knowledge ? { knowledge } : {}),
     // Its fixed fields only: never more of what InferOS reported than the page draws.
-    ...(run ? { run: { runId: run.runId, outcome: run.outcome, ranAs: run.ranAs, ...(run.reasonCode ? { reasonCode: run.reasonCode } : {}) } } : {}),
+    ...(run ? { run: { ...(run.kind ? { kind: run.kind } : {}), runId: run.runId, outcome: run.outcome, ranAs: run.ranAs,
+      ...(run.reasonCode ? { reasonCode: run.reasonCode } : {}) } } : {}),
   };
 }
 
@@ -85,7 +86,13 @@ const RUN_REASONS: Record<string, string> = {
   "lost-after-write": "it stopped after proposing a change, which may or may not have been made",
   "action-unknown": "a change it proposed may or may not have been made",
   "not-started": "it was admitted but never started",
+  // A personal workflow's steps (FAC-134 capability 2): which check refused one stays in InferOS.
+  "step-refused": "one of its steps was refused, so nothing after it was requested",
+  "step-unknown": "one of its steps' requests may or may not have been placed",
 };
+
+/** What a personal workflow's run that placed every request says (FAC-134 capability 2): never "done". */
+export const PERSONAL_WORKFLOW_PLACED = "Requests placed. Each waits for the console's builders.";
 
 /**
  * Shown with every recorded run outcome (FAC-134): InferOps keeps what InferOS reported, but can't
@@ -112,6 +119,10 @@ export function workflowRunWords(status: WriteStatus, run?: DotProposalRun): { l
   }
   const why = run.reasonCode ? RUN_REASONS[run.reasonCode] : undefined;
   const note = RUN_REPORTED;
+  // A personal workflow's steps only place requests, decided by each console's builders.
+  if (run.kind === "personal-workflow" && run.outcome === "succeeded") {
+    return { label: "Requests placed", detail: PERSONAL_WORKFLOW_PLACED, note };
+  }
   switch (run.outcome) {
     case "succeeded":
       return { label: "Run finished", detail: RAN_AS[run.ranAs], note };

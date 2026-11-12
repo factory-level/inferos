@@ -2019,6 +2019,31 @@ export function openHttpInferOpsClient(
 
     readDocument,
 
+    async listDocumentRefs(): Promise<ReadonlyMap<string, string>> {
+      // FAC-68: InferOps' own reference for each page, read from its company list, never built here.
+      // An InferOps from before it (404), a refusal or an outage leaves pages without one.
+      let body: unknown;
+      try {
+        body = await knowledge("wiki.document.refs", { method: "GET", path: "/knowledge/company/documents" });
+      } catch {
+        return new Map();
+      }
+      try {
+        return parsed("wiki.document.refs", body, raw => {
+          const refs = new Map<string, string>();
+          for (const entry of list(record(raw, "response").documents, "documents")) {
+            const { id, ref } = record(entry, "document");
+            if (typeof id === "string" && UUID.test(id) && typeof ref === "string" && ref.length <= 600) {
+              refs.set(id.toLowerCase(), ref);
+            }
+          }
+          return refs;
+        });
+      } catch {
+        return new Map();
+      }
+    },
+
     async readDocumentText(documentId: string): Promise<string | null> {
       if (!UUID.test(documentId)) return null;
       // No `maybeEmpty`: InferOps answers a page it will not show with `text: null`, so a 404 means

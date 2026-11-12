@@ -302,7 +302,8 @@ export const DOT_PROPOSAL_STATUSES = ["proposed", "confirming", "confirmed", "ha
 /** A Dot proposal as InferOps reads it (`chatbot.proposal_list`), its status derived at read time. */
 /** A run outcome as `chatbot.proposal_run_outcome` takes it (FAC-134): fixed fields, never what the run returned. */
 export type DotRunOutcomeWire = {
-  kind: "workflow-run";
+  /** A published workflow's run, or a personal workflow's (FAC-134 capability 2). */
+  kind: "workflow-run" | "personal-workflow";
   runId: string;
   outcome: "succeeded" | "failed" | "uncertain";
   reasonCode?: string;
@@ -496,6 +497,13 @@ export interface InferOpsClient {
 
   /** One Wiki page by UUID; NOT_FOUND for one this workspace does not have (or not a UUID). */
   readDocument(documentId: string): Promise<WikiDocumentHead>;
+
+  /**
+   * Each page's canonical reference as InferOps names it (FAC-68, `document.company_list`'s `ref`),
+   * by page UUID, for the pages the account can read in its company. Never built here. Empty when
+   * InferOps can't answer (one from before FAC-68, or an outage): a page or hit then has no `ref`.
+   */
+  listDocumentRefs(): Promise<ReadonlyMap<string, string>>;
 
   /**
    * The Wiki's root, pillars (with Masters and filed pages) and unfiled pages, listing only pages

@@ -67,11 +67,20 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
   const { list, structure } = snapshot
   const organized = structure.status === 'ready' ? structure.structure : null
   const navigation = list.status === 'ready' ? wikiNavigation(list.documents, organized) : null
+  const host = new URL(data?.target ?? widget.targetRef).hostname
+  // A page of this Wiki by its slug, or by the id an alias names (FAC-68), as the page list knows it.
+  const slugOf = (reference: { slug?: string; id?: string }) => reference.slug
+    ?? (list.status === 'ready' ? list.documents.find(page => page.id === reference.id)?.slug ?? null : null)
+  // The widget's page may be a slug, or a page reference of this Wiki (a Dot citation or a search hit).
+  const given = widget.params.page ?? null
+  const givenReference = given === null ? null : parseWikiReference(given)
+  const givenSlug = givenReference?.kind === 'page'
+    ? givenReference.host === host ? slugOf(givenReference) : null
+    : given ?? null
   // The default page waits for the structure read, so it does not jump from the tree's first page to the root.
-  const slug = chosen ?? widget.params.page ?? (navigation && structure.status !== 'loading' ? firstNavigationPage(navigation) : null)
+  const slug = chosen ?? givenSlug ?? (navigation && structure.status !== 'loading' ? firstNavigationPage(navigation) : null)
   const listed = list.status === 'ready' && slug !== null && list.documents.some(page => page.slug === slug)
   const page = slug === null ? undefined : snapshot.pages.get(slug)
-  const host = new URL(data?.target ?? widget.targetRef).hostname
   // Read the shown page once the list says it exists; re-reads come from refreshes and decisions.
   useEffect(() => { if (listed && slug !== null) data?.openPage(slug) }, [data, listed, slug])
 
@@ -81,9 +90,14 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
       case 'board': return <CanvasBoardWidget scrollRoot={scrollRoot} overseer={overseer} presentation="card" widget={{ id: `wiki-${reference.boardRef}`,
         kind: 'inferops.project-board', version: 1, targetRef: reference.boardRef, size: 'full', params: { workflow: reference.workflow, showCompleted: false } }} />
       case 'issue': return <WikiIssueEmbed overseer={overseer} boardRef={reference.boardRef} identifier={reference.identifier} href={href} />
-      case 'page': return reference.host === host
-        ? <Button size="sm" onClick={() => setChosen(reference.slug)}>Open page: {label || reference.slug}</Button>
-        : <p className="text-sm text-kumo-subtle">A page of another Wiki, not shown here: <code className="break-all">{href}</code></p>
+      case 'page': {
+        const target = reference.host === host ? slugOf(reference) : null
+        return target !== null
+          ? <Button size="sm" onClick={() => setChosen(target)}>Open page: {label || target}</Button>
+          : reference.host === host
+            ? <p className="text-sm text-kumo-subtle">A page of this Wiki you can&apos;t open: <code className="break-all">{href}</code></p>
+            : <p className="text-sm text-kumo-subtle">A page of another Wiki, not shown here: <code className="break-all">{href}</code></p>
+      }
       // Keyed by the whole reference and the signed-in account, so a slot that now holds another
       // embed, or the same embed for another viewer, starts over.
       case 'gadget': return <WikiGadgetEmbed key={`${embedViewerKey(viewerAccount)}:${href}`} reference={reference} label={label} />
@@ -102,6 +116,8 @@ export const CanvasWikiWidget = ({ widget, overseer, editable, scrollRoot }: {
       <div className="min-w-0 flex-1">
         <h3 className="truncate text-sm font-medium text-kumo-default">{document ? document.title : 'InferMind Wiki'}</h3>
         <p className="truncate text-xs text-kumo-subtle" title={widget.targetRef}>{widget.targetRef}</p>
+        {/* The page's one reference, as InferOps names it (FAC-68): what a Dot citation or another surface opens it by. */}
+        {document?.ref && <p className="truncate text-xs text-kumo-subtle">Page reference: <code title={document.ref}>{document.ref}</code></p>}
       </div>
       {stale && (failed ? <Badge variant="warning">Refresh failed</Badge>
         : <Badge variant="neutral" icon={<Loader size="sm" aria-label="" />}>Refreshing</Badge>)}

@@ -104,6 +104,19 @@ describe("the Wiki resource kind", () => {
     }
   });
 
+  it("parses the page alias by id, as InferOps reads it, and refuses anything else of its shape (FAC-68)", () => {
+    expect(parseWikiDocumentUrl(`inferops://acme.knowledge/knowledge/page/${HANDBOOK}`)).toEqual({
+      host: "acme.knowledge", tenant: "acme", workspace: "knowledge", id: HANDBOOK,
+    });
+    for (const bad of [
+      "inferops://acme.knowledge/knowledge/page/0B7E2C3A-1F00-4A00-8000-00000000000A", `inferops://acme.knowledge/knowledge/page/${HANDBOOK}/`,
+      "inferops://acme.knowledge/knowledge/page/not-a-uuid", `inferops://acme.knowledge/knowledge/page/${HANDBOOK}?x=1`,
+      `inferops://acme/knowledge/page/${HANDBOOK}`, `https://acme.knowledge/knowledge/page/${HANDBOOK}`,
+    ]) {
+      expect(parseWikiDocumentUrl(bad), bad).toBeNull();
+    }
+  });
+
   it("binds the demo Wiki to the Wiki gatekeeper", async () => {
     const { hooks } = setup();
     expect(await hooks.bindAccount("wiki", { accountId: crypto.randomUUID() }, WIKI_URL)).toBeNull();
@@ -276,6 +289,31 @@ describe("the structure and page text", () => {
 
 // FAC-66: searchWiki under the accepted knowledge read and search contract, over the mock's
 // plain full-text stand-in for `knowledge.search`.
+// FAC-68: a page and a search hit carry InferOps' own reference, never one built here, and only one
+// naming this Wiki; an InferOps that names none leaves them without it.
+describe("the page reference", () => {
+  it("is InferOps' own, on a page read by slug or id and on its search hits", async () => {
+    const { mock, session } = setup();
+    const ref = "inferops://demo.local/knowledge/document/handbook-as-named";
+    await mock.setDocumentRefs([[HANDBOOK, ref]]);
+    expect((await session.readDocument("handbook")).ref).toBe(ref);
+    expect((await session.readDocument(HANDBOOK)).ref).toBe(ref);
+    const hits = await session.searchWiki("demo board");
+    expect(hits.filter(hit => hit.documentId === HANDBOOK).map(hit => hit.ref)).toEqual(
+      hits.filter(hit => hit.documentId === HANDBOOK).map(() => ref));
+    expect(hits.filter(hit => hit.documentId !== HANDBOOK).every(hit => hit.ref === undefined)).toBe(true);
+  });
+
+  it("is dropped when it names another Wiki, and absent when InferOps names none", async () => {
+    const { mock, session } = setup();
+    await mock.setDocumentRefs([[HANDBOOK, "inferops://acme.other/knowledge/document/handbook"]]);
+    expect(await session.readDocument("handbook")).not.toHaveProperty("ref");
+    await mock.setDocumentRefs([]);
+    expect(await session.readDocument("handbook")).not.toHaveProperty("ref");
+    expect((await session.searchWiki("teammate")).every(hit => !("ref" in hit))).toBe(true);
+  });
+});
+
 describe("search", () => {
   const FIRST_WEEK = "61000000-0000-4000-8000-000000000004";
 
@@ -285,6 +323,7 @@ describe("search", () => {
     expect(hits).toEqual([{
       sectionId: FIRST_WEEK, sectionVersion: 1, tag: "first-week", documentId: ONBOARDING,
       documentSlug: "onboarding", documentTitle: "Onboarding", snippet: expect.stringContaining("<b>teammate</b>"),
+      ref: "inferops://demo.local/knowledge/document/onboarding",
     }]);
     expect(hits[0]).not.toHaveProperty("score");
     expect([...hits[0]!.snippet].length).toBeLessThanOrEqual(300);

@@ -114,6 +114,10 @@ import type {
 import { mergeWidgetSearches } from "@gadgets/workshop-shared/gatekeeper";
 import { parseWorkflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
 import { parseTemporaryCanvasInput, type TemporaryCanvasInput } from "@gadgets/workshop-shared/temporary-canvas";
+import {
+  parseConsoleCommandRef, parsePersonalWorkflowDeclaration, parsePersonalWorkflowRef, personalWorkflowRef,
+  type PersonalWorkflowDeclaration,
+} from "@gadgets/workshop-shared/personal-workflow";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
   CredentialSource, isCredentialsChanged, isCredentialsExpired, type CredentialRead,
@@ -172,7 +176,7 @@ import {
   CHATBOT_DOT_RESOURCE, DEMO_HOST, INFEROPS_ACCOUNT_RESOURCE, KNOWLEDGE_WIKI_RESOURCE, OBJECT_TABLE_RESOURCE,
   PORTAL_MEMBERS_RESOURCE, PROJECT_BOARD_RESOURCE, PROJECT_DISPATCH_RESOURCE, PROJECT_WORKFLOW_RESOURCE,
   accountUrl, dotUrl, hostInTenant, membersUrl, parseDotUrl, parseAccountUrl, parseHost, parseMembersUrl, parseProjectBoardUrl,
-  parseProjectDispatchUrl, parseProjectWorkflowUrl, parseTableUrl, parseWikiUrl, projectBoardUrl,
+  parseProjectDispatchUrl, parseProjectWorkflowUrl, parseTableUrl, parseWikiDocumentUrl, parseWikiUrl, projectBoardUrl,
   projectDispatchUrl, projectWorkflowUrl, resourceKind, tableUrl, wikiUrl, type ProjectBoardRef, type WikiRef,
 } from "./resources";
 import {
@@ -3775,12 +3779,27 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     };
   }
 
+  /**
+   * InferOps' own reference for each page of this Wiki (FAC-68), by page id: only references naming
+   * this Wiki's own host, so nothing of another workspace is passed on. Never built here.
+   */
+  async #refs(): Promise<ReadonlyMap<string, string>> {
+    const host = this.#binding.host.toLowerCase();
+    const refs = new Map<string, string>();
+    for (const [id, ref] of await this.#binding.client.listDocumentRefs()) {
+      if (parseWikiDocumentUrl(ref)?.host.toLowerCase() === host) refs.set(id, ref);
+    }
+    return refs;
+  }
+
   async readDocument(slugOrId: string): Promise<WikiDocument> {
-    const { head, body, pendingBody, sections } = await this.#page(slugOrId, false);
+    const [{ head, body, pendingBody, sections }, refs] = await Promise.all([this.#page(slugOrId, false), this.#refs()]);
+    const ref = refs.get(head.id);
     const page: WikiDocument = {
       id: head.id, slug: head.slug, title: head.title, body, version: head.version,
       masterRole: head.masterRole, ...(pendingBody ? { pendingBody: true as const } : {}), sections,
       references: embeddedReferences(authoredContent(head.title, { body, visibleSections: sections.map(s => s.body) })),
+      ...(ref ? { ref } : {}),
     };
     await this.#binding.observe(this.#queue, {
       title: `Read Wiki page ${plainInline(head.slug, 80)}`,
@@ -3845,9 +3864,12 @@ class WikiSessionImpl extends RpcTarget implements InferOpsWikiSession {
     }
     const binding = this.#binding;
     await binding.admitSearch();
-    const records = await binding.client.searchWiki(trimmed, limit);
+    const [records, refs] = await Promise.all([binding.client.searchWiki(trimmed, limit), this.#refs()]);
     const pending = new Set(binding.pendingEdits().flatMap(e => e.kind === "section-update" ? [e.sectionId] : []));
-    const hits: WikiSearchHit[] = records.map(hit => pending.has(hit.sectionId) ? { ...hit, pending: "update" } : hit);
+    const hits: WikiSearchHit[] = records.map(hit => {
+      const ref = refs.get(hit.documentId);
+      return { ...hit, ...(pending.has(hit.sectionId) ? { pending: "update" as const } : {}), ...(ref ? { ref } : {}) };
+    });
     const asked = [...trimmed].length > 100 ? `${[...trimmed].slice(0, 100).join("")}…` : trimmed;
     const found = hits.map(hit => `${plainInline(hit.tag, 80)} in ${plainInline(hit.documentSlug, 80)}`);
     await binding.observeWithheld(this.#queue, {
@@ -4161,7 +4183,7 @@ function shownProposal(proposal: DotProposalWire, receipt: Receipt | null): DotP
     id: proposal.id, tool: proposal.tool, input: JSON.stringify(proposal.input), status: dotProposalStatus(proposal),
     receipt,
     run: proposal.run
-      ? { runId: proposal.run.runId, outcome: proposal.run.outcome, ranAs: proposal.run.ranAs,
+      ? { kind: proposal.run.kind, runId: proposal.run.runId, outcome: proposal.run.outcome, ranAs: proposal.run.ranAs,
           ...(proposal.run.reasonCode ? { reasonCode: proposal.run.reasonCode } : {}) }
       : null,
     createdAt: proposal.createdAt, expiresAt: proposal.expiresAt,
@@ -4269,6 +4291,7 @@ async function applyDotAction(binding: DotBinding, actionId: number, effects?: D
   const fields: Partial<LogFields> = { host: binding.host, action: actionId };
   if (record.tool === DOT_WORKFLOW_INVOKE_TOOL) return applyDotWorkflowRun(binding, record, fields, effects);
   if (record.tool === DOT_CANVAS_COMPOSE_TOOL) return applyDotTemporaryCanvas(binding, record, fields, effects);
+  if (record.tool === DOT_WORKFLOW_CREATE_TOOL) return applyDotWorkflowCreate(binding, record, fields, effects);
   return binding.applyOnce(record, {
     policy: DOT_CONFIRM, fields,
     check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
@@ -4286,7 +4309,7 @@ async function applyDotAction(binding: DotBinding, actionId: number, effects?: D
 }
 
 /** The kernel's approved effects this facet uses: a workflow run (FAC-120) and a temporary canvas (FAC-137). */
-type DotApprovedEffects = Pick<ApprovedEffects, "invokeWorkflow" | "createTemporaryCanvas">;
+type DotApprovedEffects = Pick<ApprovedEffects, "invokeWorkflow" | "createTemporaryCanvas" | "createPersonalWorkflow" | "runPersonalWorkflow">;
 
 /** The Dot's InferOS workflow-run proposal (FAC-120, inferops#2627): InferOps runs nothing for it. */
 const DOT_WORKFLOW_INVOKE_TOOL = "inferos_workflow_invoke";
@@ -4346,6 +4369,33 @@ function dotCanvasOf(input: unknown): TemporaryCanvasInput | null {
   }
 }
 
+/** The Dot's personal workflow proposal (FAC-134 capability 2, inferops#2648): InferOps creates nothing for it. */
+const DOT_WORKFLOW_CREATE_TOOL = "inferos_workflow_create";
+
+/**
+ * A Dot create proposal's input (`{title, steps: [{command, input}]}`, inferops#2648) as the kernel's
+ * personal workflow declaration (`ActionDescription.personalWorkflow`), or null when it isn't one:
+ * then nothing is declared, and the approval can't create anything.
+ */
+function dotPersonalWorkflow(input: Record<string, unknown>): PersonalWorkflowDeclaration | null {
+  try {
+    let steps = Array.isArray(input.steps) ? input.steps : null;
+    return parsePersonalWorkflowDeclaration({
+      title: input.title,
+      steps: steps?.map(step => {
+        let { command, input: stepInput } = (step ?? {}) as { command?: unknown; input?: unknown };
+        return { reference: command, input: stepInput };
+      }),
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a Dot run proposal names a personal workflow (FAC-134 capability 2) rather than a trigger. */
+const runsPersonalWorkflow = (record: { input: Record<string, unknown> }) =>
+  parsePersonalWorkflowRef(record.input.reference) !== null;
+
 /** Why a workflow run can't start without the kernel's approved effects (an automatic approval, an older kernel). */
 const DOT_WORKFLOW_NEEDS_APPROVAL = "Starting a workflow run needs your own approval here.";
 
@@ -4366,12 +4416,14 @@ async function applyDotWorkflowRun(binding: DotBinding, record: DotConfirmAction
   if (!effects) {
     return { failed: { outcome: "notApplied", retryable: false, message: DOT_WORKFLOW_NEEDS_APPROVAL, kind: "policy" } };
   }
+  // A personal workflow's reference (FAC-134 capability 2) is run by its own effect, declared as such.
+  const personal = runsPersonalWorkflow(record);
   return binding.applyOnce(record, {
     policy: DOT_WORKFLOW_RUN, fields,
     check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
     send: async marked => {
       // The run the action declared at submit, which the person approved: no reference is passed here.
-      const run = await effects.invokeWorkflow();
+      const run = personal ? await effects.runPersonalWorkflow() : await effects.invokeWorkflow();
       // It may have started: uncertain, never a refusal to retry or decline (the kernel's start is
       // idempotent per action, so a retry can only return the same run).
       if (run.status === "unknown") throw new InferOpsError("UNAVAILABLE", run.reason);
@@ -4435,6 +4487,53 @@ async function applyDotTemporaryCanvas(binding: DotBinding, record: DotConfirmAc
   });
 }
 
+/**
+ * Applies the Dot's personal workflow proposal (FAC-134 capability 2): the kernel creates the
+ * workflow the action declared in the person's own operate session (`effects.createPersonalWorkflow`,
+ * present only for their own approval), after each step's console workspace said it is offered to
+ * them; then the proposal is confirmed in InferOps as handed off. Refused, it is not applied and the
+ * proposal is declined there; `unknown` (a step's check unanswered) created nothing, so it is
+ * `UNAVAILABLE`, to approve again. The created workflow's reference is kept on the action, built from
+ * the InferOps company and workspace its steps were proposed in.
+ */
+async function applyDotWorkflowCreate(binding: DotBinding, record: DotConfirmAction, fields: Partial<LogFields>,
+    effects?: Pick<ApprovedEffects, "createPersonalWorkflow">): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
+  if (!effects) {
+    return { failed: { outcome: "notApplied", retryable: false, message: DOT_WORKFLOW_CREATE_NEEDS_APPROVAL, kind: "policy" } };
+  }
+  return binding.applyOnce(record, {
+    policy: DOT_WORKFLOW_RUN, fields,
+    check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
+    send: async marked => {
+      const created = await effects.createPersonalWorkflow();
+      if (created.status === "unknown") throw new InferOpsError("UNAVAILABLE", created.reason);
+      if (created.status === "refused") {
+        await binding.client.declineDotProposal(record.conversationId, record.proposalId).catch(() => undefined);
+        throw new CheckRefused(RUN_REFUSAL_CODES[created.kind] ?? "UNAVAILABLE", created.reason);
+      }
+      const step = dotPersonalWorkflow(record.input)?.steps[0];
+      const where = step ? parseConsoleCommandRef(step.reference) : null;
+      const reference = where
+        ? personalWorkflowRef({ company: where.company, workspace: where.workspace,
+            sessionWorkspaceId: created.sessionWorkspaceId, personalWorkflowId: created.personalWorkflowId })
+        : "";
+      let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true };
+      try {
+        const confirmed = await binding.client.confirmDotProposal(record.conversationId, record.proposalId, record.proposalId);
+        confirmedOutcome = { ...summarizeDotOutcome(confirmed.outcome), handedOff: true };
+      } catch (error) {
+        logger.warn("dot personal workflow created; its InferOps confirm unanswered", {
+          event: "dot-confirm.workflow_create.confirm_unanswered", ...fields, code: inferOpsErrorCode(error) ?? "UNKNOWN",
+        });
+      }
+      return { ...(marked as DotConfirmAction), status: "applied", confirmedOutcome,
+        personalWorkflow: { id: created.personalWorkflowId, reference, expiresAt: created.expiresAt } };
+    },
+  });
+}
+
+/** Why a personal workflow can't be created without the kernel's approved effects. */
+const DOT_WORKFLOW_CREATE_NEEDS_APPROVAL = "Creating a personal workflow needs your own approval here.";
 /** Why a decline couldn't be confirmed: InferOps may still be waiting for a decision. */
 const DOT_DECLINE_UNCONFIRMED =
   "Your decline couldn't be confirmed in InferOps: the change may still be waiting there. Decline it again.";
@@ -4529,8 +4628,10 @@ export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, cli
 async function recordDotRunOutcome(binding: DotBinding, actionId: number, outcome: ApprovedRunOutcome): Promise<void> {
   const fields: Partial<LogFields> = { host: binding.host, action: actionId };
   const record = binding.action(actionId);
+  // The kind must be the one the proposal started: a personal workflow's run, or a trigger's.
+  const kind = record && isDotAction(record) && runsPersonalWorkflow(record) ? "personal-workflow" : "workflow-run";
   if (!record || !isDotAction(record) || record.tool !== DOT_WORKFLOW_INVOKE_TOOL ||
-      outcome?.kind !== "workflow-run" || typeof outcome.runId !== "string" || outcome.runId === "") {
+      outcome?.kind !== kind || typeof outcome.runId !== "string" || outcome.runId === "") {
     logger.warn("dot run outcome for no workflow-run proposal of this binding", { event: "dot-run-outcome.ignored", ...fields });
     return;
   }
@@ -4538,7 +4639,7 @@ async function recordDotRunOutcome(binding: DotBinding, actionId: number, outcom
   let inferops: DotReportedRun["inferops"] = "recorded";
   try {
     await binding.client.recordDotRunOutcome(record.conversationId, record.proposalId, {
-      kind: "workflow-run", runId: outcome.runId, outcome: outcome.outcome, ranAs: outcome.ranAs,
+      kind, runId: outcome.runId, outcome: outcome.outcome, ranAs: outcome.ranAs,
       ...(outcome.reason ? { reasonCode: outcome.reason } : {}),
     });
   } catch (error) {
@@ -4759,6 +4860,47 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
       throw error;
     });
     if (joined) return;
+    if (proposal.tool === DOT_WORKFLOW_CREATE_TOOL) {
+      // FAC-134 capability 2: a personal workflow, its own kind. The kernel lists every step and
+      // its input in its own field and creates it only from commands a console offers the person.
+      const declaration = dotPersonalWorkflow(proposal.input);
+      this.#receipts.set(proposal.id, await this.binding.submit(this.queue, actionId, {
+        title: sanitizeTitle("Your Dot proposes a personal workflow"),
+        // The prose is fixed (r1 on #475): the Dot wrote the title, so it is only ever a field's value.
+        ...(() => {
+          const described = this.binding.description(
+            `Your Dot proposes a personal workflow${declaration ? ` of ${declaration.steps.length} ` +
+            `step${declaration.steps.length === 1 ? "" : "s"}` : ""}, each a console command offered to you. ` +
+            `Approving it creates it in your operate session, only if each command is offered to you now; it ` +
+            `runs nothing. Running it is a separate approval, and each step then only places a request that ` +
+            `its console's builders decide. It can't be approved after ${proposal.expiresAt}.`);
+          return (declaration ? described.inline("Title", declaration.title) : described)
+            .verbatim("Arguments", JSON.stringify(proposal.input, null, 2))
+            .finish();
+        })(),
+        implementsRevert: false,
+        ...(declaration ? { personalWorkflow: declaration } : {}),
+        actionKind: { tag: "inferops.dot-workflow-create", label: "Approve a personal workflow your Dot proposed" },
+      }));
+      return;
+    }
+    if (proposal.tool === DOT_WORKFLOW_INVOKE_TOOL && parsePersonalWorkflowRef(proposal.input.reference)) {
+      // FAC-134 capability 2: running one of the person's own personal workflows, by its reference.
+      const reference = proposal.input.reference as string;
+      this.#receipts.set(proposal.id, await this.binding.submit(this.queue, actionId, {
+        title: sanitizeTitle("Your Dot proposes running your personal workflow"),
+        ...this.binding.description(
+          `Your Dot proposes running one of your personal workflows. Approving it runs its steps in order, ` +
+          `each only placing a request that its console's builders decide, with your access checked again ` +
+          `at each step; declining it runs nothing. It can't be approved after ${proposal.expiresAt}.`)
+          .verbatim("Reference", reference)
+          .finish(),
+        implementsRevert: false,
+        personalWorkflowRun: { reference, reportOutcome: true },
+        actionKind: { tag: "inferops.dot-personal-workflow-run", label: "Approve running a personal workflow your Dot proposed" },
+      }));
+      return;
+    }
     if (proposal.tool === DOT_WORKFLOW_INVOKE_TOOL) {
       // FAC-120: a workflow run, its own kind, so it is never mistaken for an InferOps change. The
       // trigger and revision come from the reference; it names them and authorizes nothing.

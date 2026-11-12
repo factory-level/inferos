@@ -543,6 +543,13 @@ export interface WikiDocument {
    * names something and grants nothing; reading it needs its own connection.
    */
   references: string[];
+  /**
+   * The page's one reference across surfaces, as InferOps names it (FAC-68):
+   * `inferops://<company>.<workspace>/knowledge/document/<slug>`, the same the global Wiki, InferOps
+   * search and the Dot give. Read from InferOps, never built here; absent when this InferOps doesn't
+   * name pages yet. It identifies the page and grants nothing.
+   */
+  ref?: string;
 }
 
 /**
@@ -651,6 +658,13 @@ export interface WikiSearchHit {
    * the snippet is still the committed text. Absent otherwise.
    */
   pending?: "update";
+  /**
+   * The hit's page's one reference across surfaces, as InferOps names it (FAC-68):
+   * `inferops://<company>.<workspace>/knowledge/document/<slug>`, the same the global Wiki, InferOps
+   * search and the Dot give. Read from InferOps, never built here; absent when this InferOps doesn't
+   * name pages yet. It identifies the page and grants nothing.
+   */
+  ref?: string;
 }
 
 /**
@@ -1101,6 +1115,8 @@ export interface DotProposal {
 
 /** How a workflow run your Dot's proposal started came out. */
 export interface DotProposalRun {
+  /** A published workflow's run, or one of your personal workflows' (whose `succeeded` means its requests were placed). */
+  kind: "workflow-run" | "personal-workflow";
   runId: string;
   outcome: "succeeded" | "failed" | "uncertain";
   /** Why it failed or is uncertain, as InferOS names it (for example "runtime-error"). */
