@@ -54,6 +54,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   const [isNewConnectionModalVisible, setIsNewConnectionModalVisible] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<{ name: string; resourceTitle: string } | null>(null)
   const [deleteHookTarget, setDeleteHookTarget] = useState<{ id: number; title: string } | null>(null)
+  const [drainingHookIds, setDrainingHookIds] = useState<Set<number>>(new Set())
   const [togglingHooks, setTogglingHooks] = useState<Set<number>>(new Set())
   const [annotationTarget, setAnnotationTarget] = useState<GadgetBindingInfo | null>(null)
   // Bindings that point at an agent (an agent-spawner gatekeeper), which can be reopened and edited.
@@ -76,6 +77,8 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
       // This tab shows one gadget, so drop hooks that wake a different one -- otherwise its
       // toggle/delete controls would operate on another gadget's hooks.
       setHooks(hookList.filter((hook) => hook.gadgetId === id))
+      const visibleHookIds = new Set(hookList.filter((hook) => hook.gadgetId === id).map((hook) => hook.id))
+      setDrainingHookIds((previous) => new Set([...previous].filter((hookId) => visibleHookIds.has(hookId))))
       onHasGatekeepersChange?.(bindingList.length > 0)
     } catch (err) {
       // Loud on purpose: this panel has no retry path, so a quieted transient failure would
@@ -89,6 +92,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
   }
 
   const handleToggleHook = async (id: number, enabled: boolean) => {
+    if (drainingHookIds.has(id)) return
     // Optimistically reflect the new state.
     setHooks((prev) => prev.map((h) => (h.id === id ? { ...h, enabled } : h)))
     setTogglingHooks((prev) => new Set(prev).add(id))
@@ -113,16 +117,36 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
     }
   }
 
-  const handleDeleteHookConfirm = async () => {
-    if (!deleteHookTarget) return
+  const handleDeleteHookConfirm = async (target = deleteHookTarget) => {
+    if (!target) return
+    let isDraining = false
     try {
-      await overseer.deleteHook(deleteHookTarget.id)
+      await overseer.deleteHook(target.id)
+      setDrainingHookIds((previous) => {
+        const next = new Set(previous)
+        next.delete(target.id)
+        return next
+      })
+      setDeleteHookTarget(null)
       await loadGatekeepers()
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (/(?:^|\b)TRIGGER_DRAINING:/.test(message)) {
+        isDraining = true
+        setDrainingHookIds((previous) => new Set(previous).add(target.id))
+        // The backend pauses the trigger before returning this response. Refresh the canonical
+        // row so the toggle reflects that state, but keep the confirmation open for retry.
+        await loadGatekeepers()
+        toasts.add({
+          title: 'This trigger has a run in progress. New runs are stopped; it is removed once the run finishes. Try again shortly.',
+          variant: 'warning',
+        })
+        return
+      }
       console.error('Failed to delete hook:', err)
       toasts.add({ title: 'Failed to delete hook', variant: 'error' })
     } finally {
-      setDeleteHookTarget(null)
+      if (!isDraining) setDeleteHookTarget(null)
     }
   }
 
@@ -414,6 +438,7 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
             <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-base">
               {hooks.map((hook, index) => {
                 const isDeleting = deleteHookTarget?.id === hook.id
+                const isDraining = drainingHookIds.has(hook.id)
                 const vendorId = bindings.find((b) => b.target === hook.gatekeeperId)?.vendorId
 
                 return (
@@ -424,19 +449,21 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                     {isDeleting ? (
                       <div className="flex flex-wrap items-center gap-3">
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] text-kumo-danger">
-                            Delete hook "{hook.description.title}"?
+                          <p className={`truncate text-[13px] leading-[18px] font-medium tracking-[-0.25px] ${isDraining ? 'text-kumo-default' : 'text-kumo-danger'}`}>
+                            {isDraining ? `${hook.description.title} is paused` : `Delete hook "${hook.description.title}"?`}
                           </p>
-                          <p className="truncate text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
-                            This permanently removes the hook. Future events will stop being delivered.
+                          <p role={isDraining ? 'status' : undefined} className="text-[12px] leading-4 font-normal tracking-[-0.2px] text-kumo-subtle">
+                            {isDraining
+                              ? 'This trigger has a run in progress. New runs are stopped; it is removed once the run finishes. Try again shortly.'
+                              : 'This permanently removes the hook. Future events will stop being delivered.'}
                           </p>
                         </div>
                         <WorkshopButton
-                          tone="danger"
+                          tone={isDraining ? undefined : 'danger'}
                           className="min-w-[68px]"
-                          onClick={handleDeleteHookConfirm}
+                          onClick={() => handleDeleteHookConfirm()}
                         >
-                          Delete
+                          {isDraining ? 'Retry removal' : 'Delete'}
                         </WorkshopButton>
                         <WorkshopButton
                           onClick={() => setDeleteHookTarget(null)}
@@ -460,6 +487,11 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                               {hook.description.description}
                             </p>
                           )}
+                          {isDraining && (
+                            <p role="status" className="mt-1 text-[12px] leading-4 text-kumo-subtle">
+                              This trigger has a run in progress. New runs are stopped; it is removed once the run finishes. Try again shortly.
+                            </p>
+                          )}
                           {hook.resourceTitle && (
                             <p className="mt-0.5 truncate text-[11px] leading-4 tracking-[-0.1px] text-kumo-inactive">
                               {hook.resourceTitle}
@@ -469,18 +501,24 @@ export default function Connections({ overseer, gadget, chatId, authenticatedApi
                         <div className="ml-auto flex shrink-0 items-center gap-2">
                           <HookToggle
                             enabled={hook.enabled}
-                            disabled={togglingHooks.has(hook.id)}
+                            disabled={togglingHooks.has(hook.id) || isDraining}
                             onToggle={(enabled) => handleToggleHook(hook.id, enabled)}
                           />
-                          <Tooltip content="Delete hook" asChild>
-                            <WorkshopIconButton
-                              danger
-                              onClick={() => setDeleteHookTarget({ id: hook.id, title: hook.description.title })}
-                              aria-label="Delete hook"
-                            >
-                              <Trash size={14} />
-                            </WorkshopIconButton>
-                          </Tooltip>
+                          {isDraining ? (
+                            <WorkshopButton onClick={() => handleDeleteHookConfirm({ id: hook.id, title: hook.description.title })}>
+                              Retry removal
+                            </WorkshopButton>
+                          ) : (
+                            <Tooltip content="Delete hook" asChild>
+                              <WorkshopIconButton
+                                danger
+                                onClick={() => setDeleteHookTarget({ id: hook.id, title: hook.description.title })}
+                                aria-label="Delete hook"
+                              >
+                                <Trash size={14} />
+                              </WorkshopIconButton>
+                            </Tooltip>
+                          )}
                         </div>
                       </div>
                     )}

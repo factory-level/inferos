@@ -117,6 +117,21 @@ describe("the Dot's answers, parsed strictly", () => {
     outcome: null, createdAt: "2026-11-10T12:00:00.000Z", expiresAt: "2026-11-10T12:15:00.000Z", decidedAt: null,
   };
 
+  it("reads a hand-off's recorded run outcome, its fixed fields only, and anything else as none (FAC-134)", () => {
+    const run = { kind: "workflow-run", runId: "run-1", outcome: "failed", reasonCode: "runtime-error", ranAs: "service_account",
+      recordedAt: "2026-11-10T12:05:00.000Z", report: { secret: 1 } };
+    expect(parseDotProposal({ ...proposal, status: "handed-off", run }).run).toEqual({
+      kind: "workflow-run", runId: "run-1", outcome: "failed", reasonCode: "runtime-error", ranAs: "service_account",
+    });
+    // An older InferOps (no field), nothing recorded (null), or one that doesn't read as a run: none.
+    expect(parseDotProposal(proposal).run).toBeNull();
+    for (const bad of [null, "x", { ...run, kind: "delegate" }, { ...run, outcome: "done" }, { ...run, ranAs: "person" },
+      { ...run, runId: "" }, { ...run, reasonCode: 7 }, { ...run, reasonCode: "It failed: <b>secret</b>" },
+      { ...run, reasonCode: "made-up-reason" }, { ...run, reasonCode: "constructor" }]) {
+      expect(parseDotProposal({ ...proposal, run: bad }).run).toBeNull();
+    }
+  });
+
   it("reads every status InferOps names, its derived ones included", () => {
     // `handed-off` (FAC-120, inferops#2627): a confirmed InferOS workflow-run proposal.
     for (const status of ["proposed", "confirming", "confirmed", "handed-off", "declined", "failed", "expired", "unknown"]) {

@@ -99,12 +99,15 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     "getRequestedRun" |
     // And the runs they asked one trigger for, newest first (FAC-116; workflow-requested-runs.test.ts).
     "listRequestedRuns" |
-    // A run they asked for, which they may cancel (FAC-117; workflow-run-execution.test.ts covers who may).
-    "cancelWorkflowRun";
+    // A run they asked for, which they may cancel (FAC-117; workflow-run-execution.test.ts covers who may),
+    // and retry once it failed (FAC-117 K2; the same file covers who may and when).
+    "cancelWorkflowRun" | "retryWorkflowRun";
 
 const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurface>,
     (ws: RpcStub<Overseer>) => unknown> = {
   previewAuthoredWidget: ws => ws.previewAuthoredWidget(1, 1),
+  // Settling a run's unknown write is a decision on an action, which a use collaborator doesn't make (FAC-117 K2).
+  resolveWorkflowRunWrite: ws => ws.resolveWorkflowRunWrite(1, "not-applied"),
   exportWorkspaceRecords: ws => ws.exportWorkspaceRecords(),
   // A console draft is the builder's, and so is what would stop it publishing (FAC-96).
   validateConsoleDraft: ws => ws.validateConsoleDraft("console"),
@@ -117,6 +120,7 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   deleteCanvas: ws => ws.deleteCanvas("view", "0"),
   // A use-role operator holds no temporary canvases in someone else's workspace (FAC-137).
   listTemporaryCanvases: ws => ws.listTemporaryCanvases(),
+  listPersonalWorkflows: ws => ws.listPersonalWorkflows(),
   getTemporaryCanvas: ws => ws.getTemporaryCanvas("canvas"),
   saveTemporaryCanvas: ws => ws.saveTemporaryCanvas("canvas", 1),
   removeTemporaryCanvas: ws => ws.removeTemporaryCanvas("canvas", 1),

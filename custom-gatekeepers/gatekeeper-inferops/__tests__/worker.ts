@@ -7,7 +7,7 @@ import type { TemporaryCanvasInput } from "@gadgets/workshop-shared/temporary-ca
 import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
-  ActionApplied, ActionApplyFailure, ActionFailureKind, ActionDescription, ApprovedTemporaryCanvas, ApprovedWorkflowRun, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  ActionApplied, ActionApplyFailure, ActionFailureKind, ActionDescription, ApprovedRunOutcome, ApprovedTemporaryCanvas, ApprovedWorkflowRun, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { dotBindingOver } from "../src/inferops.js";
@@ -435,6 +435,8 @@ export type DotScript = {
   confirm: { outcome: unknown } | { status: number; code: string; settlesAs?: string };
   /** How a decline answers: declined (the default), or a refusal, settling the proposal as `settlesAs`. */
   decline?: { status: number; code: string; settlesAs?: string };
+  /** How recording a run outcome answers (FAC-134): recorded (the default), or a refusal. */
+  runOutcome?: { status: number; code: string };
 };
 
 /** A Dot binding's props, as the vendor mints them. */
@@ -484,6 +486,13 @@ class FakeDot {
     }
     if (method === "POST" && /\/runs\/[0-9a-f-]+\/cancel$/.test(path)) return Response.json({ ok: true });
     if (method === "GET" && path === `${base}/proposals`) return Response.json({ proposals: this.script.proposals });
+    const ran = /\/proposals\/([0-9a-f-]+)\/run-outcome$/.exec(path);
+    if (method === "POST" && ran) {
+      const proposal = this.script.proposals.find(p => p.id === ran[1]);
+      if (!proposal) return refuse(404, "PROPOSAL_NOT_FOUND");
+      if (this.script.runOutcome) return refuse(this.script.runOutcome.status, this.script.runOutcome.code);
+      return Response.json({ proposal });
+    }
     const decided = /\/proposals\/([0-9a-f-]+)\/(confirm|decline)$/.exec(path);
     if (method === "POST" && decided) {
       const proposal = this.script.proposals.find(p => p.id === decided[1]);
@@ -1388,6 +1397,21 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
 
   async rejectDot(actionId: number): Promise<void> {
     await this.#dotBinding().rejectAction(actionId);
+  }
+
+  /** The kernel telling the Dot facet how an approved action's run came out (FAC-134). */
+  async dotRunOutcome(actionId: number, outcome: ApprovedRunOutcome): Promise<string | null> {
+    try {
+      await this.#dotBinding().workflowRunOutcome(actionId, outcome);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  /** The run outcomes a Dot action recorded (FAC-134). */
+  async dotReportedRuns(actionId: number): Promise<unknown[]> {
+    return this.ctx.storage.kv.get<{ reportedRuns?: unknown[] }>(`action:${actionId}`)?.reportedRuns ?? [];
   }
 
   /** A Dot action's stored status and, once settled, its stored message; null when there is none. */

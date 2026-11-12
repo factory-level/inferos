@@ -144,6 +144,11 @@ jobs:
       - name: Test
         id: test
         run: pnpm test
+        # The Gadget request probes run in real Chrome (GadgetUI.request-probes.test.ts), and with this
+        # set a runner without Chrome fails the test step instead of skipping them silently (FAC-15 S3).
+        # ubuntu-latest ships Google Chrome at the path the test defaults to.
+        env:
+          GADGET_BROWSER_TESTS_REQUIRED: "1"
 
       # Diagnosis only, and only after the Test step itself failed: that same run's per-task outcomes
       # and the integration suite's file-only phase timings. Read only; it always exits 0, so the job
