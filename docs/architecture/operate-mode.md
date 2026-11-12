@@ -1094,7 +1094,11 @@ FAC-134, capability 3 ([ADR 0020](https://github.com/factory-level/inferos/pull/
   - **connections:** up to 8 gatekeeper vendor ids;
   - **tools** (optional): up to 16, each in `DELEGATE_TOOLS`. That is `OPERATE_AGENT_TOOLS` without `requestConnection`, `operatePage`, `setWidgetView` and `proposePlacement`.
 
-  Anything else is refused, never flattened or narrowed. The kernel appends `DELEGATE_FIELD_LABEL` (reserved), whose value is `delegateFieldValue`: the ceiling, and the prompt with every line prefixed `> `, so none of the Dot's lines can pass for the kernel's. `autoApprovalRule` refuses the marker. **A delegate's own chat can't declare one:** submit refuses it (`DELEGATE_NO_RELAUNCH`) for an agent caller whose chat is a delegate, whichever gatekeeper it reaches.
+  Anything else is refused, never flattened or narrowed. The kernel appends two reserved fields (r1 on #487):
+  - **`DELEGATE_FIELD_LABEL`**, whose value is `delegateFieldValue`: the ceiling's connection types and tools, and what any declared tool reaches beyond those connections (`DELEGATE_TOOL_REACH`: `callConsoleTool` asks for any command a console offers the person, each a request its builders decide; `webFetch` fetches public pages);
+  - **`DELEGATE_PROMPT_FIELD_LABEL`**: the Dot's prompt alone, as written. No line of it, wrapped or not, sits among the kernel's own words.
+
+   `autoApprovalRule` refuses the marker. **A delegate's own chat can't declare one:** submit refuses it (`DELEGATE_NO_RELAUNCH`) for an agent caller whose chat is a delegate, whichever gatekeeper it reaches.
 - **Launched** by `ApprovedEffects.launchDelegate()` (`#launchApprovedDelegate`). It is minted only for that marker and the person's own approval, memoised, and revoked after apply. It launches only:
   - in the approver's own live operate session (`ownerProfileId`, not retired);
   - never for an action a delegate's chat proposed (`record.caller`);
@@ -1112,7 +1116,7 @@ FAC-134, capability 3 ([ADR 0020](https://github.com/factory-level/inferos/pull/
   The record goes in `delegates` (`delegate-store.ts`): its ceiling, the declared types, the generation, its state and outcome, never what its chat said.
 - **Checked on every call** (`assertDelegateMayCall`), in two places:
   - **`startGatekeeperSession`**, for every binding call, before anything else: the target must be one of the ceiling's connections. No other connection the person holds, gadget, worktree or git is reachable (`DELEGATE_OUTSIDE_CEILING`).
-  - **Every tool call:** `agent.ts` offers a delegate's chat only its ceiling's tools (`delegateToolsFor`). Its `execute` wrapper refuses any other and checks the starter first.
+  - **Every tool call:** `agent.ts` offers a delegate's chat only its ceiling's tools (`delegateToolsFor`). That filter is the boundary. The `execute` wrapper checks the starter first on every call, and refusing a tool outside the ceiling there is defence in depth: no such tool reaches the turn, so that branch can't be tested apart from the filter (r1 on #487).
 
   `#delegateRevoked` requires this to be the starter's live operate session (same owner, not retired), at the generation it was launched at. A grant, role or ownership change raises the generation, and a company switch retires the session. Either refuses the call and cancels the delegate: `failed`, `requester-revoked`, with its turn cancelled.
 - **Resuming re-verifies the starter.** `startAgent` asks `#delegateMayStart` before any turn of a delegate's chat. That covers a resume after an approval, after a restart, and for a delivered call. A revoked starter's turn never starts, the chat says why, and the delegate is cancelled.
@@ -1121,7 +1125,7 @@ FAC-134, capability 3 ([ADR 0020](https://github.com/factory-level/inferos/pull/
   - **`succeeded`:** a turn that ended with nothing of the delegate's own pending (no action it proposed waiting, no call or resume due). That means its work ended, never that anything it asked for was made;
   - **still running** otherwise, until those settle.
 
-  `stopDelegate` (the person's own only) ends it `failed`, `cancelled`. With `reportOutcome`, `reportDelegates` (from the alarm) hands `{kind: "delegate", runId, outcome, reason?, requestedBy, ranAs: "person"}` to the action's gatekeeper through `#handOnRunOutcome`'s rules, retried like a personal workflow run's. inferops#2653 takes that kind and `ranAs` only together.
+  `stopDelegate` (the person's own only) ends it `failed`, `cancelled`. **Stopping leaves anything it already proposed** (an action waiting for approval) for the person to decide, as any pending action is. With `reportOutcome`, `reportDelegates` (from the alarm) hands `{kind: "delegate", runId, outcome, reason?, requestedBy, ranAs: "person"}` to the action's gatekeeper through `#handOnRunOutcome`'s rules, retried like a personal workflow run's. inferops#2653 takes that kind and `ranAs` only together.
 - **Read** with `Overseer.listDelegates` (`delegatesOf`): the person's own, in their own live session, as `DelegateSummary` (state, reason, declared connections, tools, chat). A use-role operator is denied both methods.
 - **Tests:**
   - **`workshop-shared/src/delegate.test.ts`:** the declaration's fields and refusals (titles, prompts, connections, tools); the default tools; the field's words with a forged prompt.

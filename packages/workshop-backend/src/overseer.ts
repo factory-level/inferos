@@ -1348,6 +1348,12 @@ export const PERSONAL_WORKFLOW_RUN_FIELD_LABEL = "Personal workflow this approva
  */
 export const DELEGATE_FIELD_LABEL = "Delegate this approval launches (shown by InferOS)";
 
+/**
+ * The label of the second field the kernel appends to a delegate's action: the Dot's prompt alone,
+ * as written, so none of its lines can sit among the kernel's own words (r1 on #487).
+ */
+export const DELEGATE_PROMPT_FIELD_LABEL = "What your Dot asks this delegate to do (its words, shown by InferOS)";
+
 /** FAC-134 capability 3: a delegate is launched only by its own person's approval, in their own operate session. */
 export const DELEGATE_OWN_SESSION = "A delegate is launched only by your own approval, in your own operate session.";
 /** A delegate's own chat can't launch another (ADR 0020). */
@@ -1399,12 +1405,13 @@ const foldLabel = (label: string) => label.normalize("NFKC").replace(/\p{Default
 export const TEMPORARY_CANVAS_FIELD_LABEL = "Temporary canvas this approval creates for you (shown by InferOS)";
 
 const RESERVED_LABELS_FOLDED = new Set([WORKFLOW_RUN_FIELD_LABEL, TEMPORARY_CANVAS_FIELD_LABEL,
-    PERSONAL_WORKFLOW_FIELD_LABEL, PERSONAL_WORKFLOW_RUN_FIELD_LABEL, DELEGATE_FIELD_LABEL].map(foldLabel));
+    PERSONAL_WORKFLOW_FIELD_LABEL, PERSONAL_WORKFLOW_RUN_FIELD_LABEL, DELEGATE_FIELD_LABEL,
+    DELEGATE_PROMPT_FIELD_LABEL].map(foldLabel));
 
 /**
  * Whether `label` is one of the kernel's reserved labels: `WORKFLOW_RUN_FIELD_LABEL` (rounds 6 and 7),
  * `TEMPORARY_CANVAS_FIELD_LABEL` (FAC-137), and FAC-134's `PERSONAL_WORKFLOW_FIELD_LABEL`,
- * `PERSONAL_WORKFLOW_RUN_FIELD_LABEL` and `DELEGATE_FIELD_LABEL`, so a near-copy
+ * `PERSONAL_WORKFLOW_RUN_FIELD_LABEL`, `DELEGATE_FIELD_LABEL` and `DELEGATE_PROMPT_FIELD_LABEL`, so a near-copy
  * can't pass for it. Both are folded the same way first: NFKC (so fullwidth and other compatibility
  * forms match), every default-ignorable code point removed (zero-width and other invisible
  * characters), whitespace collapsed, trimmed and lower-cased. A gatekeeper's field so labelled is
@@ -8861,7 +8868,7 @@ class OverseerImpl implements AgentHooks {
         fields: [...description.fields ?? [], {label: PERSONAL_WORKFLOW_RUN_FIELD_LABEL, kind: "inline", value: reference}]};
     }
     // A declared delegate (FAC-134 capability 3, ADR 0020) is checked for its shape here and shown in
-    // the kernel's own last field: its ceiling, and its prompt with every line marked as the Dot's.
+    // the kernel's own last two fields: its ceiling, then the Dot's prompt alone (r1 on #487).
     // A delegate's own chat can't launch another: refused here, whatever gatekeeper it reaches.
     if (description.delegate !== undefined) {
       if (caller.from === "agent" && this.delegateStore().forChat(caller.chatId)) throw new Error(DELEGATE_NO_RELAUNCH);
@@ -8874,7 +8881,8 @@ class OverseerImpl implements AgentHooks {
       }
       let declaration = parseDelegateDeclaration(declared);
       description = {...description, delegate: {...declaration, ...(reportOutcome ? {reportOutcome: true} : {})},
-        fields: [...description.fields ?? [], {label: DELEGATE_FIELD_LABEL, kind: "text", value: delegateFieldValue(declaration)}]};
+        fields: [...description.fields ?? [], {label: DELEGATE_FIELD_LABEL, kind: "text", value: delegateFieldValue(declaration)},
+          {label: DELEGATE_PROMPT_FIELD_LABEL, kind: "text", value: declaration.prompt}]};
     }
 
     // Push authorization (see ActionDescription.pushedCommits): before anything is queued,

@@ -4351,8 +4351,9 @@ async function runAgentPass(
   }
 
   // FAC-134 capability 3 (ADR 0020): a delegate's chat is offered only the tools its ceiling names,
-  // fixed at its approval, and each call first checks that its starter still holds it. Guarded at
-  // execution as well as advertisement, so a model-supplied catalog can't widen it.
+  // fixed at its approval, and each call first checks that its starter still holds it. The filter
+  // below is the boundary; the check at execution is defence in depth (r1 on #487), for a tool that
+  // reaches the turn without being offered, so a model-supplied catalog can't widen it.
   let delegateTools = operateSession ? hooks.delegateToolsFor?.(chatId) ?? null : null;
   if (delegateTools) {
     const allowed = new Set(delegateTools);
