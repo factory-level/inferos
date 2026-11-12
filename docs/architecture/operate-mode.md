@@ -985,7 +985,12 @@ FAC-120 (K1): a workflow run the person's Dot proposed starts only as the person
   - **Where it goes is the kernel's:** `#invokeApprovedWorkflow` passes `reportOutcome` on, and `invokeTriggerAs` records `reportTo = {sessionWorkspaceId, actionId}` (the caller's verified operate session and the action) on the invocation (`ApprovedRunAdmission.reportTo`). `fire` moves it into `runChatReports` as the run is admitted. Nothing a caller or the run supplies names it.
   - **When:** `#settleRun`'s first final result (`succeeded`, `failed` or `uncertain`) makes it due once (`#oweRunToChat`; `delivery.chat` `pending`), and `reportRunsToChat` delivers it then and from the alarm, `RUN_CHAT_REPORT_TRIES` (5) tries with a growing delay, whatever happened to the browser or the session meanwhile.
   - **Re-checked first:** the requester, as for their page (`#requesterStillMay`); one who may no longer run it is told nothing (`undelivered`).
-  - **Received** by the session workspace (`reportApprovedRunOutcome`, Worker-only), which hands it to the action's gatekeeper (`Gatekeeper.workflowRunOutcome`) only for its own `approved` action that asked, naming a trigger in the reporting workspace, approved by the person the outcome says asked; anything else is `refused`. At most once per action (`fac134:runOutcome:<action>`).
+  - **Received** by the session workspace (`reportApprovedRunOutcome`, Worker-only). Only for its own action that asked, naming a trigger in the reporting workspace, whose approval is the person the outcome says asked:
+    - **still applying** (`pending` with `applyStartedAt`, or claimed): `retry`, so an outcome that settles before the approval's `applyAction` returns waits for it (round 2);
+    - **approved:** handed to the action's gatekeeper (`Gatekeeper.workflowRunOutcome`) with `actionApplied: true`;
+    - **its apply ended without succeeding after the run started** (`failed`, or `pending` with a last attempt, the approver then being the session's owner): the approval still started the run, so it is handed on with `actionApplied: false`, the action's failure staying on the action;
+    - **anything else:** `refused`, nothing handed on.
+  - **At least once, never exactly once** (round 2): a `sending` mark is written before the gatekeeper is called, so an overlapping call answers `retry`; `sent` answers `delivered`; a throw clears it. A crash between the gatekeeper's answer and `sent` leaves `sending`, which after `RUN_OUTCOME_SENDING_STALE_MS` is sent again: gatekeepers (and InferOps' `chatbot.proposal_run_outcome`) deduplicate by action and run id. The sender retries `retry` and failures alike, `RUN_CHAT_REPORT_TRIES` times with a growing delay, then gives up (`undelivered`).
   - **What it carries** is `ApprovedRunOutcome`: its `kind` (`workflow-run`; FAC-134's later kinds join it), the run id, its outcome and fixed reason, who asked, and what it ran as (`gadget_bindings` or `service_account`), never what the run returned or wrote.
 - **The InferOps facet** treats `unknown` as uncertain and not retryable: it neither declines nor confirms the proposal.
 - **Tests.**
@@ -1000,7 +1005,8 @@ FAC-120 (K1): a workflow run the person's Dot proposed starts only as the person
     - an assigned trigger runs only its pinned code as its assignment, and the person is told only the run; with assignments off it is refused;
     - a person taken off the control after asking: the run fails at its start and nothing is reported;
     - no report for an approval that didn't ask;
-    - the session refuses an outcome from another workspace, for another person, for an action that isn't there or didn't ask, or with an unknown `ranAs` or `kind`, and hands its own on once.
+    - the session refuses an outcome from another workspace, for another person, for an action that isn't there or didn't ask, or with an unknown `ranAs` or `kind`, and hands its own on once;
+    - round 2: an approval whose `applyAction` is held open after starting the run: the outcome is retried, not refused, and delivered once after the apply returns; an apply that failed after starting the run: reported with `actionApplied: false`; two overlapping reports: one hand-off, the second told to retry; a send a crash cut off: sent again with the same action and run, for the receiver to drop.
 - **Not covered.** The idempotency record is kept with no expiry, which is one small row per approved run. Run controls offering their reference to the Dot, and the decision card's workflow title, are FAC-120's UI change.
 
 ### Agent widget verbs

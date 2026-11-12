@@ -48,10 +48,15 @@ let restore: (() => void)[] = [];
 let ran: unknown[][] = [];
 /** What each session's gatekeeper facet was told, across instances: [session id, action, outcome]. */
 let reported: [string, number, ApprovedRunOutcome][] = [];
+/** What a session's gatekeeper does when its action is applied (round 2), and a gate its report waits on. */
+let applyWith: ((action: number, cache: unknown, effects?: any) => Promise<unknown>) | null = null;
+let outcomeGate: Promise<void> | null = null;
 afterEach(() => {
   for (let undo of restore.splice(0)) undo();
   ran = [];
   reported = [];
+  applyWith = null;
+  outcomeGate = null;
 });
 
 /** Replaces `name` on the Overseer implementation's prototype until the test ends. */
@@ -107,9 +112,13 @@ function seams(impl: any) {
   onPrototype(impl, "authorizeCollaborator", async () => "use");
   onPrototype(impl, "getGatekeeperFacet", function (this: any) {
     let session = this.ctx.id.toString();
-    return { workflowRunOutcome: async (action: number, outcome: ApprovedRunOutcome) => {
-      reported.push([session, action, outcome]);
-    } };
+    return {
+      applyAction: async (action: number, cache: unknown, effects?: unknown) => applyWith?.(action, cache, effects),
+      workflowRunOutcome: async (action: number, outcome: ApprovedRunOutcome) => {
+        await outcomeGate;
+        reported.push([session, action, outcome]);
+      },
+    };
   });
 }
 
@@ -199,18 +208,30 @@ function admissionSeams(impl: any, session: string, opts: { vendor?: string; hol
 }
 
 /** S: the person's operate session, with action ACTION approved by them, declaring a run of `reference`. */
-async function sessionWith(reference: string, opts: { reportOutcome?: boolean; approvedBy?: string } = {}): Promise<string> {
+async function sessionWith(reference: string, opts: { reportOutcome?: boolean; approvedBy?: string; pending?: boolean } = {}): Promise<string> {
   let name = `dot-run-s-${crypto.randomUUID()}`;
   await withImpl(name, impl => {
     impl.storage.actions.put({
-      type: "action", id: ACTION, gatekeeperId: 50, action: ACTION_KEY, state: "approved",
-      caller: { from: "agent", chatId: 1 }, createdAt: new Date(0), appliedAt: new Date(0),
+      type: "action", id: ACTION, gatekeeperId: 50, action: ACTION_KEY, state: opts.pending ? "pending" : "approved",
+      caller: { from: "agent", chatId: 1 }, createdAt: new Date(0), ...(opts.pending ? {} : { appliedAt: new Date(0) }),
       description: { title: "Run refunds", workflowRun: { reference, ...(opts.reportOutcome === false ? {} : { reportOutcome: true }) } },
-      resolvedBy: { type: "user", id: opts.approvedBy ?? PERSON, name: "Operator" },
+      ...(opts.pending ? {} : { resolvedBy: { type: "user", id: opts.approvedBy ?? PERSON, name: "Operator" } }),
     });
   });
   return name;
 }
+
+/** On S's instance: the person, as W's admission names them (so S's caller is the one W verifies). */
+function sessionPerson(impl: any) {
+  impl.ownerProfileId = PERSON;
+  impl.users = {
+    idFromName: (profileId: string) => ({ toString: () => uid(profileId) }),
+    idFromString: (id: string) => id,
+    get: () => ({}),
+  };
+}
+
+const OPERATOR = { type: "user" as const, id: PERSON, name: "Operator" };
 
 const caller = (session: string): ConsoleToolCaller => ({ userId: uid(PERSON), profileId: PERSON, sessionWorkspaceId: session });
 const request = (w: Workspace, reportOutcome = true) =>
@@ -240,6 +261,7 @@ describe("a run started by approving the Dot's proposal (FAC-134)", () => {
     await vi.waitFor(() => expect(reported).toHaveLength(1));
     expect(reported[0]).toEqual([idOf(s), ACTION_KEY, {
       kind: "workflow-run", runId: started.status === "started" ? started.runId : "", outcome: "succeeded", requestedBy: PERSON, ranAs: "gadget_bindings",
+      actionApplied: true,
     }]);
     expect(await withImpl(w.name, impl => impl.storage.workflowDeliveries.get(deliveryId).delivery))
       .toMatchObject({ chat: "delivered" });
@@ -362,7 +384,7 @@ describe("the session receiving a run's outcome (FAC-134)", () => {
       // Its own: handed on once; a repeat is delivered again without a second hand-off.
       expect(await impl.reportApprovedRunOutcome(ACTION, w.id, outcome())).toBe("delivered");
       expect(await impl.reportApprovedRunOutcome(ACTION, w.id, outcome())).toBe("delivered");
-      expect(reported).toEqual([[idOf(s), ACTION_KEY, outcome()]]);
+      expect(reported).toEqual([[idOf(s), ACTION_KEY, { ...outcome(), actionApplied: true }]]);
     });
   });
 
@@ -374,5 +396,107 @@ describe("the session receiving a run's outcome (FAC-134)", () => {
       expect(await impl.reportApprovedRunOutcome(ACTION, w.id, outcome())).toBe("refused");
       expect(reported).toEqual([]);
     });
+  });
+});
+
+// Round 2 (review r1 MEDIUM, r2 HIGH): an outcome that arrives while the approval that started its run
+// is still applying waits for it; one whose apply failed after the run started is still reported;
+// and handing it on is at least once, never twice at once, with a crash's repeat left for the
+// receiver to drop by action and run id.
+describe("an outcome and the approval that started its run (FAC-134, round 2)", () => {
+  async function approveInSession(w: Workspace, s: string): Promise<{ applying: Promise<unknown> }> {
+    await withImpl(w.name, impl => { admissionSeams(impl, idOf(s)); });
+    let applying!: Promise<unknown>;
+    await withImpl(s, impl => {
+      seams(impl);
+      sessionPerson(impl);
+      // Settled to a value at once, so a refused apply is never an unhandled rejection.
+      applying = impl.applyPendingAction(impl.storage.actions.get(ACTION), OPERATOR, false)
+        .then(() => "applied", (error: Error) => error.message);
+    });
+    await withImpl(w.name, impl => vi.waitFor(() => expect([...impl.storage.workflowRunQueue.list()]).toHaveLength(1)));
+    // In an object: an async function returning the promise itself would wait for the apply.
+    return { applying };
+  }
+
+  it("waits while the approval's apply runs, then is delivered once it returns", async () => {
+    let w = await triggerWorkspace();
+    let s = await sessionWith(w.reference, { pending: true });
+    let release!: () => void;
+    applyWith = async (_action, _cache, effects) => {
+      await effects.invokeWorkflow();
+      await new Promise<void>(resolve => { release = resolve; });
+    };
+    let { applying } = await approveInSession(w, s);
+    // The run settles and reports while the gatekeeper is still in applyAction: not refused, retried.
+    await runAlarm(w.name);
+    expect(ran).toHaveLength(1);
+    await withImpl(w.name, impl => vi.waitFor(() => {
+      expect([...impl.storage.runChatReports.list()]).toEqual([expect.objectContaining({ attempts: 1 })]);
+    }));
+    expect(reported).toEqual([]);
+    expect(await withImpl(w.name, impl => [...impl.storage.workflowDeliveries.list()][0].delivery)).toMatchObject({ chat: "pending" });
+    // Released and awaited in S, whose apply it is: workerd keeps each object's I/O to its own context.
+    expect(await withImpl(s, async impl => {
+      release();
+      await applying;
+      return impl.storage.actions.get(ACTION).state;
+    })).toBe("approved");
+    await withImpl(w.name, impl => impl.reportRunsToChat(Date.now() + 1e9));
+    expect(reported).toHaveLength(1);
+    expect(reported[0]![2]).toMatchObject({ outcome: "succeeded", actionApplied: true });
+    expect(await withImpl(w.name, impl => [...impl.storage.workflowDeliveries.list()][0].delivery)).toMatchObject({ chat: "delivered" });
+  });
+
+  it("is reported for a run whose approval's apply failed after starting it, saying the apply didn't", async () => {
+    let w = await triggerWorkspace();
+    let s = await sessionWith(w.reference, { pending: true });
+    applyWith = async (_action, _cache, effects) => {
+      await effects.invokeWorkflow();
+      return { failed: { outcome: "notApplied", retryable: false, message: "InferOps didn't answer", kind: "unavailable" } };
+    };
+    let { applying } = await approveInSession(w, s);
+    expect(await withImpl(s, () => applying)).toBe("InferOps didn't answer");
+    expect(await withImpl(s, impl => impl.storage.actions.get(ACTION).state)).toBe("failed");
+    await runAlarm(w.name);
+    await vi.waitFor(() => expect(reported).toHaveLength(1));
+    expect(reported[0]![2]).toMatchObject({ outcome: "succeeded", requestedBy: PERSON, actionApplied: false });
+  });
+
+  it("hands two overlapping reports on once: the second is told to retry", async () => {
+    let w = await triggerWorkspace();
+    let s = await sessionWith(w.reference);
+    let open!: () => void;
+    outcomeGate = new Promise<void>(resolve => { open = resolve; });
+    let report = { kind: "workflow-run" as const, runId: "run-1", outcome: "succeeded" as const, requestedBy: PERSON, ranAs: "gadget_bindings" as const };
+    await withImpl(s, async impl => {
+      seams(impl);
+      let first = impl.reportApprovedRunOutcome(ACTION, w.id, report);
+      expect(await impl.reportApprovedRunOutcome(ACTION, w.id, report)).toBe("retry");
+      open();
+      expect(await first).toBe("delivered");
+      expect(await impl.reportApprovedRunOutcome(ACTION, w.id, report)).toBe("delivered");
+    });
+    expect(reported).toHaveLength(1);
+  });
+
+  it("sends again after a send a crash cut off, with the same action and run for the receiver to drop", async () => {
+    let w = await triggerWorkspace();
+    let s = await sessionWith(w.reference);
+    let report = { kind: "workflow-run" as const, runId: "run-1", outcome: "failed" as const, reason: "runtime-error", requestedBy: PERSON, ranAs: "gadget_bindings" as const };
+    await withImpl(s, async impl => {
+      seams(impl);
+      expect(await impl.reportApprovedRunOutcome(ACTION, w.id, report)).toBe("delivered");
+      // A restart between the gatekeeper's answer and the `sent` mark: `sending`, older than the bound.
+      impl.ctx.storage.kv.put(`fac134:runOutcome:${ACTION}`, { state: "sending", runId: "run-1", at: 0 });
+      expect(await impl.reportApprovedRunOutcome(ACTION, w.id, report)).toBe("delivered");
+      // A fresh send in progress isn't repeated; another run for the same action is refused.
+      impl.ctx.storage.kv.put(`fac134:runOutcome:${ACTION}`, { state: "sending", runId: "run-1", at: Date.now() });
+      expect(await impl.reportApprovedRunOutcome(ACTION, w.id, report)).toBe("retry");
+      expect(await impl.reportApprovedRunOutcome(ACTION, w.id, { ...report, runId: "run-2" })).toBe("refused");
+    });
+    // At least once: two hand-offs, both the same action and run, so a receiver deduplicating by them has one.
+    expect(reported).toHaveLength(2);
+    expect(new Set(reported.map(([, action, outcome]) => `${action}:${outcome.runId}`)).size).toBe(1);
   });
 });

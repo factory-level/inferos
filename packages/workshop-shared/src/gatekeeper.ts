@@ -1099,6 +1099,12 @@ export type ApprovedRunOutcome = {
    * their request (inferops ADR 0011's two contexts).
    */
   ranAs: "gadget_bindings" | "service_account";
+  /**
+   * Set by the session handing it on: true when the approval that started the run was recorded as
+   * applied; false when that apply ended without succeeding after the run had started (the
+   * action's own failure stays on the action).
+   */
+  actionApplied?: boolean;
 };
 
 /**
@@ -1343,11 +1349,13 @@ export interface Gatekeeper<Session> extends DurableObject {
       : Promise<void | { failed: ActionApplyFailure } | ActionApplied>;
 
   /**
-   * How the run applied action `action` started came out (FAC-134): called only for an action whose
-   * description declared `workflowRun` with `reportOutcome`, after the run has a final outcome, and
-   * at most once per action once it returns (a throw is retried a few times, then given up). The
-   * gatekeeper records it where the action came from; it is told nothing it may act on as anyone.
-   * Gatekeepers that never set `reportOutcome` need not implement it.
+   * How the run approved action `action` started came out (FAC-134): called only for an action whose
+   * description declared `workflowRun` with `reportOutcome`, after the run has a final outcome. It is
+   * delivered at least once, never exactly once: a throw is retried a few times, then given up, and
+   * a call cut off by a restart may be repeated. **Implementations must deduplicate by `action` and
+   * `outcome.runId`**, so a repeat has no second effect. The gatekeeper records it where the action
+   * came from; it is told nothing it may act on as anyone. Gatekeepers that never set
+   * `reportOutcome` need not implement it.
    */
   workflowRunOutcome?(action: number, outcome: ApprovedRunOutcome): Promise<void>;
 
@@ -1807,8 +1815,8 @@ export type ActionDescription = {
    * hands `applyAction()` the `ApprovedEffects` that start exactly this run. It is fixed at submit:
    * nothing at apply time can name another.
    *
-   * With `reportOutcome` (FAC-134), the kernel also tells this gatekeeper, once, how the run it
-   * started came out (`Gatekeeper.workflowRunOutcome`), after the run has a final outcome and
+   * With `reportOutcome` (FAC-134), the kernel also tells this gatekeeper how the run it started
+   * came out (`Gatekeeper.workflowRunOutcome`, at least once), after the run has a final outcome and
    * whether or not the approver's browser is still open. Without it, nothing is reported.
    */
   workflowRun?: { reference: string; reportOutcome?: boolean };

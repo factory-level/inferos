@@ -1351,6 +1351,13 @@ export const REPLAY_WITHDRAW_TRIES = 5;
 /** How many times a run's outcome is offered to the approved action that started it (FAC-134). */
 export const RUN_CHAT_REPORT_TRIES = 5;
 
+/**
+ * How long a run outcome's send stays `sending` before it is tried again (FAC-134,
+ * reportApprovedRunOutcome): long enough for one gatekeeper call, so only a send a crash cut off
+ * is repeated.
+ */
+export const RUN_OUTCOME_SENDING_STALE_MS = 2 * 60_000;
+
 /** The refusal to apply such a copy: it is the same write as one already proposed. */
 export const REPLAY_DUPLICATE_REFUSED =
   "This is a duplicate of a write a workflow run proposed again after a restart. Reject it; the first one stands.";
@@ -7795,8 +7802,9 @@ class OverseerImpl implements AgentHooks {
 
   #reportingRunsToChat = false;
 
-  // One try at reporting a run's outcome (see reportRunsToChat): "retry" only when the session may
-  // not have heard it.
+  // One try at reporting a run's outcome (see reportRunsToChat): "retry" when the session may not
+  // have heard it, or answered that it can't take it yet (its approval still applying, or a send in
+  // progress); "undelivered" for a refusal.
   async #reportRunToChat(owed: RunChatReport): Promise<"delivered" | "undelivered" | "retry"> {
     let delivery = this.storage.workflowDeliveries.get(owed.deliveryId);
     let result = delivery?.result;
@@ -7815,7 +7823,7 @@ class OverseerImpl implements AgentHooks {
       kind: "workflow-run", runId: delivery.run.runId, outcome: result.outcome, ...(result.reason ? { reason: result.reason } : {}),
       requestedBy, ranAs: delivery.run.executor.kind,
     });
-    return answer === "delivered" ? "delivered" : "undelivered";
+    return answer === "delivered" ? "delivered" : answer === "retry" ? "retry" : "undelivered";
   }
 
   // Whether the person who asked for run `deliveryId` still may now (FAC-116): `requireRunRequester`
@@ -13436,33 +13444,67 @@ class OverseerImpl implements AgentHooks {
    * Hands the outcome of a run that action `actionId` started to that action's gatekeeper (FAC-134;
    * `Gatekeeper.workflowRunOutcome`), as workspace `workspaceId`, where the run ran, reports it
    * (reportRunsToChat). Only for an action of this workspace that declared its run with
-   * `reportOutcome`, naming a trigger in `workspaceId`, approved here by the person `outcome` says
-   * asked: anything else is `refused`, with nothing handed on. At most once per action: a repeat
-   * after a delivery is `delivered` again. The gatekeeper is given fixed fields only.
+   * `reportOutcome`, naming a trigger in `workspaceId`, whose approval here is the person `outcome`
+   * says asked:
+   * - still applying (its `applyAction`, which started the run, hasn't returned): `retry`, never a
+   *   refusal, so the outcome waits for the approval to be recorded (review r1, round 2);
+   * - approved: handed on, with `actionApplied` true;
+   * - its apply ended without succeeding after the run started (`failed`, or `pending` with a last
+   *   attempt): the person's approval still started the run, so it is handed on too, with
+   *   `actionApplied` false; the action's own failure stays on the action;
+   * - anything else (rejected, never approved, another workspace, another person, a bad shape):
+   *   `refused`, with nothing handed on.
+   * At least once, never exactly once (review r2, round 2): a send in progress is marked
+   * synchronously before the gatekeeper is called (`sending`), so an overlapping call answers `retry`
+   * rather than sending again; a delivered one is marked `sent` and answers `delivered`; a throw
+   * clears the mark for the sender's retry. A crash between the gatekeeper's answer and the `sent`
+   * mark leaves `sending`, which after `RUN_OUTCOME_SENDING_STALE_MS` is sent again: the gatekeeper
+   * deduplicates by action and run id. The gatekeeper is given fixed fields only.
    */
   async reportApprovedRunOutcome(actionId: number, workspaceId: string, outcome: ApprovedRunOutcome)
-      : Promise<"delivered" | "refused"> {
+      : Promise<"delivered" | "retry" | "refused"> {
     let record = Number.isSafeInteger(actionId) ? this.storage.actions.get(actionId) : undefined;
     let declared = record?.type === "action" ? record.description.workflowRun : undefined;
-    if (record?.type !== "action" || !declared?.reportOutcome || record.state !== "approved" ||
-        parseWorkflowTriggerRef(declared.reference)?.inferosWorkspaceId !== workspaceId ||
-        record.resolvedBy?.type !== "user" || record.resolvedBy.id !== outcome?.requestedBy) {
+    if (record?.type !== "action" || !declared?.reportOutcome ||
+        parseWorkflowTriggerRef(declared.reference)?.inferosWorkspaceId !== workspaceId) {
       return "refused";
     }
-    let {runId, reason, requestedBy, ranAs} = outcome;
-    let final = outcome.outcome;
-    if (outcome.kind !== "workflow-run" || typeof runId !== "string" || (final !== "succeeded" && final !== "failed" && final !== "uncertain") ||
+    let {runId, reason, requestedBy, ranAs} = outcome ?? {};
+    let final = outcome?.outcome;
+    if (outcome?.kind !== "workflow-run" || typeof runId !== "string" || typeof requestedBy !== "string" ||
+        (final !== "succeeded" && final !== "failed" && final !== "uncertain") ||
         (reason !== undefined && typeof reason !== "string") ||
         (ranAs !== "gadget_bindings" && ranAs !== "service_account")) {
       return "refused";
     }
+    if (record.state === "pending" && (record.applyStartedAt !== undefined || this.#claimedActions.has(record.id))) {
+      return "retry";
+    }
+    // Whose approval started it: the recorded resolver, or, for an apply that ended without a
+    // decision, this operate session's owner, the only one who decides here.
+    let approver = record.state === "approved" || record.state === "failed"
+      ? (record.resolvedBy?.type === "user" ? record.resolvedBy.id : undefined)
+      : record.state === "pending" && record.lastAttempt ? this.ownerProfileId : undefined;
+    if (approver === undefined || approver !== requestedBy) return "refused";
     let key = `fac134:runOutcome:${actionId}`;
-    if (this.ctx.storage.kv.get(key) === runId) return "delivered";
+    let mark = this.ctx.storage.kv.get<{state: "sending" | "sent", runId: string, at: number}>(key);
+    if (mark && mark.runId !== runId) return "refused";
+    if (mark?.state === "sent") return "delivered";
+    if (mark?.state === "sending" && Date.now() - mark.at < RUN_OUTCOME_SENDING_STALE_MS) return "retry";
+    // Before the await: the input gate holds between this write and the check above.
+    this.ctx.storage.kv.put(key, {state: "sending", runId, at: Date.now()});
     let facet = this.getGatekeeperFacet(record.gatekeeperId) as unknown as
         Pick<Required<Gatekeeper<unknown>>, "workflowRunOutcome">;
-    await facet.workflowRunOutcome(record.action,
-        {kind: "workflow-run", runId, outcome: final, ...(reason !== undefined ? {reason} : {}), requestedBy, ranAs});
-    this.ctx.storage.kv.put(key, runId);
+    try {
+      await facet.workflowRunOutcome(record.action, {
+        kind: "workflow-run", runId, outcome: final, ...(reason !== undefined ? {reason} : {}), requestedBy, ranAs,
+        actionApplied: record.state === "approved",
+      });
+    } catch (error) {
+      this.ctx.storage.kv.delete(key);
+      throw error;
+    }
+    this.ctx.storage.kv.put(key, {state: "sent", runId, at: Date.now()});
     return "delivered";
   }
 
@@ -14465,7 +14507,7 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
    * the operate session whose approved action started that run; no client interface reaches it.
    */
   async reportApprovedRunOutcome(actionId: number, workspaceId: string, outcome: ApprovedRunOutcome)
-      : Promise<"delivered" | "refused"> {
+      : Promise<"delivered" | "retry" | "refused"> {
     return this.impl.reportApprovedRunOutcome(actionId, workspaceId, outcome);
   }
 
