@@ -12,6 +12,10 @@ covers:
   - packages/workshop-shared/src/personal-workflow.test.ts
   - packages/workshop-backend/src/personal-workflow-store.ts
   - packages/workshop-backend/__tests__/personal-workflows.test.ts
+  - packages/workshop-shared/src/delegate.ts
+  - packages/workshop-shared/src/delegate.test.ts
+  - packages/workshop-backend/src/delegate-store.ts
+  - packages/workshop-backend/__tests__/delegates.test.ts
   - packages/workshop-backend/__tests__/temporary-canvases.test.ts
   - packages/workshop-backend/__tests__/approved-temporary-canvas.test.ts
   - packages/workshop-backend/__tests__/console-widget-events.test.ts
@@ -1079,6 +1083,60 @@ FAC-134, capability 2 (the lead's decisions D1 (B), D2 (B) and D3, and r1's thre
   - **UI and gatekeeper:** the gatekeeper's actions for both markers are in [InferOps gatekeeper](inferops-gatekeeper.md), and the person's list (`listPersonalWorkflows`, `PersonalWorkflows`) in [InferOps canvas](inferops-canvas.md).
   - **The decider's view:** `actionContextOf` gives the step's action an `agent-turn` context with `onBehalfOf` and `personalWorkflowStep: {runId, index}` (r1's LOW 3). The UI words it as "Step <n> of <name>'s approved personal workflow" (`contextText`).
   - **Kept rows:** `personalWorkflowRuns` keeps the latest `PERSONAL_WORKFLOW_RUNS_KEPT` (100) ended runs.
+
+### Delegates
+
+FAC-134, capability 3 ([ADR 0020](https://github.com/factory-level/inferos/pull/485), proposed in inferos#485). A delegate is an agent chat in the person's own operate session, launched only by their own approval of an action that declared it. It has at most their authority at each moment, within a ceiling fixed at that approval.
+
+- **Declared** as `ActionDescription.delegate: {title, prompt, connections, tools?, reportOutcome?}`. It is one of the markers an action declares at most one of. Submit checks it with `parseDelegateDeclaration` (`workshop-shared/src/delegate.ts`):
+  - **the title:** one line of plain text (`plainTitle`), checked before anything is trimmed;
+  - **the prompt:** 1 to 4000 characters, with no format or control character except line breaks and tabs;
+  - **connections:** up to 8 gatekeeper vendor ids;
+  - **tools** (optional): up to 16, each in `DELEGATE_TOOLS`. That is `OPERATE_AGENT_TOOLS` without `requestConnection`, `operatePage`, `setWidgetView` and `proposePlacement`.
+
+  Anything else is refused, never flattened or narrowed. The kernel appends two reserved fields (r1 on #487):
+  - **`DELEGATE_FIELD_LABEL`**, whose value is `delegateFieldValue`: the ceiling's connection types and tools, and what any declared tool reaches beyond those connections (`DELEGATE_TOOL_REACH`: `callConsoleTool` asks for any command a console offers the person, each a request its builders decide; `webFetch` fetches public pages);
+  - **`DELEGATE_PROMPT_FIELD_LABEL`**: the Dot's prompt alone, as written. No line of it, wrapped or not, sits among the kernel's own words.
+
+   `autoApprovalRule` refuses the marker. **A delegate's own chat can't declare one:** submit refuses it (`DELEGATE_NO_RELAUNCH`) for an agent caller whose chat is a delegate, whichever gatekeeper it reaches.
+- **Launched** by `ApprovedEffects.launchDelegate()` (`#launchApprovedDelegate`). It is minted only for that marker and the person's own approval, memoised, and revoked after apply. It launches only:
+  - in the approver's own live operate session (`ownerProfileId`, not retired);
+  - never for an action a delegate's chat proposed (`record.caller`);
+  - once per action.
+
+  The ceiling is fixed then:
+  - **connections:** this session's connections of a declared type that an operate chat may use (not `excludeFromOperateChat`), named `<VENDOR>_<id>`;
+  - **tools:** the declared ones, or `DELEGATE_DEFAULT_TOOLS`.
+
+  The authorization generation is read before the awaits and checked again after them. The chat is created on the person's own account and model:
+  - its seed bindings are exactly the ceiling's connections;
+  - its first message is the prompt;
+  - `startAgent` is called with the owner as initiator.
+
+  The record goes in `delegates` (`delegate-store.ts`): its ceiling, the declared types, the generation, its state and outcome, never what its chat said.
+- **Checked on every call** (`assertDelegateMayCall`), in two places:
+  - **`startGatekeeperSession`**, for every binding call, before anything else: the target must be one of the ceiling's connections. No other connection the person holds, gadget, worktree or git is reachable (`DELEGATE_OUTSIDE_CEILING`).
+  - **Every tool call:** `agent.ts` offers a delegate's chat only its ceiling's tools (`delegateToolsFor`). That filter is the boundary. The `execute` wrapper checks the starter first on every call, and refusing a tool outside the ceiling there is defence in depth: no such tool reaches the turn, so that branch can't be tested apart from the filter (r1 on #487).
+
+  `#delegateRevoked` requires this to be the starter's live operate session (same owner, not retired), at the generation it was launched at. A grant, role or ownership change raises the generation, and a company switch retires the session. Either refuses the call and cancels the delegate: `failed`, `requester-revoked`, with its turn cancelled.
+- **Resuming re-verifies the starter.** `startAgent` asks `#delegateMayStart` before any turn of a delegate's chat. That covers a resume after an approval, after a restart, and for a delivered call. A revoked starter's turn never starts, the chat says why, and the delegate is cancelled.
+- **Outcome** (`settleDelegateAfterTurn`, from the turn's `finally`):
+  - **`failed`:** a turn that threw, with reason `cancelled` if it was cancelled, else `runtime-error`;
+  - **`succeeded`:** a turn that ended with nothing of the delegate's own pending (no action it proposed waiting, no call or resume due). That means its work ended, never that anything it asked for was made;
+  - **still running** otherwise, until those settle.
+
+  `stopDelegate` (the person's own only) ends it `failed`, `cancelled`. **Stopping leaves anything it already proposed** (an action waiting for approval) for the person to decide, as any pending action is. With `reportOutcome`, `reportDelegates` (from the alarm) hands `{kind: "delegate", runId, outcome, reason?, requestedBy, ranAs: "person"}` to the action's gatekeeper through `#handOnRunOutcome`'s rules, retried like a personal workflow run's. inferops#2653 takes that kind and `ranAs` only together.
+- **Read** with `Overseer.listDelegates` (`delegatesOf`): the person's own, in their own live session, as `DelegateSummary` (state, reason, declared connections, tools, chat). A use-role operator is denied both methods.
+- **Tests:**
+  - **`workshop-shared/src/delegate.test.ts`:** the declaration's fields and refusals (titles, prompts, connections, tools); the default tools; the field's words with a forged prompt.
+  - **`workshop-backend/__tests__/delegates.test.ts`**, a real operate session DO with a faux model:
+    - **Submit:** the field and reserved label; refusals; never auto-approved; a delegate's chat refused.
+    - **Launch:** the ceiling (its own InferOps connections; not another type, not an excluded one), seed bindings, prompt and initiator; once per action. Nothing for an automatic approval, another approver, a retired session or a delegate's own action.
+    - **Per call:** only ceiling connections, through `startGatekeeperSession` too; cancelled after a generation bump, another owner or a retired session.
+    - **Start:** no turn for a revoked starter.
+    - **Tools:** in a scripted turn, only the ceiling's tools are offered, and a call after a generation bump is refused and cancels it.
+    - **Outcome:** succeeded, runtime-error, still running while its action waits; reported once as the person's delegate run; listed and stopped only by its starter.
+- **Not covered:** the gatekeeper's action and the UI (the person's list and stopping one) are the next PR. A delegate's own console commands still place pending requests for the console's builders, as the person's would.
 
 ### Agent widget verbs
 

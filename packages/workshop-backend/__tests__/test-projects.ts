@@ -148,6 +148,8 @@ export const BACKEND: readonly string[] = [
   "console-tool-invocation.test.ts",
   "console-commands.test.ts",
   "personal-workflows.test.ts",
+  // FAC-134 capability 3: a delegate launched by a person's approval, its ceiling and revocation.
+  "delegates.test.ts",
   "describe-binding.test.ts",
   "execution-bound-loopbacks.test.ts",
   "gadget-restore.test.ts",

@@ -4631,7 +4631,9 @@ async function recordDotRunOutcome(binding: DotBinding, actionId: number, outcom
   // The kind must be the one the proposal started: a personal workflow's run, or a trigger's.
   const kind = record && isDotAction(record) && runsPersonalWorkflow(record) ? "personal-workflow" : "workflow-run";
   if (!record || !isDotAction(record) || record.tool !== DOT_WORKFLOW_INVOKE_TOOL ||
-      outcome?.kind !== kind || typeof outcome.runId !== "string" || outcome.runId === "") {
+      outcome?.kind !== kind || typeof outcome.runId !== "string" || outcome.runId === "" ||
+      // Only a delegate's run is the person's (FAC-134 capability 3): none this binding proposes yet.
+      outcome.ranAs === "person") {
     logger.warn("dot run outcome for no workflow-run proposal of this binding", { event: "dot-run-outcome.ignored", ...fields });
     return;
   }
