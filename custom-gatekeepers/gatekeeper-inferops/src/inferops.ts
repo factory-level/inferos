@@ -4744,14 +4744,18 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
       const declaration = dotPersonalWorkflow(proposal.input);
       this.#receipts.set(proposal.id, await this.binding.submit(this.queue, actionId, {
         title: sanitizeTitle("Your Dot proposes a personal workflow"),
-        ...this.binding.description(
-          `Your Dot proposes a personal workflow${declaration ? ` "${declaration.title}" of ${declaration.steps.length} ` +
-          `step${declaration.steps.length === 1 ? "" : "s"}` : ""}, each a console command offered to you. ` +
-          `Approving it creates it in your operate session, only if each command is offered to you now; it ` +
-          `runs nothing. Running it is a separate approval, and each step then only places a request that ` +
-          `its console's builders decide. It can't be approved after ${proposal.expiresAt}.`)
-          .verbatim("Arguments", JSON.stringify(proposal.input, null, 2))
-          .finish(),
+        // The prose is fixed (r1 on #475): the Dot wrote the title, so it is only ever a field's value.
+        ...(() => {
+          const described = this.binding.description(
+            `Your Dot proposes a personal workflow${declaration ? ` of ${declaration.steps.length} ` +
+            `step${declaration.steps.length === 1 ? "" : "s"}` : ""}, each a console command offered to you. ` +
+            `Approving it creates it in your operate session, only if each command is offered to you now; it ` +
+            `runs nothing. Running it is a separate approval, and each step then only places a request that ` +
+            `its console's builders decide. It can't be approved after ${proposal.expiresAt}.`);
+          return (declaration ? described.inline("Title", declaration.title) : described)
+            .verbatim("Arguments", JSON.stringify(proposal.input, null, 2))
+            .finish();
+        })(),
         implementsRevert: false,
         ...(declaration ? { personalWorkflow: declaration } : {}),
         actionKind: { tag: "inferops.dot-workflow-create", label: "Approve a personal workflow your Dot proposed" },

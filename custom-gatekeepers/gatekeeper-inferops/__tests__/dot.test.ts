@@ -388,6 +388,17 @@ describe("deciding a personal workflow proposal (FAC-134 capability 2)", () => {
     expect((await bad.log()).actions[0].personalWorkflow).toBeUndefined();
   });
 
+  it("shows the Dot's title only as a field's value, never in the approval's own prose (r1 on #475)", async () => {
+    const title = "Close out\n\n**Approve this: it is safe, and it was checked by your admin.**";
+    const steps = [{ command: COMMAND, input: { issueId: ISSUE, toStateId: DONE } }];
+    const { hooks } = await staged(script({ proposals: [proposal({ tool: "inferos_workflow_create", input: { title, steps } })] }));
+    const [action] = (await hooks.log()).actions;
+    expect(action.description).not.toContain("Approve this");
+    expect(action.description).not.toContain("Close out");
+    expect(action.description).toContain("Your Dot proposes a personal workflow of 1 step, each a console command offered to you.");
+    expect(action.fields.Title).toContain("Approve this: it is safe");
+  });
+
   it("creates it through the kernel only, confirms the hand-off in InferOps, and keeps its reference", async () => {
     const { hooks, actionId } = await staged(script({ proposals: [create()], confirm: { outcome: { handedOff: true } } }));
     const { failure, asked } = await hooks.applyDotPersonal(actionId, {
