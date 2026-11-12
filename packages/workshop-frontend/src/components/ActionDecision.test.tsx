@@ -125,6 +125,12 @@ describe('where a decision came from (FAC-119 K2)', () => {
 
   // FAC-14: the operate agent's request applies on the connection's own account once approved, so
   // every decider is told whose request it is, by name, and the person themselves is told it is theirs.
+  it("names a step of a person's approved personal workflow as theirs, not the agent's (FAC-134)", () => {
+    const step = run({ kind: 'agent-turn', onBehalfOf: { profileId: 'ada', name: 'Ada Lovelace' }, personalWorkflowStep: { runId: 'r1', index: 1 } })
+    expect(contextText(step, 'someone-else')).toBe("Step 2 of Ada Lovelace's approved personal workflow")
+    expect(contextText(step, 'ada')).toBe('Step 2 of your approved personal workflow')
+  })
+
   it("names the person an operate-agent request is for, or says it is the viewer's own", () => {
     const forAda = run({ kind: 'agent-turn', onBehalfOf: { profileId: 'ada', name: 'Ada Lovelace' } })
     expect(contextText(forAda, 'ben')).toBe('Requested by the operate agent for Ada Lovelace')
