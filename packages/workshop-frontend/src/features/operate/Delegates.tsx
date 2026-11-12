@@ -40,6 +40,8 @@ const DelegateItem = ({ delegate, onStop }: { delegate: DelegateSummary; onStop:
     <p className="m-0 text-kumo-subtle">
       Connections: {delegate.connections.length > 0 ? delegate.connections.join(', ') : 'none'} · Tools: {delegate.tools.join(', ')}
     </p>
+    {delegate.state === 'running' &&
+      <p className="m-0 text-kumo-subtle">Stopping it leaves anything it already proposed waiting for your decision.</p>}
     {stopping === 'failed' && <p role="alert" className="m-0 text-kumo-danger">Couldn't stop it. Try again.</p>}
   </li>
 }

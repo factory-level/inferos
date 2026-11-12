@@ -35,11 +35,14 @@ it("lists the person's own delegates, what each may use and how it ended, and st
   expect(container.textContent).toContain('Connections: inferops · Tools: grep, executeCode')
   expect(container.textContent).toContain('Summarise the week · Failed: your access here changed while it ran')
   expect(buttons().map(b => b.textContent)).toEqual(['Refresh', 'Stop'])
+  // Stopping it leaves what it proposed for the person (r1 on #487).
+  expect(container.textContent).toContain('Stopping it leaves anything it already proposed waiting for your decision.')
   listDelegates.mockResolvedValue([{ ...running, state: 'failed', reason: 'cancelled' }, revoked])
   await act(async () => buttons().find(b => b.textContent === 'Stop')!.click())
   expect(stopDelegate).toHaveBeenCalledWith('dl-1')
   expect(container.textContent).toContain('Triage the open bugs · Failed: you stopped it')
   expect(buttons().map(b => b.textContent)).toEqual(['Refresh'])
+  expect(container.textContent).not.toContain('Stopping it leaves')
 })
 
 it('says when a stop failed, and keeps the delegate as it was', async () => {
