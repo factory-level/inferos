@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   invokeWorkflowTrigger, makeOverseerStorage, TRIGGER_AUTO_RETIRED, WORKFLOW_ASSIGNMENTS_DISABLED, WORKFLOW_INVOKE_REFUSED,
 } from "../src/overseer.js";
-import { SHARED_ONLY_AUDIENCE, WORKSPACE_AUDIENCE, WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
+import { SHARED_ONLY_AUDIENCE, WORKFLOW_REVISION_CHANGED, WORKSPACE_AUDIENCE, WorkspaceWorkflowDefinitionStore } from "../src/workflow-definition-store.js";
 import { openFakeOverseer } from "./fixtures.js";
 import { makeMockStorage } from "./mock-storage.js";
 
@@ -586,7 +586,11 @@ describe("what an invoker sees, and what reaches the gatekeeper", () => {
       workflowDefinitionStore: () => store, definitionRoles: async () => () => "use" as const, takenInvocations: new Map<string, boolean>(), getGadgetHead: headOf,
     };
     let direct = invokeWorkflowTrigger as unknown as (...args: unknown[]) => Promise<unknown>;
-    await direct(impl, "viewer-id", OPERATOR, HOOK, { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" });
+    let extra = { event: "x", prompt: "y", payload: { principalId: "z" }, callback: "https://e.example" };
+    // In the place of an approved run's revision (FAC-120), it names none, so it refuses: nothing is handed on.
+    await expect(direct(impl, "viewer-id", OPERATOR, HOOK, extra)).rejects.toThrow(WORKFLOW_REVISION_CHANGED);
+    expect(invoke).not.toHaveBeenCalled();
+    await direct(impl, "viewer-id", OPERATOR, HOOK, undefined, extra);
     expect(invoke.mock.calls).toEqual([[{ invocationId: expect.any(String) }]]);
   });
 });
@@ -872,5 +876,102 @@ describe("admission refuses before anything reaches the runtime (FAC-111)", () =
     retired.store.markAutoRetired(HOOK);
     await expect(retired.overseer.invokeTrigger(HOOK)).rejects.toThrow(TRIGGER_AUTO_RETIRED);
     nothingRan(retired.store, retired.invoke, definitionOf(retired.store));
+  });
+});
+
+// FAC-120 (r2's HIGH): an approved run names the definition and revision the person reviewed, and
+// admission holds it to them after its last await, when it mints. The grant check is the await a
+// repin or a new publication can land in.
+describe("an approved run's revision is held through admission (FAC-120)", () => {
+  /** A session whose grant answer waits until `release()`, with the gadget's code at `code.head`. */
+  async function racing() {
+    let release!: () => void;
+    let asked = new Promise<void>(resolve => { release = resolve; });
+    let code = { head: commit(1) };
+    let pending = Promise.withResolvers<void>();
+    let session = await invokeSession(async () => {
+      pending.resolve();
+      await asked;
+      return true;
+    }, undefined, id => (id === GADGET ? code.head : undefined));
+    let definitionId = session.store.list(ADA.id, "build")[0]!.id;
+    /** Publishes revision 2 on new code. */
+    let publishTwo = () => {
+      code.head = commit(2);
+      session.store.save(ADA, { id: definitionId, title: "Refund", gadgetId: GADGET }, () => code.head, "build");
+      session.store.publish(ADA, definitionId, 2);
+    };
+    return { ...session, definitionId, release, waiting: pending.promise, publishTwo };
+  }
+  const run = (impl: unknown, expected?: { definitionId: string; revision: number; onAdmitted?: (id: string) => void }) =>
+    (invokeWorkflowTrigger as (...a: unknown[]) => Promise<{ revision: number }>)(impl, "viewer-id", OPERATOR, HOOK, expected);
+  // Nothing was minted: the per-person rate still has all its runs.
+  const nothingMinted = (store: WorkspaceWorkflowDefinitionStore) => {
+    for (let i = 0; i < 3; i++) store.cancelInvocation(store.beginInvocation(OPERATOR, HOOK).id);
+  };
+
+  it("refuses, starting nothing, when the trigger is repinned while the grant is asked", async () => {
+    let race = await racing();
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1 });
+    await race.waiting;
+    race.publishTwo();
+    race.store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: race.definitionId, revision: 2, mode: "pinned" });
+    race.release();
+    await expect(admitting).rejects.toThrow(WORKFLOW_REVISION_CHANGED);
+    expect(race.invoke).not.toHaveBeenCalled();
+    nothingMinted(race.store);
+  });
+
+  it("refuses, starting nothing, when a follow-latest trigger's definition is published again meanwhile", async () => {
+    let race = await racing();
+    race.store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: race.definitionId, revision: 1, mode: "follow-latest" });
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1 });
+    await race.waiting;
+    race.publishTwo();
+    race.release();
+    await expect(admitting).rejects.toThrow(WORKFLOW_REVISION_CHANGED);
+    expect(race.invoke).not.toHaveBeenCalled();
+    nothingMinted(race.store);
+  });
+
+  it("tells the approved call of its own admission only: not of another person's run minted while it waits", async () => {
+    let race = await racing();
+    let heard: string[] = [];
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1, onAdmitted: id => heard.push(id) });
+    await race.waiting;
+    // Another request is minted meanwhile; this call hasn't been admitted.
+    race.store.cancelInvocation(race.store.beginInvocation(OPERATOR, HOOK).id);
+    expect(heard).toEqual([]);
+    race.release();
+    let invocation = await admitting as unknown as { id: string };
+    expect(heard).toEqual([invocation.id]);
+  });
+
+  it("never reports an admission it refused", async () => {
+    let race = await racing();
+    let heard: string[] = [];
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1, onAdmitted: id => heard.push(id) });
+    await race.waiting;
+    race.publishTwo();
+    race.store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: race.definitionId, revision: 2, mode: "pinned" });
+    race.release();
+    await expect(admitting).rejects.toThrow(WORKFLOW_REVISION_CHANGED);
+    expect(heard).toEqual([]);
+  });
+
+  it("admits the approved revision when nothing moved, and a person's own request (no reference) as before", async () => {
+    let race = await racing();
+    let admitting = run(race.impl, { definitionId: race.definitionId, revision: 1 });
+    race.release();
+    expect(await admitting).toMatchObject({ revision: 1 });
+    expect(race.invoke).toHaveBeenCalledTimes(1);
+    // The on-request path names no revision: it runs what the trigger runs when it is admitted.
+    let own = await racing();
+    own.store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: own.definitionId, revision: 1, mode: "follow-latest" });
+    let manual = run(own.impl);
+    await own.waiting;
+    own.publishTwo();
+    own.release();
+    expect(await manual).toMatchObject({ revision: 2 });
   });
 });
