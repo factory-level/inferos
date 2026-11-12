@@ -316,6 +316,11 @@ export type DotProposalWire = {
   status: (typeof DOT_PROPOSAL_STATUSES)[number];
   /** The capability's answer once confirmed, or its refusal in InferOps' words once failed. */
   outcome: unknown;
+  /**
+   * For a hand-off to InferOS (FAC-134), how the run it started came out, once InferOS reported it;
+   * null otherwise, and on an InferOps that doesn't report it yet.
+   */
+  run: DotRunOutcomeWire | null;
   createdAt: string;
   expiresAt: string;
   decidedAt: string | null;
