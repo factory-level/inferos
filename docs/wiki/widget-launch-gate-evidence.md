@@ -12,8 +12,9 @@ The release evidence for governed React/Refine widgets: one approved authored wi
 **Recommendation (Calvin decides).**
 
 - **Scope A, authored React/Refine widgets with their own local data, no governed data: GO, with the conditions below.**
-  - Every step of the loop runs on the real product path, and the regression around it holds.
+  - **What that rests on:** every step of the loop ran on real Workshop code, with InferOps (and InferLab) and the model programmed, never live; widget search ranked by keyword (the fake's), not by embeddings; and the embed path resolved and served the compiled widget, but no Wiki page rendered it. The regression around it holds.
   - The open gaps (R-4 and R-3, below) can only move data the widget itself holds, and today that's never governed data.
+  - **One risk applies under A too:** through paths 3 and 4 a widget can show an outside page in its own frame or in a popup, so it can spoof a sign-in or InferOps page (R-3, below).
 - **Scope B, governed data inside an authored widget's frame: NO-GO.**
   - It isn't built (G-1).
   - Two known P0 gaps would let a widget move governed rows to another viewer or outside the frame (R-4, R-3), which ADR 0013 itself calls a no-go.
@@ -23,7 +24,7 @@ The release evidence for governed React/Refine widgets: one approved authored wi
 | Known P0 gap | What's true today | Safe only while | Closes it |
 |---|---|---|---|
 | **R-4: a console install's own server state is shared across operators** (inferops ADR 0013, W3: "no writable state shared between viewers of a data widget"; "rows reach another viewer by any route" is a no-go) | A published console's widget is one frozen install for every operator, so its own server (its Gadget Durable Object) holds one state. Operator B reads what operator A wrote. Characterized by "known P0 gap (ADR 0013 W3)…" in `integration-tests/__tests__/wiki-embedded-widget.test.ts` (#468). | no governed data reaches a code-running widget (G-1) | Per-operator Gadget partitioning, then inverting that test |
-| **R-3: the frame's outward paths 3 and 4** (ADR 0013 "Outward paths from a frame"; "any route left open" is a no-go) | **Path 3 is open:** a widget can navigate its own frame to an outside URL. Characterized by "known P0 gap (ADR 0013 outward path 3)…" in `GadgetUI.request-probes.test.ts` (#470), in real Chrome. **Path 4 (`window.open` on a click) is not characterized:** headless Chrome showed no request even with a click proven to reach the widget's handler, but the sandbox allows popups that escape it (`GadgetUI.tsx`), so **treat it as open**. Path 5 (forms) is closed, by the sandbox (no `allow-forms`) and by the CSP's `form-action 'none'`, which a second probe pins alone in a frame that allows forms. | the same: G-1 | A sandbox and CSP change for navigation and popups, which is a product decision (links need popups), then inverting the path 3 test and adding a headed-browser probe for path 4 |
+| **R-3: the frame's outward paths 3 and 4** (ADR 0013 "Outward paths from a frame"; "any route left open" is a no-go) | **Path 3 is open:** a widget can navigate its own frame to an outside URL. Characterized by "known P0 gap (ADR 0013 outward path 3)…" in `GadgetUI.request-probes.test.ts` (#470), in real Chrome. **Path 4 (`window.open` on a click) is not characterized:** headless Chrome showed no request even with a click proven to reach the widget's handler, but the sandbox allows popups that escape it (`GadgetUI.tsx`), so **treat it as open**. **Both paths also let a widget show an outside page in its frame or a popup: a spoofing risk that applies under A too, with no governed data at all.** Path 5 (forms) is closed, by the sandbox (no `allow-forms`) and by the CSP's `form-action 'none'`, which a second probe pins alone in a frame that allows forms. | data: the same, G-1. Spoofing: only while publishing stays an Administrator's reviewed act (`configuration:publish`, frozen installs) | A sandbox and CSP change for navigation and popups, which is a product decision (links need popups), then inverting the path 3 test and adding a headed-browser probe for path 4 |
 
 **Mitigations in force today:**
 - publishing a widget needs `configuration:publish` in InferOps (an Administrator's grant);
@@ -54,7 +55,7 @@ The contract is `packages/integration-tests/src/scenarios/widget-launch-gate.md`
 - **Everything else runs real code.**
 - **Isolation:** only the harness's own origin may use the real network.
 
-**The report on main `b1dca5ac`:** verdict **PASS** (8/8), `dirty: false`, isolation checked, **0** unmocked requests, `source: "mock"`, `liveProviderProof: false`. Every case observed the same as the first clean run at `48ee0bf1` (#466's head).
+**The report on main `b1dca5ac`** ([the JSON, on #476](https://github.com/factory-level/inferos/pull/476#issuecomment-6825056857)): verdict **PASS** (8/8), `dirty: false`, isolation checked, **0** unmocked requests, `source: "mock"`, `liveProviderProof: false`. Every case observed the same as the first clean run at `48ee0bf1` (#466's head).
 
 | Case | Shows | Observed |
 |---|---|---|
