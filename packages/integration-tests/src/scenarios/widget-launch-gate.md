@@ -1,9 +1,9 @@
-# Scenario `widget-launch-gate`, version 1
+# Scenario `widget-launch-gate`, version 2
 
 FAC-15's end-to-end proof: one authored React/Refine widget through the whole governed loop, on
 synthetic fixtures, in one repeatable run. Its data is `widget-launch-gate.ts`. The runner is
 `__tests__/widget-launch-gate-scenario.test.ts`, and the report is
-`.wrangler/tmp/scenario-reports/widget-launch-gate-v1.json`.
+`.wrangler/tmp/scenario-reports/widget-launch-gate-v2.json`.
 
 **What it is not:** a live-provider proof, a deployed (dev-os) proof, or a browser proof. The report says
 `source: "mock"` and `liveProviderProof: false`.
@@ -21,24 +21,31 @@ synthetic fixtures, in one repeatable run. Its data is `widget-launch-gate.ts`. 
 ## Cases, in order
 
 1. **`loopback-only`:** the run refuses any non-loopback target.
-2. **`generate`:** the widget's TSX is compiled by the real build Durable Object when its blueprint is
-   published. The case records the published version.
+2. **`generate`:** the widget is authored as TSX only (no `client.js`), and its blueprint is
+   published with `AUTHORED_WIDGET_BUILD_ENABLED` on. The `client.js` it later serves was compiled on
+   the server, where the only compiler is the build Durable Object's. The test infers that from the
+   deployment shape; it reads no build record.
 3. **`publish`:** the publisher's console offers the widget and is published. InferOps' widget index
    then lists one definition for the company, written as the publisher.
 4. **`find`:** the operator's own widget search (`searchWidgets`) with `SEARCH_INTENT` returns that
    definition.
-5. **`embed-wiki`:** opened without an operate session, the console workspace resolves the published
-   console's instance for a Wiki embed (`resolveEmbeddedWidget`).
+5. **`embed-resolve`:** opened without an operate session, the console workspace resolves the
+   published console's instance through the kernel path a Wiki embed calls (`resolveEmbeddedWidget`,
+   then `getEmbeddedWidget`), and serves its compiled bundle. No Wiki page renders it here: the
+   InferMind Wiki surface isn't proven by this scenario.
 6. **`embed-operate`:** the operator places the widget on their own canvas
    (`OperateSession.saveWidgetPlacement`), and it is listed back.
 7. **`agent-read-filter`:** the operate agent finds, describes and reads the widget, then shows it
    with another filter in the operator's overlay only. Nothing is saved until the operator keeps it.
 8. **`agent-act`:** the operate agent requests the widget's declared board command on the operator's
    behalf. It waits, unapplied, for a decider of the console's workspace (the publisher, never the
-   person who asked), is approved, and is applied once: exactly one board write.
+   person who asked), is approved, and is applied once: one board write. Approving it again is
+   refused, and after a pause there is still only that one write.
 
 **The verdict** is PASS only when every case passes, in this order, and no outbound request went
-unanswered.
+unanswered. Only the harness's own origin may use the real network; any other request, a loopback one
+included, goes to the programmed handlers and fails the isolation check if they don't answer it.
+The report's `dirty` is true only for changes to tracked files: untracked files don't count.
 
 ## Known gaps (recorded for FAC-15's go/no-go)
 

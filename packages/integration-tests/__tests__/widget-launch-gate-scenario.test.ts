@@ -29,7 +29,11 @@ const VENDOR = "inferops";
 
 const fake = new InferOpsFake();
 const router = scriptedModelRouter();
-const network = new NetworkInterceptor({ handlers: [fake.handler, router.handler] });
+// Only the harness's own origin uses the real network (r1 LOW 4): any other loopback call, such as
+// a step mis-wired to a dev API on the host, goes to the handlers and fails isolation if unanswered.
+let harnessOrigin: string | undefined;
+const network = new NetworkInterceptor({ handlers: [fake.handler, router.handler], allowLoopback: false,
+  allow: url => harnessOrigin !== undefined && url.origin === harnessOrigin });
 const cases: ScenarioCase[] = [];
 let harness: Harness;
 let target: URL;
@@ -53,6 +57,7 @@ beforeAll(async () => {
     },
   });
   target = assertLoopbackTarget(harness.url);
+  harnessOrigin = harness.url.origin;
 });
 
 afterAll(async () => {
@@ -157,7 +162,11 @@ it("generates the Refine widget: its TSX compiled by the build Durable Object as
     const blueprint = await gadget.createBlueprint(WIDGET_TITLE, WIDGET_PURPOSE);
     state.blueprintId = blueprint.id;
     await waitFor("the published blueprint", () => publisher.api.getBlueprintInfo(blueprint.id));
-    return { blueprintId: blueprint.id, sources: Object.keys(WIDGET_SOURCES) };
+    // Authored as TSX only: no client.js was written, so the one the published widget serves (see
+    // embed-resolve) was compiled on the server. In the Worker that is the build Durable Object's
+    // compiler; the Node-only Blueprint compiler isn't loaded there (agent-authoring.md).
+    expect(Object.keys(WIDGET_SOURCES)).not.toContain("client.js");
+    return { blueprintId: blueprint.id, sources: Object.keys(WIDGET_SOURCES), authoredClientJs: false };
   }));
 
 it("publishes it securely: a console publication lists it in InferOps' index, as the publisher", () =>
@@ -200,8 +209,8 @@ it("is found by meaning through the operator's own widget search", () => record(
   return { intent: SEARCH_INTENT, found: true, ranking: answer.ranking };
 }));
 
-it("is embedded in the Wiki: the published console's instance resolves, and runs its compiled bundle", () =>
-  record("embed-wiki", async () => {
+it("resolves through the kernel's embed path a Wiki embed uses, and serves its compiled bundle", () =>
+  record("embed-resolve", async () => {
     const operator = state.operator!;
     expect(await state.space!.addCollaborator(operator.username, "use")).toBeTruthy();
     using used = await operator.api.openGadget(state.spaceId!);
@@ -212,7 +221,8 @@ it("is embedded in the Wiki: the published console's instance resolves, and runs
     const bundle = await embedded.getUiBundle();
     if (!bundle) throw new Error("The embedded widget has no UI bundle");
     const { jsCode } = bundle;
-    // Compiled, not the authored source: no TSX, no Refine telemetry.
+    // Compiled on the server from TSX alone (see generate): a bundle, not the authored source, with
+    // no TSX type syntax and no Refine telemetry.
     expect(jsCode.length).toBeGreaterThan(0);
     expect(jsCode).not.toContain("type DataProvider");
     expect(jsCode).not.toContain("telemetry.refine.dev");
@@ -291,7 +301,12 @@ it("is acted on by the agent: the declared command waits for a decider of the co
     // A decider of the console's workspace (the publisher) approves; it is applied once.
     await state.space!.approveAction(pending[0]!.id);
     await waitFor("the board write", async () => fake.commits.length > writesBefore ? true : null);
-    expect(fake.commits.length).toBe(writesBefore + 1);
     expect(fake.issue(SCENARIO_ISSUE).stateId).toBe(state.toStateId);
-    return { pendingBeforeApproval: 1, writesBeforeApproval: 0, writesAfterApproval: 1, decidedBy: "publisher" };
+    // Once (r1 LOW 3): approving the same action again is refused, and after a pause the write count
+    // is still one more than before.
+    await expect(state.space!.approveAction(pending[0]!.id)).rejects.toThrow();
+    await new Promise(settled => setTimeout(settled, 1_000));
+    expect(fake.commits.length).toBe(writesBefore + 1);
+    return { pendingBeforeApproval: 1, writesBeforeApproval: 0, writesAfterApproval: 1, secondApprovalRefused: true,
+      decidedBy: "publisher" };
   }));

@@ -17,7 +17,7 @@ import {
 } from "./scenario-report.js";
 
 /** Bump `version` whenever a fixture input or an expected result below changes. */
-export const SCENARIO = { id: "widget-launch-gate", version: 1 } as const;
+export const SCENARIO = { id: "widget-launch-gate", version: 2 } as const;
 
 /** The InferOps workspace the fixture people hold, where the publisher may publish shared configuration. */
 export const SCENARIO_WORKSPACE = "operations";
@@ -98,7 +98,7 @@ export type ScenarioReport = Report<typeof SCENARIO.id>;
 
 /** The case names a complete run records, in order. */
 export const CASE_NAMES = [
-  "loopback-only", "generate", "publish", "find", "embed-wiki", "embed-operate", "agent-read-filter", "agent-act",
+  "loopback-only", "generate", "publish", "find", "embed-resolve", "embed-operate", "agent-read-filter", "agent-act",
 ] as const;
 
 /** PASS only for every case passing and an isolation check that ran and found no unanswered request. */
@@ -119,7 +119,7 @@ export const BOUNDARIES = {
     "blueprint publication, the console's frozen installs and console publication with shared configuration authority",
     "the console widget index write to InferOps as the publisher",
     "the person's own widget search through their InferOps account",
-    "the Wiki embed's resolution of a published console's instance",
+    "the kernel embed path a Wiki embed calls (resolveEmbeddedWidget, getEmbeddedWidget); no Wiki page renders it",
     "the person's own canvas placement (OperateSession.saveWidgetPlacement)",
     "the operate agent's widget tools and its declared-command request, and the person's approval through the action journal",
   ],
