@@ -27,6 +27,9 @@ type ListState =
 
 type Shown = { session: RpcStub<OperateSession>; attempt: number; state: ListState }
 
+/** The longest delay `setTimeout` takes: 2^31 - 1 ms. */
+const MAX_TIMEOUT_MS = 2_147_483_647
+
 /** True once an unsaved canvas's server-set expiry has passed at `now`. */
 const expiredAt = (canvas: TemporaryCanvas, now: number) =>
   canvas.expiresAt !== undefined && new Date(canvas.expiresAt).getTime() <= now
@@ -41,7 +44,9 @@ const useNowAtExpiry = (canvases: readonly TemporaryCanvas[]): number => {
     .filter(at => at > now))
   useEffect(() => {
     if (!Number.isFinite(next)) return
-    const timer = setTimeout(() => setNow(Date.now()), Math.max(0, next - Date.now()))
+    // A delay past setTimeout's 32-bit limit (about 24.8 days) would fire at once: wait the most it
+    // takes, and look again then.
+    const timer = setTimeout(() => setNow(Date.now()), Math.min(MAX_TIMEOUT_MS, Math.max(0, next - Date.now())))
     return () => clearTimeout(timer)
   }, [next])
   return now

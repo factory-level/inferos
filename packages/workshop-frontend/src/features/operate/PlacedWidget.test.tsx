@@ -99,6 +99,18 @@ it("keeps a board's completed-issues filter on the placement", async () => {
   expect(onFilters).toHaveBeenCalledWith({ showCompleted: 'false' })
 })
 
+// #489's review: the board's "Show completed" control is the arranging person's own, shown only with edit.
+it('offers the Show completed filter on a board only when the placement can be edited', async () => {
+  const board = placement({ type: 'builtin', kind: 'project/board', target: 'inferops://acme.operations/project/board/ENG' })
+  await render(board)
+  const box = container.querySelector<HTMLInputElement>('label input[type="checkbox"]')
+  expect(box?.closest('label')?.textContent).toContain('Show completed')
+  await act(async () => root.render(<PlacedWidget placement={board} api={undefined} viewer={null}
+    session={{} as RpcStub<OperateSession>} sessionWorkspace={{} as RpcStub<Overseer>} focused={false} />))
+  expect(container.textContent).not.toContain('Show completed')
+  expect(container.querySelector('input[type="checkbox"]')).toBeNull()
+})
+
 // FAC-137: a temporary canvas shows its placements as placed, with nothing to arrange or filter.
 it('shows a placement with nothing to arrange when it is given no edit controls', async () => {
   await act(async () => root.render(<PlacedWidget placement={placement({ type: 'builtin', kind: 'project/board',

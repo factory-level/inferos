@@ -168,3 +168,32 @@ it('reads as expired once its server time passes while open: closed, and no long
   expect(buttons()).toEqual(['Refresh'])
   expect(saveTemporaryCanvas).not.toHaveBeenCalled()
 })
+
+// #489's QA: an answer read under one session is never shown once the session has changed.
+it('shows a new session nothing of the last one, while its own list is still loading', async () => {
+  listTemporaryCanvases.mockResolvedValue([canvas()])
+  await render()
+  expect(container.textContent).toContain('Kitchen rewire')
+  const pending = vi.fn<() => Promise<TemporaryCanvas[]>>(() => new Promise(() => {}))
+  const other = { ...session, listTemporaryCanvases: pending } as unknown as RpcStub<OperateSession>
+  await act(async () => root.render(<TemporaryCanvases session={other} api={{} as RpcStub<AuthenticatedApi>}
+    viewer={null} sessionWorkspace={null} />))
+  expect(pending).toHaveBeenCalled()
+  expect(container.textContent).not.toContain('Kitchen rewire')
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('Loading your temporary canvases…')
+})
+
+// #489's review: an expiry past setTimeout's 32-bit limit must not fire at once.
+it('keeps a canvas that expires in 30 days temporary, not expired, as time passes', async () => {
+  const later = new Date(NOW + 30 * 24 * 60 * 60 * 1000)
+  listTemporaryCanvases.mockResolvedValue([canvas({ expiresAt: later })])
+  // Real timers fire a delay past 2^31 - 1 ms at once (fake ones don't), so no delay may exceed it.
+  const timeouts = vi.spyOn(globalThis, 'setTimeout')
+  await render()
+  expect(timeouts.mock.calls.map(([, delay]) => delay ?? 0).every(delay => delay <= 2_147_483_647)).toBe(true)
+  expect(timeouts).toHaveBeenCalled()
+  await act(async () => { vi.advanceTimersByTime(1_000) })
+  expect(container.textContent).toContain(`Temporary · expires ${later.toLocaleString()} unless saved`)
+  expect(container.textContent).not.toContain('Expired')
+  expect(buttons()).toContain('Save')
+})
