@@ -14,7 +14,7 @@ import { runInDurableObject } from "cloudflare:test";
 import type { ApprovedEffects, ApprovedWorkflowRun } from "@gadgets/workshop-shared/gatekeeper";
 import { workflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
 import type { ConsoleToolCaller } from "../src/console-tools";
-import { actionContextOf, WORKFLOW_RUN_FIELD_LABEL, type OverseerDurableObject } from "../src/overseer.js";
+import { actionContextOf, invokeWorkflowTrigger, WORKFLOW_RUN_FIELD_LABEL, type OverseerDurableObject } from "../src/overseer.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -92,6 +92,57 @@ describe("the trigger's own workspace", () => {
       // With the definition and revision approved, which admission holds the run to (r2's HIGH).
       expect(h.invoked).toEqual([[uid("p1"), "p1", HOOK,
         { definitionId: DEFINITION, revision: 2, onAdmitted: expect.any(Function) }]]);
+    }));
+
+  // FAC-115's last criterion: a background result appears in the common run history. Here the
+  // approved run takes the person's real on-request path (invokeWorkflowTrigger -> beginInvocation),
+  // and the trigger's gatekeeper delivers it (store.fire, as startHook does), so the history entry is
+  // the one the run itself leaves, not one the test writes.
+  it("records the approved run in the definition's run history, as the approver's, readable only by who may read it", () =>
+    withTrigger(async h => {
+      let p1 = person(h, "p1", "use");
+      let owner = { type: "user" as const, id: OWNER, name: "Owner" };
+      let headOf = () => "a".repeat(40);
+      let store = h.impl.workflowDefinitionStore();
+      let saved = store.save(owner, { title: "Build", gadgetId: 3 }, headOf, "build");
+      store.publish(owner, saved.id, 1);
+      store.pinTrigger(OWNER, HOOK, 3, { definitionId: saved.id, revision: 1, mode: "pinned" });
+      store.setControl(owner, HOOK, { label: "Build now", invokers: ["p1"] });
+      // The gatekeeper's half, as startHook does it: the delivery names the invocation it was handed.
+      let roles = await h.impl.definitionRoles();
+      let hook = { id: HOOK, gadgetId: 3, gatekeeperId: 50, enabled: true, controller: {
+        invoke: async ({ invocationId }: { invocationId: string }) => {
+          h.impl.takenInvocations.set(invocationId, true);
+          store.fire(HOOK, 3, headOf, roles, invocationId);
+        },
+      } };
+      h.impl.storage.boundHooks = { get: (id: number) => (id === HOOK ? hook : undefined), list: () => [hook] };
+      h.impl.assertGatekeeperUsable = () => {};
+      h.impl.requireHookBound = () => {};
+      h.impl.requireTriggerStarts = () => {};
+      h.impl.getGadgetHead = headOf;
+      h.impl.invokeTrigger = (userId: string, profileId: string, hookId: number, expected?: never) =>
+        invokeWorkflowTrigger(h.impl, userId, profileId, hookId, expected);
+
+      let started = await h.instance.invokeTriggerAs(p1, request({ definitionId: saved.id, revision: 1 }));
+      expect(started).toMatchObject({ status: "started" });
+      let runId = (started as { runId: string }).runId;
+
+      // 1. One delivery for that run, requested by the approver.
+      let deliveries = store.deliveries(OWNER, saved.id, "build");
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]!.invocation).toEqual({ id: runId, requestedBy: "p1" });
+      // 2. The owner's readable histories discover it.
+      expect(store.listReadableWorkflowHistories(OWNER, "build")).toContainEqual({ definitionId: saved.id });
+      // 3. A person of another company holds no role in this workspace: not listed, and its
+      // deliveries read as absent.
+      expect(store.listReadableWorkflowHistories("other-company-person", null)).toEqual([]);
+      expect(() => store.deliveries("other-company-person", saved.id, null)).toThrow();
+      // 4. Nor a stranger of this company, nor the approver as a runner (who reads their own
+      // requested runs through requestedDeliveries instead).
+      expect(store.listReadableWorkflowHistories("stranger", null)).toEqual([]);
+      expect(store.listReadableWorkflowHistories("p1", "use")).toEqual([]);
+      expect(() => store.deliveries("p1", saved.id, "use")).toThrow();
     }));
 
   it("starts nothing for a stranger, an unverified caller, a caller naming W as its session, or in an operate session", () =>

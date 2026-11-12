@@ -31,6 +31,10 @@
       "types": "./src/widget-placements.ts",
       "import": "./src/widget-placements.ts"
     },
+    "./temporary-canvas": {
+      "types": "./src/temporary-canvas.ts",
+      "import": "./src/temporary-canvas.ts"
+    },
     "./workflow-trigger-ref": {
       "types": "./src/workflow-trigger-ref.ts",
       "import": "./src/workflow-trigger-ref.ts"

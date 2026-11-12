@@ -24,6 +24,8 @@ export type WorkshopObservabilityFields = {
   executionId: string;
   failureCount: number;
   definitionCount: number;
+  /** How many expired temporary canvases a sweep removed (FAC-137). */
+  canvasCount: number;
   gadgetId: string;
   gatekeeperId: number | string;
   handoffKind: "connect" | "restore";

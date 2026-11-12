@@ -44,8 +44,14 @@ import {
   type RunReportTo,
 } from "./workflow-definition-store";
 import { collaboratorAccountName } from "./account-subject";
+import { TemporaryCanvasStore, type StoredTemporaryCanvas } from "./temporary-canvas-store";
+import {
+  TEMPORARY_CANVAS_ERROR_CODES, TemporaryCanvasError, parseTemporaryCanvasInput, temporaryCanvasTtlMs,
+  type TemporaryCanvas,
+} from "@gadgets/workshop-shared/temporary-canvas";
 import type { UserDirectoryDurableObject } from "./user-directory";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
+import { workspaceReadiness, type ReadinessInputs } from "./workspace-readiness";
 import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { commandInputProblem, isReservedToolMethod, parseToolEnvelope, parseWidgetToolFile, plainJsonProblem, WIDGET_COMMANDS, WIDGET_TOOL_LIMITS, widgetToolValueProblem, type WidgetCommandName } from "@gadgets/workshop-shared/widget-tools";
@@ -155,7 +161,7 @@ import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import { createOperateSessionError, OPERATE_SESSION_ERROR_CODES, WIDGET_SEARCH_LIMIT, type BoundViewDescription, type GadgetExportFormat, type GovernedSessionHandle } from "@gadgets/workshop-shared/api";
+import { createOperateSessionError, OPERATE_SESSION_ERROR_CODES, WIDGET_SEARCH_LIMIT, type BoundViewDescription, type GadgetExportFormat, type GovernedSessionHandle, type WorkspaceReadiness } from "@gadgets/workshop-shared/api";
 import {
   governedResourceOf, type GovernedCommandReceipt, type GovernedDescription, type GovernedListResult, type GovernedRow,
   type GovernedWriteSession,
@@ -2040,6 +2046,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       canvasPages: collection<StoredCanvasPage>()({ primaryKey: record => record.page.id }),
       // Authored flows: ordered lists of this workspace's canvases (see flow-store.ts).
       flows: collection<OperateFlow>()({ primaryKey: "id" }),
+      // The owner's temporary canvases (FAC-137), only in an operate session workspace: references
+      // only, each unsaved one expiring unless saved (see temporary-canvas-store.ts).
+      temporaryCanvases: collection<StoredTemporaryCanvas>()({ primaryKey: "id" }),
       // Saved and published workflow definitions, the triggers pinned to them, and the deliveries
       // those triggers made (see workflow-definition-store.ts).
       workflowDefinitions: collection<StoredWorkflowDefinition>()({ primaryKey: "id" }),
@@ -2906,6 +2915,9 @@ class OverseerImpl implements AgentHooks {
     // The next dynamic workflow definition to expire (FAC-124), so it is swept on time.
     let nextExpiry = this.workflowDefinitionStore().nextExpiry();
     if (nextExpiry !== undefined) times.push(nextExpiry);
+    // And the next unsaved temporary canvas (FAC-137).
+    let nextCanvasExpiry = this.temporaryCanvasStore().nextExpiry();
+    if (nextCanvasExpiry !== undefined) times.push(nextCanvasExpiry);
     let nextRunHistorySweep = this.workflowDefinitionStore().nextRunHistorySweep();
     if (nextRunHistorySweep !== undefined) times.push(nextRunHistorySweep);
 
@@ -2979,8 +2991,10 @@ class OverseerImpl implements AgentHooks {
   /**
    * Removes expired temporary configuration (FAC-124): today, dynamic workflow definitions past
    * their TTL that no trigger or live run keeps (`WorkspaceWorkflowDefinitionStore.sweepExpired`).
-   * FAC-137's temporary canvases join here, under the same rule: expiry ends future availability and
-   * never deletes records or stops work. A failure is logged and retried at the next alarm.
+   * And FAC-137's unsaved temporary canvases past their expiry, under the same rule: expiry ends
+   * future availability and never deletes records or stops work (`TemporaryCanvasStore.sweepExpired`
+   * deletes only the canvas records). Each is tried on its own, so one failing doesn't hold back the
+   * other. A failure is logged and retried at the next alarm.
    */
   #sweepTemporary(): void {
     try {
@@ -2990,6 +3004,12 @@ class OverseerImpl implements AgentHooks {
       if (swept > 0) this.logger.info("swept expired workflow definitions", { event: "workflow.definitions.expired", definitionCount: swept });
     } catch (error) {
       this.logger.error("temporary sweep failed", { event: "workflow.definitions.expire.failed", error });
+    }
+    try {
+      let swept = this.temporaryCanvasStore().sweepExpired();
+      if (swept > 0) this.logger.info("swept expired temporary canvases", { event: "operate.temporary_canvases.expired", canvasCount: swept });
+    } catch (error) {
+      this.logger.error("temporary canvas sweep failed", { event: "operate.temporary_canvases.expire.failed", error });
     }
   }
 
@@ -13113,6 +13133,46 @@ class OverseerImpl implements AgentHooks {
     return invokeWorkflowTrigger(this, userId, profileId, hookId, expected);
   }
 
+  /**
+   * This workspace's temporary canvas store (FAC-137), with the deployment's TTL, read only when a
+   * canvas is created. It is the raw store: callers reach it through `temporaryCanvasesOf`, which
+   * checks whose operate session this is.
+   */
+  temporaryCanvasStore(): TemporaryCanvasStore {
+    return new TemporaryCanvasStore(this.ctx.storage, this.storage, {
+      now: () => Date.now(),
+      ttlMs: () => temporaryCanvasTtlMs(this.env.OPERATE_TEMPORARY_CANVAS_TTL_HOURS),
+      // As for dynamic definitions: wake for the next expiry whenever it changes.
+      onChange: () => {
+        if (this.toolLane) this.#updateAlarm();
+        else this.#alarmOwed = true;
+      },
+    });
+  }
+
+  /**
+   * `userId`'s temporary canvases (FAC-137): only in their own live operate session workspace.
+   * Anywhere else (an ordinary workspace, someone else's session, or a session their company change
+   * retired) it is refused with `TEMPORARY_CANVASES_UNAVAILABLE`, naming nothing.
+   */
+  temporaryCanvasesOf(userId: string): TemporaryCanvasStore {
+    if (!this.storage.operateSession.get() || this.isRetiredOperateSession() || this.ownerId !== userId) {
+      throw new TemporaryCanvasError(TEMPORARY_CANVAS_ERROR_CODES.unavailable,
+        "Temporary canvases are kept only in your own operate session.");
+    }
+    return this.temporaryCanvasStore();
+  }
+
+  /**
+   * Creates a temporary canvas for `userId` in their own operate session (FAC-137), from `input`
+   * checked here (`parseTemporaryCanvasInput`). The kernel's own path for a canvas the person
+   * approved; never offered to an agent or a client.
+   */
+  createTemporaryCanvasFor(userId: string, input: unknown): TemporaryCanvas {
+    let store = this.temporaryCanvasesOf(userId);
+    return store.create(parseTemporaryCanvasInput(input));
+  }
+
   workflowDefinitionStore(): WorkspaceWorkflowDefinitionStore {
     // A dynamic definition lasts the deployment's TTL (FAC-124), read only when one is created.
     return new WorkspaceWorkflowDefinitionStore(this.ctx.storage, this.storage, {
@@ -13375,6 +13435,40 @@ class OverseerImpl implements AgentHooks {
       return `Connection ${gatekeeperId} is not an InferOps board, which this command needs.`;
     }
     return null;
+  }
+
+  /**
+   * What this workspace's deployment readiness is decided from (FAC-144, `workspaceReadiness`), read
+   * now: its connections, the connections its gadgets bind (provisional edges excluded), its
+   * published consoles (null while consoles are off) and the URL patterns the deployment's InferOps
+   * gatekeeper offers (null when there is none to ask). Reads only.
+   */
+  async workspaceReadinessInputs(): Promise<ReadinessInputs> {
+    let connections = Array.from(this.storage.gatekeepers.list(), record => ({
+      id: record.id, vendorId: gatekeeperVendorId(record),
+      resourceUrl: record.resourceUrl ?? gatekeeperResourceUrl(record), connected: record.connectedBy !== undefined,
+    }));
+    let boundConnectionIds = new Set<number>();
+    for (let gadget of this.storage.gadgets.list()) {
+      if (gadget.type !== "gadget" || gadget.pending) continue;
+      for (let binding of Object.values(gadget.bindings ?? {})) {
+        if (!binding.pending) boundConnectionIds.add(binding.target);
+      }
+    }
+    let publishedConsoles: number | null;
+    try {
+      publishedConsoles = this.#consoleStore().listPublished().length;
+    } catch {
+      publishedConsoles = null;
+    }
+    let inferopsPatterns: string[] | null;
+    try {
+      let vendor = (await this.#listGatekeeperVendorsCached()).find(v => v.id.toLowerCase() === "inferops");
+      inferopsPatterns = vendor ? vendor.supportedResources.map(r => r.urlPattern) : null;
+    } catch {
+      inferopsPatterns = null;
+    }
+    return { connections, boundConnectionIds, publishedConsoles, inferopsPatterns };
   }
 
   #consoleStore(): WorkspaceConsoleStore {
@@ -15773,6 +15867,20 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
 
   async listCanvases(): Promise<CanvasDefinition[]> { return this.#canvasStore().list(); }
   async getCanvas(id: string): Promise<CanvasDefinition | null> { return this.#canvasStore().get(id); }
+  // FAC-137: the client's own temporary canvases, only in their own live operate session workspace
+  // (OverseerImpl.temporaryCanvasesOf); never shared configuration, so no build or publish check.
+  async listTemporaryCanvases(): Promise<TemporaryCanvas[]> {
+    return this.impl.temporaryCanvasesOf(this.clientUserId).list();
+  }
+  async getTemporaryCanvas(id: string): Promise<TemporaryCanvas> {
+    return this.impl.temporaryCanvasesOf(this.clientUserId).get(id);
+  }
+  async saveTemporaryCanvas(id: string, expectedRevision: number): Promise<TemporaryCanvas> {
+    return this.impl.temporaryCanvasesOf(this.clientUserId).save(id, expectedRevision);
+  }
+  async removeTemporaryCanvas(id: string, expectedRevision: number): Promise<void> {
+    this.impl.temporaryCanvasesOf(this.clientUserId).remove(id, expectedRevision);
+  }
   // Writes go through the workspace's canvas write methods, the agent's too (see OverseerImpl), as
   // a `session` writer: FAC-44 checked this session's build when it opened (see CanvasWriter).
   get #canvasWriter(): CanvasWriter { return { kind: "session", userId: this.clientUserId }; }
@@ -16043,6 +16151,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().list(); }
+  /** See Overseer.getWorkspaceReadiness: build, with the shared workspace's `build` authority. */
+  async getWorkspaceReadiness(): Promise<WorkspaceReadiness> {
+    await this.#requireSharedConfiguration("build", "shared");
+    return workspaceReadiness(await this.impl.workspaceReadinessInputs());
+  }
   // Read first, then checked, as a save is (see createConsole).
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> {
     let store = this.#consoleStore();
@@ -18781,6 +18894,11 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async getCanvas(id: string): Promise<CanvasDefinition | null> {
     return this.#consoleStore().publishedScreen(id);
   }
+  // FAC-137: a use-role operator holds no temporary canvases in someone else's workspace.
+  async listTemporaryCanvases(): Promise<TemporaryCanvas[]> { this.#deny(); }
+  async getTemporaryCanvas(_id: string): Promise<TemporaryCanvas> { this.#deny(); }
+  async saveTemporaryCanvas(_id: string, _expectedRevision: number): Promise<TemporaryCanvas> { this.#deny(); }
+  async removeTemporaryCanvas(_id: string, _expectedRevision: number): Promise<void> { this.#deny(); }
   async createCanvas(_content: CanvasContent): Promise<CanvasDefinition> { this.#deny(); }
   async editCanvas(_id: string, _expectedRevision: string, _operations: CanvasOperation[]): Promise<CanvasDefinition> { this.#deny(); }
   async deleteCanvas(_id: string, _expectedRevision: string): Promise<void> { this.#deny(); }
@@ -18850,6 +18968,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // read-only: a console is references and presentation, and grants nothing. Drafts, and every
   // write, stay build-only.
   async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().listPublished(); }
+  async getWorkspaceReadiness(): Promise<WorkspaceReadiness> { this.#deny(); }
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
@@ -19355,8 +19474,18 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async previewAuthoredWidget(_gadgetId: WorkpieceId, _chatId: number): Promise<AuthoredWidgetPreview> { this.#deny(); }
   async listCanvases(): Promise<CanvasDefinition[]> { this.#live(); return this.owner.listCanvases(); }
   async getCanvas(id: string): Promise<CanvasDefinition | null> { this.#live(); return this.owner.getCanvas(id); }
+  // FAC-137: the owner's own temporary canvases, in this their operate session.
+  async listTemporaryCanvases(): Promise<TemporaryCanvas[]> { this.#live(); return this.owner.listTemporaryCanvases(); }
+  async getTemporaryCanvas(id: string): Promise<TemporaryCanvas> { this.#live(); return this.owner.getTemporaryCanvas(id); }
+  async saveTemporaryCanvas(id: string, expectedRevision: number): Promise<TemporaryCanvas> {
+    this.#live(); return this.owner.saveTemporaryCanvas(id, expectedRevision);
+  }
+  async removeTemporaryCanvas(id: string, expectedRevision: number): Promise<void> {
+    this.#live(); return this.owner.removeTemporaryCanvas(id, expectedRevision);
+  }
   async listFlows(): Promise<OperateFlow[]> { this.#live(); return this.owner.listFlows(); }
   async listConsoles(): Promise<OperateConsole[]> { this.#live(); return this.owner.listConsoles(); }
+  async getWorkspaceReadiness(): Promise<WorkspaceReadiness> { this.#deny(); }
   async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
     this.#live(); return this.owner.getConsole(id, source);
   }

@@ -121,6 +121,7 @@ export const WORKERD_LIGHT: readonly string[] = [
  * worker instead of once per file; a file here must not leave state another file can see.
  */
 export const BACKEND: readonly string[] = [
+  "workspace-readiness.test.ts",
   "agent-spawner-config.test.ts",
   "approved-workflow-run.test.ts",
   "operate-flow-start.test.ts",
@@ -132,6 +133,7 @@ export const BACKEND: readonly string[] = [
   "run-navigation.test.ts",
   "workflow-run-delivery.test.ts",
   "workflow-definition-expiry-alarm.test.ts",
+  "temporary-canvases.test.ts",
   "agent-tracing.test.ts",
   "authored-widget-publish-flow.test.ts",
   "authorize-observation-flags.test.ts",
