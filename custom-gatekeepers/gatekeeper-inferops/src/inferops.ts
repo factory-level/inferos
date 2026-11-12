@@ -4151,7 +4151,12 @@ class DotBinding extends ActionBinding {
 function shownProposal(proposal: DotProposalWire, receipt: Receipt | null): DotProposal {
   return {
     id: proposal.id, tool: proposal.tool, input: JSON.stringify(proposal.input), status: dotProposalStatus(proposal),
-    receipt, createdAt: proposal.createdAt, expiresAt: proposal.expiresAt,
+    receipt,
+    run: proposal.run
+      ? { runId: proposal.run.runId, outcome: proposal.run.outcome, ranAs: proposal.run.ranAs,
+          ...(proposal.run.reasonCode ? { reasonCode: proposal.run.reasonCode } : {}) }
+      : null,
+    createdAt: proposal.createdAt, expiresAt: proposal.expiresAt,
   };
 }
 

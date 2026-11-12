@@ -808,6 +808,10 @@ FAC-133 (inferos [ADR 0013](../adr/0013-dot-runtime.md) decision 3). A seventh r
   - **InferOps' answers:** a refusal for good (409: another run already there, or not handed off) is kept as `refused`, not retried. Anything else is thrown for the kernel to retry.
   - **Ignored:** an outcome for any other action of the binding is logged (`dot-run-outcome.ignored`), and nothing is sent.
   - **Tests:** `dot.test.ts`, "deciding a workflow-run proposal".
+  - **Shown in the Dot (FAC-134 UI):** InferOps' proposal carries the recorded outcome as `run`.
+    - **Parsing:** `parseDotProposal` reads its fixed fields only (kind, run id, outcome, ranAs, and a slug `reasonCode`). Anything else, or an older InferOps without the field, reads as `null`.
+    - **The session API:** `DotProposal.run` (`types.d.ts`).
+    - **The `inferops-dot` blueprint:** passes only those fields to its page. A workflow-run proposal never reads "Made": `workflowRunWords` gives *Started in InferOS* until its run ends, then *Run finished*, *Run failed* (with a fixed reason in words, never the code) or *Run uncertain*, each with what it ran as.
 - **Receipts** (`dotProposalStatus`), in FAC-97's words from InferOps' own status, read when asked:
 
   | InferOps | Receipt |

@@ -7,7 +7,7 @@
 // is, under Needs your approval: nothing here approves or declines.
 // ---------------------------------------------------------------------------
 
-import { DECIDE_WHERE, failureWords, proposalHeading, proposalWords, stepWords } from "./lib/dot.ts";
+import { DECIDE_WHERE, WORKFLOW_RUN_TOOL, failureWords, proposalHeading, proposalWords, stepWords, workflowRunWords } from "./lib/dot.ts";
 import type {
   AskResult, Failure, GadgetStub, OpenResult, ShownConversation, ShownProgress, ShownProposal,
 } from "./lib/protocol.ts";
@@ -140,7 +140,9 @@ function renderProposals(conversation: ShownConversation): HTMLElement | null {
   if (conversation.proposals.length === 0) return null;
   const list = el("ul", {});
   for (const proposal of conversation.proposals) {
-    const words = proposalWords(proposal.status, proposal.knowledge);
+    const words = proposal.tool === WORKFLOW_RUN_TOOL
+      ? workflowRunWords(proposal.status, proposal.run)
+      : proposalWords(proposal.status, proposal.knowledge);
     list.append(el("li", {},
       el("span", { class: `label${proposal.status.outcome === "unknown" ? " uncertain" : ""}` }, words.label),
       el("span", { class: proposal.knowledge ? "heading" : "tool" }, proposalHeading(proposal)),

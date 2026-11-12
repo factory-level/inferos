@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import {
-  DECIDE_WHERE, classify, failureWords, knowledgeWrite, proposalHeading, proposalWords, shownProgress, shownProposal, stepWords,
+  DECIDE_WHERE, WORKFLOW_RUN_TOOL, classify, failureWords, knowledgeWrite, proposalHeading, proposalWords, shownProgress, shownProposal,
+  stepWords, workflowRunWords,
 } from "../files/lib/dot.ts";
 
 describe("a proposal's words", () => {
@@ -100,5 +101,49 @@ describe("a step while the Dot answers", () => {
       expect(stepWords(tool)).toBe("Reading your company's knowledge… Reading changes nothing.");
     }
     expect(stepWords("issue_list")).toBe("Using issue_list…");
+  });
+});
+
+// FAC-134: a workflow run the Dot handed to InferOS is never "made"; once it ends, its outcome shows.
+describe("a workflow-run proposal's words", () => {
+  const run = (outcome: "succeeded" | "failed" | "uncertain", extra: Record<string, string> = {}) =>
+    ({ runId: "run-1", outcome, ranAs: "gadget_bindings" as const, ...extra });
+
+  it("reads started, not made, until its run has an outcome", () => {
+    expect(workflowRunWords({ outcome: "succeeded" })).toEqual({
+      label: "Started in InferOS", detail: "Its run belongs to InferOS now. How it came out shows here once it ends.",
+    });
+    expect(workflowRunWords({ outcome: "succeeded" }).label).not.toBe("Made");
+  });
+
+  it("says how its run came out, why in fixed words, and what it ran as", () => {
+    expect(workflowRunWords({ outcome: "succeeded" }, run("succeeded"))).toEqual({
+      label: "Run finished", detail: "It ran on the workflow's own connections.",
+    });
+    expect(workflowRunWords({ outcome: "succeeded" }, run("failed", { reasonCode: "cancelled" }))).toEqual({
+      label: "Run failed", detail: "It failed because it was cancelled. It ran on the workflow's own connections.",
+    });
+    const assigned = workflowRunWords({ outcome: "succeeded" }, { ...run("uncertain", { reasonCode: "action-unknown" }), ranAs: "service_account" });
+    expect(assigned.label).toBe("Run uncertain");
+    expect(assigned.detail).toContain("a change it proposed may or may not have been made");
+    expect(assigned.detail).toContain("as the workflow's assigned account, not as you");
+    // A reason it doesn't know says only that it failed, never the code itself.
+    expect(workflowRunWords({ outcome: "succeeded" }, run("failed", { reasonCode: "something-new" })).detail)
+      .toBe("It ran on the workflow's own connections.");
+  });
+
+  it("reads waiting, declined, failed and uncertain as any change does", () => {
+    for (const status of [{ outcome: "waiting" }, { outcome: "rejected" }, { outcome: "failed", code: "EXPIRED" }, { outcome: "unknown" }] as const) {
+      expect(workflowRunWords(status)).toEqual(proposalWords(status));
+    }
+  });
+
+  it("shows the client its run's fixed fields only", () => {
+    const shownRun = shownProposal({
+      id: "p1", tool: WORKFLOW_RUN_TOOL, input: "{}", status: { outcome: "succeeded" }, receipt: null,
+      createdAt: "", expiresAt: "",
+      run: { ...run("failed", { reasonCode: "runtime-error" }), extra: "x" } as never,
+    }).run;
+    expect(shownRun).toEqual({ runId: "run-1", outcome: "failed", reasonCode: "runtime-error", ranAs: "gadget_bindings" });
   });
 });
