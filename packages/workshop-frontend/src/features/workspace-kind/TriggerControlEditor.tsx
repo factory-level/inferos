@@ -5,10 +5,24 @@ import type { CollaboratorInfo, Overseer } from '@gadgets/workshop-shared/api'
 import type {
   TriggerControl, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
 } from '@gadgets/workshop-shared/workflow-definition'
+import { isLiveWorkflowDelivery } from '@gadgets/workshop-shared/workflow-definition'
 import { WorkshopButton, WorkshopInput } from '../../components/WorkshopControls'
 
 /** How many of a trigger's runs on request the editor lists. */
 const RECENT_RUNS = 5
+
+type History = { status: 'loading' } | { status: 'error' } | { status: 'ready'; runs: WorkflowDefinitionDelivery[] }
+
+const runState = (run: WorkflowDefinitionDelivery) => {
+  if (run.result) {
+    return ({ queued: 'Queued', running: 'Running', waiting: 'Waiting for approval', succeeded: 'Finished', failed: "Didn't finish", uncertain: 'Outcome uncertain' } as const)[run.result.outcome]
+  }
+  if (run.execution?.state === 'queued') return 'Queued'
+  if (run.execution?.state === 'running') return 'Running'
+  if (run.execution?.state === 'finished') return 'Finished'
+  if (run.execution?.state === 'failed') return "Didn't finish"
+  return 'Run recorded'
+}
 
 const errorText = (err: unknown, fallback: string) =>
   err instanceof Error && err.message ? err.message : fallback
@@ -16,8 +30,9 @@ const errorText = (err: unknown, fallback: string) =>
 /**
  * Who may run one pinned trigger on request (Overseer.setTriggerControl): a label for its button
  * and the people listed, chosen from the workspace's collaborators. Being listed lets a person run
- * the trigger and nothing else. Below it, the trigger's recent runs on request and who asked; the
- * person who asked is a record, not the run's authority. Refusals show in the server's words.
+ * the trigger and nothing else. Below it, this trigger's latest run history and server-computed
+ * retention. A requester is shown as a record, not the run's authority. Refusals show in the
+ * server's words.
  */
 export const TriggerControlEditor = ({ overseer, hookId, pin, control, collaborators, onChanged }: {
   overseer: RpcStub<Overseer>
@@ -31,18 +46,22 @@ export const TriggerControlEditor = ({ overseer, hookId, pin, control, collabora
   const [invokers, setInvokers] = useState<ReadonlySet<string>>(new Set(control?.invokers ?? []))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [runs, setRuns] = useState<WorkflowDefinitionDelivery[]>([])
+  const [history, setHistory] = useState<History>({ status: 'loading' })
+  const [historyRetry, setHistoryRetry] = useState(0)
 
   useEffect(() => {
-    if (!control) return
     let cancelled = false
+    setHistory({ status: 'loading' })
     overseer.listWorkflowDeliveries(pin.definitionId)
       .then(all => {
-        if (!cancelled) setRuns(all.filter(d => d.hookId === hookId && d.invocation).slice(-RECENT_RUNS).toReversed())
+        if (!cancelled) setHistory({
+          status: 'ready',
+          runs: all.filter(d => d.hookId === hookId).slice(-RECENT_RUNS).toReversed(),
+        })
       })
-      .catch(() => {})
+      .catch(() => { if (!cancelled) setHistory({ status: 'error' }) })
     return () => { cancelled = true }
-  }, [overseer, hookId, pin.definitionId, control])
+  }, [overseer, hookId, pin.definitionId, historyRetry])
 
   const nameOf = (profileId: string) =>
     collaborators.find(c => c.profile.id === profileId)?.profile.name ?? 'Someone no longer here'
@@ -128,18 +147,39 @@ export const TriggerControlEditor = ({ overseer, hookId, pin, control, collabora
         </WorkshopButton>
       </div>
       {error && <p role="alert" className="m-0 text-[12px] leading-4 text-kumo-danger">{error}</p>}
-      {control && (
-        runs.length === 0 ? (
-          <p className="m-0 text-[11px] leading-4 text-kumo-inactive">No runs on request yet.</p>
-        ) : (
-          <ul aria-label="Recent runs on request" className="m-0 grid list-none gap-0.5 p-0">
-            {runs.map(run => (
-              <li key={run.invocation!.id} className="text-[11px] leading-4 text-kumo-subtle">
-                Requested by {nameOf(run.invocation!.requestedBy)}, {new Date(run.at).toLocaleString()}, revision {run.revision}
+      <p className="m-0 text-[12px] leading-4 font-medium text-kumo-default">Recent run history</p>
+      {history.status === 'loading' && (
+        <p role="status" className="m-0 text-[11px] leading-4 text-kumo-subtle">Loading run history…</p>
+      )}
+      {history.status === 'error' && (
+        <div>
+          <p role="alert" className="m-0 text-[11px] leading-4 text-kumo-danger">Couldn't load run history.</p>
+          <WorkshopButton onClick={() => setHistoryRetry(n => n + 1)}>Retry history</WorkshopButton>
+        </div>
+      )}
+      {history.status === 'ready' && history.runs.length === 0 && (
+        <p className="m-0 text-[11px] leading-4 text-kumo-inactive">No run history yet.</p>
+      )}
+      {history.status === 'ready' && history.runs.length > 0 && (
+        <ul aria-label="Recent workflow run history" className="m-0 grid list-none gap-0.5 p-0">
+          {history.runs.map((run, index) => {
+            const live = isLiveWorkflowDelivery(run)
+            return (
+              <li key={run.run?.runId ?? run.invocation?.id ?? `${run.hookId}:${run.at.getTime()}:${index}`}
+                className="text-[11px] leading-4 text-kumo-subtle">
+                <span>{runState(run)} · {new Date(run.at).toLocaleString()} · revision {run.revision}</span>
+                {run.invocation && <span> · Requested by {nameOf(run.invocation.requestedBy)}</span>}
+                {live ? (
+                  <span> · Kept while it&apos;s live, uncertain or waiting</span>
+                ) : run.historyExpiresAt ? (
+                  <span> · Kept until <time dateTime={run.historyExpiresAt.toISOString()}>{run.historyExpiresAt.toLocaleString()}</time></span>
+                ) : (
+                  <span> · Retention date unavailable</span>
+                )}
               </li>
-            ))}
-          </ul>
-        )
+            )
+          })}
+        </ul>
       )}
     </section>
   )
