@@ -1741,10 +1741,13 @@ export function openHttpInferOpsClient(
       });
     },
 
-    async confirmDotProposal(conversationId: string, proposalId: string, idempotencyKey: string): Promise<DotProposalWire> {
+    async confirmDotProposal(
+      conversationId: string, proposalId: string, idempotencyKey: string, opts?: { runId?: string },
+    ): Promise<DotProposalWire> {
       await beforeSending(async () => dotIds(conversationId, proposalId));
       const body = await dot("chatbot.proposal_confirm", {
-        method: "POST", path: `/chatbot/conversations/${conversationId}/proposals/${proposalId}/confirm`, body: {},
+        method: "POST", path: `/chatbot/conversations/${conversationId}/proposals/${proposalId}/confirm`,
+        body: opts?.runId !== undefined ? { runId: opts.runId } : {},
         idempotencyKey,
       });
       return dotParsed("chatbot.proposal_confirm", body, raw => onlyProposal(raw, proposalId));

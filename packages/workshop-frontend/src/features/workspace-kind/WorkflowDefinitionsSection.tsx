@@ -6,6 +6,7 @@ import {
   MAX_WORKFLOW_DEFINITION_TITLE_LENGTH,
   WORKFLOW_DEFINITION_EXPIRED,
   type WorkflowDefinition,
+  type WorkflowDefinitionDelivery,
 } from '@gadgets/workshop-shared/workflow-definition'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { WorkshopButton } from '../../components/WorkshopControls'
@@ -21,9 +22,15 @@ type Props = {
   definitions: readonly WorkflowDefinition[]
   // The workspace's collaborators, whom an owner may share a definition with by account (FAC-122).
   collaborators?: readonly CollaboratorInfo[]
+  view?: 'all' | 'shared' | 'saved' | 'recent'
+  recentRuns?: readonly WorkflowDefinitionDelivery[] | null
+  recentRunsError?: boolean
   // Called after a save or publish, so the panel reloads definitions and pins.
   onChanged: () => void
 }
+
+const latestSavedAt = (definition: WorkflowDefinition) =>
+  definition.revisions.at(-1)?.savedAt.getTime() ?? 0
 
 /** The server's refusal as it words it, when it has one. */
 const refusalOf = (err: unknown, fallback: string) =>
@@ -53,7 +60,9 @@ const EXPIRED_BEFORE_SAVE =
  * its connections are set up from its owner's own accounts and models it says it can't run and why,
  * in the words its runs are refused with; only its owner sees that and sets them up.
  */
-export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, collaborators = [], onChanged }: Props) => {
+export const WorkflowDefinitionsSection = ({
+  overseer, gadgets, definitions, collaborators = [], view = 'all', recentRuns, recentRunsError = false, onChanged,
+}: Props) => {
   const toasts = useKumoToastManager()
   const { currentUser } = useAuthenticatedApi()
   const [title, setTitle] = useState('')
@@ -64,6 +73,13 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, col
   const [settingUp, setSettingUp] = useState<WorkflowDefinition | null>(null)
   const chosenGadget = gadgetId ?? gadgets[0]?.id ?? null
   const trimmed = title.trim()
+  const visibleDefinitions = definitions
+    .filter(definition => view === 'shared'
+      ? definition.sharedWithMe === true
+      : view === 'saved'
+        ? definition.expiresAt === undefined
+        : true)
+    .toSorted((left, right) => latestSavedAt(right) - latestSavedAt(left))
 
   const run = async (work: () => Promise<unknown>, failure: string) => {
     setBusy(true)
@@ -104,20 +120,22 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, col
   }
 
   return (
-    <section aria-labelledby="workflow-definitions-heading" className="mt-8">
+    <section id="workflow-definitions-panel" aria-labelledby="workflow-definitions-heading" className="mt-5">
       <h2
         id="workflow-definitions-heading"
         className="m-0 text-[17px] leading-6 font-medium tracking-[-0.35px] text-kumo-default"
       >
-        Definitions
+        {view === 'shared' ? 'Shared with me' : view === 'saved' ? 'Saved' : view === 'recent' ? 'Recent' : 'Definitions'}
       </h2>
       <p className="mt-1 text-[13px] leading-[18px] tracking-[-0.25px] text-kumo-subtle">
-        Save this workflow&apos;s current code as a revision to reuse it. Saving keeps it for you, and
-        anyone you share it with for editing; publishing a revision makes it the one everyone else who
-        may see it reads and runs.
+        {view === 'shared'
+          ? 'Workflow definitions other people have shared with you.'
+          : view === 'recent'
+            ? 'Recently saved revisions and runs you may read. Opened workflows are not tracked.'
+            : 'Save this workflow’s current code as a revision to reuse it. Saving keeps it for you, and anyone you share it with for editing; publishing a revision makes it the one everyone else who may see it reads and runs.'}
       </p>
 
-      {gadgets.length > 0 && (
+      {(view === 'saved' || view === 'all') && gadgets.length > 0 && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Input
             aria-label="Definition title"
@@ -143,11 +161,45 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, col
         </div>
       )}
 
-      {definitions.length === 0 ? (
-        <p className="mt-3 mb-0 text-[13px] text-kumo-subtle">No saved definitions yet.</p>
+      {view === 'recent' && (
+        <section aria-labelledby="workflow-recent-runs-heading" className="mt-4">
+          <h3 id="workflow-recent-runs-heading" className="m-0 text-[14px] leading-5 font-medium text-kumo-default">
+            Recent runs
+          </h3>
+          {recentRunsError ? (
+            <p role="alert" className="mt-2 mb-0 text-[13px] text-kumo-subtle">Run history could not be loaded.</p>
+          ) : recentRuns === null || recentRuns === undefined ? (
+            <p role="status" className="mt-2 mb-0 text-[13px] text-kumo-subtle">Loading run history…</p>
+          ) : recentRuns.length === 0 ? (
+            <p className="mt-2 mb-0 text-[13px] text-kumo-subtle">No recent runs.</p>
+          ) : (
+            <ul className="mt-2 mb-0 list-none overflow-hidden rounded-xl border border-kumo-line bg-kumo-base p-0">
+              {recentRuns.slice(0, 50).map((delivery, index) => {
+                const definition = definitions.find(item => item.id === delivery.definitionId)
+                return (
+                  <li key={`${delivery.definitionId}:${delivery.hookId}:${delivery.at.toISOString()}:${index}`}
+                    className={`px-3 py-3 ${index > 0 ? 'border-t border-kumo-line' : ''}`}>
+                    <p className="m-0 text-[13px] leading-[18px] font-medium text-kumo-default">
+                      {definition?.title ?? 'Workflow run'} · revision {delivery.revision}
+                    </p>
+                    <p className="mt-1 mb-0 text-[12px] leading-4 text-kumo-subtle">
+                      <time dateTime={delivery.at.toISOString()}>{delivery.at.toLocaleString()}</time>
+                    </p>
+                  </li>
+                )
+              })}
+            </ul>
+          )}
+        </section>
+      )}
+
+      {visibleDefinitions.length === 0 ? (
+        <p className="mt-3 mb-0 text-[13px] text-kumo-subtle">
+          {view === 'shared' ? 'No workflows have been shared with you.' : view === 'recent' ? 'No recent saves or edits.' : 'No saved definitions yet.'}
+        </p>
       ) : (
         <ul className="mt-3 mb-0 list-none overflow-hidden rounded-xl border border-kumo-line bg-kumo-base p-0">
-          {definitions.map((definition, index) => {
+          {visibleDefinitions.map((definition, index) => {
             const latest = definition.revisions[definition.revisions.length - 1]
             const published = definition.published?.revision
             const own = currentUser !== null && definition.owner.id === currentUser.id
@@ -173,6 +225,7 @@ export const WorkflowDefinitionsSection = ({ overseer, gadgets, definitions, col
                   <p className="mt-0.5 mb-0 truncate text-[12px] leading-4 text-kumo-subtle">
                     {[
                       latest && `Revision ${latest.revision}`,
+                      latest && `Saved ${latest.savedAt.toLocaleString()}`,
                       published === undefined ? 'Not published' : `Published: revision ${published}`,
                       definition.owner.name,
                     ].filter(Boolean).join(' · ')}

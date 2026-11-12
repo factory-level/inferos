@@ -4314,7 +4314,10 @@ async function applyDotWorkflowRun(binding: DotBinding, record: DotConfirmAction
       }
       let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true };
       try {
-        const confirmed = await binding.client.confirmDotProposal(record.conversationId, record.proposalId, record.proposalId);
+        // Names the run it started, so InferOps accepts that run's outcome only (FAC-134).
+        const confirmed = await binding.client.confirmDotProposal(
+          record.conversationId, record.proposalId, record.proposalId, { runId: run.runId },
+        );
         confirmedOutcome = { ...summarizeDotOutcome(confirmed.outcome), handedOff: true };
       } catch (error) {
         logger.warn("dot workflow run started; its InferOps confirm unanswered", {
