@@ -114,17 +114,20 @@ describe("a workflow-run proposal's words", () => {
       label: "Started in InferOS", detail: "Its run belongs to InferOS now. How it came out shows here once it ends.",
     });
     expect(workflowRunWords({ outcome: "succeeded" }).label).not.toBe("Made");
+    // Nothing reported yet, so nothing to call unverified.
+    expect(workflowRunWords({ outcome: "succeeded" }).note).toBeUndefined();
   });
 
   it("says how its run came out, why in fixed words, and what it ran as", () => {
     expect(workflowRunWords({ outcome: "succeeded" }, run("succeeded"))).toEqual({
-      label: "Run finished", detail: "It ran on the workflow's own connections.",
+      label: "Run finished", detail: "It ran on the workflow's own connections.", note: "Reported, not verified",
     });
     expect(workflowRunWords({ outcome: "succeeded" }, run("failed", { reasonCode: "cancelled" }))).toEqual({
-      label: "Run failed", detail: "It failed because it was cancelled. It ran on the workflow's own connections.",
+      label: "Run failed", detail: "It failed because it was cancelled. It ran on the workflow's own connections.", note: "Reported, not verified",
     });
     const assigned = workflowRunWords({ outcome: "succeeded" }, { ...run("uncertain", { reasonCode: "action-unknown" }), ranAs: "service_account" });
     expect(assigned.label).toBe("Run uncertain");
+    expect(assigned.note).toBe("Reported, not verified");
     expect(assigned.detail).toContain("a change it proposed may or may not have been made");
     expect(assigned.detail).toContain("as the workflow's assigned account, not as you");
     // A reason it doesn't know says only that it failed, never the code itself.

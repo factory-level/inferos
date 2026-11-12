@@ -87,6 +87,12 @@ const RUN_REASONS: Record<string, string> = {
   "not-started": "it was admitted but never started",
 };
 
+/**
+ * Shown with every recorded run outcome (FAC-134): InferOps keeps what InferOS reported, but can't
+ * tell it from one the person produced themself through InferOS's public sign-in client.
+ */
+export const RUN_REPORTED = "Reported, not verified";
+
 /** What a run ran as, in words (inferops ADR 0011's two contexts). */
 const RAN_AS: Record<DotProposalRun["ranAs"], string> = {
   gadget_bindings: "It ran on the workflow's own connections.",
@@ -99,21 +105,23 @@ const RAN_AS: Record<DotProposalRun["ranAs"], string> = {
  * its outcome shows here once the run ends; with that outcome, it says how it came out (a fixed
  * reason, never what the run returned) and what it ran as.
  */
-export function workflowRunWords(status: WriteStatus, run?: DotProposalRun): { label: string; detail?: string } {
+export function workflowRunWords(status: WriteStatus, run?: DotProposalRun): { label: string; detail?: string; note?: string } {
   if (status.outcome !== "succeeded") return proposalWords(status);
   if (!run) {
     return { label: "Started in InferOS", detail: "Its run belongs to InferOS now. How it came out shows here once it ends." };
   }
   const why = run.reasonCode ? RUN_REASONS[run.reasonCode] : undefined;
+  const note = RUN_REPORTED;
   switch (run.outcome) {
     case "succeeded":
-      return { label: "Run finished", detail: RAN_AS[run.ranAs] };
+      return { label: "Run finished", detail: RAN_AS[run.ranAs], note };
     case "failed":
-      return { label: "Run failed", detail: `${why ? `It failed because ${why}. ` : ""}${RAN_AS[run.ranAs]}` };
+      return { label: "Run failed", detail: `${why ? `It failed because ${why}. ` : ""}${RAN_AS[run.ranAs]}`, note };
     case "uncertain":
       return {
         label: "Run uncertain",
         detail: `${why ? `It's uncertain because ${why}. ` : "Whether all of it happened isn't known. "}Check its run in InferOS. ${RAN_AS[run.ranAs]}`,
+        note,
       };
   }
 }
