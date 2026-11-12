@@ -7703,7 +7703,7 @@ class OverseerImpl implements AgentHooks {
     let ns = this.ctx.exports.OverseerDurableObject;
     let session = ns.get(ns.idFromString(owed.sessionWorkspaceId));
     let answer = await session.reportApprovedRunOutcome(owed.actionId, this.ctx.id.toString(), {
-      runId: delivery.run.runId, outcome: result.outcome, ...(result.reason ? { reason: result.reason } : {}),
+      kind: "workflow-run", runId: delivery.run.runId, outcome: result.outcome, ...(result.reason ? { reason: result.reason } : {}),
       requestedBy, ranAs: delivery.run.executor.kind,
     });
     return answer === "delivered" ? "delivered" : "undelivered";
@@ -13222,7 +13222,7 @@ class OverseerImpl implements AgentHooks {
     }
     let {runId, reason, requestedBy, ranAs} = outcome;
     let final = outcome.outcome;
-    if (typeof runId !== "string" || (final !== "succeeded" && final !== "failed" && final !== "uncertain") ||
+    if (outcome.kind !== "workflow-run" || typeof runId !== "string" || (final !== "succeeded" && final !== "failed" && final !== "uncertain") ||
         (reason !== undefined && typeof reason !== "string") ||
         (ranAs !== "gadget_bindings" && ranAs !== "service_account")) {
       return "refused";
@@ -13232,7 +13232,7 @@ class OverseerImpl implements AgentHooks {
     let facet = this.getGatekeeperFacet(record.gatekeeperId) as unknown as
         Pick<Required<Gatekeeper<unknown>>, "workflowRunOutcome">;
     await facet.workflowRunOutcome(record.action,
-        {runId, outcome: final, ...(reason !== undefined ? {reason} : {}), requestedBy, ranAs});
+        {kind: "workflow-run", runId, outcome: final, ...(reason !== undefined ? {reason} : {}), requestedBy, ranAs});
     this.ctx.storage.kv.put(key, runId);
     return "delivered";
   }

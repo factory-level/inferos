@@ -986,7 +986,7 @@ FAC-120 (K1): a workflow run the person's Dot proposed starts only as the person
   - **When:** `#settleRun`'s first final result (`succeeded`, `failed` or `uncertain`) makes it due once (`#oweRunToChat`; `delivery.chat` `pending`), and `reportRunsToChat` delivers it then and from the alarm, `RUN_CHAT_REPORT_TRIES` (5) tries with a growing delay, whatever happened to the browser or the session meanwhile.
   - **Re-checked first:** the requester, as for their page (`#requesterStillMay`); one who may no longer run it is told nothing (`undelivered`).
   - **Received** by the session workspace (`reportApprovedRunOutcome`, Worker-only), which hands it to the action's gatekeeper (`Gatekeeper.workflowRunOutcome`) only for its own `approved` action that asked, naming a trigger in the reporting workspace, approved by the person the outcome says asked; anything else is `refused`. At most once per action (`fac134:runOutcome:<action>`).
-  - **What it carries** is `ApprovedRunOutcome`: the run id, its outcome and fixed reason, who asked, and what it ran as (`gadget_bindings` or `service_account`), never what the run returned or wrote.
+  - **What it carries** is `ApprovedRunOutcome`: its `kind` (`workflow-run`; FAC-134's later kinds join it), the run id, its outcome and fixed reason, who asked, and what it ran as (`gadget_bindings` or `service_account`), never what the run returned or wrote.
 - **The InferOps facet** treats `unknown` as uncertain and not retryable: it neither declines nor confirms the proposal.
 - **Tests.**
   - `approved-workflow-run.test.ts`: effects only for a declared run's own approval (none for an undeclared action, a non-Dot gatekeeper's write, an automatic approval, an agent or system resolver, or an assigned run's write); bound to the declared reference; repeats get the first answer; revoked after; a malformed declared run refused at submit; the workspace side's admission and every refusal, with nothing started; the same action returns the same run; a changed revision at admission is a `policy` refusal the same action may retry; another person's run minted while this one waits, then this one refused before admission, is a refusal the same action may retry; a start that may have happened stays `unknown`.
@@ -1000,7 +1000,7 @@ FAC-120 (K1): a workflow run the person's Dot proposed starts only as the person
     - an assigned trigger runs only its pinned code as its assignment, and the person is told only the run; with assignments off it is refused;
     - a person taken off the control after asking: the run fails at its start and nothing is reported;
     - no report for an approval that didn't ask;
-    - the session refuses an outcome from another workspace, for another person, for an action that isn't there or didn't ask, or with an unknown `ranAs`, and hands its own on once.
+    - the session refuses an outcome from another workspace, for another person, for an action that isn't there or didn't ask, or with an unknown `ranAs` or `kind`, and hands its own on once.
 - **Not covered.** The idempotency record is kept with no expiry, which is one small row per approved run. Run controls offering their reference to the Dot, and the decision card's workflow title, are FAC-120's UI change.
 
 ### Agent widget verbs

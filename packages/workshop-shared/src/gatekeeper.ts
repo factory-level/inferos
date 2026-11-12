@@ -1083,6 +1083,8 @@ export type ApprovedWorkflowRun =
  * returned or wrote), who asked for it, and what it ran as. Kernel text throughout.
  */
 export type ApprovedRunOutcome = {
+  /** What the approval started: a workflow run (FAC-134's later kinds join here). */
+  kind: "workflow-run";
   /** The run `ApprovedEffects.invokeWorkflow` started. */
   runId: string;
   /** Its final outcome: `succeeded`, `failed` or `uncertain` (see WorkflowRunOutcome). */

@@ -57,10 +57,18 @@ async function withTrigger(fn: (h: Harness) => Promise<void>, name = `approved-r
     let invoked: unknown[][] = [];
     impl.invokeTrigger = async (...args: unknown[]) => {
       invoked.push(args);
-      return { id: "run-1", hookId: HOOK, definitionId: DEFINITION, revision: 2 };
+      return minted(impl, "inv-1", "run-1");
     };
     await fn({ impl, instance, workspaceId: impl.ctx.id.toString(), people, invoked });
   }, name);
+}
+
+// An invocation as beginInvocation records it, with the id its run will have (FAC-134): what
+// invokeTriggerAs answers with, never the invocation's own id.
+function minted(impl: any, id: string, runId: string) {
+  impl.storage.workflowInvocations.put({ id, hookId: HOOK, definitionId: DEFINITION, revision: 2,
+    requestedAt: new Date(0), requestedBy: "p1", company: null, runId });
+  return { id, hookId: HOOK, definitionId: DEFINITION, revision: 2 };
 }
 
 // `profileId` with that role in W (none: a stranger), their operate session `session`.
@@ -134,7 +142,7 @@ describe("the trigger's own workspace", () => {
       expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "refused", kind: "policy",
         reason: "The workflow changed since it was proposed: its trigger no longer runs that revision. Ask the Dot again." });
       // Refused, not unknown: the record is gone, so the same action is answered afresh.
-      h.impl.invokeTrigger = async () => ({ id: "run-2", hookId: HOOK, definitionId: DEFINITION, revision: 2 });
+      h.impl.invokeTrigger = async () => minted(h.impl, "inv-2", "run-2");
       expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "started", runId: "run-2" });
     }));
 
@@ -150,7 +158,7 @@ describe("the trigger's own workspace", () => {
       expect(await h.instance.invokeTriggerAs(p1, request()))
         .toEqual({ status: "refused", kind: "permission", reason: "You can't run this trigger." });
       // No record is left: the same approved action is answered afresh, and starts.
-      h.impl.invokeTrigger = async () => ({ id: "run-2", hookId: HOOK, definitionId: DEFINITION, revision: 2 });
+      h.impl.invokeTrigger = async () => minted(h.impl, "inv-2", "run-2");
       expect(await h.instance.invokeTriggerAs(p1, request())).toEqual({ status: "started", runId: "run-2" });
     }));
 

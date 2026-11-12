@@ -239,7 +239,7 @@ describe("a run started by approving the Dot's proposal (FAC-134)", () => {
     expect(ran).toHaveLength(1);
     await vi.waitFor(() => expect(reported).toHaveLength(1));
     expect(reported[0]).toEqual([idOf(s), ACTION_KEY, {
-      runId: started.status === "started" ? started.runId : "", outcome: "succeeded", requestedBy: PERSON, ranAs: "gadget_bindings",
+      kind: "workflow-run", runId: started.status === "started" ? started.runId : "", outcome: "succeeded", requestedBy: PERSON, ranAs: "gadget_bindings",
     }]);
     expect(await withImpl(w.name, impl => impl.storage.workflowDeliveries.get(deliveryId).delivery))
       .toMatchObject({ chat: "delivered" });
@@ -345,7 +345,7 @@ describe("a run started by approving the Dot's proposal (FAC-134)", () => {
 
 describe("the session receiving a run's outcome (FAC-134)", () => {
   const outcome = (overrides: Partial<ApprovedRunOutcome> = {}): ApprovedRunOutcome =>
-    ({ runId: "run-1", outcome: "succeeded", requestedBy: PERSON, ranAs: "gadget_bindings", ...overrides });
+    ({ kind: "workflow-run", runId: "run-1", outcome: "succeeded", requestedBy: PERSON, ranAs: "gadget_bindings", ...overrides });
 
   it("hands it to the action's gatekeeper only for its own approved action, from the workspace it names", async () => {
     let w = await triggerWorkspace();
@@ -357,6 +357,7 @@ describe("the session receiving a run's outcome (FAC-134)", () => {
       expect(await impl.reportApprovedRunOutcome(ACTION, w.id, outcome({ requestedBy: "someone-else" }))).toBe("refused");
       expect(await impl.reportApprovedRunOutcome(ACTION + 1, w.id, outcome())).toBe("refused");
       expect(await impl.reportApprovedRunOutcome(ACTION, w.id, outcome({ ranAs: "person" as never }))).toBe("refused");
+      expect(await impl.reportApprovedRunOutcome(ACTION, w.id, outcome({ kind: "delegate" as never }))).toBe("refused");
       expect(reported).toEqual([]);
       // Its own: handed on once; a repeat is delivered again without a second hand-off.
       expect(await impl.reportApprovedRunOutcome(ACTION, w.id, outcome())).toBe("delivered");
