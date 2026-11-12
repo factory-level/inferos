@@ -71,12 +71,22 @@ The contract is `packages/integration-tests/src/scenarios/widget-launch-gate.md`
 
 | Category | Proven by | Note |
 |---|---|---|
-| Direct HTTP or a custom provider | `GadgetUI.request-probes.test.ts` (real Chrome; **required in CI by #470**), `GadgetUI.integration.test.tsx`, `governedDataProvider.test.ts`, `gatekeeper-lookup.test.ts` (a connector session's extra method is unreachable), `widget-tools.test.ts` (a command outside the kernel's templates is refused), `inferops-isolation.test.ts`, `rpc-target-validation.test.ts` | Outward paths 3 and 4: see the go/no-go |
+| Direct HTTP or a custom provider (R-2: a declared extra method refused **not run**, below) | `GadgetUI.request-probes.test.ts` (real Chrome; **required in CI by #470**), `GadgetUI.integration.test.tsx`, `governedDataProvider.test.ts`, `gatekeeper-lookup.test.ts` (a connector session's extra method is unreachable), `widget-tools.test.ts` (a command outside the kernel's templates is refused), `inferops-isolation.test.ts`, `rpc-target-validation.test.ts` | Outward paths 3 and 4: see the go/no-go |
 | Unsafe imports | `authoring-compiler.test.ts`, `authored-widget-build-runtime.test.ts` (an edge outside the reviewed closure, and an unlisted browser-field disabled module, are refused; #465), `authored-widget-build.test.ts` | |
 | Cross-user and cross-company leaks | `widget-placements.test.ts`, `personal-state-partition.test.ts`, `agent-widgets.test.ts`, `console-commands.test.ts`, `temporary-canvases.test.ts`, `wiki-embedded-widget.test.ts`; inferops `widget-definitions.integration.test.ts`, `widget-retrieval.integration.test.ts`, `rls-isolation.integration.test.ts` | Cross-*operator* via a widget's own server: **R-4**, a known P0 gap |
-| Cache or subscription reuse | `gatekeeper-kit/__tests__/cache.test.ts`, `workerd/conformance.test.ts` (repartition on reconnect), `OperateSessionPage.reconnect.test.tsx`, `wiki-embedded-widget.test.ts` | Known: the governed cache isn't discarded when a connection is removed (#409) |
+| Cache or subscription reuse (R-5: two people through a widget **not run**, below) | `gatekeeper-kit/__tests__/cache.test.ts`, `workerd/conformance.test.ts` (repartition on reconnect), `OperateSessionPage.reconnect.test.tsx`, `wiki-embedded-widget.test.ts` | Known: the governed cache isn't discarded when a connection is removed (#409) |
 | Revoked grants | `governed-table.test.ts`, `governed-queue.test.ts`, `account.test.ts`, `operate-console-widget-index.test.ts`, `console-commands.test.ts`, `wiki-embedded-widget.test.ts`; **new (#468):** a revoked role ends the agent's widget reads mid-session (`agent-widgets.test.ts`) | |
 | Preview side effects | `authored-widget-publish-flow.test.ts`, `authored-widget-preview.test.ts`, `AuthoredWidgetPreview.test.tsx` | |
+
+### Planned red-team tests not run (S2 part 3)
+
+The plan's S2 part 3 wrote no new tests. What exists today, and what stays unproven:
+
+| Planned | Existing test | Not run |
+|---|---|---|
+| **P-2:** the Dot's two deciders | gatekeeper-inferops `dot.test.ts`, "settles one InferOps says was decided to what it is": a proposal declined in InferOps is not applied by an approval in InferOS | Nothing: covered. |
+| **R-2:** a custom gatekeeper's extra methods or commands | `gatekeeper-lookup.test.ts` ("offering only the governed methods": an extra method is unreachable); `widget-tools.test.ts` (reserved methods; a command outside the kernel's templates is refused) | **A test where a custom gatekeeper declares an extra method or command and is refused.** Today it's shown unreachable, not refused. |
+| **R-5:** a cached query or rendered widget never reused across two people | `gatekeeper-kit/__tests__/cache.test.ts` ("does not serve an entry written under another authority"; "does not share an in-flight load across a reconnect") | **Two people in one session or worker, through a widget.** The tests cover the gatekeeper's governed cache, not that path. Also known: the governed cache isn't discarded when a connection is removed (#409). |
 
 ## Parity across surfaces
 
