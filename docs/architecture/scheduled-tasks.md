@@ -44,3 +44,8 @@ definition and revision. If it is still executing, the removal request returns a
 the trigger is paused while its run finishes; retry removal after the run completes to retire the
 trigger. Retirement removes the trigger and its control but preserves delivery and run history.
 Ordinary hooks that are not pinned to a workflow keep immediate deletion behavior.
+
+Deleting the gadget itself stops its runs: the run's executable code is part of the gadget being
+removed. This is distinct from removing only a schedule, which drains the already admitted run.
+While a trigger is draining, the delete response carries the stable `TRIGGER_DRAINING` code and
+explains that the trigger is paused; clients can offer retry after the run finishes.

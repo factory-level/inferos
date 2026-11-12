@@ -21,7 +21,7 @@ import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
   maxWorkflowDeliveries, workflowRunHistoryRetentionMs,
   WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS, WORKFLOW_BINDINGS_UNATTRIBUTED, parseWorkflowDefinitionTitle,
-  TRIGGER_LIFECYCLE_REFUSED, workflowRunLimits,
+  TRIGGER_DRAINING, TRIGGER_LIFECYCLE_REFUSED, workflowRunLimits,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { checkAssignments, requireBound, requirementsOf, unmetBindings } from "./workflow-duplicate.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
@@ -3968,6 +3968,8 @@ class OverseerImpl implements AgentHooks {
   // related histories. (Chat docs may still hold content in the gadget's files root, and chats
   // may still pin the gadget; the pins stay because the chat's rows still fold on them. Both are
   // inert because the registry entry -- the enumeration source of truth -- is gone.)
+  // Removing a schedule drains its admitted run; deleting the gadget itself stops its runs because
+  // the code those runs execute is being removed.
   async removeWorkpiece(id: WorkpieceId): Promise<void> {
     let record = this.storage.gadgets.get(id);
     if (!record) {
@@ -13358,15 +13360,15 @@ class OverseerImpl implements AgentHooks {
   /**
    * Remove a workflow trigger without interrupting a run already admitted for it (FAC-121).
    * The first request pauses the trigger and stops new starts. If a run is still executing, the
-   * caller gets a fixed retry message; after it drains, the next request retires the trigger and
-   * keeps the run's history. Non-workflow hooks retain the immediate delete behavior.
+   * caller gets a fixed `TRIGGER_DRAINING` retry message; after it drains, the next request retires
+   * the trigger and keeps the run's history. Non-workflow hooks retain immediate deletion behavior.
    */
   async removeHookWithDrain(hookId: number, by: AiChatAuthorInfo): Promise<void> {
     if (!this.storage.boundHooks.get(hookId)) return;
     if (!this.workflowDefinitionStore().pinOf(hookId)) return this.deleteHook(hookId);
     let lifecycle = await this.pauseTrigger(hookId, by);
     if (lifecycle.state !== "paused") {
-      throw new Error("This workflow is paused while its run finishes. Remove it again when the run is complete.");
+      throw new Error(`${TRIGGER_DRAINING}: This workflow is paused while its run finishes. Remove it again when the run is complete.`);
     }
     await this.retireTrigger(hookId, by);
   }
