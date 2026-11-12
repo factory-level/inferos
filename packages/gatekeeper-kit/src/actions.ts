@@ -183,7 +183,11 @@ export const APPLY_OUTCOME_UNKNOWN_MESSAGE = "This action was interrupted after 
 type KitOwnedField = "awaitDecision" | "autoApprovable" | "actionKind";
 type ProviderOwnedField =
   | "title" | "description" | "fields" | "descriptionIsComplete" | "pushedCommits"
-  | "implementsRevert" | "workflowRun";
+  | "implementsRevert" | "workflowRun" | "temporaryCanvas"
+  // FAC-134 capability 2: what a provider's action declares a person's approval creates or runs.
+  | "personalWorkflow" | "personalWorkflowRun"
+  // FAC-134 capability 3: a delegate a person's approval launches.
+  | "delegate";
 type Unclassified = Exclude<keyof ActionDescription, KitOwnedField | ProviderOwnedField>;
 
 /**

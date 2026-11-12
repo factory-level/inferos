@@ -30,7 +30,9 @@ vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticate
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { catalog: { widgetKinds: [], blueprints: [], screens: [] } } }) }))
 // One overseer for every render, as the real hook keeps it in state.
 testState.overseer = { stub: { createConsole: testState.createConsole, replaceConsole: testState.replaceConsole,
-  createCanvas: testState.createCanvas, listConsoleWidgetCandidates: () => testState.candidates() } }
+  createCanvas: testState.createCanvas, listConsoleWidgetCandidates: () => testState.candidates(),
+  // The workspace's readiness panel (FAC-144) reads this once a workspace is open; nothing here checks it.
+  getWorkspaceReadiness: async () => ({ deploymentReady: false, items: [] }) } }
 vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: ({ id }: { id?: string }) => ({
   overseer: testState.overseer,
   metadata: { id: id ?? 'w1', role: testState.denied ? 'use' : 'build' }, error: null,

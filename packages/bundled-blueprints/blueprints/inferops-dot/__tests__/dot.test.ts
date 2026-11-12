@@ -1,7 +1,8 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import {
-  DECIDE_WHERE, classify, failureWords, knowledgeWrite, proposalHeading, proposalWords, shownProgress, shownProposal, stepWords,
+  DECIDE_WHERE, RUN_TOOLS, WORKFLOW_RUN_TOOL, classify, failureWords, knowledgeWrite, proposalHeading, proposalWords, shownProgress, shownProposal,
+  stepWords, workflowRunWords,
 } from "../files/lib/dot.ts";
 
 describe("a proposal's words", () => {
@@ -100,5 +101,88 @@ describe("a step while the Dot answers", () => {
       expect(stepWords(tool)).toBe("Reading your company's knowledge… Reading changes nothing.");
     }
     expect(stepWords("issue_list")).toBe("Using issue_list…");
+  });
+});
+
+// FAC-134: a workflow run the Dot handed to InferOS is never "made"; once it ends, its outcome shows.
+describe("a workflow-run proposal's words", () => {
+  const run = (outcome: "succeeded" | "failed" | "uncertain", extra: Record<string, string> = {}) =>
+    ({ runId: "run-1", outcome, ranAs: "gadget_bindings" as const, ...extra });
+
+  it("reads started, not made, until its run has an outcome", () => {
+    expect(workflowRunWords({ outcome: "succeeded" })).toEqual({
+      label: "Started in InferOS", detail: "Its run belongs to InferOS now. How it came out shows here once it ends.",
+    });
+    expect(workflowRunWords({ outcome: "succeeded" }).label).not.toBe("Made");
+    // Nothing reported yet, so nothing to call unverified.
+    expect(workflowRunWords({ outcome: "succeeded" }).note).toBeUndefined();
+  });
+
+  it("says how its run came out, why in fixed words, and what it ran as", () => {
+    expect(workflowRunWords({ outcome: "succeeded" }, run("succeeded"))).toEqual({
+      label: "Run finished", detail: "It ran on the workflow's own connections.", note: "Reported, not verified",
+    });
+    expect(workflowRunWords({ outcome: "succeeded" }, run("failed", { reasonCode: "cancelled" }))).toEqual({
+      label: "Run failed", detail: "It failed because it was cancelled. It ran on the workflow's own connections.", note: "Reported, not verified",
+    });
+    const assigned = workflowRunWords({ outcome: "succeeded" }, { ...run("uncertain", { reasonCode: "action-unknown" }), ranAs: "service_account" });
+    expect(assigned.label).toBe("Run uncertain");
+    expect(assigned.note).toBe("Reported, not verified");
+    expect(assigned.detail).toContain("a change it proposed may or may not have been made");
+    expect(assigned.detail).toContain("as the workflow's assigned account, not as you");
+    // A reason it doesn't know says only that it failed, never the code itself.
+    expect(workflowRunWords({ outcome: "succeeded" }, run("failed", { reasonCode: "something-new" })).detail)
+      .toBe("It ran on the workflow's own connections.");
+  });
+
+  it("says a personal workflow's run placed requests, never that it was done (FAC-134 capability 2)", () => {
+    const placed = workflowRunWords({ outcome: "succeeded" }, { ...run("succeeded"), kind: "personal-workflow" });
+    expect(placed).toEqual({ label: "Requests placed", detail: "Requests placed. Each waits for the console's builders.", note: "Reported, not verified" });
+    expect(JSON.stringify(placed)).not.toMatch(/\b(done|made|finished)\b/i);
+    const refused = workflowRunWords({ outcome: "succeeded" }, { ...run("failed", { reasonCode: "step-refused" }), kind: "personal-workflow" });
+    expect(refused.detail).toContain("one of its steps was refused, so nothing after it was requested");
+    // A published workflow's run still reads as before.
+    expect(workflowRunWords({ outcome: "succeeded" }, { ...run("succeeded"), kind: "workflow-run" }).label).toBe("Run finished");
+  });
+
+  it("says how a delegate ended, as you, never what it did (FAC-134 capability 3)", () => {
+    const delegate = (outcome: "succeeded" | "failed" | "uncertain", extra: Record<string, string> = {}) =>
+      ({ runId: "run-d", outcome, ranAs: "person" as const, kind: "delegate" as const, ...extra });
+    expect(workflowRunWords({ outcome: "succeeded" }, delegate("succeeded"))).toEqual({
+      label: "Delegate finished", detail: "Check what it changed in your operate session. It ran as you, with at most what you approved.",
+      note: "Reported, not verified",
+    });
+    expect(workflowRunWords({ outcome: "succeeded" }, delegate("failed", { reasonCode: "requester-revoked" })).detail)
+      .toBe("It failed because your access in your operate session changed while it ran. It ran as you, with at most what you approved.");
+    expect(workflowRunWords({ outcome: "succeeded" }, delegate("failed", { reasonCode: "cancelled" })).detail).toContain("because it was stopped");
+    expect(workflowRunWords({ outcome: "succeeded" }, delegate("failed", { reasonCode: "runtime-error" })).detail)
+      .toContain("because its code stopped with an error");
+    expect(RUN_TOOLS.has("inferos_delegate_launch")).toBe(true);
+  });
+
+  it("has words for every reason InferOS gives a failed or uncertain run", () => {
+    const failures = ["requester-revoked", "assignment-changed", "trigger-gone", "bindings-needed", "cancelled", "timed-out",
+      "attempts-exhausted", "runtime-error", "step-refused"];
+    for (const reasonCode of failures) {
+      expect(workflowRunWords({ outcome: "succeeded" }, run("failed", { reasonCode })).detail).toMatch(/^It failed because /);
+    }
+    for (const reasonCode of ["action-unknown", "lost-after-write", "not-started", "step-unknown"]) {
+      expect(workflowRunWords({ outcome: "succeeded" }, run("uncertain", { reasonCode })).detail).toMatch(/^It's uncertain because /);
+    }
+  });
+
+  it("reads waiting, declined, failed and uncertain as any change does", () => {
+    for (const status of [{ outcome: "waiting" }, { outcome: "rejected" }, { outcome: "failed", code: "EXPIRED" }, { outcome: "unknown" }] as const) {
+      expect(workflowRunWords(status)).toEqual(proposalWords(status));
+    }
+  });
+
+  it("shows the client its run's fixed fields only", () => {
+    const shownRun = shownProposal({
+      id: "p1", tool: WORKFLOW_RUN_TOOL, input: "{}", status: { outcome: "succeeded" }, receipt: null,
+      createdAt: "", expiresAt: "",
+      run: { ...run("failed", { reasonCode: "runtime-error" }), extra: "x" } as never,
+    }).run;
+    expect(shownRun).toEqual({ runId: "run-1", outcome: "failed", reasonCode: "runtime-error", ranAs: "gadget_bindings" });
   });
 });

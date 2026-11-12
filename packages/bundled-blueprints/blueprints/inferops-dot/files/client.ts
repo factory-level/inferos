@@ -7,7 +7,7 @@
 // is, under Needs your approval: nothing here approves or declines.
 // ---------------------------------------------------------------------------
 
-import { DECIDE_WHERE, failureWords, proposalHeading, proposalWords, stepWords } from "./lib/dot.ts";
+import { DECIDE_WHERE, RUN_TOOLS, failureWords, proposalHeading, proposalWords, stepWords, workflowRunWords } from "./lib/dot.ts";
 import type {
   AskResult, Failure, GadgetStub, OpenResult, ShownConversation, ShownProgress, ShownProposal,
 } from "./lib/protocol.ts";
@@ -59,6 +59,7 @@ section.proposals .target { display: block; color: var(--muted); margin-top: 2px
 section.proposals .label { font-weight: 600; margin-right: 6px; }
 section.proposals .label.uncertain { color: var(--warn); }
 section.proposals .detail { color: var(--muted); }
+section.proposals .note { color: var(--muted); font-style: italic; }
 .composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border); background: var(--surface); }
 .composer textarea { flex: 1; min-height: 2.6em; max-height: 10em; resize: vertical; padding: 6px 8px;
   border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
@@ -140,9 +141,13 @@ function renderProposals(conversation: ShownConversation): HTMLElement | null {
   if (conversation.proposals.length === 0) return null;
   const list = el("ul", {});
   for (const proposal of conversation.proposals) {
-    const words = proposalWords(proposal.status, proposal.knowledge);
+    const words: { label: string; detail?: string; note?: string } = RUN_TOOLS.has(proposal.tool)
+      ? workflowRunWords(proposal.status, proposal.run)
+      : proposalWords(proposal.status, proposal.knowledge);
     list.append(el("li", {},
       el("span", { class: `label${proposal.status.outcome === "unknown" ? " uncertain" : ""}` }, words.label),
+      // A run's outcome is what InferOS reported, not something InferOps could check (FAC-134).
+      words.note ? el("span", { class: "note" }, words.note) : null,
       el("span", { class: proposal.knowledge ? "heading" : "tool" }, proposalHeading(proposal)),
       renderTarget(proposal),
       words.detail ? el("div", { class: "detail" }, words.detail) : null));

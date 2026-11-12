@@ -121,6 +121,7 @@ export const WORKERD_LIGHT: readonly string[] = [
  * worker instead of once per file; a file here must not leave state another file can see.
  */
 export const BACKEND: readonly string[] = [
+  "workspace-readiness.test.ts",
   "agent-spawner-config.test.ts",
   "approved-workflow-run.test.ts",
   "operate-flow-start.test.ts",
@@ -132,6 +133,8 @@ export const BACKEND: readonly string[] = [
   "run-navigation.test.ts",
   "workflow-run-delivery.test.ts",
   "workflow-definition-expiry-alarm.test.ts",
+  "temporary-canvases.test.ts",
+  "approved-temporary-canvas.test.ts",
   "agent-tracing.test.ts",
   "authored-widget-publish-flow.test.ts",
   "authorize-observation-flags.test.ts",
@@ -144,6 +147,9 @@ export const BACKEND: readonly string[] = [
   "console-revision-notice.test.ts",
   "console-tool-invocation.test.ts",
   "console-commands.test.ts",
+  "personal-workflows.test.ts",
+  // FAC-134 capability 3: a delegate launched by a person's approval, its ceiling and revocation.
+  "delegates.test.ts",
   "describe-binding.test.ts",
   "execution-bound-loopbacks.test.ts",
   "gadget-restore.test.ts",
@@ -178,6 +184,7 @@ export const BACKEND_RESTART: readonly string[] = [
   "published-consoles-migration.test.ts",
   "tool-lane.test.ts",
   "workflow-run-execution.test.ts",
+  "dot-run-outcome.test.ts",
   "workflow-run-restart.test.ts",
   "workflow-run-results.test.ts",
   "worktrees.test.ts",

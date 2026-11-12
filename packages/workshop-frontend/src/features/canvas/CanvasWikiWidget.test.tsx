@@ -11,7 +11,7 @@ import { composeDocumentText, documentText, masterStructureText } from '@inferos
 import { CanvasView } from './CanvasView'
 import { setFieldValue } from './kumoPopupDoubles'
 import { wikiDocumentUrl } from '@inferos/gatekeeper-inferops/src/resources'
-import { WIKI, fakeWiki, organizedWiki, wikiSections } from './wikiTestDoubles'
+import { WIKI, fakeWiki, organizedWiki, wikiPages, wikiSections } from './wikiTestDoubles'
 
 vi.mock('@cloudflare/kumo', async importOriginal =>
   (await import('./kumoPopupDoubles')).withKumoPopupDoubles(await importOriginal<typeof import('@cloudflare/kumo')>()))
@@ -617,4 +617,44 @@ it('shows a lone closing marker in a snippet as the text it is', async () => {
   const hit = results()!.querySelector('button')!
   expect([...hit.querySelectorAll('mark')].map(m => m.textContent)).toEqual(['Pair'])
   expect(hit.textContent).toContain('on one small issue.</b> Ask first.')
+})
+
+// FAC-68: a page reference by the alias, or as the widget's page, opens that page of this Wiki; the
+// page shows InferOps' own reference.
+const RUNBOOK = '0b7e2c3a-1f00-4a00-8000-00000000000a'
+const withRunbook = (link: string) => {
+  const pages = [...wikiPages().map(page => ({ ...page, body: '', version: 1, masterRole: null })),
+    { id: RUNBOOK, slug: 'runbook', title: 'Runbook', parentId: null, siblingOrder: 2, body: 'Restart the queue.', version: 1, masterRole: null }]
+  return fakeWiki({ pages, sections: [...wikiSections(), { id: 's8', documentId: 'd3', tag: 'see-also', body: `[Runbook](${link})`, version: 1 }] })
+}
+
+it('opens a page from its alias reference, by the id the page list knows', async () => {
+  wiki = withRunbook(`inferops://acme.kb/knowledge/page/${RUNBOOK}`)
+  bindings.set(WIKI, connection(wiki.session))
+  await render(widget('onboarding'))
+  await click(button(section('see-also'), 'Open page: Runbook'))
+  expect(wiki.session.readDocument).toHaveBeenLastCalledWith('runbook')
+  expect(pageBody().textContent).toContain('Restart the queue.')
+})
+
+it("says an alias names a page of this Wiki it can't open, when the page list doesn't have it", async () => {
+  const unknown = '0b7e2c3a-1f00-4a00-8000-0000000000ff'
+  wiki = withRunbook(`inferops://acme.kb/knowledge/page/${unknown}`)
+  bindings.set(WIKI, connection(wiki.session))
+  await render(widget('onboarding'))
+  expect(section('see-also').textContent).toContain("A page of this Wiki you can't open")
+  expect([...section('see-also').querySelectorAll('button')].some(b => b.textContent?.startsWith('Open page'))).toBe(false)
+})
+
+it("opens the page a widget names by reference, as a Dot citation or a search hit gives it, and shows the page's reference", async () => {
+  for (const page of ['inferops://acme.kb/knowledge/document/release-process', `inferops://acme.kb/knowledge/page/${RUNBOOK}`]) {
+    await act(async () => root.unmount())
+    root = createRoot(container)
+    wiki = withRunbook('inferops://acme.kb/knowledge/document/handbook')
+    bindings.set(WIKI, connection(wiki.session))
+    await render(widget(page))
+    const slug = page.includes('/page/') ? 'runbook' : 'release-process'
+    expect(wiki.session.readDocument).toHaveBeenLastCalledWith(slug)
+    expect(wikiArticle().textContent).toContain(`Page reference: inferops://acme.kb/knowledge/document/${slug}`)
+  }
 })

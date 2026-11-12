@@ -11,6 +11,16 @@ export interface WriteStatus {
   reason?: string;
 }
 
+/** How a workflow run a proposal handed to InferOS came out (FAC-134), as the gatekeeper reports it. */
+export interface DotProposalRun {
+  /** A published workflow's run, or one of the person's personal workflows' (FAC-134 capability 2). */
+  kind?: "workflow-run" | "personal-workflow" | "delegate";
+  runId: string;
+  outcome: "succeeded" | "failed" | "uncertain";
+  reasonCode?: string;
+  ranAs: "gadget_bindings" | "service_account" | "person";
+}
+
 /** A change the Dot proposed, as the gatekeeper reports it. */
 export interface DotProposal {
   id: string;
@@ -18,6 +28,8 @@ export interface DotProposal {
   input: string;
   status: WriteStatus;
   receipt: unknown;
+  /** For a workflow run it handed to InferOS, how that run came out; null until then (FAC-134). */
+  run?: DotProposalRun | null;
   createdAt: string;
   expiresAt: string;
 }
@@ -86,6 +98,8 @@ export interface ShownProposal {
   status: WriteStatus;
   /** Set for a knowledge write (FAC-136): what it changes, from its arguments, read on the server. */
   knowledge?: KnowledgeWrite;
+  /** Set for a workflow run handed to InferOS (FAC-134): its run, once that run has an outcome. */
+  run?: DotProposalRun;
 }
 
 export interface ShownMessage {

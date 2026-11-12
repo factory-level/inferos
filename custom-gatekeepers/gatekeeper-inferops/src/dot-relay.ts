@@ -6,6 +6,7 @@
 // reason, which the session turns into a visible error. Also the strict parsers of the Dot's JSON
 // answers, so a field InferOps didn't send is never read as one it did.
 import { EventSchema } from "@ag-ui/core/schemas";
+import type { WorkflowRunFailure, WorkflowRunUncertainty } from "@gadgets/workshop-shared/workflow-definition";
 import { DOT_PROPOSAL_STATUSES, type DotConversationWire, type DotEvent, type DotMessageWire, type DotProposalWire, type DotRunEnd } from "./inferops-client";
 
 /** The relay's bounds: InferOps aborts a run at 125 s and sends a heartbeat every 15 s. */
@@ -151,6 +152,42 @@ function arr(value: unknown, what: string): unknown[] {
   return value;
 }
 
+const RUN_OUTCOMES = new Set(["succeeded", "failed", "uncertain"]);
+const RUN_AUTHORITIES = new Set(["gadget_bindings", "service_account", "person"]);
+/**
+ * Every fixed reason InferOS gives a failed or uncertain run (WorkflowRunFailure, WorkflowRunUncertainty),
+ * and only those: the same set InferOps accepts (inferops#2644). Typed as a record, so a reason the
+ * kernel adds or drops fails to compile here.
+ */
+const RUN_REASON_CODES: Record<WorkflowRunFailure | WorkflowRunUncertainty, true> = {
+  "requester-revoked": true, "assignment-changed": true, "trigger-gone": true, "bindings-needed": true, cancelled: true,
+  "timed-out": true, "attempts-exhausted": true, "runtime-error": true, "step-refused": true,
+  "action-unknown": true, "lost-after-write": true, "not-started": true, "step-unknown": true,
+};
+
+/**
+ * A proposal's recorded run outcome (FAC-134), its fixed fields only; null when absent (an older
+ * InferOps, or nothing recorded yet) or when it doesn't read as one, never a malformed proposal.
+ */
+function parseDotRun(raw: unknown): DotProposalWire["run"] {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if ((r.kind !== "workflow-run" && r.kind !== "personal-workflow" && r.kind !== "delegate") ||
+      // Only a delegate ran as the person (FAC-134 capability 3), and a delegate only as the person.
+      ((r.kind === "delegate") !== (r.ranAs === "person")) ||
+      typeof r.runId !== "string" || r.runId.length === 0 || r.runId.length > 200 ||
+      typeof r.outcome !== "string" || !RUN_OUTCOMES.has(r.outcome) ||
+      typeof r.ranAs !== "string" || !RUN_AUTHORITIES.has(r.ranAs) ||
+      (r.reasonCode !== undefined && (typeof r.reasonCode !== "string" || !Object.hasOwn(RUN_REASON_CODES, r.reasonCode)))) {
+    return null;
+  }
+  return {
+    kind: r.kind, runId: r.runId, outcome: r.outcome as "succeeded" | "failed" | "uncertain",
+    ranAs: r.ranAs as "gadget_bindings" | "service_account" | "person",
+    ...(typeof r.reasonCode === "string" ? { reasonCode: r.reasonCode } : {}),
+  };
+}
+
 /** One proposal as `chatbot.proposal_*` answers it. */
 export function parseDotProposal(raw: unknown): DotProposalWire {
   const p = obj(raw, "proposal");
@@ -162,6 +199,7 @@ export function parseDotProposal(raw: unknown): DotProposalWire {
     input: obj(p.input, "proposal.input"),
     status: status as DotProposalWire["status"],
     outcome: p.outcome ?? null,
+    run: parseDotRun(p.run),
     createdAt: str(p.createdAt, "proposal.createdAt"),
     expiresAt: str(p.expiresAt, "proposal.expiresAt"),
     decidedAt: nullable(p.decidedAt, v => str(v, "proposal.decidedAt")),

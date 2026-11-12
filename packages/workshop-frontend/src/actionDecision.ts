@@ -58,6 +58,12 @@ export const contextText = (entry: ActionEntry, viewerProfileId?: string | null)
     // FAC-14: the operate agent's request runs on the connection's own account once approved, so
     // the decider is told whose request it is. The name is the person's profile name, never authority.
     if (context.onBehalfOf) {
+      // FAC-134 capability 2: a step of the person's own approved personal workflow, not the agent's.
+      if (context.personalWorkflowStep) {
+        const step = context.personalWorkflowStep.index + 1
+        return context.onBehalfOf.profileId === viewerProfileId ? `Step ${step} of your approved personal workflow`
+          : `Step ${step} of ${context.onBehalfOf.name}'s approved personal workflow`
+      }
       return context.onBehalfOf.profileId === viewerProfileId ? 'Requested by the operate agent for you'
         : `Requested by the operate agent for ${context.onBehalfOf.name}`
     }
@@ -65,6 +71,8 @@ export const contextText = (entry: ActionEntry, viewerProfileId?: string | null)
   }
   // A declared run alone (FAC-120 round 6, `context.declaredRun`) names no origin here; the UI PR shows the run.
   if (context.kind === 'declared-run') return null
+  // Likewise a declared temporary canvas alone (FAC-137, `context.declaredCanvas`); its UI PR shows it.
+  if (context.kind === 'declared-canvas') return null
   const trigger = context.triggerLabel ? `the workflow trigger “${context.triggerLabel}”` : 'a workflow trigger'
   const asker = context.requestedBy === null ? ', which fired by itself'
     : context.requestedBy === undefined ? ''
@@ -75,6 +83,29 @@ export const contextText = (entry: ActionEntry, viewerProfileId?: string | null)
 /** A rejection after an attempt that may have reached the service: rejecting it undid nothing there. */
 export const UNCERTAIN_REJECTION_TEXT =
   'It was denied here, so local approval is closed; check the service for whether it took effect.'
+
+/**
+ * Whether `entry` is a workflow run's write whose outcome is unknown, which a person deciding it may
+ * settle (FAC-117 K2, `Overseer.resolveWorkflowRunWrite`): pending, of a run, its last attempt
+ * unknown, with no apply in flight. The server checks this again, and who may settle it.
+ */
+export const isSettleableRunWrite = (entry: ActionEntry): boolean =>
+  entry.state === 'pending' && entry.context?.kind === 'workflow-run' &&
+  entry.lastAttempt?.outcome === 'unknown' && entry.applying !== true && entry.settled === undefined
+
+/** The question a person settling an unknown write answers (FAC-117 K2). */
+export const SETTLE_QUESTION = 'Did this change happen?'
+
+/**
+ * What settling does and doesn't do: the kernel records the person's answer and the run reads it,
+ * and nothing is sent, applied or undone at the service.
+ */
+export const SETTLE_WARNING =
+  "InferOS records your answer, nothing more: it doesn't make or undo the change at the service. Check there first."
+
+/** How a settled write reads afterwards (FAC-117 K2): the person's answer, never a fact InferOS checked. */
+export const settledText = (settled: NonNullable<ActionEntry['settled']>): string =>
+  `${settled.by.name} said ${settled.outcome === 'applied' ? 'this change happened' : "this change didn't happen"}; nothing was sent again.`
 
 /** Why a pending action was blocked, or a rejected one was rejected without a person (FAC-118). */
 export const REJECTED_BECAUSE_TEXT: Record<NonNullable<ActionEntry['rejectedBecause']>, string> = {

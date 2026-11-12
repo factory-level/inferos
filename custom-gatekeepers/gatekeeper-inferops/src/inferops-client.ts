@@ -300,6 +300,16 @@ export type TableSummary = { id: string; label: string };
 export const DOT_PROPOSAL_STATUSES = ["proposed", "confirming", "confirmed", "handed-off", "declined", "failed", "expired", "unknown"] as const;
 
 /** A Dot proposal as InferOps reads it (`chatbot.proposal_list`), its status derived at read time. */
+/** A run outcome as `chatbot.proposal_run_outcome` takes it (FAC-134): fixed fields, never what the run returned. */
+export type DotRunOutcomeWire = {
+  /** A published workflow's run, or a personal workflow's (FAC-134 capability 2). */
+  kind: "workflow-run" | "personal-workflow" | "delegate";
+  runId: string;
+  outcome: "succeeded" | "failed" | "uncertain";
+  reasonCode?: string;
+  ranAs: "gadget_bindings" | "service_account" | "person";
+};
+
 export type DotProposalWire = {
   id: string;
   tool: string;
@@ -307,6 +317,11 @@ export type DotProposalWire = {
   status: (typeof DOT_PROPOSAL_STATUSES)[number];
   /** The capability's answer once confirmed, or its refusal in InferOps' words once failed. */
   outcome: unknown;
+  /**
+   * For a hand-off to InferOS (FAC-134), how the run it started came out, once InferOS reported it;
+   * null otherwise, and on an InferOps that doesn't report it yet.
+   */
+  run: DotRunOutcomeWire | null;
   createdAt: string;
   expiresAt: string;
   decidedAt: string | null;
@@ -378,10 +393,20 @@ export interface InferOpsClient {
   /**
    * Confirm one proposal (`chatbot.proposal_confirm`) under the person's own token; InferOps keys
    * the write by the proposal id. EXPIRED once it expired, CONFLICT once it was decided.
+   * `runId` names the InferOS run a workflow-run hand-off started (FAC-134): InferOps records it and
+   * later accepts that run's outcome only, from a session issued to InferOS's client (reported, not verified).
    */
-  confirmDotProposal(conversationId: string, proposalId: string, idempotencyKey: string): Promise<DotProposalWire>;
+  confirmDotProposal(
+    conversationId: string, proposalId: string, idempotencyKey: string, opts?: { runId?: string },
+  ): Promise<DotProposalWire>;
   /** Decline one proposal (`chatbot.proposal_decline`); nothing is written. */
   declineDotProposal(conversationId: string, proposalId: string): Promise<DotProposalWire>;
+  /**
+   * Record how the InferOS run a confirmed hand-off started came out (`chatbot.proposal_run_outcome`,
+   * FAC-134) under the person's own token. InferOps keeps it once per proposal: the same run again
+   * answers as recorded, another is CONFLICT.
+   */
+  recordDotRunOutcome(conversationId: string, proposalId: string, run: DotRunOutcomeWire): Promise<DotProposalWire>;
   /** Add a comment to an issue in the bound project, with a replayable key and exact head. */
   commentIssue(projectKey: string, issueId: string, body: string, expectedRevision: Revision, idempotencyKey: string): Promise<void>;
   /** Published joined reads, narrowed to the bound project by the HTTP adapter. */
@@ -472,6 +497,13 @@ export interface InferOpsClient {
 
   /** One Wiki page by UUID; NOT_FOUND for one this workspace does not have (or not a UUID). */
   readDocument(documentId: string): Promise<WikiDocumentHead>;
+
+  /**
+   * Each page's canonical reference as InferOps names it (FAC-68, `document.company_list`'s `ref`),
+   * by page UUID, for the pages the account can read in its company. Never built here. Empty when
+   * InferOps can't answer (one from before FAC-68, or an outage): a page or hit then has no `ref`.
+   */
+  listDocumentRefs(): Promise<ReadonlyMap<string, string>>;
 
   /**
    * The Wiki's root, pillars (with Masters and filed pages) and unfiled pages, listing only pages

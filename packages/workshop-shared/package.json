@@ -31,9 +31,21 @@
       "types": "./src/widget-placements.ts",
       "import": "./src/widget-placements.ts"
     },
+    "./temporary-canvas": {
+      "types": "./src/temporary-canvas.ts",
+      "import": "./src/temporary-canvas.ts"
+    },
     "./workflow-trigger-ref": {
       "types": "./src/workflow-trigger-ref.ts",
       "import": "./src/workflow-trigger-ref.ts"
+    },
+    "./personal-workflow": {
+      "types": "./src/personal-workflow.ts",
+      "import": "./src/personal-workflow.ts"
+    },
+    "./delegate": {
+      "types": "./src/delegate.ts",
+      "import": "./src/delegate.ts"
     },
     "./agent-widgets": {
       "types": "./src/agent-widgets.ts",

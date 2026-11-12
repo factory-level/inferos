@@ -565,6 +565,18 @@ export interface AgentHooks {
   isOperateSession(): boolean;
 
   /**
+   * The tools chat `chatId` may use when it is a delegate (FAC-134 capability 3, ADR 0020), fixed at
+   * its approval, or null for any other chat. Absent on hosts without delegates.
+   */
+  delegateToolsFor?(chatId: number): readonly string[] | null;
+
+  /**
+   * Refuses, by throwing, a call delegate chat `chatId` may no longer make: its starter's access in
+   * the session changed since its approval, which also cancels it. A chat that isn't a delegate passes.
+   */
+  assertDelegateMayCall?(chatId: number): void;
+
+  /**
    * Whether chat `chatId` has read console tool output (see chat-taint.ts). While it has, the
    * agent's egress tools refuse: webFetch here, and the connection, GIT and connection-request
    * gates in the Overseer.
@@ -1155,6 +1167,12 @@ let OPERATE_AGENT_TOOLS = [
   "setWidgetView",
   "proposePlacement",
 ] as const;
+
+/**
+ * The tools an operate chat is offered (`OPERATE_AGENT_TOOLS`), read-only, for the checks that hold
+ * what the operate agent may never do: none writes a canvas, saved or temporary (FAC-137).
+ */
+export const OPERATE_AGENT_TOOL_NAMES: readonly string[] = OPERATE_AGENT_TOOLS;
 
 // Leads the project-specific prompt slot in an operate chat, overriding the building guidance in
 // SYSTEM_PROMPT that its tools can't act on.
@@ -4330,6 +4348,24 @@ async function runAgentPass(
   } else {
     delete tools.operatePage;
     for (let name of OPERATE_WIDGET_TOOLS) delete tools[name];
+  }
+
+  // FAC-134 capability 3 (ADR 0020): a delegate's chat is offered only the tools its ceiling names,
+  // fixed at its approval, and each call first checks that its starter still holds it. The filter
+  // below is the boundary; the check at execution is defence in depth (r1 on #487), for a tool that
+  // reaches the turn without being offered, so a model-supplied catalog can't widen it.
+  let delegateTools = operateSession ? hooks.delegateToolsFor?.(chatId) ?? null : null;
+  if (delegateTools) {
+    const allowed = new Set(delegateTools);
+    for (const tool of Object.values(tools)) {
+      const execute = tool.execute;
+      tool.execute = (...args) => {
+        if (!allowed.has(tool.name)) throw new Error("A delegate may use only the tools it was launched with.");
+        hooks.assertDelegateMayCall?.(chatId);
+        return execute(...args);
+      };
+    }
+    tools = Object.fromEntries(Object.entries(tools).filter(([name]) => allowed.has(name)));
   }
 
   if (agentContext.spawnerConfig) {

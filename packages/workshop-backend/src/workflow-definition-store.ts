@@ -12,10 +12,14 @@ import {
   type WorkflowRunRecord, WORKFLOW_RUN_HISTORY_CAP_REFUSAL, WORKFLOW_RUN_HISTORY_RETENTION_MS,
   WORKFLOW_RUN_HISTORY_SWEEP_BATCH, WORKFLOW_RUN_START_WINDOW_MS,
   WORKFLOW_RUN_HISTORY_ADMISSION_SWEEP_BATCHES, WORKFLOW_RUN_HISTORY_SWEEP_RETRY_MS,
-  type WorkflowDefinitionProvenance, type WorkflowRequiredBinding,
+  type WorkflowDefinitionProvenance, type WorkflowRequiredBinding, WORKFLOW_RUN_RETRY_REFUSED,
+  WORKFLOW_RUN_RETRY_WINDOW_MS,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 import type { HookOccurrence } from "@gadgets/workshop-shared/gatekeeper";
+
+/** FAC-111: a trigger pinned to an unpublished revision runs only while that revision's owner can build here. */
+export const UNPUBLISHED_REVISION_OWNER_CANT_BUILD = "This trigger runs an unpublished revision whose owner can no longer build here.";
 
 /** A workflow definition as stored: every saved revision, whoever is looking. */
 export type StoredWorkflowDefinition = Omit<WorkflowDefinition, "revisions" | "duplicatedFrom" | "bindingsNeeded"> & {
@@ -83,6 +87,26 @@ const WORKFLOW_OCCURRENCE_EXPIRY_SWEEP_LIMIT = 100;
 export type QueuedWorkflowRun = { deliveryId: number; hookId: number; method: string | null; args: unknown[] };
 
 /**
+ * Where a run started by a person's approval of an action reports its outcome (FAC-134): that
+ * person's operate session workspace and the action there, both taken by the kernel from the
+ * approval itself (`invokeTriggerAs`), never from anything a caller or the run supplies.
+ */
+export type RunReportTo = { sessionWorkspaceId: string; actionId: number };
+
+/**
+ * A run's outcome still to report to the action that started it (FAC-134; the `chat` destination):
+ * written as the run is admitted, made due once the run has a final outcome (`due`), retried by the
+ * alarm until it is delivered or given up on, then removed.
+ */
+export type RunChatReport = RunReportTo & {
+  deliveryId: number;
+  /** When it may next be tried; absent until the run's outcome is final. */
+  due?: number;
+  /** Failed tries so far. */
+  attempts: number;
+};
+
+/**
  * How the store tells time and how long a dynamic definition lasts (FAC-124). `dynamicTtlMs` is read
  * only when a dynamic definition is created, so a misconfigured deployment refuses just that.
  * `onChange` is called after anything that can change what is due to expire (a save, a pin added
@@ -119,6 +143,13 @@ export type StoredWorkflowInvocation = WorkflowInvocation & {
    * deployment names no such authority. Absent on requests admitted before FAC-111: read as null.
    */
   company?: string | null;
+  /** Where its run reports its outcome, for a run started by an approved action that asked (FAC-134). */
+  reportTo?: RunReportTo;
+  /**
+   * The id its run will have (FAC-134), minted with the request so the person approving it is told
+   * the run's own id at once, whenever the trigger's gatekeeper fires it. Absent on older requests.
+   */
+  runId?: string;
 };
 
 /** Most admitted requests one trigger may have waiting for delivery. */
@@ -157,7 +188,7 @@ export class WorkspaceWorkflowDefinitionStore {
           "workflowOccurrenceExpiries" | "workflowOccurrenceCounts" | "nextWorkflowDeliveryId" |
           "workflowTriggerControls" | "workflowInvocations" | "workflowInvocationLog" |
           "nextWorkflowInvocationLogId" | "workflowTriggerAssignments" | "workflowTriggerAutoRetired" |
-          "workflowRunQueue" | "workflowDefinitionShares">,
+          "workflowRunQueue" | "workflowDefinitionShares" | "runChatReports" | "endedRunCalls">,
       private retention: DefinitionRetention = DEFAULT_RETENTION,
       private audience: WorkflowDefinitionAudience = WORKSPACE_AUDIENCE,
       private bindingsNeededOf: BindingsNeededOf = () => []) {}
@@ -316,6 +347,7 @@ export class WorkspaceWorkflowDefinitionStore {
     let expiry = this.#historyExpiry(delivery);
     if (expiry !== undefined) this.storage.workflowDeliveryExpiries.delete(this.#historyExpiryKey(expiry, deliveryId));
     this.storage.workflowDeliveries.delete(deliveryId);
+    this.storage.endedRunCalls.delete(deliveryId);
     let indexed = this.storage.workflowDeliveryCount.get();
     if (indexed?.indexed) this.storage.workflowDeliveryCount.put({ ...indexed, count: Math.max(0, indexed.count - 1) });
     return true;
@@ -794,7 +826,7 @@ export class WorkspaceWorkflowDefinitionStore {
     }
     if (pin.mode !== "follow-latest" && stored.published?.revision !== pin.revision &&
         roleOf(stored.owner.id) !== "build") {
-      throw new Error("This trigger runs an unpublished revision whose owner can no longer build here.");
+      throw new Error(UNPUBLISHED_REVISION_OWNER_CANT_BUILD);
     }
     // Keep expiry progress even when the subsequent admission is refused at the cap. That
     // transaction throws by design, which would otherwise roll back its own cleanup. One
@@ -847,7 +879,7 @@ export class WorkspaceWorkflowDefinitionStore {
       let assignment = invocation ? this.storage.workflowTriggerAssignments.get(hookId) : undefined;
       // The durable run (FAC-111): minted here, in the delivery's own transaction, so a run exists
       // exactly when its delivery does, with the authority it was admitted under.
-      let runId = crypto.randomUUID();
+      let runId = invocation?.runId ?? crypto.randomUUID();
       let delivery: StoredWorkflowDelivery = {
         id, hookId, definitionId: pin.definitionId, revision: revision.revision,
         historyOwnerProfileId: stored.owner.id,
@@ -865,6 +897,10 @@ export class WorkspaceWorkflowDefinitionStore {
         },
       };
       if (invocation) this.storage.workflowInvocations.delete(invocation.id);
+      // Its outcome is owed to the approved action that asked for it (FAC-134), from admission on.
+      if (invocation?.reportTo) {
+        this.storage.runChatReports.put({ deliveryId: id, ...invocation.reportTo, attempts: 0 });
+      }
       this.#putDelivery(delivery);
       let count = this.storage.workflowDeliveryCount.get();
       this.storage.workflowDeliveryCount.put({ count: (count?.count ?? 0) + 1, indexed: true });
@@ -899,6 +935,21 @@ export class WorkspaceWorkflowDefinitionStore {
     this.storage.workflowOccurrenceExpiries.delete(expiryKey);
     let count = this.storage.workflowOccurrenceCounts.get(hookId)?.count ?? 0;
     this.storage.workflowOccurrenceCounts.put({ hookId, count: Math.max(0, count - 1) });
+  }
+
+  /**
+   * Refuses, as `fire` does (FAC-111), when trigger `hookId` is pinned to a revision that isn't the
+   * published one and whose definition's owner can no longer build here (`roleOf`). For a caller that
+   * doesn't go through `fire`: a retry, which queues its kept call again (FAC-117 K2).
+   */
+  requireUnpublishedOwnerBuilds(hookId: number, roleOf: (profileId: string) => CollaboratorRole | null): void {
+    let pin = this.storage.workflowTriggerPins.get(hookId);
+    if (!pin) throw new Error(CANNOT_RUN);
+    let stored = this.storage.workflowDefinitions.get(pin.definitionId);
+    if (pin.mode !== "follow-latest" && stored && stored.published?.revision !== pin.revision &&
+        roleOf(stored.owner.id) !== "build") {
+      throw new Error(UNPUBLISHED_REVISION_OWNER_CANT_BUILD);
+    }
   }
 
   /**
@@ -1086,7 +1137,7 @@ export class WorkspaceWorkflowDefinitionStore {
    * transaction that mints, so nothing awaited can move it in between.
    */
   beginInvocation(profileId: string, hookId: number, company: string | null = null,
-      expected?: { definitionId: string; revision: number }): WorkflowInvocation {
+      expected?: { definitionId: string; revision: number; reportTo?: RunReportTo }): WorkflowInvocation {
     return this.durableStorage.transactionSync(() => {
       let control = this.storage.workflowTriggerControls.get(hookId);
       let pin = this.storage.workflowTriggerPins.get(hookId);
@@ -1109,9 +1160,11 @@ export class WorkspaceWorkflowDefinitionStore {
       let invocation: StoredWorkflowInvocation = {
         id: crypto.randomUUID(), hookId, definitionId: pin.definitionId, revision,
         requestedAt: new Date(now), requestedBy: profileId, company,
+        ...(expected?.reportTo ? { reportTo: { ...expected.reportTo } } : {}),
+        runId: crypto.randomUUID(),
       };
       this.storage.workflowInvocations.put(invocation);
-      let { requestedBy: _, company: __, ...shown } = invocation;
+      let { requestedBy: _, company: __, reportTo: ___, runId: ____, ...shown } = invocation;
       return shown;
     });
   }
@@ -1257,8 +1310,16 @@ export class WorkspaceWorkflowDefinitionStore {
   /** Record queued run `deliveryId` ended (FAC-112), failed for `failure` when given, and unqueue it. */
   endRun(deliveryId: number, failure?: WorkflowRunFailure): void {
     this.durableStorage.transactionSync(() => {
+      // A failed run keeps its call (FAC-117 K2), so the person who asked may retry it; a cancelled
+      // or finished one doesn't.
+      let call = this.storage.workflowRunQueue.get(deliveryId);
       this.storage.workflowRunQueue.delete(deliveryId);
       let delivery = this.storage.workflowDeliveries.get(deliveryId);
+      if (call && failure !== undefined && failure !== "cancelled" && !delivery?.execution?.cancelled) {
+        this.storage.endedRunCalls.put(call);
+      } else {
+        this.storage.endedRunCalls.delete(deliveryId);
+      }
       if (!delivery?.execution) return;
       this.#putDelivery({
         ...delivery,
@@ -1301,6 +1362,76 @@ export class WorkspaceWorkflowDefinitionStore {
     return result;
   }
 
+  /**
+   * Retry failed run `deliveryId` as `by`, the person who asked for it (FAC-117 K2): another attempt
+   * of the same run, queued again with its own call, its run id and its attempts kept, so the
+   * deployment's `attempts` bounds it and the writes it proposes again are matched to those it made.
+   * In one transaction: refused unless its result is `failed` (`notFailed`), for a cancelled run
+   * (`cancelled`), at `attempts` starts (`exhausted`), once its trigger runs another definition or
+   * revision than the run did (`repinned`), past `WORKFLOW_RUN_RETRY_WINDOW_MS` since it was admitted
+   * (`tooOld`), without its kept call (`noCall`), and past the per-person and per-trigger run rates,
+   * which a retry counts against as a request does. The caller checks who may retry, the trigger and
+   * the writes first.
+   */
+  retryRun(deliveryId: number, by: AiChatAuthorInfo, attempts: number): StoredWorkflowDelivery {
+    let retried = this.durableStorage.transactionSync(() => {
+      let delivery = this.storage.workflowDeliveries.get(deliveryId);
+      let now = Date.now();
+      requireRetryable(delivery, attempts);
+      // Again here, after the caller's awaits: a repin that landed meanwhile is seen.
+      this.#requireSameRunNow(delivery, now);
+      let execution = delivery.execution;
+      let call = this.storage.endedRunCalls.get(deliveryId);
+      if (!call || call.hookId !== delivery.hookId) throw new Error(WORKFLOW_RUN_RETRY_REFUSED.noCall);
+      this.#checkRate(delivery.hookId, by.id, now);
+      let logId = this.storage.nextWorkflowInvocationLogId.get();
+      this.storage.nextWorkflowInvocationLogId.put(logId + 1);
+      this.storage.workflowInvocationLog.put({ id: logId, hookId: delivery.hookId, requestedBy: by.id, at: now });
+      if (logId >= MAX_WORKFLOW_INVOCATIONS) this.storage.workflowInvocationLog.delete(logId - MAX_WORKFLOW_INVOCATIONS);
+      this.storage.endedRunCalls.delete(deliveryId);
+      this.storage.workflowRunQueue.put(call);
+      let { endedAt: _ended, failure: _failure, startedAt: _started, ...kept } = execution;
+      let next: StoredWorkflowDelivery = {
+        ...delivery,
+        execution: {
+          ...kept, state: "queued", queuedAt: new Date(now),
+          retries: [...execution.retries ?? [], { by: { type: by.type, id: by.id, name: by.name }, at: new Date(now) }],
+        },
+        result: { outcome: "queued", settledAt: new Date(now) },
+      };
+      this.#putDelivery(next);
+      return next;
+    });
+    this.#changed();
+    return retried;
+  }
+
+  /**
+   * Refuse retrying run `deliveryId` from its stored state alone (FAC-117 K2), as `retryRun` does in
+   * its transaction, so the overseer can answer before its awaits: `notFailed`, `cancelled`,
+   * `exhausted`, `repinned` or `tooOld`.
+   */
+  requireRetryable(deliveryId: number, attempts: number): void {
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    requireRetryable(delivery, attempts);
+    this.#requireSameRunNow(delivery, Date.now());
+  }
+
+  /**
+   * Refuse retrying `delivery` at `now` unless it would run what a fresh request runs (r1 on FAC-117
+   * K2): its trigger's current pin (`pinOf`, a follow-latest pin read as the revision it resolves to)
+   * is still the run's own definition and revision (`repinned`), and it was admitted no more than
+   * `WORKFLOW_RUN_RETRY_WINDOW_MS` ago (`tooOld`). A retry re-runs the call as admitted, so without
+   * this it would run superseded code, as the trigger's assignment for an assigned one.
+   */
+  #requireSameRunNow(delivery: StoredWorkflowDelivery, now: number): void {
+    let pin = this.pinOf(delivery.hookId);
+    if (!pin || pin.definitionId !== delivery.definitionId || pin.revision !== delivery.revision) {
+      throw new Error(WORKFLOW_RUN_RETRY_REFUSED.repinned);
+    }
+    if (now - new Date(delivery.at).getTime() > WORKFLOW_RUN_RETRY_WINDOW_MS) throw new Error(WORKFLOW_RUN_RETRY_REFUSED.tooOld);
+  }
+
   /** When run `deliveryId` was admitted, or undefined when there's no record of it. */
   admittedAt(deliveryId: number): Date | undefined {
     return this.storage.workflowDeliveries.get(deliveryId)?.at;
@@ -1337,6 +1468,15 @@ export class WorkspaceWorkflowDefinitionStore {
     return dropped;
   }
 
+  /**
+   * The id of the run a person's request `invocationId` makes (FAC-134): minted with the request,
+   * so known while it waits for the trigger's gatekeeper and after its delivery, or null.
+   */
+  runIdOfInvocation(invocationId: string): string | null {
+    return this.storage.workflowInvocations.get(invocationId)?.runId ??
+        this.deliveryOfInvocation(invocationId)?.run?.runId ?? null;
+  }
+
   /** The delivery a person's request `invocationId` made, or null (FAC-114): at most one, ever. */
   deliveryOfInvocation(invocationId: string): StoredWorkflowDelivery | null {
     for (let delivery of this.storage.workflowDeliveries.list()) {
@@ -1367,6 +1507,18 @@ export class WorkspaceWorkflowDefinitionStore {
       if (!delivery) return;
       let { canvas: _, ...rest } = delivery.delivery ?? {};
       this.#putDelivery({ ...delivery, delivery: { ...rest, ...(state === undefined ? {} : { canvas: state }) } });
+    });
+  }
+
+  /**
+   * Record where delivery `deliveryId`'s outcome stands with the approved action that started it
+   * (FAC-134, the `chat` destination): owed, delivered, or given up on.
+   */
+  setChatDelivery(deliveryId: number, state: "pending" | "delivered" | "undelivered"): void {
+    this.durableStorage.transactionSync(() => {
+      let delivery = this.storage.workflowDeliveries.get(deliveryId);
+      if (!delivery) return;
+      this.#putDelivery({ ...delivery, delivery: { ...delivery.delivery, chat: state } });
     });
   }
 
@@ -1464,5 +1616,23 @@ export class WorkspaceWorkflowDefinitionStore {
     let stored = this.storage.workflowDefinitions.get(id);
     if (!stored || !this.#rights(stored, profileId, role).edit) throw new Error(NOT_FOUND);
     return stored;
+  }
+}
+
+/**
+ * Throw the `WORKFLOW_RUN_RETRY_REFUSED` reason run `delivery` can't be retried for, from its state:
+ * not failed (or missing), cancelled, or out of `attempts` starts.
+ */
+function requireRetryable(
+  delivery: StoredWorkflowDelivery | undefined,
+  attempts: number,
+): asserts delivery is StoredWorkflowDelivery & { execution: NonNullable<StoredWorkflowDelivery["execution"]> } {
+  let execution = delivery?.execution;
+  if (!delivery || !execution || execution.state !== "failed" || delivery.result?.outcome !== "failed") {
+    throw new Error(WORKFLOW_RUN_RETRY_REFUSED.notFailed);
+  }
+  if (execution.failure === "cancelled" || execution.cancelled) throw new Error(WORKFLOW_RUN_RETRY_REFUSED.cancelled);
+  if (execution.failure === "attempts-exhausted" || execution.attempts >= attempts) {
+    throw new Error(WORKFLOW_RUN_RETRY_REFUSED.exhausted);
   }
 }

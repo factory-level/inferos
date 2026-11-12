@@ -2,8 +2,8 @@
 // the words for each state. No DOM and no I/O, so both sides and the tests share them.
 
 import type {
-  DotConversation, DotProgress, DotProposal, Failure, FailureReason, KnowledgeWrite, ShownConversation, ShownProgress,
-  ShownProposal, WriteStatus,
+  DotConversation, DotProgress, DotProposal, DotProposalRun, Failure, FailureReason, KnowledgeWrite, ShownConversation,
+  ShownProgress, ShownProposal, WriteStatus,
 } from "./protocol.ts";
 
 const CODES: ReadonlyArray<[string, FailureReason]> = [
@@ -60,9 +60,102 @@ export function knowledgeWrite(tool: string, input: string): KnowledgeWrite | un
 }
 
 /** A change as the client may see it: its id, tool and status, and a knowledge write's target. */
-export function shownProposal({ id, tool, status, input }: DotProposal): ShownProposal {
+export function shownProposal({ id, tool, status, input, run }: DotProposal): ShownProposal {
   const knowledge = knowledgeWrite(tool, input);
-  return { id, tool, status, ...(knowledge ? { knowledge } : {}) };
+  return {
+    id, tool, status, ...(knowledge ? { knowledge } : {}),
+    // Its fixed fields only: never more of what InferOS reported than the page draws.
+    ...(run ? { run: { ...(run.kind ? { kind: run.kind } : {}), runId: run.runId, outcome: run.outcome, ranAs: run.ranAs,
+      ...(run.reasonCode ? { reasonCode: run.reasonCode } : {}) } } : {}),
+  };
+}
+
+/** The Dot's InferOS workflow-run proposal (FAC-120): approving it starts a run there, not a change here. */
+export const WORKFLOW_RUN_TOOL = "inferos_workflow_invoke";
+
+/** The Dot's delegate proposal (FAC-134 capability 3): approving it in InferOS launches a delegate there. */
+export const DELEGATE_TOOL = "inferos_delegate_launch";
+
+/** The Dot's proposals whose hand-off starts something in InferOS that reports how it came out. */
+export const RUN_TOOLS: ReadonlySet<string> = new Set([WORKFLOW_RUN_TOOL, DELEGATE_TOOL]);
+
+/** Why a run failed or is uncertain, in words, by the reason InferOS gives; an unknown one says only that. */
+const RUN_REASONS: Record<string, string> = {
+  "runtime-error": "its code stopped with an error",
+  "requester-revoked": "you could no longer run it when it started",
+  "assignment-changed": "its trigger's assigned account changed after you approved it",
+  "trigger-gone": "its trigger was removed",
+  "bindings-needed": "its connections weren't set up",
+  cancelled: "it was cancelled",
+  "timed-out": "it ran past its time limit",
+  "attempts-exhausted": "it was interrupted too many times",
+  "lost-after-write": "it stopped after proposing a change, which may or may not have been made",
+  "action-unknown": "a change it proposed may or may not have been made",
+  "not-started": "it was admitted but never started",
+  // A personal workflow's steps (FAC-134 capability 2): which check refused one stays in InferOS.
+  "step-refused": "one of its steps was refused, so nothing after it was requested",
+  "step-unknown": "one of its steps' requests may or may not have been placed",
+};
+
+/** A delegate's own words for the reasons that mean something else for it (FAC-134 capability 3). */
+const DELEGATE_REASONS: Record<string, string> = {
+  "requester-revoked": "your access in your operate session changed while it ran",
+  cancelled: "it was stopped",
+};
+
+/** What a personal workflow's run that placed every request says (FAC-134 capability 2): never "done". */
+export const PERSONAL_WORKFLOW_PLACED = "Requests placed. Each waits for the console's builders.";
+
+/**
+ * Shown with every recorded run outcome (FAC-134): InferOps keeps what InferOS reported, but can't
+ * tell it from one the person produced themself through InferOS's public sign-in client.
+ */
+export const RUN_REPORTED = "Reported, not verified";
+
+/** What a run ran as, in words (inferops ADR 0011's two contexts). */
+const RAN_AS: Record<DotProposalRun["ranAs"], string> = {
+  gadget_bindings: "It ran on the workflow's own connections.",
+  service_account: "It ran as the workflow's assigned account, not as you.",
+  person: "It ran as you, with at most what you approved.",
+};
+
+/**
+ * A workflow-run proposal's status (FAC-134): its hand-off to InferOS is never "made". Waiting,
+ * declined, failed and uncertain read as for any change; handed off, it says the run started and
+ * its outcome shows here once the run ends; with that outcome, it says how it came out (a fixed
+ * reason, never what the run returned) and what it ran as.
+ */
+export function workflowRunWords(status: WriteStatus, run?: DotProposalRun): { label: string; detail?: string; note?: string } {
+  if (status.outcome !== "succeeded") return proposalWords(status);
+  if (!run) {
+    return { label: "Started in InferOS", detail: "Its run belongs to InferOS now. How it came out shows here once it ends." };
+  }
+  // A delegate (FAC-134 capability 3) reports only how it ended, never what it did or said.
+  if (run.kind === "delegate") {
+    const label = run.outcome === "succeeded" ? "Delegate finished" : run.outcome === "failed" ? "Delegate failed" : "Delegate uncertain";
+    const why = run.reasonCode ? DELEGATE_REASONS[run.reasonCode] ?? RUN_REASONS[run.reasonCode] : undefined;
+    const ended = run.outcome === "succeeded" ? "Check what it changed in your operate session. "
+      : why ? `It ${run.outcome === "failed" ? "failed" : "is uncertain"} because ${why}. ` : "";
+    return { label, detail: `${ended}${RAN_AS[run.ranAs]}`, note: RUN_REPORTED };
+  }
+  const why = run.reasonCode ? RUN_REASONS[run.reasonCode] : undefined;
+  const note = RUN_REPORTED;
+  // A personal workflow's steps only place requests, decided by each console's builders.
+  if (run.kind === "personal-workflow" && run.outcome === "succeeded") {
+    return { label: "Requests placed", detail: PERSONAL_WORKFLOW_PLACED, note };
+  }
+  switch (run.outcome) {
+    case "succeeded":
+      return { label: "Run finished", detail: RAN_AS[run.ranAs], note };
+    case "failed":
+      return { label: "Run failed", detail: `${why ? `It failed because ${why}. ` : ""}${RAN_AS[run.ranAs]}`, note };
+    case "uncertain":
+      return {
+        label: "Run uncertain",
+        detail: `${why ? `It's uncertain because ${why}. ` : "Whether all of it happened isn't known. "}Check its run in InferOS. ${RAN_AS[run.ranAs]}`,
+        note,
+      };
+  }
 }
 
 /** A step of the answer as the client may hear it: a proposed change only as shown. */

@@ -78,6 +78,18 @@ export class CheckRefused extends InferOpsError {
 }
 
 /**
+ * A refusal the kernel proves, in its own kind and words: the effect is known not made, on this
+ * attempt and every earlier one, because the kernel answers per action. So the action ends as failed,
+ * not applied and not retryable, even after an attempt that was uncertain (FAC-137: a temporary
+ * canvas the kernel refused, or one it created that has since expired or been removed).
+ */
+export class KernelRefused extends CheckRefused {
+  constructor(code: InferOpsErrorCode, reason: string, readonly kind: ActionFailureKind) {
+    super(code, reason);
+  }
+}
+
+/**
  * Whether applying again may succeed after a refusal with `code`: a transient one, or a FORBIDDEN
  * that is a missing permission or product access (which can be granted) rather than the workflow
  * policy's decision.

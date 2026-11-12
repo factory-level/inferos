@@ -18,6 +18,7 @@ import { ConsoleWidgetRegistry } from './ConsoleWidgetRegistry'
 import { useConsoleWidgetCandidates } from './useConsoleWidgetCandidates'
 import { consoleScreens } from '@gadgets/workshop-shared/operate-console'
 import { consoleContentForSave, consoleRefusalMessage, unshownSteps, viewScreens, type ConsoleEntry } from './consoles'
+import { WorkspaceReadiness } from './WorkspaceReadiness'
 
 const ignore = () => {}
 const START_LABELS: Record<ConsoleFullChat, string> = { default: 'Assistant first', available: 'A view first, with Assistant', off: 'A view first, with side chat only', only: 'Assistant only' }
@@ -128,6 +129,7 @@ export const ConsoleBuilder = ({ workspaces, initial, onCancel, onSaved }: {
       {workspaces.length === 0 && <p className="text-sm text-kumo-subtle">Create a workspace in Build first, then return here to set up a console.</p>}
       {workspaceId && (openError || observerConfig || metadata?.role === 'use') && <p role="alert" className="text-sm text-kumo-danger">This workspace is not ready for setup. Open it in Build to check your access and connections.</p>}
       {limitReached && <p role="alert" className="text-sm text-kumo-danger">This workspace already has {MAX_WORKSPACE_CONSOLES} consoles. Choose another workspace.</p>}
+      {available && overseer && <WorkspaceReadiness key={workspaceId} overseer={overseer.stub} />}
     </div>}
     {step === 1 && <div className="space-y-5">
       <div><h2 className="font-medium text-kumo-default">Build your navigation</h2><p className="mt-1 text-sm text-kumo-subtle">Reuse pages from this workspace in any console, then arrange their navigation.</p></div>

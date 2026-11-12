@@ -88,6 +88,24 @@ it('says a temporary definition expires, and when, and saves it to keep it', asy
   expect(onChanged).toHaveBeenCalledOnce()
 })
 
+it('keeps temporary definitions out of Saved and limits Shared with me to shared definitions', async () => {
+  const shared: WorkflowDefinition = {
+    ...kept, id: 'shared', title: 'Shared workflow', owner: { ...ADA, id: 'ben', name: 'Ben' },
+    sharedWithMe: true, access: { read: true, run: true, edit: false },
+  }
+  const overseer = {} as RpcStub<Overseer>
+  await act(async () => root.render(<WorkflowDefinitionsSection overseer={overseer} gadgets={GADGETS}
+    definitions={[temporary, kept, shared]} view="saved" onChanged={() => {}} />))
+  expect(container.textContent).toContain('Kept')
+  expect(container.textContent).toContain('Shared workflow')
+  expect(container.textContent).not.toContain('One-off')
+
+  await act(async () => root.render(<WorkflowDefinitionsSection overseer={overseer} gadgets={GADGETS}
+    definitions={[temporary, kept, shared]} view="shared" onChanged={() => {}} />))
+  expect(container.textContent).toContain('Shared workflow')
+  expect(container.textContent).not.toContain('Kept')
+})
+
 it('says plainly when a save lost the race with expiry, and reloads so the definition leaves the list', async () => {
   const saveWorkflowDefinition = vi.fn<Overseer['saveWorkflowDefinition']>(async () => {
     throw new Error('Error: This workflow expired. Create it again.')
