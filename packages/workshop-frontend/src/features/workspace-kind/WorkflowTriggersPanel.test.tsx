@@ -164,7 +164,9 @@ describe('WorkflowTriggersPanel', () => {
     let firstCommitAfterSwitch = ''
     const IdentitySwitchProbe = ({ overseer }: { overseer: RpcStub<Overseer> }) => {
       useLayoutEffect(() => {
-        firstCommitAfterSwitch = container.textContent ?? ''
+        if (overseer !== previousOverseer) {
+          firstCommitAfterSwitch = container.textContent ?? ''
+        }
       }, [overseer])
       return <WorkflowTriggersPanel overseer={overseer} gadgets={[]} refreshKey="" pendingActionCount={0} onOpenActivity={() => {}} />
     }
