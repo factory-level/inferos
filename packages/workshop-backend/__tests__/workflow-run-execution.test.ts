@@ -15,7 +15,7 @@ import { env } from "cloudflare:workers";
 import { abortAllDurableObjects, runInDurableObject } from "cloudflare:test";
 import { onlyExplicitAlarms, takeSkippedFiring } from "./test-worker.js";
 import { RUN_REQUESTER_REVOKED, WORKFLOW_RUN_CANCELLED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
-import { DEFAULT_WORKFLOW_RUN_LIMITS, TRIGGER_LIFECYCLE_REFUSED, WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS } from "@gadgets/workshop-shared/workflow-definition";
+import { DEFAULT_WORKFLOW_RUN_LIMITS, TRIGGER_DRAINING, TRIGGER_LIFECYCLE_REFUSED, WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS } from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
 import { actionDescriptionDigest } from "../src/system-run.js";
 
@@ -837,6 +837,46 @@ describe("a trigger's lifecycle and a run's cancellation and limits (FAC-117)", 
     expect(done.execution).toMatchObject({ state: "finished" });
     expect(callsIn(name)).toBe(1);
     await withImpl(name, impl => expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "paused" }));
+  });
+
+  it("removing a workflow trigger pauses new starts, lets its admitted run finish, then retires on retry", async () => {
+    let name = `life-remove-${crypto.randomUUID()}`;
+    let id = await withImpl(name, async impl => {
+      let { deliveryId } = queuedFirst(impl);
+      withController(impl);
+      await new Promise(resolve => setTimeout(resolve, 5));
+      await expect(impl.removeHookWithDrain(HOOK, ADA)).rejects.toThrow(
+        `${TRIGGER_DRAINING}: This workflow is paused while its run finishes. Remove it again when the run is complete.`);
+      expect(impl.storage.boundHooks.get(HOOK).enabled).toBe(false);
+      expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "draining" });
+      await expect(invokeWorkflowTrigger(impl, "operator-user", PERSON, HOOK)).rejects.toThrow();
+      return deliveryId;
+    });
+
+    let completed = await settled(name, id);
+    expect(completed.execution).toMatchObject({ state: "finished" });
+    expect(callsIn(name)).toBe(1);
+    await withImpl(name, async impl => {
+      expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "paused" });
+      await impl.removeHookWithDrain(HOOK, ADA);
+      expect(impl.storage.boundHooks.get(HOOK)).toBeUndefined();
+      expect(impl.triggerLifecycleOf(HOOK)).toMatchObject({ state: "retired" });
+      expect(deliveryOf(impl, id).execution).toMatchObject({ state: "finished" });
+    });
+  });
+
+  it("deletes a non-workflow hook immediately", async () => {
+    await withImpl(`life-remove-ordinary-${crypto.randomUUID()}`, async impl => {
+      impl.storage.boundHooks.put({
+        id: HOOK, actionId: 1, gatekeeperId: CONNECTION, gadgetId: GADGET, vendorId: "scheduler",
+        controller: null, callback: null, description: { title: "Ordinary hook" }, enabled: true,
+      });
+      withController(impl);
+      await impl.removeHookWithDrain(HOOK, ADA);
+      expect(impl.storage.boundHooks.get(HOOK)).toBeUndefined();
+      expect(impl.triggerLifecycleOf(HOOK)).toBeNull();
+      expect(impl.storage.workflowTriggerLifecycles.get(HOOK)).toBeUndefined();
+    });
   });
 
   it("refuses a run admitted after the pause's recorded time, and its write, while earlier ones go on", async () => {

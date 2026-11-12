@@ -156,6 +156,34 @@ describe("a published console's widget embedded in a Wiki page", () => {
     await expect(used.getEmbeddedWidget(s.created.id, "0", s.frozen)).rejects.toThrow(/changed/);
   });
 
+  // FAC-15 R-4: a characterization test of a KNOWN P0 GAP (inferops ADR 0013, W3: "no writable state
+  // shared between viewers of a data widget"; "rows reach another viewer by any route" is a no-go). A
+  // published console's widget is one frozen install shared by every operator of the console, so the
+  // widget's own server (its Gadget Durable Object) holds one state: what one operator's session writes
+  // there, another operator's session reads. That is not isolation between operators. It is safe today
+  // only because no governed data reaches a code-running widget (FAC-15 gap G-1). It must be closed,
+  // by per-operator Gadget partitioning, before W3's data requirements reach an authored widget; then
+  // invert this test so it asserts operator B sees none of operator A's state.
+  it("known P0 gap (ADR 0013 W3): a widget's own server state is shared across operators of a console install", async () => {
+    const s = await publishedSpace("sharedinstall");
+    const [otherName] = nextUsernames("sharedother");
+    const other = await signUp(publicApi, otherName!);
+    expect(await s.space.addCollaborator(otherName!, "use")).toBeTruthy();
+
+    using usedByA = await s.operator.openGadget(s.spaceId);
+    using widgetForA = await usedByA.getEmbeddedWidget(s.created.id, s.published.revision, s.frozen);
+    const serverForA = await widgetForA.connectToGadget() as unknown as RpcStub<Counter>;
+    using usedByB = await other.openGadget(s.spaceId);
+    using widgetForB = await usedByB.getEmbeddedWidget(s.created.id, s.published.revision, s.frozen);
+    const serverForB = await widgetForB.connectToGadget() as unknown as RpcStub<Counter>;
+
+    // Operator A writes twice; operator B's very next call sees A's writes in the same server state.
+    expect(await serverForA.bump()).toBe(1);
+    expect(await serverForA.bump()).toBe(2);
+    expect(await serverForB.bump()).toBe(3);
+    expect(await serverForA.bump()).toBe(4);
+  });
+
   it("names nothing for a widget the console doesn't list, an unpublished or unknown console", async () => {
     const s = await publishedSpace("embedmissing");
     using used = await s.operator.openGadget(s.spaceId);

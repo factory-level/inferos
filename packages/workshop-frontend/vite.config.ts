@@ -67,7 +67,16 @@ const runConfig = {
         command: viteBuildCommand,
         ...frontendBundleTaskOptions,
       },
-      test: vitestTask('vitest run', [ownDist]),
+      /**
+       * The test task also declares the Gadget browser probes' two variables
+       * (`GADGET_BROWSER_TESTS_REQUIRED`, `CHROME_BIN`; `src/GadgetUI.request-probes.test.ts`). A
+       * cached task strips undeclared env, so without them CI's required flag never reached the test
+       * and a runner without Chrome skipped the probes silently.
+       */
+      test: (() => {
+        const task = vitestTask('vitest run', [ownDist])
+        return { ...task, cache: { ...task.cache, env: [...task.cache.env, 'GADGET_BROWSER_TESTS_REQUIRED', 'CHROME_BIN'] } }
+      })(),
     },
   },
 }
