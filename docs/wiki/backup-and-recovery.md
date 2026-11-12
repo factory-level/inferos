@@ -73,6 +73,7 @@ node scripts/proof/recovery-rehearsal.ts --worktree "$PWD/.worktrees/<name>" --r
 - the target has uncommitted changes;
 - the target's stack or backend is already running;
 - the shell holds a cloud, deploy or model-provider credential;
+- the target's `.env`, `.dev.vars` or `.env.worktree` sets one (read through a symlink: a `pnpm wt` worktree's `.env` points at the main checkout's, so give the rehearsal a worktree without that link). The refusal names the file and the variable, never its value;
 - the Postgres host isn't localhost;
 - the database isn't the backend's own `inferos_<port>` that this run started.
 
