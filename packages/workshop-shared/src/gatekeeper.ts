@@ -1065,7 +1065,35 @@ export interface ApprovedEffects extends RpcTarget {
    * returns the run it started.
    */
   invokeWorkflow(): Promise<ApprovedWorkflowRun>;
+
+  /**
+   * Creates the personal workflow the action declared (`ActionDescription.personalWorkflow`, FAC-134
+   * capability 2) in the approving person's own operate session, after each step's console workspace
+   * says the command is offered to them now, by a console it published at that revision, on the
+   * connection fixed at publication, in their own company, with an input that fits it. Idempotent per
+   * approved action: asking again returns the workflow it created. Refused unless declared.
+   */
+  createPersonalWorkflow(): Promise<ApprovedPersonalWorkflow>;
+
+  /**
+   * Starts the run of the personal workflow the action declared (`ActionDescription.personalWorkflowRun`),
+   * one of the approving person's own, in this operate session, not expired. Its steps then run in
+   * order, each placing a request the console's builders decide. Idempotent per approved action.
+   * Refused unless declared.
+   */
+  runPersonalWorkflow(): Promise<ApprovedWorkflowRun>;
 }
+
+/**
+ * An `ApprovedEffects.createPersonalWorkflow` answer: created, with the workflow's id in the operate
+ * session (`sessionWorkspaceId`) and when it expires; refused, in a FAC-119 kind, with a fixed
+ * sentence that never says which step's check refused it; or `unknown`, when a step's check couldn't
+ * be answered, with nothing created.
+ */
+export type ApprovedPersonalWorkflow =
+  | { status: "created"; personalWorkflowId: string; sessionWorkspaceId: string; expiresAt: string }
+  | { status: "refused"; kind: ActionFailureKind; reason: string }
+  | { status: "unknown"; reason: string };
 
 /**
  * An `ApprovedEffects.invokeWorkflow` answer: the run admitted; refused, so known not started, in a
@@ -1083,9 +1111,12 @@ export type ApprovedWorkflowRun =
  * returned or wrote), who asked for it, and what it ran as. Kernel text throughout.
  */
 export type ApprovedRunOutcome = {
-  /** What the approval started: a workflow run (FAC-134's later kinds join here). */
-  kind: "workflow-run";
-  /** The run `ApprovedEffects.invokeWorkflow` started. */
+  /**
+   * What the approval started: a published workflow's run, or a personal workflow's (FAC-134,
+   * capability 2), whose `succeeded` means every step's request was placed, never that it was made.
+   */
+  kind: "workflow-run" | "personal-workflow";
+  /** The run `ApprovedEffects.invokeWorkflow` (or `runPersonalWorkflow`) started. */
   runId: string;
   /** Its final outcome: `succeeded`, `failed` or `uncertain` (see WorkflowRunOutcome). */
   outcome: "succeeded" | "failed" | "uncertain";
@@ -1096,7 +1127,8 @@ export type ApprovedRunOutcome = {
   /**
    * What the run executed as: the workflow's own connections (`gadget_bindings`), or the
    * trigger's assigned service account (`service_account`). Never the person's own authority beyond
-   * their request (inferops ADR 0011's two contexts).
+   * their request (inferops ADR 0011's two contexts). A personal workflow's steps run on each
+   * console's own connections, as their builders bound them: `gadget_bindings`.
    */
   ranAs: "gadget_bindings" | "service_account";
   /**
@@ -1820,6 +1852,30 @@ export type ActionDescription = {
    * whether or not the approver's browser is still open. Without it, nothing is reported.
    */
   workflowRun?: { reference: string; reportOutcome?: boolean };
+
+  /**
+   * If present (FAC-134, capability 2), approving this action asks the kernel to create this
+   * personal workflow in the approving person's own operate session: a title and 1 to 10 steps, each
+   * a published console command's reference and the transition's input without its revision
+   * (`parsePersonalWorkflowDeclaration`, personal-workflow.ts). The kernel checks its shape when the
+   * action is submitted and appends its own last field listing every step and its input (whatever
+   * this description says). Only for that person's own approval of this action, and only once each
+   * step's console workspace says the command is offered to them now, does `applyAction()` get the
+   * `ApprovedEffects` that create exactly it. It is never approved automatically. At most one of
+   * `workflowRun`, `personalWorkflow` and `personalWorkflowRun` is declared.
+   */
+  personalWorkflow?: { title: string; steps: { reference: string; input: { issueId: string; toStateId: string } }[] };
+
+  /**
+   * If present (FAC-134, capability 2), approving this action asks the kernel to run the personal
+   * workflow this reference names (`inferops://<company>.<workspace>/inferos/personal-workflow/...`),
+   * which must be one of the approving person's own, in the operate session this action is in. As
+   * with `workflowRun`, the kernel checks its form at submit, shows it in its own appended field,
+   * never approves it automatically, and hands `applyAction()` the `ApprovedEffects` that start
+   * exactly this run, only for the person's own approval. With `reportOutcome`, the run's outcome is
+   * reported to this gatekeeper (`Gatekeeper.workflowRunOutcome`, `kind: "personal-workflow"`).
+   */
+  personalWorkflowRun?: { reference: string; reportOutcome?: boolean };
 
   /**
    * If present, applying this action will push the named commits to the remote resource this

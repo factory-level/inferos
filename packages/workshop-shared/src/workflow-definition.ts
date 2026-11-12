@@ -383,9 +383,10 @@ export type WorkflowRunOutcome = "queued" | "running" | "waiting" | "succeeded" 
 /**
  * Why a run is uncertain (FAC-114): a write of it whose outcome is unknown (`action-unknown`); it
  * threw after it had proposed a write (`lost-after-write`); or it was admitted and never started
- * within `WORKFLOW_RUN_START_WINDOW_MS` (`not-started`).
+ * within `WORKFLOW_RUN_START_WINDOW_MS` (`not-started`). A personal workflow (FAC-134, capability 2)
+ * is uncertain when a step's request may or may not have been placed (`step-unknown`).
  */
-export type WorkflowRunUncertainty = "action-unknown" | "lost-after-write" | "not-started";
+export type WorkflowRunUncertainty = "action-unknown" | "lost-after-write" | "not-started" | "step-unknown";
 
 /** How long an admitted run may take to be queued before it reads `uncertain` (`not-started`). */
 export const WORKFLOW_RUN_START_WINDOW_MS = 10 * 60 * 1000;
@@ -464,12 +465,14 @@ export type WorkflowRunExecution = {
  * - `cancelled`: a person cancelled it (FAC-117; who and when are on its execution);
  * - `timed-out`: an attempt of it ran past the deployment's time per attempt (FAC-117);
  * - `attempts-exhausted`: it was interrupted more times than the deployment's attempts allow (FAC-117);
- * - `runtime-error`: anything else the run threw.
+ * - `runtime-error`: anything else the run threw;
+ * - `step-refused`: a personal workflow's step was refused (FAC-134, capability 2), with nothing
+ *   after it sent; which check refused it is kept only in its owner's own record.
  * A run whose write may have landed reads `uncertain`, never failed, whatever stopped it.
  */
 export type WorkflowRunFailure =
   "requester-revoked" | "assignment-changed" | "trigger-gone" | "bindings-needed" | "cancelled" | "timed-out" |
-  "attempts-exhausted" | "runtime-error";
+  "attempts-exhausted" | "runtime-error" | "step-refused";
 
 /**
  * A trigger's lifecycle (FAC-117): `active` (no record), `draining` (paused: no new start, while the

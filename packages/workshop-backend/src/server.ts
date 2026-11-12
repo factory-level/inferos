@@ -7,6 +7,7 @@ import {
 } from "@gadgets/workshop-shared/widget-placements";
 import type { AgentViewOverlay } from "@gadgets/workshop-shared/agent-widgets";
 import type { TemporaryCanvas } from "@gadgets/workshop-shared/temporary-canvas";
+import type { PersonalWorkflow } from "@gadgets/workshop-shared/personal-workflow";
 import { canvasPageEffects } from "@gadgets/workshop-shared/canvas-model";
 import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import type { OperateReadRun } from "@gadgets/workshop-shared/api";
@@ -1123,6 +1124,12 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   async listTemporaryCanvases(): Promise<TemporaryCanvas[]> {
     using workspace = await this.openWorkspace();
     return await workspace.listTemporaryCanvases();
+  }
+
+  /** FAC-134 capability 2: personal workflows live in the session's own workspace, like temporary canvases. */
+  async listPersonalWorkflows(): Promise<PersonalWorkflow[]> {
+    using workspace = await this.openWorkspace();
+    return await workspace.listPersonalWorkflows();
   }
 
   async getTemporaryCanvas(id: string): Promise<TemporaryCanvas> {

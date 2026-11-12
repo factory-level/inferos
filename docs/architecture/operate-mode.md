@@ -8,6 +8,10 @@ covers:
   - packages/workshop-backend/__tests__/workspace-readiness.test.ts
   - packages/workshop-shared/src/temporary-canvas.ts
   - packages/workshop-backend/src/temporary-canvas-store.ts
+  - packages/workshop-shared/src/personal-workflow.ts
+  - packages/workshop-shared/src/personal-workflow.test.ts
+  - packages/workshop-backend/src/personal-workflow-store.ts
+  - packages/workshop-backend/__tests__/personal-workflows.test.ts
   - packages/workshop-backend/__tests__/temporary-canvases.test.ts
   - packages/workshop-backend/__tests__/console-widget-events.test.ts
   - packages/workshop-backend/__tests__/workflow-dynamic-definitions.test.ts
@@ -1015,6 +1019,61 @@ FAC-120 (K1): a workflow run the person's Dot proposed starts only as the person
     - the session refuses an outcome from another workspace, for another person, for an action that isn't there or didn't ask, or with an unknown `ranAs` or `kind`, and hands its own on once;
     - round 2: an approval whose `applyAction` is held open after starting the run: the outcome is retried, not refused, and delivered once after the apply returns; an apply that failed after starting the run: reported with `actionApplied: false`; two overlapping reports: one hand-off, the second told to retry; a send a crash cut off: sent again with the same action and run, for the receiver to drop.
 - **Not covered.** The idempotency record is kept with no expiry, which is one small row per approved run. Run controls offering their reference to the Dot, and the decision card's workflow title, are FAC-120's UI change.
+
+### Personal workflows
+
+FAC-134, capability 2 (the lead's decisions D1 (B), D2 (B) and D3, and r1's three obligations on inferops#2648). A person's personal workflow is a short, ordered list of published console commands, each with a fixed input. It's created and run only by the person's own approvals, and kept only in their own operate session. It isn't a workflow definition: no code, no connection of its own, nothing to publish, share, pin or duplicate, and it expires.
+
+- **Declared, as for a workflow run.** Two `ActionDescription` markers, at most one of them, or `workflowRun`, per action:
+  - **`personalWorkflow: {title, steps}`, to create one.** 1 to `PERSONAL_WORKFLOW_LIMITS.steps` (10) steps. Each is a console command's reference (`inferops://<company>.<workspace>/inferos/console-command/<workspace>/<console>/<widget>/<command>?revision="<n>"`) and the transition's input **without `expectedRevision`** (`personalWorkflowStepInputProblem`).
+  - **`personalWorkflowRun: {reference, reportOutcome?}`, to run one.** The reference is `inferops://…/inferos/personal-workflow/<session workspace>/<id>`.
+
+  Submit checks the shape (`parsePersonalWorkflowDeclaration`, `parsePersonalWorkflowRef`) and appends the kernel's own last field:
+  - **`PERSONAL_WORKFLOW_FIELD_LABEL`:** lists every step and its input, and says *the issue's revision is read when it runs* (`personalWorkflowFieldValue`).
+  - **`PERSONAL_WORKFLOW_RUN_FIELD_LABEL`:** names the reference.
+
+  Both labels are reserved, as `WORKFLOW_RUN_FIELD_LABEL` is. `autoApprovalRule` refuses both markers.
+- **Effects.** `ApprovedEffects.createPersonalWorkflow()` and `runPersonalWorkflow()`, each minted in `#applyPendingAction` only for its own marker and only for a person's own approval (never automatic, never an agent, system or assigned resolver). Each answer is memoised, and both are revoked after apply. Undeclared, each answers `refused`.
+- **Created** (`#createApprovedPersonalWorkflow`) only in the approver's own live operate session (`#ownPersonalWorkflows`: `operateSession`, not retired, `ownerProfileId` the approver).
+  - **Each step's console workspace answers first** (`checkPersonalWorkflowStep`): every console command check but the open page (`#personalWorkflowStepChecks`). Those checks:
+    - `CONSOLE_TOOLS` on, and not itself an operate session;
+    - the caller verified as a console tool caller (`#consoleToolUser`), with at least `use`;
+    - the command offered by a console it published at exactly that revision (`offeredCommand`), with the frozen binding re-checked (`consoleCommandRefusal`);
+    - the person's company and the connection's equal (`COMMAND_OTHER_COMPANY`, where the deployment has companies);
+    - the input fitting the command without its revision.
+
+    A workspace id of no workspace here is refused like any other.
+  - **One refused step refuses it all,** in a fixed sentence naming the step, never the check. An unanswered check is `unknown`, with nothing created.
+  - **Kept in `personalWorkflows`,** once per action, at most `PERSONAL_WORKFLOW_LIMITS.workflows` (20), each expiring FAC-124's TTL (`WORKFLOW_DYNAMIC_DEFINITION_TTL_HOURS`) after it was created. The sweep (`#sweepTemporary`) deletes only expired records. A run keeps its own copy of the steps.
+- **Run** (`#runApprovedPersonalWorkflow`): only one of the approver's own workflows, in this, their own session (the reference's session must be this one), not expired. It starts a `personalWorkflowRuns` record, once per action, and answers `started` with its run id. The runner, `advancePersonalWorkflowRuns` from the alarm, takes the steps in order. Each step:
+  - **Is marked `sending`** before it's asked.
+  - **Asks its console workspace's kernel-only `requestPersonalWorkflowStep`,** which replaces only FAC-14's open-page check (`consoleSessionCheck`).
+  - **Is vouched for by the session:** the console workspace calls back the session the caller names (`personalWorkflowStepFor`). That session answers only for its owner's live session running exactly that step of one of their runs, with it marked `sending`. Nothing else in the kernel can make a session vouch, and no client, agent tool or gatekeeper reaches the entry: it's on the Durable Object only, not on any `Overseer` interface.
+  - **Makes every other check again** (`#personalWorkflowStepChecks`), then once more with no await before the gatekeeper is asked: the authz generation, role, still offered as published.
+  - **Reads the issue's current revision** as the person, through the same connection (`issue.read()`, D2). It requests the transition at that revision as `{from: "operateAgent", …, personalWorkflowStep: {runId, index}}`: a pending, manual-only action in the console's workspace. It shows the issue's current state and that revision, and the console's builders decide it.
+  - **Has a result:** `requested`, `unchanged` (already in that state), `refused` (its cause in kernel words, kept only in the run record) or `unknown`.
+- **Outcome** (D3). The run ends:
+  - **`succeeded`:** every step's request was placed, never that a change was made;
+  - **`failed`:** a step was refused, with nothing after it sent. The reason is `step-refused`.
+  - **`uncertain`:** a step's answer was lost, or a step was found still `sending` after a restart and never sent again. The reason is `step-unknown`.
+
+  Both reasons join `WorkflowRunFailure` and `WorkflowRunUncertainty`, and inferops#2648's `RUN_REASON_CODES`. With `reportOutcome`, the outcome is handed to the approved action's gatekeeper as `{kind: "personal-workflow", runId, outcome, reason?, requestedBy, ranAs: "gadget_bindings"}`. That goes through `#handOnRunOutcome`, the same rules and `fac134:runOutcome` mark as `reportApprovedRunOutcome` (now its caller too), retried `RUN_CHAT_REPORT_TRIES` times.
+- **Tests:**
+  - **`workshop-shared/src/personal-workflow.test.ts`:** both references round-trip as InferOps formats them, and the malformed forms are no reference; a step's input refuses a revision, a bad id and an extra field; a declaration's bounds; the field's words.
+  - **`workshop-backend/__tests__/personal-workflows.test.ts`**, with two real Durable Objects, the session S and the console workspace W:
+    - **Submit:** the kernel's field lists every step and says the revision is read when it runs; reserved labels, two markers, a revision in a step and 11 steps are refused; never auto-approved.
+    - **Create:** created once after W's checks. It's refused, with nothing created and no check named, for a command not offered, another revision, another widget, a workspace id of none, another company's board, a binding no longer a board, no role, and a person of another company. There are no effects for an automatic or agent resolver, and it's refused for another person or outside an operate session.
+    - **Run:** steps requested in order at the revision read when they run (the issue changed between approval and run), each a pending, manual-only request showing that revision, reported once as `succeeded`. A role ended after creation stops it at that step with nothing sent: `step-refused`, the cause only in the record. Each FAC-14 re-check refuses the step, with nothing placed: the generation, publication, binding, company and input. A step found still sending is `uncertain` and not sent again. Another session's reference, an unknown workflow and another person's approval are refused.
+    - **The entry:** nothing is requested for a step the session isn't sending, another run or step, another person naming the session, a session running nothing, or the console workspace itself. No client interface has it. The console tools' own command path still requires the open page.
+  - **Mutations** (each caught, then restored):
+    - the session vouching for any step;
+    - create skipping the console check;
+    - a run reference of another session;
+    - the step sending the stored revision.
+- **Not covered:**
+  - **UI and gatekeeper:** the gatekeeper's actions for both markers, and the person's list of their workflows, are capability 2's next PR.
+  - **The decider's view:** the decider sees the step as the operate agent's request for the person (`onBehalfOf`). `personalWorkflowStep` is recorded on the caller but not shown yet.
+  - **Kept rows:** `personalWorkflowRuns` keeps the latest `PERSONAL_WORKFLOW_RUNS_KEPT` (100) ended runs.
 
 ### Agent widget verbs
 
