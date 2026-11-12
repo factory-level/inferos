@@ -1937,7 +1937,7 @@ export type ActionDescription = {
    * this delegate in the approving person's own operate session (`parseDelegateDeclaration`,
    * delegate.ts): a title, the prompt it starts from, the connection types it may use and, optionally,
    * its tools. The kernel checks its shape when the action is submitted, refuses one declared from a
-   * delegate's own chat, and appends its own last field naming the ceiling and quoting the prompt
+   * delegate's own chat, and appends its own last two fields, one naming the ceiling and one holding the prompt alone
    * (whatever this description says). It is never approved automatically, and only that person's own
    * approval gets the `ApprovedEffects` that launch exactly it. With `reportOutcome`, its outcome is
    * reported to this gatekeeper (`kind: "delegate"`, `ranAs: "person"`). At most one of

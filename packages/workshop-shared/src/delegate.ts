@@ -111,19 +111,30 @@ export const delegateTools = (declaration: DelegateDeclaration): string[] =>
   [...(declaration.tools ?? DELEGATE_DEFAULT_TOOLS)];
 
 /**
+ * What a tool reaches beyond the connections a delegate may use (r1 on #487), said beside it in the
+ * kernel's field, so the person approves exactly what it can do.
+ */
+export const DELEGATE_TOOL_REACH: Readonly<Record<string, string>> = {
+  callConsoleTool: "callConsoleTool can ask for any command a console offers you, each placed as a request its builders decide",
+  webFetch: "webFetch can fetch public web pages",
+};
+
+/**
  * The kernel's own words for a declared delegate, the value of its reserved field: the title, the
- * connection types and tools it may use at most, and the prompt, every line of which is marked as
- * the Dot's (`> `), so no line of it can pass for one of the kernel's.
+ * connection types and tools it may use at most, and what any of those tools reaches beyond its
+ * connections. The Dot's prompt is never in it: the kernel shows that alone in its own reserved field
+ * (`DELEGATE_PROMPT_FIELD_LABEL`), so no line of it, wrapped or not, can pass for one of these.
  */
 export function delegateFieldValue(declaration: DelegateDeclaration): string {
   let connections = declaration.connections.length > 0 ? declaration.connections.join(", ") : "none";
+  let tools = delegateTools(declaration);
+  let reach = tools.flatMap(tool => DELEGATE_TOOL_REACH[tool] ? [DELEGATE_TOOL_REACH[tool]] : []);
   return [
     `"${declaration.title}": a delegate in your own operate session, with at most your own access there.`,
     `Connections it may use: ${connections}.`,
-    `Tools it may use: ${delegateTools(declaration).join(", ")}.`,
+    `Tools it may use: ${tools.join(", ")}.`,
+    ...(reach.length > 0 ? [`Beyond its connections: ${reach.join("; ")}.`] : []),
     "It reports only whether it succeeded, failed or was cancelled, and can't launch another delegate.",
-    "What your Dot asks it to do:",
-    ...declaration.prompt.split("\n").map(line => `> ${line}`),
   ].join("\n");
 }
 
