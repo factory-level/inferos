@@ -349,6 +349,13 @@ describe("autoApprovalRule", () => {
         .toBeUndefined();
   });
 
+  it("never approves an action that declares a workflow run (FAC-120), even under an enabled rule", () => {
+    let storage = makeStorage();
+    enableRule(storage);
+    let reference = 'inferops://acme.operations/inferos/workflow-trigger/ws-1/7?definition="def-1"&revision="2"';
+    expect(autoApprovalRule(storage, ROLES, GK, eligibleDescription({ workflowRun: { reference } }))).toBeUndefined();
+  });
+
   it("requires an actionKind", () => {
     let storage = makeStorage();
     enableRule(storage);

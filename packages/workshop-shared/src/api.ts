@@ -2650,9 +2650,20 @@ export type ActionRequester = "agent" | "person" | "gadget" | "hook";
  * command (FAC-14 K2), `onBehalfOf` names the person it asked for, by profile id and the display
  * name their profile had then, so the decider knows whose request it is. A name, never authority.
  */
-export type ActionContext =
+export type ActionContext = (
   | { kind: "workflow-run"; hookId: WorkpieceId; assigned: boolean; runId?: string; requestedBy?: string | null; triggerLabel?: string }
-  | { kind: "agent-turn"; onBehalfOf?: { profileId: string; name: string } };
+  | { kind: "agent-turn"; onBehalfOf?: { profileId: string; name: string } }
+  | { kind: "declared-run" }
+) & {
+  /**
+   * The workflow run approving this action starts (FAC-120, round 6), when the action declared one
+   * (`ActionDescription.workflowRun`): the trigger reference the kernel validated at submit and binds
+   * the approval's effects to. Set only by the kernel from its own record, never by a gatekeeper, so
+   * a surface that shows no fields (a notification's Approve, a collapsed row) can still say a run
+   * will start. A `declared-run` context is one whose only origin to report is this.
+   */
+  declaredRun?: { reference: string };
+};
 
 export type ActionLogEntry = {
   /** Sequential ID number for the action. Counts up from when the workspace was created. */

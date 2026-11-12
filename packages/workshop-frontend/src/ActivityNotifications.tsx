@@ -7,6 +7,7 @@ import { CountBadge } from './components/CountBadge'
 import { IncompleteDescriptionNotice, isDescriptionIncomplete } from './components/IncompleteDescriptionNotice'
 import { ActionFields, entryFields, fieldCountLabel } from './components/ActionFields'
 import { ResolveButton } from './components/ResolveButton'
+import { contextText } from './actionDecision'
 import { RestrictedApprovalNotice } from './components/RestrictedApprovalNotice'
 import {
   formatRelativeTime,
@@ -96,14 +97,18 @@ export default function ActivityNotifications({
               const incompleteId = `${noticeId}-incomplete-${action.id}`
               const fields = entryFields(action)
               const incomplete = isDescriptionIncomplete(action)
+              // Who the request is for, or where it came from (FAC-14), said beside Approve too.
+              const contextId = `${noticeId}-context-${action.id}`
+              const context = action.type === 'action' ? contextText(action) : null
               const describedBy = restricted
                 ? [
                   noticeId,
+                  ...(context ? [contextId] : []),
                   requestId,
                   ...(fields.length > 0 ? [fieldsId] : []),
                   ...(incomplete ? [incompleteId] : []),
                 ].join(' ')
-                : undefined
+                : context ? contextId : undefined
               return (
                 <div
                   key={action.id}
@@ -123,6 +128,11 @@ export default function ActivityNotifications({
                         <span className="px-1">·</span>
                         {formatRelativeTime(action.createdAt)}
                       </span>
+                      {context && (
+                        <span id={contextId} className="mt-1 block text-[11.5px] leading-4 tracking-[-0.1px] text-kumo-inactive">
+                          {context}
+                        </span>
+                      )}
                       <span id={requestId} className={`mt-1.5 block whitespace-pre-wrap text-[12.5px] leading-[18px] tracking-[-0.2px] text-kumo-subtle ${restricted ? '' : 'line-clamp-2'}`}>
                         {action.description.description}
                       </span>
