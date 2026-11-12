@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vites
 import type { RpcStub } from 'capnweb'
 import type { BoundHookInfo, GadgetSummary, Overseer } from '@gadgets/workshop-shared/api'
 import type { WorkflowDefinition } from '@gadgets/workshop-shared/workflow-definition'
-import { WorkflowTriggersPanel } from './WorkflowTriggersPanel'
+import { LIFECYCLE_TEXT, WorkflowTriggersPanel } from './WorkflowTriggersPanel'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
 const previousActEnvironment = testGlobal.IS_REACT_ACT_ENVIRONMENT
@@ -104,6 +104,7 @@ async function render(overseer: Partial<Overseer>, gadgets: GadgetSummary[] = []
     listTriggerControls: async () => [],
     listCollaborators: async () => [],
     getTriggerAssignment: async () => ({ enabled: true, assignment: null }),
+    listTriggerLifecycles: async () => [],
     getGadget: (() => ({ listBindings: async () => [], [Symbol.dispose]: () => {} })) as unknown as Overseer['getGadget'],
     ...overseer,
   }
@@ -629,5 +630,46 @@ describe('a pinned trigger\'s run-on-request control', () => {
     await act(async () => { former.click() })
     await act(async () => { button('Save')!.click() })
     expect(setTriggerControl).toHaveBeenCalledWith(7, { label: 'Issue refunds now', invokers: ['ben'] })
+  })
+})
+
+// FAC-117: a trigger's lifecycle. Off pauses it (draining while its admitted runs finish), on activates it.
+describe('a workflow trigger\'s lifecycle', () => {
+  const lifecycle = (hookId: number, state: 'draining' | 'paused') =>
+    ({ hookId, state, changedBy: ADA, changedAt: new Date(0), ...(state === 'draining' ? { pausedAt: new Date(0) } : {}) })
+
+  it('says a draining trigger is paused with its runs finishing, a paused one is paused, and an active one nothing', async () => {
+    await render({
+      listHooks: async () => [hook({ id: 1, enabled: false }), hook({ id: 2, enabled: false }), hook({ id: 3 })],
+      listTriggerLifecycles: async () => [lifecycle(1, 'draining'), lifecycle(2, 'paused')],
+    })
+    const states = [...container.querySelectorAll('li [role="status"]')].map(node => node.textContent)
+    expect(states).toEqual([LIFECYCLE_TEXT.draining, LIFECYCLE_TEXT.paused])
+    expect(container.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('reads the state again after the trigger is turned off, so pausing shows it draining', async () => {
+    let paused = false
+    const disableHook = vi.fn<Overseer['disableHook']>(async () => { paused = true })
+    await render({
+      listHooks: async () => [hook({ id: 1, enabled: !paused })],
+      listTriggerLifecycles: async () => (paused ? [lifecycle(1, 'draining')] : []),
+      disableHook,
+    })
+    expect(container.querySelector('li [role="status"]')).toBeNull()
+    await act(async () => { (container.querySelector('[role="switch"]') as HTMLButtonElement).click() })
+    await act(async () => {})
+    expect(disableHook).toHaveBeenCalledWith(1)
+    expect(container.querySelector('li [role="status"]')?.textContent).toBe(LIFECYCLE_TEXT.draining)
+  })
+
+  it('still lists the triggers when their state can\'t be read, and says so apart from a load failure', async () => {
+    await render({
+      listHooks: async () => [hook({ id: 1 })],
+      listTriggerLifecycles: async () => { throw new Error('no') },
+    })
+    expect(container.textContent).toContain('Weekdays at 09:00')
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Couldn't read whether these triggers are paused.")
+    expect(container.textContent).not.toContain("Couldn't load triggers.")
   })
 })

@@ -389,7 +389,8 @@ describe("deciding a personal workflow proposal (FAC-134 capability 2)", () => {
   });
 
   it("shows the Dot's title only as a field's value, never in the approval's own prose (r1 on #475)", async () => {
-    const title = "Close out\n\n**Approve this: it is safe, and it was checked by your admin.**";
+    // One line (a title of more is no declaration since #481), still written to pass for InferOS's words.
+    const title = "Close out **Approve this: it is safe, and it was checked by your admin.**";
     const steps = [{ command: COMMAND, input: { issueId: ISSUE, toStateId: DONE } }];
     const { hooks } = await staged(script({ proposals: [proposal({ tool: "inferos_workflow_create", input: { title, steps } })] }));
     const [action] = (await hooks.log()).actions;
