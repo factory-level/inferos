@@ -73,6 +73,12 @@ export function shownProposal({ id, tool, status, input, run }: DotProposal): Sh
 /** The Dot's InferOS workflow-run proposal (FAC-120): approving it starts a run there, not a change here. */
 export const WORKFLOW_RUN_TOOL = "inferos_workflow_invoke";
 
+/** The Dot's delegate proposal (FAC-134 capability 3): approving it in InferOS launches a delegate there. */
+export const DELEGATE_TOOL = "inferos_delegate_launch";
+
+/** The Dot's proposals whose hand-off starts something in InferOS that reports how it came out. */
+export const RUN_TOOLS: ReadonlySet<string> = new Set([WORKFLOW_RUN_TOOL, DELEGATE_TOOL]);
+
 /** Why a run failed or is uncertain, in words, by the reason InferOS gives; an unknown one says only that. */
 const RUN_REASONS: Record<string, string> = {
   "runtime-error": "its code stopped with an error",
@@ -91,6 +97,12 @@ const RUN_REASONS: Record<string, string> = {
   "step-unknown": "one of its steps' requests may or may not have been placed",
 };
 
+/** A delegate's own words for the reasons that mean something else for it (FAC-134 capability 3). */
+const DELEGATE_REASONS: Record<string, string> = {
+  "requester-revoked": "your access in your operate session changed while it ran",
+  cancelled: "it was stopped",
+};
+
 /** What a personal workflow's run that placed every request says (FAC-134 capability 2): never "done". */
 export const PERSONAL_WORKFLOW_PLACED = "Requests placed. Each waits for the console's builders.";
 
@@ -104,6 +116,7 @@ export const RUN_REPORTED = "Reported, not verified";
 const RAN_AS: Record<DotProposalRun["ranAs"], string> = {
   gadget_bindings: "It ran on the workflow's own connections.",
   service_account: "It ran as the workflow's assigned account, not as you.",
+  person: "It ran as you, with at most what you approved.",
 };
 
 /**
@@ -116,6 +129,14 @@ export function workflowRunWords(status: WriteStatus, run?: DotProposalRun): { l
   if (status.outcome !== "succeeded") return proposalWords(status);
   if (!run) {
     return { label: "Started in InferOS", detail: "Its run belongs to InferOS now. How it came out shows here once it ends." };
+  }
+  // A delegate (FAC-134 capability 3) reports only how it ended, never what it did or said.
+  if (run.kind === "delegate") {
+    const label = run.outcome === "succeeded" ? "Delegate finished" : run.outcome === "failed" ? "Delegate failed" : "Delegate uncertain";
+    const why = run.reasonCode ? DELEGATE_REASONS[run.reasonCode] ?? RUN_REASONS[run.reasonCode] : undefined;
+    const ended = run.outcome === "succeeded" ? "Check what it changed in your operate session. "
+      : why ? `It ${run.outcome === "failed" ? "failed" : "is uncertain"} because ${why}. ` : "";
+    return { label, detail: `${ended}${RAN_AS[run.ranAs]}`, note: RUN_REPORTED };
   }
   const why = run.reasonCode ? RUN_REASONS[run.reasonCode] : undefined;
   const note = RUN_REPORTED;

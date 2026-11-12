@@ -303,11 +303,11 @@ export const DOT_PROPOSAL_STATUSES = ["proposed", "confirming", "confirmed", "ha
 /** A run outcome as `chatbot.proposal_run_outcome` takes it (FAC-134): fixed fields, never what the run returned. */
 export type DotRunOutcomeWire = {
   /** A published workflow's run, or a personal workflow's (FAC-134 capability 2). */
-  kind: "workflow-run" | "personal-workflow";
+  kind: "workflow-run" | "personal-workflow" | "delegate";
   runId: string;
   outcome: "succeeded" | "failed" | "uncertain";
   reasonCode?: string;
-  ranAs: "gadget_bindings" | "service_account";
+  ranAs: "gadget_bindings" | "service_account" | "person";
 };
 
 export type DotProposalWire = {

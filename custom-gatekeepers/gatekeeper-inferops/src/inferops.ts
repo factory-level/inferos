@@ -117,6 +117,7 @@ import {
   parseConsoleCommandRef, parsePersonalWorkflowDeclaration, parsePersonalWorkflowRef, personalWorkflowRef,
   type PersonalWorkflowDeclaration,
 } from "@gadgets/workshop-shared/personal-workflow";
+import { parseDelegateDeclaration, type DelegateDeclaration } from "@gadgets/workshop-shared/delegate";
 import type { ConfiguratorUIOption } from "@gadgets/configurator-ui";
 import {
   CredentialSource, isCredentialsChanged, isCredentialsExpired, type CredentialRead,
@@ -4275,7 +4276,8 @@ export class InferOpsDotGatekeeper
  * InferOps applies at most once. A proposal InferOps says was already decided is read back and
  * settled to what it actually is, never assumed done.
  */
-async function applyDotAction(binding: DotBinding, actionId: number, effects?: Pick<ApprovedEffects, "invokeWorkflow" | "createPersonalWorkflow" | "runPersonalWorkflow">):
+async function applyDotAction(binding: DotBinding, actionId: number,
+    effects?: Pick<ApprovedEffects, "invokeWorkflow" | "createPersonalWorkflow" | "runPersonalWorkflow" | "launchDelegate">):
     Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
   const record = binding.action(actionId);
   if (!record || !isDotAction(record)) throw new Error(`No such Dot action: ${actionId}.`);
@@ -4283,6 +4285,7 @@ async function applyDotAction(binding: DotBinding, actionId: number, effects?: P
   const fields: Partial<LogFields> = { host: binding.host, action: actionId };
   if (record.tool === DOT_WORKFLOW_INVOKE_TOOL) return applyDotWorkflowRun(binding, record, fields, effects);
   if (record.tool === DOT_WORKFLOW_CREATE_TOOL) return applyDotWorkflowCreate(binding, record, fields, effects);
+  if (record.tool === DOT_DELEGATE_TOOL) return applyDotDelegate(binding, record, fields, effects);
   return binding.applyOnce(record, {
     policy: DOT_CONFIRM, fields,
     check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
@@ -4304,6 +4307,26 @@ const DOT_WORKFLOW_INVOKE_TOOL = "inferos_workflow_invoke";
 
 /** The Dot's personal workflow proposal (FAC-134 capability 2, inferops#2648): InferOps creates nothing for it. */
 const DOT_WORKFLOW_CREATE_TOOL = "inferos_workflow_create";
+
+/** The Dot's delegate proposal (FAC-134 capability 3, inferops#2653): InferOps launches nothing for it. */
+const DOT_DELEGATE_TOOL = "inferos_delegate_launch";
+
+/**
+ * A Dot delegate proposal's input (`{title, prompt, connections, tools?, note?}`, inferops#2653) as
+ * the kernel's delegate declaration (`ActionDescription.delegate`), or null when it isn't one: then
+ * nothing is declared, and the approval can't launch anything. The note is the Dot's words to the
+ * person and is never declared: it reaches the person only inside the "Arguments" field.
+ */
+function dotDelegate(input: Record<string, unknown>): DelegateDeclaration | null {
+  try {
+    return parseDelegateDeclaration({
+      title: input.title, prompt: input.prompt, connections: input.connections,
+      ...(input.tools !== undefined ? { tools: input.tools } : {}),
+    });
+  } catch {
+    return null;
+  }
+}
 
 /**
  * A Dot create proposal's input (`{title, steps: [{command, input}]}`, inferops#2648) as the kernel's
@@ -4427,6 +4450,50 @@ async function applyDotWorkflowCreate(binding: DotBinding, record: DotConfirmAct
   });
 }
 
+/**
+ * Applies the Dot's delegate proposal (FAC-134 capability 3, ADR 0020): the kernel launches the
+ * delegate the action declared in the person's own operate session (`effects.launchDelegate`,
+ * present only for their own approval), then the proposal is confirmed in InferOps as handed off,
+ * naming the delegate's run, whose outcome only it may report. Refused, it is not applied, in its
+ * FAC-119 kind, and the proposal is declined there; `unknown` may have launched it, so it is
+ * uncertain, never declined or retried. A confirm InferOps doesn't answer is logged; the delegate is
+ * recorded here and never launched twice.
+ */
+async function applyDotDelegate(binding: DotBinding, record: DotConfirmAction, fields: Partial<LogFields>,
+    effects?: Pick<ApprovedEffects, "launchDelegate">): Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
+  if (!effects) {
+    return { failed: { outcome: "notApplied", retryable: false, message: DOT_DELEGATE_NEEDS_APPROVAL, kind: "policy" } };
+  }
+  return binding.applyOnce(record, {
+    policy: DOT_WORKFLOW_RUN, fields,
+    check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
+    send: async marked => {
+      const launched = await effects.launchDelegate();
+      if (launched.status === "unknown") throw new InferOpsError("UNAVAILABLE", launched.reason);
+      if (launched.status === "refused") {
+        await binding.client.declineDotProposal(record.conversationId, record.proposalId).catch(() => undefined);
+        throw new CheckRefused(RUN_REFUSAL_CODES[launched.kind] ?? "UNAVAILABLE", launched.reason);
+      }
+      let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true };
+      try {
+        const confirmed = await binding.client.confirmDotProposal(
+          record.conversationId, record.proposalId, record.proposalId, { runId: launched.runId },
+        );
+        confirmedOutcome = { ...summarizeDotOutcome(confirmed.outcome), handedOff: true };
+      } catch (error) {
+        logger.warn("dot delegate launched; its InferOps confirm unanswered", {
+          event: "dot-confirm.delegate.confirm_unanswered", ...fields, code: inferOpsErrorCode(error) ?? "UNKNOWN",
+        });
+      }
+      return { ...(marked as DotConfirmAction), status: "applied", runId: launched.runId, confirmedOutcome,
+        delegate: { id: launched.delegateId } };
+    },
+  });
+}
+
+/** Why a delegate can't be launched without the kernel's approved effects. */
+const DOT_DELEGATE_NEEDS_APPROVAL = "Launching a delegate needs your own approval here.";
+
 /** Why a personal workflow can't be created without the kernel's approved effects. */
 const DOT_WORKFLOW_CREATE_NEEDS_APPROVAL = "Creating a personal workflow needs your own approval here.";
 
@@ -4507,7 +4574,9 @@ export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, cli
   const binding = new DotBinding(props, { store: new ActionStore(kv), client, observers: () => [] });
   return {
     startSession: (queue: RpcStub<ApprovalQueue>): InferOpsDotSession => new DotSessionImpl(binding, queue.dup()),
-    applyAction: (actionId: number, effects?: Pick<ApprovedEffects, "invokeWorkflow" | "createPersonalWorkflow" | "runPersonalWorkflow">) => applyDotAction(binding, actionId, effects),
+    applyAction: (actionId: number,
+        effects?: Pick<ApprovedEffects, "invokeWorkflow" | "createPersonalWorkflow" | "runPersonalWorkflow" | "launchDelegate">) =>
+      applyDotAction(binding, actionId, effects),
     rejectAction: (actionId: number) => rejectDotAction(binding, actionId),
     workflowRunOutcome: (actionId: number, outcome: ApprovedRunOutcome) => recordDotRunOutcome(binding, actionId, outcome),
   };
@@ -4525,11 +4594,14 @@ async function recordDotRunOutcome(binding: DotBinding, actionId: number, outcom
   const fields: Partial<LogFields> = { host: binding.host, action: actionId };
   const record = binding.action(actionId);
   // The kind must be the one the proposal started: a personal workflow's run, or a trigger's.
-  const kind = record && isDotAction(record) && runsPersonalWorkflow(record) ? "personal-workflow" : "workflow-run";
-  if (!record || !isDotAction(record) || record.tool !== DOT_WORKFLOW_INVOKE_TOOL ||
+  // A delegate's run (FAC-134 capability 3) is the person's, and only a delegate's is.
+  const kind = !record || !isDotAction(record) ? null
+    : record.tool === DOT_DELEGATE_TOOL ? "delegate"
+    : record.tool === DOT_WORKFLOW_INVOKE_TOOL ? (runsPersonalWorkflow(record) ? "personal-workflow" : "workflow-run")
+    : null;
+  if (!record || !isDotAction(record) || kind === null ||
       outcome?.kind !== kind || typeof outcome.runId !== "string" || outcome.runId === "" ||
-      // Only a delegate's run is the person's (FAC-134 capability 3): none this binding proposes yet.
-      outcome.ranAs === "person") {
+      (kind === "delegate") !== (outcome.ranAs === "person")) {
     logger.warn("dot run outcome for no workflow-run proposal of this binding", { event: "dot-run-outcome.ignored", ...fields });
     return;
   }
@@ -4758,6 +4830,31 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
       throw error;
     });
     if (joined) return;
+    if (proposal.tool === DOT_DELEGATE_TOOL) {
+      // FAC-134 capability 3 (ADR 0020): a delegate, its own kind. The prose is fixed: the Dot wrote
+      // the title, the prompt and the note, so each is only ever a field's value (r1 on inferops#2653).
+      // The kernel shows the ceiling and quotes the prompt in its own field, and launches it only for
+      // the person's own approval, with at most their authority.
+      const declaration = dotDelegate(proposal.input);
+      this.#receipts.set(proposal.id, await this.binding.submit(this.queue, actionId, {
+        title: sanitizeTitle("Your Dot proposes a delegate"),
+        ...(() => {
+          const described = this.binding.description(
+            `Your Dot proposes a delegate: a separate agent chat in your own operate session that works on ` +
+            `one task, with at most your own access there, narrowed to the connections and tools InferOS ` +
+            `shows below. Your access is checked again on every call it makes, and it stops if that changes. ` +
+            `It reports only whether it succeeded, failed or was cancelled, and can't launch another ` +
+            `delegate. Declining it launches nothing. It can't be approved after ${proposal.expiresAt}.`);
+          return (declaration ? described.inline("Title", declaration.title) : described)
+            .verbatim("Arguments", JSON.stringify(proposal.input, null, 2))
+            .finish();
+        })(),
+        implementsRevert: false,
+        ...(declaration ? { delegate: { ...declaration, reportOutcome: true } } : {}),
+        actionKind: { tag: "inferops.dot-delegate", label: "Approve a delegate your Dot proposed" },
+      }));
+      return;
+    }
     if (proposal.tool === DOT_WORKFLOW_CREATE_TOOL) {
       // FAC-134 capability 2: a personal workflow, its own kind. The kernel lists every step and
       // its input in its own field and creates it only from commands a console offers the person.

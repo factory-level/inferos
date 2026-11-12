@@ -829,6 +829,17 @@ FAC-133 (inferos [ADR 0013](../adr/0013-dot-runtime.md) decision 3). A seventh r
   - **Its outcome** is recorded only as `kind: "personal-workflow"` for such a proposal, and a trigger run's only as `workflow-run`. Anything else is logged and ignored.
   - **In the Dot,** `parseDotRun` reads both kinds and the step reasons (`step-refused`, `step-unknown`). A personal workflow whose run placed every request reads *Requests placed* / *Requests placed. Each waits for the console's builders.*, never done.
   - **Tests:** `dot.test.ts`, "deciding a personal workflow proposal", and the blueprint's `dot.test.ts`.
+- **Delegate proposals (FAC-134 capability 3, ADR 0020, inferops#2653).**
+  - **A delegate** (`inferos_delegate_launch`) is staged as `inferops.dot-delegate`.
+    - **Its prose is fixed.** The Dot's title is only the *Title* field's value. Its prompt and note appear only in the *Arguments* field, never in the gatekeeper's own sentences (r1's LOW on inferops#2653).
+    - **Its input becomes the kernel's `delegate` declaration** (`dotDelegate`: the title, prompt, connections and tools; never the note), with `reportOutcome: true`. One that isn't valid declares nothing, so its approval launches nothing. The kernel shows the ceiling and quotes the prompt in its own field.
+  - **Approving it** calls `ApprovedEffects.launchDelegate()` (`applyDotDelegate`):
+    - **launched:** the proposal is confirmed in InferOps naming the delegate's run (`{runId}`), and the action keeps `runId` and `delegate: {id}`;
+    - **refused:** not applied, in its FAC-119 kind, retryable only for a refusal that can pass (permission, sign-in, unavailable), and declined in InferOps;
+    - **unknown:** it may have launched, so it's uncertain (`UNAVAILABLE`), never declined.
+  - **Its outcome** is recorded only as `kind: "delegate"` with `ranAs: "person"`, for a delegate proposal. No other proposal's outcome may claim the person (`recordDotRunOutcome`, and `parseDotRun` on InferOps' answer).
+  - **In the Dot,** a delegate's proposal uses the run words (`RUN_TOOLS`): *Delegate finished* (with *Check what it changed in your operate session.*), *Delegate failed* or *Delegate uncertain*, each with *It ran as you, with at most what you approved.* and *Reported, not verified*. `requester-revoked` and `cancelled` have a delegate's own words.
+  - **Tests:** `dot.test.ts`, "deciding a delegate proposal", and the blueprint's `dot.test.ts`.
 - **Receipts** (`dotProposalStatus`), in FAC-97's words from InferOps' own status, read when asked:
 
   | InferOps | Receipt |

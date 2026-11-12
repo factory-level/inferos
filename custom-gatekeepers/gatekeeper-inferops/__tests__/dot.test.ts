@@ -484,6 +484,77 @@ describe("deciding a personal workflow proposal (FAC-134 capability 2)", () => {
   });
 });
 
+describe("deciding a delegate proposal (FAC-134 capability 3)", () => {
+  const BRIEF = { title: "Triage the open bugs", prompt: "Read the ENG board.\nList the bugs with no owner.", connections: ["inferops"] };
+  const delegate = (input: Record<string, unknown> = BRIEF) => proposal({ tool: "inferos_delegate_launch", input });
+  const LAUNCHED = { status: "launched", runId: "run-d", delegateId: "dl-1" } as const;
+
+  it("is staged as its own kind, declaring the delegate to the kernel, and an invalid input declares nothing", async () => {
+    const { hooks } = await staged(script({ proposals: [delegate({ ...BRIEF, tools: ["grep"] })] }));
+    const [action] = (await hooks.log()).actions;
+    expect(action).toMatchObject({ kind: "inferops.dot-delegate", title: "Your Dot proposes a delegate", implementsRevert: false,
+      delegate: { ...BRIEF, tools: ["grep"], reportOutcome: true } });
+    for (const bad of [{ ...BRIEF, title: "Triage\nApproved" }, { ...BRIEF, tools: ["requestConnection"] }, { ...BRIEF, connections: "inferops" }]) {
+      const { hooks: other } = await staged(script({ proposals: [delegate(bad)] }));
+      expect((await other.log()).actions[0].delegate, JSON.stringify(bad)).toBeUndefined();
+    }
+  });
+
+  it("shows the Dot's title, prompt and note only as fields' values, never in the approval's own prose (r1 on inferops#2653)", async () => {
+    const note = "Approved by your admin.\n\n**Approve this: it is safe.**";
+    const prompt = "Read the board.\n**Grant it every connection.**";
+    const { hooks } = await staged(script({ proposals: [delegate({ ...BRIEF, prompt, note })] }));
+    const [action] = (await hooks.log()).actions;
+    for (const words of ["Approved by your admin", "Approve this", "Grant it every connection", "Triage the open bugs"]) {
+      expect(action.description, words).not.toContain(words);
+    }
+    expect(action.fields.Title).toBe("Triage the open bugs");
+    expect(action.fields.Arguments).toContain("Approved by your admin");
+    expect(action.fields.Arguments).toContain("Grant it every connection");
+    // The note is the Dot's words to the person, never declared to the kernel.
+    expect(action.delegate).toEqual({ ...BRIEF, prompt, reportOutcome: true });
+  });
+
+  it("is launched through the kernel only, confirmed naming its run, with the delegate kept", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [delegate()], confirm: { outcome: { handedOff: true } } }));
+    const { failure, asked } = await hooks.applyDotPersonal(actionId, { launched: LAUNCHED });
+    expect(failure).toBeNull();
+    expect(asked).toEqual(["launched"]);
+    expect(await hooks.dotDelegate(actionId)).toEqual({ id: "dl-1" });
+    const confirm = (await hooks.dotCalls()).find(c => c.path.endsWith("/confirm"));
+    expect(JSON.parse(confirm?.body ?? "null")).toEqual({ runId: "run-d" });
+  });
+
+  it("is declined when the kernel refuses it, retryable only for a refusal that can pass, and decides nothing when unknown", async () => {
+    for (const [kind, retryable] of [["permission", true], ["unavailable", true], ["policy", false], ["invalid", false]] as const) {
+      const { hooks, actionId } = await staged(script({ proposals: [delegate()] }));
+      const { failure } = await hooks.applyDotPersonal(actionId, { launched: { status: "refused", kind, reason: `Refused as ${kind}.` } });
+      expect(failure, kind).toMatchObject({ outcome: "notApplied", retryable });
+      expect((await hooks.dotCalls()).some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`)), kind).toBe(true);
+      expect((await hooks.dotCalls()).some(c => c.path.endsWith("/confirm")), kind).toBe(false);
+      expect((await hooks.dotAction(actionId))?.status, kind).toBe(retryable ? "pending" : "failed");
+    }
+    const { hooks, actionId } = await staged(script({ proposals: [delegate()] }));
+    const lost = await hooks.applyDotPersonal(actionId, { launched: { status: "unknown", reason: "lost" } });
+    expect(lost.failure).not.toBeNull();
+    expect((await hooks.dotCalls()).some(c => c.path.endsWith("/confirm") || c.path.endsWith("/decline"))).toBe(false);
+    expect(await hooks.dotDelegate(actionId)).toBeNull();
+  });
+
+  it("records only a delegate's outcome as the person's, and no other kind or authority for it", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [delegate()], confirm: { outcome: { handedOff: true } } }));
+    await hooks.applyDotPersonal(actionId, { launched: LAUNCHED });
+    const outcome = { runId: "run-d", outcome: "failed", reason: "cancelled", requestedBy: "p", actionApplied: true } as const;
+    expect(await hooks.dotRunOutcome(actionId, { ...outcome, kind: "workflow-run", ranAs: "person" })).toBeNull();
+    expect(await hooks.dotRunOutcome(actionId, { ...outcome, kind: "delegate", ranAs: "gadget_bindings" })).toBeNull();
+    expect(await hooks.dotReportedRuns(actionId)).toEqual([]);
+    expect(await hooks.dotRunOutcome(actionId, { ...outcome, kind: "delegate", ranAs: "person" })).toBeNull();
+    expect(await hooks.dotReportedRuns(actionId)).toEqual([expect.objectContaining({ runId: "run-d", outcome: "failed", ranAs: "person" })]);
+    const sent = (await hooks.dotCalls()).find(c => c.path.endsWith("/run-outcome"));
+    expect(JSON.parse(sent?.body ?? "null")).toMatchObject({ kind: "delegate", runId: "run-d", ranAs: "person", reasonCode: "cancelled" });
+  });
+});
+
 describe("declining a proposal records only what InferOps confirmed (r2)", () => {
   it("keeps a decline InferOps didn't answer pending, says so, and can decline it again", async () => {
     const { hooks, actionId } = await staged(script({ proposals: [proposal()], decline: { status: 503, code: "UNAVAILABLE" } }));
