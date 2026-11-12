@@ -1156,6 +1156,12 @@ let OPERATE_AGENT_TOOLS = [
   "proposePlacement",
 ] as const;
 
+/**
+ * The tools an operate chat is offered (`OPERATE_AGENT_TOOLS`), read-only, for the checks that hold
+ * what the operate agent may never do: none writes a canvas, saved or temporary (FAC-137).
+ */
+export const OPERATE_AGENT_TOOL_NAMES: readonly string[] = OPERATE_AGENT_TOOLS;
+
 // Leads the project-specific prompt slot in an operate chat, overriding the building guidance in
 // SYSTEM_PROMPT that its tools can't act on.
 let OPERATE_SESSION_PROMPT = `

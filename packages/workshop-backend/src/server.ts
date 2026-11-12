@@ -6,6 +6,7 @@ import {
   WIDGET_PLACEMENT_ERROR_CODES, WidgetPlacementError, parseWidgetPlacementInput, type WidgetPlacementInput, type WidgetPlacements,
 } from "@gadgets/workshop-shared/widget-placements";
 import type { AgentViewOverlay } from "@gadgets/workshop-shared/agent-widgets";
+import type { TemporaryCanvas } from "@gadgets/workshop-shared/temporary-canvas";
 import { canvasPageEffects } from "@gadgets/workshop-shared/canvas-model";
 import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import type { OperateReadRun } from "@gadgets/workshop-shared/api";
@@ -1113,6 +1114,30 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
 
   dismissAgentPlacement(proposalId: string): Promise<AgentViewOverlay> {
     return this.user().dismissAgentPlacement(proposalId);
+  }
+
+  /**
+   * FAC-137: temporary canvases live in the session's own workspace, opened with the person's own
+   * access (OperateOverseerInterface), which refuses once a company change retired it.
+   */
+  async listTemporaryCanvases(): Promise<TemporaryCanvas[]> {
+    using workspace = await this.openWorkspace();
+    return await workspace.listTemporaryCanvases();
+  }
+
+  async getTemporaryCanvas(id: string): Promise<TemporaryCanvas> {
+    using workspace = await this.openWorkspace();
+    return await workspace.getTemporaryCanvas(id);
+  }
+
+  async saveTemporaryCanvas(id: string, expectedRevision: number): Promise<TemporaryCanvas> {
+    using workspace = await this.openWorkspace();
+    return await workspace.saveTemporaryCanvas(id, expectedRevision);
+  }
+
+  async removeTemporaryCanvas(id: string, expectedRevision: number): Promise<void> {
+    using workspace = await this.openWorkspace();
+    await workspace.removeTemporaryCanvas(id, expectedRevision);
   }
 
   // FAC-94: where `event` on widget `ref` leads, if the published page the person is shown wires it
