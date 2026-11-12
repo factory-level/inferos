@@ -14,7 +14,7 @@ import type {
   TriggerControl, TriggerControlSettings, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionRef,
   WorkflowDefinitionRights, WorkflowDefinitionShare, WorkflowDefinitionHistoryRef,
   WorkflowDefinitionSave, WorkflowInvocation, WorkflowRunFailure, RequestedRun, WorkflowRunOutcome, WorkflowRunResult,
-  WorkflowTriggerDefinitionRef, WorkflowDefinitionDuplicate, WorkflowRequiredBinding,
+  WorkflowTriggerDefinitionRef, WorkflowDefinitionDuplicate, WorkflowRequiredBinding, WorkflowScheduleSummary,
 } from "@gadgets/workshop-shared/workflow-definition";
 import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
@@ -15575,6 +15575,10 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let viewer = await this.#getClientProfile();
     return this.impl.workflowDefinitionStore().listReadableWorkflowHistories(viewer.id, "build");
   }
+  async listReadableWorkflowSchedules(): Promise<WorkflowScheduleSummary[]> {
+    let viewer = await this.#getClientProfile();
+    return listReadableWorkflowSchedules(this.impl, viewer.id, "build");
+  }
   // A control lets named people run a pinned trigger now; setting one is building. Running one is
   // the listed person's own request, checked against the authenticated session's profile.
   async setTriggerControl(hookId: number, settings: TriggerControlSettings | null): Promise<TriggerControl | null> {
@@ -18373,6 +18377,9 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   async listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]> { this.#deny(); }
+  async listReadableWorkflowSchedules(): Promise<WorkflowScheduleSummary[]> {
+    return listReadableWorkflowSchedules(this.impl, this.clientProfileId, "use");
+  }
   // An operator listed on a trigger's control may ask it to run, and sees only those controls; it
   // configures nothing (FAC-102, inferops ADR 0011 S6).
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
@@ -19052,6 +19059,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getTriggerDefinition(_hookId: number): Promise<WorkflowDefinitionRef | null> { this.#deny(); }
   async listWorkflowDeliveries(_definitionId: string): Promise<WorkflowDefinitionDelivery[]> { this.#deny(); }
   async listReadableWorkflowHistories(): Promise<WorkflowDefinitionHistoryRef[]> { this.#deny(); }
+  async listReadableWorkflowSchedules(): Promise<WorkflowScheduleSummary[]> { this.#deny(); }
   async setTriggerControl(_hookId: number, _settings: TriggerControlSettings | null): Promise<TriggerControl | null> { this.#deny(); }
   async setTriggerAssignment(_hookId: number, _settings: TriggerAssignmentSettings | null): Promise<TriggerAssignment | null> { this.#deny(); }
   async getTriggerAssignment(_hookId: number): Promise<TriggerAssignmentState> { this.#deny(); }
@@ -19987,6 +19995,97 @@ export async function invokeWorkflowTrigger(
     impl.takenInvocations.delete(invocation.id);
   }
   return invocation;
+}
+
+/** Join workspace-bound scheduler hooks to their own summaries after applying definition read rights. */
+async function listReadableWorkflowSchedules(
+    impl: Pick<OverseerImpl, "storage" | "workflowDefinitionStore">,
+    viewer: string, role: CollaboratorRole): Promise<WorkflowScheduleSummary[]> {
+  let store = impl.workflowDefinitionStore();
+  const MAX_SCHEDULE_HOOK_READS = 100;
+  const SCHEDULE_READ_TIMEOUT_MS = 2_000;
+  const hooks = [...impl.storage.boundHooks.list()].filter(hook => {
+    if (hook.vendorId !== "scheduler" || !hook.enabled) return false;
+    let pin = store.pinOf(hook.id);
+    return !!pin && !!store.canReadDefinition(viewer, pin.definitionId, role);
+  }).slice(0, MAX_SCHEDULE_HOOK_READS);
+  let reads = hooks.flatMap(hook => {
+    let read = (hook.controller as unknown as HookController<RpcTarget>).getWorkflowSchedule;
+    if (typeof read !== "function") return [];
+    return [{ hook, read }];
+  });
+  let results = await Promise.allSettled(reads.map(async ({ hook, read }) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      let schedule = await Promise.race([
+        Promise.resolve().then(() => read.call(hook.controller)),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Schedule summary read timed out.")), SCHEDULE_READ_TIMEOUT_MS);
+        }),
+      ]);
+      let safeSchedule = sanitizeWorkflowScheduleSummary(schedule);
+      if (!safeSchedule) return null;
+      return {
+        hookId: hook.id, ...safeSchedule,
+      } satisfies WorkflowScheduleSummary;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }));
+  let summaries = results.flatMap(result => result.status === "fulfilled" && result.value ? [result.value] : []);
+  return summaries.toSorted((a, b) => a.hookId - b.hookId);
+}
+
+function sanitizeWorkflowScheduleSummary(value: unknown): Omit<WorkflowScheduleSummary, "hookId"> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  let summary = value as Record<string, unknown>;
+  if (typeof summary.scheduleId !== "string" || summary.scheduleId.length < 1 || summary.scheduleId.length > 128 ||
+      typeof summary.title !== "string" || summary.title.length < 1 || summary.title.length > 120 ||
+      typeof summary.description !== "string" || summary.description.length > 1_000 ||
+      !["active", "dead", "completed", "expired"].includes(String(summary.status)) ||
+      (summary.nextFire !== undefined && (typeof summary.nextFire !== "number" || !Number.isFinite(summary.nextFire)))) return null;
+  let cadence = sanitizeWorkflowScheduleCadence(summary.cadence);
+  if (!cadence) return null;
+  let status = summary.status as WorkflowScheduleSummary["status"];
+  return {
+    scheduleId: summary.scheduleId, title: summary.title, description: summary.description, cadence, status,
+    ...(status === "active" && typeof summary.nextFire === "number" ? { nextFire: summary.nextFire } : {}),
+  };
+}
+
+function sanitizeWorkflowScheduleCadence(value: unknown): WorkflowScheduleSummary["cadence"] | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  let cadence = value as Record<string, unknown>;
+  const nonempty = (entry: unknown, max: number) => typeof entry === "string" && entry.length > 0 && entry.length <= max;
+  if (cadence.kind === "interval") {
+    if (typeof cadence.everyMs !== "number" || !Number.isFinite(cadence.everyMs) || cadence.everyMs <= 0 ||
+        typeof cadence.anchorMs !== "number" || !Number.isFinite(cadence.anchorMs)) return null;
+    return { kind: "interval", everyMs: cadence.everyMs, anchorMs: cadence.anchorMs };
+  }
+  if (cadence.kind === "once") {
+    if (typeof cadence.fireAt !== "number" || !Number.isFinite(cadence.fireAt) || !nonempty(cadence.timeZone, 100)) return null;
+    return { kind: "once", fireAt: cadence.fireAt, timeZone: cadence.timeZone as string };
+  }
+  if (cadence.kind !== "calendar" || !nonempty(cadence.timeZone, 100)) return null;
+  let rule = cadence.rule;
+  if (!rule || typeof rule !== "object" || Array.isArray(rule)) return null;
+  let calendar = rule as Record<string, unknown>;
+  if (typeof calendar.interval !== "number" || !Number.isFinite(calendar.interval) || calendar.interval <= 0 ||
+      typeof calendar.minute !== "number" || !Number.isFinite(calendar.minute) || calendar.minute < 0 || calendar.minute > 59 ||
+      typeof calendar.anchorMs !== "number" || !Number.isFinite(calendar.anchorMs)) return null;
+  if (calendar.freq === "hourly") return { kind: "calendar", timeZone: cadence.timeZone as string, rule: {
+    freq: "hourly", interval: calendar.interval as number, minute: calendar.minute as number, anchorMs: calendar.anchorMs as number,
+  } };
+  if (typeof calendar.hour !== "number" || !Number.isFinite(calendar.hour) || calendar.hour < 0 || calendar.hour > 23) return null;
+  if (calendar.freq === "daily") return { kind: "calendar", timeZone: cadence.timeZone as string, rule: {
+    freq: "daily", interval: calendar.interval as number, hour: calendar.hour as number, minute: calendar.minute as number, anchorMs: calendar.anchorMs as number,
+  } };
+  if (calendar.freq !== "weekly" || !Array.isArray(calendar.byDay) || calendar.byDay.length < 1 ||
+      calendar.byDay.length > 7 || !calendar.byDay.every(day => ["MO", "TU", "WE", "TH", "FR", "SA", "SU"].includes(String(day)))) return null;
+  return { kind: "calendar", timeZone: cadence.timeZone as string, rule: {
+    freq: "weekly", interval: calendar.interval, byDay: calendar.byDay as string[],
+    hour: calendar.hour, minute: calendar.minute, anchorMs: calendar.anchorMs,
+  } };
 }
 
 function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {

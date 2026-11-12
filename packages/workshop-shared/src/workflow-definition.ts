@@ -13,6 +13,23 @@ export const MAX_WORKSPACE_WORKFLOW_DEFINITIONS = 32;
 /** ID-only discovery result for a workflow whose retained run history the viewer may read. */
 export type WorkflowDefinitionHistoryRef = { definitionId: string };
 
+/** Safe schedule metadata shown beside a workflow definition its viewer may read. */
+export type WorkflowScheduleSummary = {
+  hookId: number;
+  scheduleId: string;
+  title: string;
+  description: string;
+  cadence:
+    | { kind: "interval"; everyMs: number; anchorMs: number }
+    | { kind: "once"; fireAt: number; timeZone: string }
+    | { kind: "calendar"; timeZone: string; rule:
+        | { freq: "hourly"; interval: number; minute: number; anchorMs: number }
+        | { freq: "daily"; interval: number; hour: number; minute: number; anchorMs: number }
+        | { freq: "weekly"; interval: number; byDay: string[]; hour: number; minute: number; anchorMs: number } };
+  status: "active" | "dead" | "completed" | "expired";
+  nextFire?: number;
+};
+
 /** Most saved revisions one workflow definition keeps. */
 export const MAX_WORKFLOW_DEFINITION_REVISIONS = 50;
 

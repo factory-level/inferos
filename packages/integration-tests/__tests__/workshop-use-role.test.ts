@@ -91,7 +91,7 @@ type UseSurface = "getMetadata" | "subscribeToMetadata" | "subscribeToPresence" 
     // wiki-embedded-widget.test.ts).
     "resolveEmbeddedWidget" | "getEmbeddedWidget" | "listWidgetInstances" |
     // Published workflow definitions only (workflow-definitions.test.ts covers the filtering).
-    "listWorkflowDefinitions" |
+    "listWorkflowDefinitions" | "listReadableWorkflowSchedules" |
     // A use collaborator listed on a trigger's control may run it, and sees only those controls
     // (workflow-invocation.test.ts covers both, and that nothing else opens to them).
     "listTriggerControls" | "invokeTrigger" |

@@ -370,6 +370,13 @@ export class WorkspaceWorkflowDefinitionStore {
     return stored && this.#available(stored, this.retention.now()) ? this.#viewOf(stored, viewer, role) : null;
   }
 
+  /** Whether the viewer can read this definition through the same projection used by list/get. */
+  canReadDefinition(viewer: string, id: string, role: CollaboratorRole | null): boolean {
+    let stored = this.storage.workflowDefinitions.get(id);
+    return !!stored && this.#available(stored, this.retention.now(), this.#pinnedIds()) &&
+      this.#viewOf(stored, viewer, role) !== null;
+  }
+
   /**
    * What `viewer`, whose role in this workspace is `role`, may do with `stored` (FAC-122). The owner
    * may do everything. Anyone else needs a role here (a share outlives a removed collaborator but
