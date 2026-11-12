@@ -4,8 +4,8 @@ import { LightningIcon } from '@phosphor-icons/react'
 import type { RpcStub } from 'capnweb'
 import type { BoundHookInfo, CollaboratorInfo, GadgetSummary, Overseer } from '@gadgets/workshop-shared/api'
 import type {
-  TriggerAssignment, TriggerControl, WorkflowDefinition, WorkflowDefinitionDelivery, WorkflowDefinitionHistoryRef,
-  WorkflowDefinitionRef, WorkflowScheduleSummary,
+  TriggerAssignment, TriggerControl, TriggerLifecycle, TriggerLifecycleState, WorkflowDefinition, WorkflowDefinitionDelivery,
+  WorkflowDefinitionHistoryRef, WorkflowDefinitionRef, WorkflowScheduleSummary,
 } from '@gadgets/workshop-shared/workflow-definition'
 import { HookToggle } from '../../components/HookToggle'
 import { WorkshopButton } from '../../components/WorkshopControls'
@@ -45,7 +45,18 @@ type Loaded =
       assignmentsEnabled: boolean
       // The connections each pinned hook's gadget binds, which an assignment can choose, by hook id.
       connections: ReadonlyMap<number, AssignableConnection[] | null>
+      // Each trigger's recorded lifecycle (FAC-117), by hook id; absent is active. Null when unreadable.
+      lifecycles: ReadonlyMap<number, TriggerLifecycle> | null
     }
+
+/**
+ * What a paused trigger's state means for its runs (FAC-117): it starts none, and those it already
+ * admitted finish first. Turning the trigger off pauses it, and on activates it again.
+ */
+export const LIFECYCLE_TEXT: Readonly<Record<Exclude<TriggerLifecycleState, 'active' | 'retired'>, string>> = {
+  draining: 'Paused: it starts no new runs, and the runs it already started are finishing.',
+  paused: 'Paused: it starts no new runs.',
+}
 
 // The definition revision a trigger could run: the published one for the gadget it wakes.
 const publishedFor = (definitions: readonly WorkflowDefinition[], gadgetId: number) =>
@@ -105,11 +116,14 @@ export const WorkflowTriggersPanel = ({
   useEffect(() => {
     let cancelled = false
     const load = async () => {
-      const [hooks, definitions, controlList, collaborators, schedules] = await Promise.all([
+      const [hooks, definitions, controlList, collaborators, schedules, lifecycleList] = await Promise.all([
         overseer.listHooks(), overseer.listWorkflowDefinitions(), overseer.listTriggerControls(),
         overseer.listCollaborators().catch(() => [] as CollaboratorInfo[]),
         overseer.listReadableWorkflowSchedules(),
+        // Unreadable, the triggers still show, with a line saying their state couldn't be read.
+        Promise.resolve().then(() => overseer.listTriggerLifecycles()).catch(() => null),
       ])
+      const lifecycles = lifecycleList && new Map(lifecycleList.map(lifecycle => [lifecycle.hookId, lifecycle]))
       const refs = await Promise.all(hooks.map(h => overseer.getTriggerDefinition(h.id)))
       const pins = new Map<number, WorkflowDefinitionRef>()
       refs.forEach((ref, i) => { if (ref) pins.set(hooks[i]!.id, ref) })
@@ -124,7 +138,7 @@ export const WorkflowTriggersPanel = ({
       // One instance-wide switch; every read reports the same.
       const assignmentsEnabled = assignmentList.some(state => state.enabled)
       const connections = new Map(pinned.map((h, i) => [h.id, connectionList[i]!]))
-      return { hooks, definitions, schedules, pins, controls, collaborators, assignments, assignmentsEnabled, connections }
+      return { hooks, definitions, schedules, pins, controls, collaborators, assignments, assignmentsEnabled, connections, lifecycles }
     }
     load()
       .then(ready => {
@@ -174,6 +188,8 @@ export const WorkflowTriggersPanel = ({
     setToggling(prev => new Set(prev).add(id))
     try {
       await (enabled ? overseer.enableHook(id) : overseer.disableHook(id))
+      // Off pauses a workflow trigger and on activates it (FAC-117): read its new state.
+      setReloadTick(t => t + 1)
     } catch {
       setHookEnabled(id, !enabled)
       toasts.add({ title: `Failed to ${enabled ? 'enable' : 'disable'} trigger`, variant: 'error' })
@@ -249,12 +265,19 @@ export const WorkflowTriggersPanel = ({
                 </p>
               </div>
             )}
+            {loaded.status === 'ready' && loaded.hooks.length > 0 && loaded.lifecycles === null && (
+              <p role="alert" className="mb-2 text-[12px] leading-4 text-kumo-warning">
+                Couldn&apos;t read whether these triggers are paused.
+              </p>
+            )}
             {loaded.status === 'ready' && loaded.hooks.length > 0 && (
               <ul className="m-0 list-none overflow-hidden rounded-xl border border-kumo-line bg-kumo-base p-0">
                 {loaded.hooks.map((hook, index) => {
                   const wakes = gadgetTitle(hook.gadgetId)
                   const pin = loaded.pins.get(hook.id)
                   const pinned = pin && loaded.definitions.find(d => d.id === pin.definitionId)
+                  const lifecycle = loaded.lifecycles?.get(hook.id)?.state
+                  const lifecycleText = lifecycle === 'draining' || lifecycle === 'paused' ? LIFECYCLE_TEXT[lifecycle] : null
                   const candidates = publishedFor(loaded.definitions, hook.gadgetId)
                     .filter(c => c.ref.definitionId !== pin?.definitionId || c.ref.revision !== pin?.revision)
                   return (
@@ -281,6 +304,9 @@ export const WorkflowTriggersPanel = ({
                           <p className="mt-0.5 mb-0 truncate text-[11px] leading-4 text-kumo-subtle">
                             Runs {pinned ? `“${pinned.title}”` : 'a definition'}, revision {pin.revision}
                           </p>
+                        )}
+                        {lifecycleText && (
+                          <p role="status" className="mt-0.5 mb-0 text-[11px] leading-4 text-kumo-warning">{lifecycleText}</p>
                         )}
                       </div>
                       {candidates[0] && (

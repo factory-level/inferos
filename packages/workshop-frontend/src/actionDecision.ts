@@ -78,6 +78,29 @@ export const contextText = (entry: ActionEntry, viewerProfileId?: string | null)
 export const UNCERTAIN_REJECTION_TEXT =
   'It was denied here, so local approval is closed; check the service for whether it took effect.'
 
+/**
+ * Whether `entry` is a workflow run's write whose outcome is unknown, which a person deciding it may
+ * settle (FAC-117 K2, `Overseer.resolveWorkflowRunWrite`): pending, of a run, its last attempt
+ * unknown, with no apply in flight. The server checks this again, and who may settle it.
+ */
+export const isSettleableRunWrite = (entry: ActionEntry): boolean =>
+  entry.state === 'pending' && entry.context?.kind === 'workflow-run' &&
+  entry.lastAttempt?.outcome === 'unknown' && entry.applying !== true && entry.settled === undefined
+
+/** The question a person settling an unknown write answers (FAC-117 K2). */
+export const SETTLE_QUESTION = 'Did this change happen?'
+
+/**
+ * What settling does and doesn't do: the kernel records the person's answer and the run reads it,
+ * and nothing is sent, applied or undone at the service.
+ */
+export const SETTLE_WARNING =
+  "InferOS records your answer, nothing more: it doesn't make or undo the change at the service. Check there first."
+
+/** How a settled write reads afterwards (FAC-117 K2): the person's answer, never a fact InferOS checked. */
+export const settledText = (settled: NonNullable<ActionEntry['settled']>): string =>
+  `${settled.by.name} said ${settled.outcome === 'applied' ? 'this change happened' : "this change didn't happen"}; nothing was sent again.`
+
 /** Why a pending action was blocked, or a rejected one was rejected without a person (FAC-118). */
 export const REJECTED_BECAUSE_TEXT: Record<NonNullable<ActionEntry['rejectedBecause']>, string> = {
   expired: "It expired before it was decided, so it was rejected. Ask for it again if it's still wanted.",

@@ -8,7 +8,9 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterAll, afterEach, beforeEach, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import { WORKFLOW_BINDINGS_NEEDED, type RequestedRun, type WorkflowDefinition } from '@gadgets/workshop-shared/workflow-definition'
+import {
+  WORKFLOW_BINDINGS_NEEDED, WORKFLOW_RUN_RETRY_REFUSED, WORKFLOW_RUN_RETRY_WINDOW_MS, type RequestedRun, type WorkflowDefinition,
+} from '@gadgets/workshop-shared/workflow-definition'
 import { RUN_OUTCOME_TEXT, RUN_REQUESTED_TEXT, WorkflowRunControls } from './WorkflowRunControls'
 
 const testGlobal = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -20,8 +22,10 @@ afterAll(() => {
 })
 
 vi.mock('@cloudflare/kumo', () => ({
-  Button: ({ children, onClick, disabled }: { children: ReactNode; onClick?: () => void; disabled?: boolean }) => (
-    <button type="button" onClick={onClick} disabled={disabled}>{children}</button>
+  Button: ({ children, onClick, disabled, 'aria-label': label }: {
+    children: ReactNode; onClick?: () => void; disabled?: boolean; 'aria-label'?: string
+  }) => (
+    <button type="button" onClick={onClick} disabled={disabled} aria-label={label}>{children}</button>
   ),
 }))
 
@@ -191,4 +195,71 @@ it("says a run didn't finish because its connections weren't set up", async () =
   const run: RequestedRun = { runId: 'r', invocationId: 'i', revision: 1, requestedAt: new Date(0), outcome: 'failed', reason: 'bindings-needed', actions: [] }
   await render({ listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }], listRequestedRuns: async () => [run] })
   expect(container.querySelector('[role="status"]')?.textContent).toMatch(/^Last run: Didn't finish: its connections aren't set up \(requested at .+\)$/)
+})
+
+// FAC-117 K2: Retry, another attempt of the same run, offered only on this person's own failed run.
+const recent = (outcome: RequestedRun['outcome'], extra: Partial<RequestedRun> = {}): RequestedRun =>
+  ({ runId: 'run-r', invocationId: 'inv-r', revision: 1, requestedAt: new Date(Date.now() - 60_000), outcome, actions: [], ...extra })
+const retryButton = () => [...container.querySelectorAll('button')].find(b => b.textContent === 'Retry')
+
+it("offers Retry only on the person's own newest run that failed, and retries that run", async () => {
+  for (const outcome of ['queued', 'running', 'waiting', 'succeeded', 'uncertain'] as const) {
+    await render({ listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }], listRequestedRuns: async () => [recent(outcome)] })
+    expect(retryButton()).toBeUndefined()
+  }
+  // listRequestedRuns is the caller's own runs: with none of theirs, none to retry, whatever others ran.
+  await render({ listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }], listRequestedRuns: async () => [] })
+  expect(retryButton()).toBeUndefined()
+  let retried = false
+  const retryWorkflowRun = vi.fn<Overseer['retryWorkflowRun']>(async () => { retried = true; return recent('queued') })
+  await render({
+    listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }],
+    listRequestedRuns: async () => [retried ? recent('queued') : recent('failed', { reason: 'runtime-error' })],
+    retryWorkflowRun,
+  })
+  expect(retryButton()!.getAttribute('aria-label')).toBe('Retry the last run of Issue refunds now')
+  await act(async () => { retryButton()!.click() })
+  expect(retryWorkflowRun).toHaveBeenCalledWith('inv-r')
+  // The same run, queued again: requested, never done; and no Retry while it is.
+  expect(container.querySelector('[role="status"]')?.textContent).toMatch(new RegExp(`^Last run: ${RUN_REQUESTED_TEXT}`))
+  expect(retryButton()).toBeUndefined()
+})
+
+it("disables Retry with the kernel's own sentence when the run says it can't be retried", async () => {
+  const cases: [Partial<RequestedRun>, string][] = [
+    [{ reason: 'cancelled' }, WORKFLOW_RUN_RETRY_REFUSED.cancelled],
+    [{ reason: 'attempts-exhausted' }, WORKFLOW_RUN_RETRY_REFUSED.exhausted],
+    [{ reason: 'runtime-error', requestedAt: new Date(Date.now() - WORKFLOW_RUN_RETRY_WINDOW_MS - 60_000) }, WORKFLOW_RUN_RETRY_REFUSED.tooOld],
+  ]
+  for (const [extra, sentence] of cases) {
+    const retryWorkflowRun = vi.fn<Overseer['retryWorkflowRun']>()
+    await render({
+      listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }],
+      listRequestedRuns: async () => [recent('failed', extra)],
+      retryWorkflowRun,
+    })
+    expect(retryButton()!.disabled).toBe(true)
+    expect([...container.querySelectorAll('[role="status"]')].map(n => n.textContent)).toContain(sentence)
+    expect(retryWorkflowRun).not.toHaveBeenCalled()
+  }
+})
+
+it("shows the server's refusal of a retry verbatim, never a generic error", async () => {
+  for (const refusal of [WORKFLOW_RUN_RETRY_REFUSED.repinned, WORKFLOW_RUN_RETRY_REFUSED.tooOld, 'This trigger is paused, so it starts no new runs.']) {
+    await render({
+      listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }],
+      listRequestedRuns: async () => [recent('failed', { reason: 'timed-out' })],
+      retryWorkflowRun: async () => { throw new Error(refusal) },
+    })
+    await act(async () => { retryButton()!.click() })
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(refusal)
+  }
+  // Only a rejection with no words of its own reads as the fixed sentence.
+  await render({
+    listTriggerControls: async () => [{ hookId: 7, label: 'Issue refunds now' }],
+    listRequestedRuns: async () => [recent('failed', { reason: 'timed-out' })],
+    retryWorkflowRun: async () => { throw 'lost' },
+  })
+  await act(async () => { retryButton()!.click() })
+  expect(container.querySelector('[role="alert"]')?.textContent).toBe("Couldn't retry this run.")
 })
