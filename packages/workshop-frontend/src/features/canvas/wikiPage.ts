@@ -176,7 +176,8 @@ export type WikiReference =
   /** One issue (`project/issue-card/<KEY>-<n>`), read from its project's board. */
   | { kind: 'issue'; href: string; boardRef: string; identifier: string }
   /** A Wiki page (`knowledge/document/<slug>`). */
-  | { kind: 'page'; href: string; host: string; slug: string }
+  /** A page of a Wiki, by its slug, or by its id (the `knowledge/page/<uuid>` alias, FAC-68). */
+  | { kind: 'page'; href: string; host: string; slug: string; id?: undefined } | { kind: 'page'; href: string; host: string; id: string; slug?: undefined }
   /**
    * A published console's widget (`knowledge/inferos-widget/<workspace>/<console>/<source gadget>`,
    * FAC-12), named by its source gadget and the definition the link was written for. It opens
@@ -197,7 +198,10 @@ const ISSUE_KEY = /^([A-Za-z0-9]+)-\d+$/
 
 export const parseWikiReference = (href: string): WikiReference => {
   const page = parseWikiDocumentUrl(href)
-  if (page) return { kind: 'page', href, host: page.host.toLowerCase(), slug: page.slug }
+  if (page) {
+    const host = page.host.toLowerCase()
+    return page.slug !== undefined ? { kind: 'page', href, host, slug: page.slug } : { kind: 'page', href, host, id: page.id }
+  }
   let url: URL
   try { url = new URL(href) } catch { return { kind: 'unsupported', href } }
   const host = url.hostname.toLowerCase()

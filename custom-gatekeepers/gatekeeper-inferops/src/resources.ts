@@ -338,8 +338,14 @@ export function wikiUrl({ host }: Pick<WikiRef, "host">): string {
   return `inferops://${host}/knowledge/wiki`;
 }
 
-/** A parsed Wiki page reference: the workspace and the page's slug. */
-export type WikiDocumentRef = WikiRef & { slug: string };
+/**
+ * A parsed Wiki page reference: the workspace, and the page by its slug (the canonical form) or by
+ * its UUID (the `knowledge/page/<uuid>` alias InferOps accepts too, FAC-68).
+ */
+export type WikiDocumentRef = WikiRef & ({ slug: string; id?: undefined } | { id: string; slug?: undefined });
+
+/** A page alias's id: a lowercase UUID, as InferOps' `document-ref.ts` reads it. */
+const PAGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 // A document slug: URL-unreserved characters in one or more `/`-separated segments (InferOps slugs
 // such as `dispatch/dispatch-a-crew`). No empty, `.` or `..` segment, so it can never step out of
@@ -356,14 +362,20 @@ export function isDocumentSlug(value: string): boolean {
 }
 
 /**
- * Parse a Wiki page reference, `inferops://<tenant>.<workspace>/knowledge/document/<slug>`, or
- * return null when `url` is not one. The slug is exactly one path segment; a slug containing `/` is
- * carried percent-encoded (`dispatch%2Fdispatch-a-crew`) and decoded once here, then validated.
- * Raw extra segments, other escapes, double encoding, a query or a fragment do not parse. It
- * identifies a page and grants nothing: the page is readable only through a Wiki binding of the
- * same workspace.
+ * Parse a Wiki page reference, `inferops://<tenant>.<workspace>/knowledge/document/<slug>`, or the
+ * alias `…/knowledge/page/<uuid>` (FAC-68: what the Dot cited before, which InferOps still reads),
+ * or return null when `url` is neither. The slug is exactly one path segment; a slug containing `/`
+ * is carried percent-encoded (`dispatch%2Fdispatch-a-crew`) and decoded once here, then validated.
+ * The alias's id is a lowercase UUID. Raw extra segments, other escapes, double encoding, a query
+ * or a fragment do not parse. It identifies a page and grants nothing: the page is readable only
+ * through a Wiki binding of the same workspace.
  */
 export function parseWikiDocumentUrl(url: string): WikiDocumentRef | null {
+  const alias = /^inferops:\/\/([^/?#]+)\/knowledge\/page\/([^/?#]+)$/.exec(url.trim());
+  if (alias) {
+    const labels = parseHost(alias[1]!);
+    return labels && PAGE_ID.test(alias[2]!) ? { host: alias[1]!, ...labels, id: alias[2]! } : null;
+  }
   const match = /^inferops:\/\/([^/?#]+)\/knowledge\/document\/([^/?#]+)\/?$/.exec(url.trim());
   const labels = match ? parseHost(match[1]!) : null;
   if (!match || !labels) return null;
@@ -376,7 +388,7 @@ export function parseWikiDocumentUrl(url: string): WikiDocumentRef | null {
 }
 
 /** The reference of one Wiki page, its slug as one encoded segment. Inverse of `parseWikiDocumentUrl`. */
-export function wikiDocumentUrl({ host, slug }: Pick<WikiDocumentRef, "host" | "slug">): string {
+export function wikiDocumentUrl({ host, slug }: { host: string; slug: string }): string {
   return `inferops://${host}/knowledge/document/${slug.replaceAll("/", "%2F")}`;
 }
 

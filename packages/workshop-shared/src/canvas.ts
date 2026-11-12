@@ -179,6 +179,20 @@ export const CANVAS_WIKI_REF = /^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/kn
 /** Wiki page slug syntax accepted in an `inferops.wiki` widget's `page` parameter: URL-unreserved characters only. */
 export const CANVAS_WIKI_PAGE = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,199}$/;
 
+/**
+ * A page reference an `inferops.wiki` widget's `page` parameter may hold instead of a slug (FAC-68):
+ * `inferops://<host>/knowledge/document/<slug>` (a `/` in the slug carried as %2F) or the alias
+ * `…/knowledge/page/<uuid>`, as a Dot citation or a search hit names it. Its host must be the
+ * widget's own Wiki's; it opens that page, read with the widget's binding, and grants nothing.
+ */
+export const isCanvasWikiPageRef = (page: string, targetRef: string): boolean => {
+  const match = /^inferops:\/\/([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\/knowledge\/(document|page)\/([^/?#]+)$/.exec(page);
+  if (!match || match[1] !== /^inferops:\/\/([^/]+)\//.exec(targetRef)?.[1]) return false;
+  if (match[2] === "page") return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(match[3]!);
+  if (/%(?!2[fF])/.test(match[3]!) || match[3]!.length > 600) return false;
+  return match[3]!.replace(/%2[fF]/g, "/").split("/").every(segment => CANVAS_WIKI_PAGE.test(segment) && segment !== "." && segment !== "..");
+};
+
 /** Ordered group of widgets with a curated responsive column count. */
 export interface CanvasSection {
   /** Stable section ID, unique across this definition. */
@@ -311,7 +325,8 @@ function widget(value: unknown, options: CanvasReadOptions = {}): CanvasWidget {
     if (!CANVAS_WIKI_REF.test(w.targetRef)) return invalid("target reference");
     const dataBinding = parseDataBinding(w.dataBinding, "knowledge/wiki", w.targetRef);
     const params = record(w.params, ["page"], "widget parameters");
-    if (params.page !== null && (typeof params.page !== "string" || !CANVAS_WIKI_PAGE.test(params.page))) return invalid("wiki page");
+    if (params.page !== null && (typeof params.page !== "string" ||
+        !(CANVAS_WIKI_PAGE.test(params.page) || isCanvasWikiPageRef(params.page, w.targetRef)))) return invalid("wiki page");
     return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, dataBinding, size: w.size, params: { page: params.page } };
   }
   if (w.kind === "inferos.governed-table") {

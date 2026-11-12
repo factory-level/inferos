@@ -103,6 +103,8 @@ const IDEMPOTENCY_PREFIX = "idem:";
 const WIKI_KEY = "wiki:v2";
 const NO_INFERMIND_KEY = "wiki:no-infermind";
 const SEARCH_DOWN_KEY = "wiki:search-down";
+/** Test control (FAC-68): the page references InferOps names, in place of the demo's own. */
+const DOCUMENT_REFS_KEY = "wiki:document-refs";
 const PROPOSALS_KEY = "wiki:proposals:v1";
 const PROPOSAL_ROLE_KEY = "wiki:proposal-role";
 const TABLES_KEY = "tables:v1";
@@ -589,6 +591,14 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
       .map(({ id, slug, title, parentId, siblingOrder }) => ({ id, slug, title, parentId, siblingOrder }));
   }
 
+  /** Each page's reference as InferOps names it (FAC-68): by slug, `/` carried as %2F. */
+  async listDocumentRefs(): Promise<ReadonlyMap<string, string>> {
+    const set = this.ctx.storage.kv.get<[string, string][]>(DOCUMENT_REFS_KEY);
+    if (set) return new Map(set);
+    return new Map(this.#wiki().documents.map(d =>
+      [d.id, `inferops://${MOCK_HOST}/knowledge/document/${d.slug.replaceAll("/", "%2F")}`]))
+  }
+
   async readDocument(documentId: string): Promise<WikiDocumentHead> {
     const found = this.#wiki().documents.find(d => d.id === documentId);
     if (!found) throw new InferOpsError("NOT_FOUND", "No such page in this Wiki.");
@@ -915,6 +925,15 @@ export class MockInferOps extends DurableObject<Cloudflare.Env> {
   }
 
   /** Make the demo workspace one with InferMind (the default) or without it. */
+  /**
+   * Test control (FAC-68): the page references InferOps answers with, by page id, as given (an
+   * InferOps before FAC-68 answers none); null restores the demo's own.
+   */
+  async setDocumentRefs(refs: [string, string][] | null): Promise<void> {
+    if (refs) this.ctx.storage.kv.put(DOCUMENT_REFS_KEY, refs);
+    else this.ctx.storage.kv.delete(DOCUMENT_REFS_KEY);
+  }
+
   /** Test and demo control: make Wiki search fail as InferOps does when it times out. */
   async setSearchUnavailable(unavailable: boolean): Promise<void> {
     if (unavailable) this.ctx.storage.kv.put(SEARCH_DOWN_KEY, true);
@@ -1098,6 +1117,7 @@ export function openInferOpsClient(
       refused(stub.cancelRun(projectKey, runId, idempotencyKey)),
     listDocuments: () => stub.listDocuments(),
     readDocument: documentId => stub.readDocument(documentId),
+    listDocumentRefs: () => stub.listDocumentRefs(),
     readStructure: () => stub.readStructure(),
     readDocumentText: documentId => stub.readDocumentText(documentId),
     searchWiki: (query, limit) => stub.searchWiki(query, limit),
