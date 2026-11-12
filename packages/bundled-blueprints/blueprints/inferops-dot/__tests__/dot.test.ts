@@ -132,6 +132,17 @@ describe("a workflow-run proposal's words", () => {
       .toBe("It ran on the workflow's own connections.");
   });
 
+  it("has words for every reason InferOS gives a failed or uncertain run", () => {
+    const failures = ["requester-revoked", "assignment-changed", "trigger-gone", "bindings-needed", "cancelled", "timed-out",
+      "attempts-exhausted", "runtime-error"];
+    for (const reasonCode of failures) {
+      expect(workflowRunWords({ outcome: "succeeded" }, run("failed", { reasonCode })).detail).toMatch(/^It failed because /);
+    }
+    for (const reasonCode of ["action-unknown", "lost-after-write", "not-started"]) {
+      expect(workflowRunWords({ outcome: "succeeded" }, run("uncertain", { reasonCode })).detail).toMatch(/^It's uncertain because /);
+    }
+  });
+
   it("reads waiting, declined, failed and uncertain as any change does", () => {
     for (const status of [{ outcome: "waiting" }, { outcome: "rejected" }, { outcome: "failed", code: "EXPIRED" }, { outcome: "unknown" }] as const) {
       expect(workflowRunWords(status)).toEqual(proposalWords(status));

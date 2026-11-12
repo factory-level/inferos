@@ -76,6 +76,8 @@ export const WORKFLOW_RUN_TOOL = "inferos_workflow_invoke";
 const RUN_REASONS: Record<string, string> = {
   "runtime-error": "its code stopped with an error",
   "requester-revoked": "you could no longer run it when it started",
+  "assignment-changed": "its trigger's assigned account changed after you approved it",
+  "trigger-gone": "its trigger was removed",
   "bindings-needed": "its connections weren't set up",
   cancelled: "it was cancelled",
   "timed-out": "it ran past its time limit",

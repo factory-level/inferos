@@ -126,7 +126,8 @@ describe("the Dot's answers, parsed strictly", () => {
     // An older InferOps (no field), nothing recorded (null), or one that doesn't read as a run: none.
     expect(parseDotProposal(proposal).run).toBeNull();
     for (const bad of [null, "x", { ...run, kind: "delegate" }, { ...run, outcome: "done" }, { ...run, ranAs: "person" },
-      { ...run, runId: "" }, { ...run, reasonCode: 7 }, { ...run, reasonCode: "It failed: <b>secret</b>" }]) {
+      { ...run, runId: "" }, { ...run, reasonCode: 7 }, { ...run, reasonCode: "It failed: <b>secret</b>" },
+      { ...run, reasonCode: "made-up-reason" }, { ...run, reasonCode: "constructor" }]) {
       expect(parseDotProposal({ ...proposal, run: bad }).run).toBeNull();
     }
   });
