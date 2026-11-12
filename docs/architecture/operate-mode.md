@@ -18,6 +18,8 @@ covers:
   - packages/workshop-backend/__tests__/delegates.test.ts
   - packages/workshop-backend/__tests__/temporary-canvases.test.ts
   - packages/workshop-backend/__tests__/approved-temporary-canvas.test.ts
+  - packages/workshop-frontend/src/features/operate/TemporaryCanvases.tsx
+  - packages/workshop-frontend/src/features/operate/TemporaryCanvases.test.tsx
   - packages/workshop-backend/__tests__/console-widget-events.test.ts
   - packages/workshop-backend/__tests__/workflow-dynamic-definitions.test.ts
   - packages/workshop-backend/__tests__/workflow-definition-expiry-alarm.test.ts
@@ -1179,7 +1181,15 @@ FAC-137 (K1): a person's temporary canvases, each a set of widget placements in 
   - **At submit** the kernel checks it (`parseTemporaryCanvasInput`, stored as checked), refuses an action that declares a run too, and appends its own last field, `TEMPORARY_CANVAS_FIELD_LABEL` ("<title> (<n> widgets)"). That label is reserved with the run's, folded the same way (`isReservedFieldLabel`). `ActionContext.declaredCanvas` (title and widget count, kind `declared-canvas` when nothing else is the origin) comes from the kernel's own record only.
   - **Never automatic.** `autoApprovalRule` approves no declared canvas.
   - **The effect.** `ApprovedEffects.createTemporaryCanvas()` is handed to `applyAction` only for a person's own approval (never an automatic one, an agent's or the system's, nor an assigned run's write) and revoked when it returns. `#createApprovedTemporaryCanvas` then: requires this workspace to be the approver's own live operate session (`temporaryCanvasesOf`; anyone else, or a retired session, is `TEMPORARY_CANVAS_NOT_YOURS`); checks every widget again as offered to them now, a console widget by its own workspace's `listWidgetInstancesFor` and a built-in kind by their own widget search, refusing the whole canvas if one isn't (`TEMPORARY_CANVAS_WIDGET_UNAVAILABLE`); and creates it, with the server's expiry. Idempotent per action, for the same approver in the same live session only (r2's HIGH): the record (`fac137:approvedCanvas:<action>`, `ApprovedCanvasRecord`) holds the canvas with the approver and session it was created for. A repeat, or a retry of the apply, first passes `temporaryCanvasesOf` again (the owner, a live session, not retired), then gets the stored canvas only if the record names that approver and session; anyone else, or a retired session, is `TEMPORARY_CANVAS_NOT_YOURS` and is never handed the stored canvas's id. It takes no arguments, so nothing at apply names another canvas. The stored answer also needs the canvas to still be there (r2's second HIGH): if the person has since removed it, or it expired, a retry is refused with `TEMPORARY_CANVAS_GONE` ("expired or removed"), is never reported as created, and creates nothing.
-- **Not built here.** The InferOps gatekeeper staging a Dot proposal as such an action (G1), and the UI (U1). Widget state is not yet keyed to a placement on a temporary canvas: `#widgetStateKey` knows only the person's personal canvas placements.
+- **The UI (U1).** `workshop-frontend/src/features/operate/TemporaryCanvases.tsx`, on the person's own canvas page ("My canvas") under their personal canvas, as **From your Dot**:
+  - It lists their temporary canvases through the session's own `listTemporaryCanvases`. Each has its title and widget count. An unsaved one shows "Temporary · expires <time> unless saved", with the server's `expiresAt` in a `<time>`; a saved one shows **Saved**.
+  - **Open** reads the canvas again (`getTemporaryCanvas`) and shows its placements on the same 12-column grid as the personal canvas. Each is a `PlacedWidget` with no `edit` controls, so nothing on it can be moved, resized, filtered or removed, and each widget opens through its own checked path, as on the personal canvas.
+  - **Save** (`saveTemporaryCanvas` at the revision it read) and **Remove…**, which asks for confirmation (`removeTemporaryCanvas`), are the person's own actions. The agent has none.
+  - **Expiry while it is shown:** once a canvas's `expiresAt` passes, it reads **Expired** with `TEMPORARY_CANVAS_EXPIRED`, closes, and offers no Open, Save or Remove, as the server then refuses them.
+  - **Refusals are said plainly and the list is read again:** `TEMPORARY_CANVAS_EXPIRED` (the save-vs-expiry race), `TEMPORARY_CANVAS_CONFLICT` and `TEMPORARY_CANVAS_NOT_FOUND`.
+  - **Its states are drawn:** loading, empty ("Ask your Dot to compose one"), error with **Try again**, and `TEMPORARY_CANVASES_UNAVAILABLE` (not the person's own session).
+  - **Tests:** `TemporaryCanvases.test.tsx`, plus `PlacedWidget.test.tsx` (no arrange or filter controls without `edit`).
+- **Not built yet.** Widget state is not keyed to a placement on a temporary canvas: `#widgetStateKey` knows only the person's personal canvas placements. A temporary canvas's own layout can't be changed: the kernel offers no RPC for it.
 
 ### Shared configuration
 
