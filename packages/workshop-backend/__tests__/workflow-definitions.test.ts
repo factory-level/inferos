@@ -82,6 +82,16 @@ describe("workflow delivery retention", () => {
     expect(isLiveWorkflowDelivery({ run: {}, at: new Date(Date.now() - WORKFLOW_RUN_START_WINDOW_MS - 1) })).toBe(false);
     expect(isLiveWorkflowDelivery({})).toBe(false);
   });
+
+  // FAC-117 K2, the addition: Kernel 1's failure reasons are terminal, recorded result or not; a
+  // cancelled run still running (it ends at its next guarded call) is still live work.
+  it("treats a cancelled, timed-out or attempts-exhausted run as terminal, and a cancelled one still running as live", () => {
+    for (let reason of ["cancelled", "timed-out", "attempts-exhausted"] as const) {
+      expect(isLiveWorkflowDelivery({ run: {}, result: { outcome: "failed", reason } }), reason).toBe(false);
+      expect(isLiveWorkflowDelivery({ run: {}, execution: { state: "failed" } }), reason).toBe(false);
+    }
+    expect(isLiveWorkflowDelivery({ run: {}, execution: { state: "running" } })).toBe(true);
+  });
 });
 
 describe("saving a workflow definition", () => {
@@ -384,6 +394,26 @@ describe("triggers and runs", () => {
       .toThrow("Wait for older completed runs to expire");
     expect(store.deliveries(ADA.id, saved.id, "build")).toHaveLength(3);
     expect(store.run(first.run!.runId)).not.toBeNull();
+  });
+
+  // FAC-117 K2, the addition: each of Kernel 1's failure reasons gets a history expiry, so its
+  // definition can be swept; an uncertain run keeps none until it is settled.
+  it("indexes a cancelled, timed-out or attempts-exhausted run for expiry, and an uncertain one not until settled", () => {
+    let { store, storage, headOf } = workspace({ max: 10 });
+    let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
+    store.publish(ADA, saved.id, 1);
+    store.pinTrigger(ADA.id, 11, GADGET, { definitionId: saved.id, revision: 1 });
+    const indexed = () => [...storage.workflowDeliveryExpiries.list()].map(pointer => pointer.deliveryId);
+    for (let reason of ["cancelled", "timed-out", "attempts-exhausted"] as const) {
+      let delivery = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+      store.recordResult(delivery.deliveryId, { outcome: "failed", reason });
+      expect(indexed(), reason).toContain(delivery.deliveryId);
+    }
+    let uncertain = store.fire(11, GADGET, headOf, everyoneBuilds)!;
+    store.recordResult(uncertain.deliveryId, { outcome: "uncertain", reason: "action-unknown" });
+    expect(indexed()).not.toContain(uncertain.deliveryId);
+    store.recordResult(uncertain.deliveryId, { outcome: "failed", reason: "runtime-error" });
+    expect(indexed()).toContain(uncertain.deliveryId);
   });
 
   it("expires not-started history after the start window", () => {

@@ -21,7 +21,7 @@ import {
   REQUESTED_RUNS_MAX, WORKFLOW_RUN_REPORT_MAX_CHARS, WORKFLOW_RUN_START_WINDOW_MS, dynamicDefinitionTtlMs,
   maxWorkflowDeliveries, workflowRunHistoryRetentionMs,
   WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS, WORKFLOW_BINDINGS_UNATTRIBUTED, parseWorkflowDefinitionTitle,
-  TRIGGER_DRAINING, TRIGGER_LIFECYCLE_REFUSED, workflowRunLimits,
+  TRIGGER_DRAINING, TRIGGER_LIFECYCLE_REFUSED, workflowRunLimits, WORKFLOW_RUN_RETRY_REFUSED, WORKFLOW_WRITE_SETTLE_REFUSED,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { checkAssignments, requireBound, requirementsOf, unmetBindings } from "./workflow-duplicate.js";
 import { buildGatekeeperVendorMap } from "./auth/auth-vendors.js";
@@ -1458,6 +1458,11 @@ export type ActionRecord = {
    * applied (`REPLAY_DUPLICATE_REFUSED`).
    */
   replayDuplicateOf?: number;
+  /**
+   * Set when a person settled this run write's unknown outcome (FAC-117 K2,
+   * `resolveWorkflowRunWrite`): what they found, who and when. Nothing was sent again.
+   */
+  settled?: { outcome: "applied" | "not-applied"; by: AiChatAuthorInfo; at: Date };
 } | {
   type: "observation";
   description: ObservationDescription;
@@ -2112,6 +2117,9 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Runs a person asked for, queued here until they end (FAC-112; see
       // WorkspaceWorkflowDefinitionStore.queueRun): what the alarm runs, or runs again after a reset.
       workflowRunQueue: collection<QueuedWorkflowRun>()({ primaryKey: "deliveryId" }),
+      // The call of each run that failed (FAC-117 K2), kept so the person who asked may retry it as
+      // another attempt of the same run; removed with the run's history, or when it's retried.
+      endedRunCalls: collection<QueuedWorkflowRun>()({ primaryKey: "deliveryId" }),
       // The newest on-request runs, which the run rates count (see workflow-definition-store.ts).
       workflowInvocationLog: collection<StoredWorkflowInvocationRecord>()({ primaryKey: "id" }),
       // Authored consoles: one role's menu of views over this workspace's canvases (see console-store.ts).
@@ -7780,9 +7788,10 @@ class OverseerImpl implements AgentHooks {
   // Evaluate requested run `deliveryId`'s result (FAC-114; inferos ADR 0012 §3, proposed) from its
   // execution and its own writes, and record it with run history delivered. `succeeded` needs its
   // code to have finished and none of its writes to be waiting, applying or unknown; any unknown
-  // write makes it `uncertain`, as does a throw after it proposed a write; a throw before any is
-  // `failed`. Called as the run ends (with its report) and as each of its writes settles, so a run
-  // waiting on a write moves on when that write does, and an uncertain one when it's reconciled.
+  // write makes it `uncertain`, as does a throw after it proposed a write that may still happen; a
+  // throw before any write, or once every write is decided or settled (FAC-117 K2), is `failed`.
+  // Called as the run ends (with its report) and as each of its writes settles, so a run waiting on
+  // a write moves on when that write does, and an uncertain one when it's settled.
   #settleRun(deliveryId: number, report?: unknown): void {
     let store = this.workflowDefinitionStore();
     let delivery = this.storage.workflowDeliveries.get(deliveryId);
@@ -7794,9 +7803,12 @@ class OverseerImpl implements AgentHooks {
     // A cancelled run whose every write was rejected or failed unapplied made no write (FAC-117).
     let cancelledUnwritten = execution.failure === "cancelled" &&
       outcomes.every(outcome => outcome === "rejected" || outcome === "failed");
+    // A failed run is uncertain only while a write of it is (FAC-117 K2): one unknown, or one still
+    // waiting or applying, which may yet happen. Once every write is decided or settled, it failed.
+    let undecided = outcomes.some(outcome => outcome === "waiting" || outcome === "running");
     if (execution.state === "failed") {
-      result = outcomes.length > 0 && !cancelledUnwritten
-        ? { outcome: "uncertain", reason: outcomes.includes("unknown") ? "action-unknown" : "lost-after-write" }
+      result = outcomes.includes("unknown") ? { outcome: "uncertain", reason: "action-unknown" }
+        : undecided && !cancelledUnwritten ? { outcome: "uncertain", reason: "lost-after-write" }
         : { outcome: "failed", ...(execution.failure ? { reason: execution.failure } : {}) };
     } else if (outcomes.includes("unknown")) {
       result = { outcome: "uncertain", reason: "action-unknown" };
@@ -13413,6 +13425,96 @@ class OverseerImpl implements AgentHooks {
 
 
   /**
+   * Retry the failed run the request `invocationId` made, as `caller` (FAC-117 K2): another attempt
+   * of the same run (`WorkspaceWorkflowDefinitionStore.retryRun`), so `attempts` bounds it and every
+   * write it proposes again is matched to the one it made, never applied twice (`#runWrite`). Only the
+   * person who asked; anyone else, and a run that doesn't exist, are told "No such run.". Before
+   * anything is queued, as a fresh request is refused: the trigger live, enabled and active (not
+   * draining, paused or retired), its connections set up (FAC-123), with assignments off not
+   * assigned and not auto-retired (FAC-102), and its pinned revision still runnable (FAC-111:
+   * `requireCurrentRevision`, and an unpublished revision's owner still able to build); the run's own state
+   * (failed, not cancelled, attempts left, its trigger still pinned to the run's own definition and
+   * revision, admitted within `WORKFLOW_RUN_RETRY_WINDOW_MS`: `requireRetryable`, checked again in
+   * `retryRun`'s transaction); no write of the run that a replay can't match (its description
+   * incomplete), since that one could be proposed and applied again; and the person's own admission
+   * again, as when the run starts (`requireRunRequester`: the trigger's control lists them, the same
+   * executor, their right to run the definition, and their InferOps `workflow:invoke` in the run's
+   * company). After that last await the trigger is read once more, then the local re-check
+   * (`revalidate`), then the run is queued, with no await between them (the FAC-104 order).
+   */
+  async retryWorkflowRun(invocationId: string, caller: AiChatAuthorInfo): Promise<RequestedRun> {
+    let store = this.workflowDefinitionStore();
+    let delivery = typeof invocationId === "string" ? store.deliveryOfInvocation(invocationId) : null;
+    if (!delivery || delivery.invocation?.requestedBy !== caller.id) throw new Error("No such run.");
+    let { hookId, id: deliveryId } = delivery;
+    // Who may build here, resolved before the other awaits and read after the last one (as a fresh request).
+    let roleOf = await this.definitionRoles();
+    let requireStarts = () => {
+      let record = requireLiveHook(this, hookId);
+      // A duplicate's connections set up (FAC-123), refused here rather than at the run's start.
+      this.requireHookBound(hookId);
+      this.requireTriggerStarts(hookId);
+      // Assignments off (FAC-102): refused here, as a fresh request is, never left to fail at its start.
+      if (!workflowAssignmentsEnabled(this.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
+      // Nor once its assignment was retired automatically, until an Admin acts (FAC-102 follow-up B).
+      if (store.autoRetiredOf(hookId)) throw new Error(TRIGGER_AUTO_RETIRED);
+      // The pinned revision still runnable (FAC-111), as a fresh request checks it at admission: its
+      // commit still the gadget's head, and an unpublished one's owner still able to build here. A
+      // retry queues its kept call again without going through fire, which checks these too.
+      store.requireCurrentRevision(hookId, record.gadgetId ?? this.defaultGadgetId ?? null, gadgetId => this.getGadgetHead(gadgetId));
+      store.requireUnpublishedOwnerBuilds(hookId, roleOf);
+    };
+    requireStarts();
+    // Its own state first, so a cancelled, spent, repinned or old run is told so, never refused as admission.
+    store.requireRetryable(deliveryId, this.runLimits().attempts);
+    let runId = delivery.run?.runId;
+    if (runId !== undefined && this.#runWrites(runId).some(record => !runWriteMatchable(record))) {
+      throw new Error(WORKFLOW_RUN_RETRY_REFUSED.unmatchable);
+    }
+    let check = await requireRunRequester(this, hookId, deliveryId);
+    requireStarts();
+    check.revalidate();
+    store.retryRun(deliveryId, caller, this.runLimits().attempts);
+    let retried = { hookId, deliveryId, ...(runId ? { runId } : {}) };
+    logger.info("workflow run retried", { event: "workflow.run.retried", ...retried });
+    this.#updateAlarm();
+    let read = await this.getRequestedRun(caller.id, invocationId);
+    if (!read) throw new Error("No such run.");
+    return read;
+  }
+
+  /**
+   * Settle run write `actionId`, whose outcome is unknown, as `outcome`, for `by` (FAC-117 K2): the
+   * answer of the person deciding it, who found at the provider whether it applied. The caller checks
+   * they may decide it (`#requireDecider`). Only a workflow run's write, pending, with an unknown last
+   * attempt and no apply in flight; anything else is `WORKFLOW_WRITE_SETTLE_REFUSED`. Recorded on the
+   * action (`settled`), its state following it, with nothing sent to its connection; then the run's
+   * result is read again (`settleRunOfAction`), so a run that was uncertain only because of it reads
+   * what it now is.
+   */
+  async resolveWorkflowRunWrite(actionId: number, outcome: "applied" | "not-applied", by: AiChatAuthorInfo): Promise<void> {
+    if (outcome !== "applied" && outcome !== "not-applied") throw new TypeError("A write is settled as applied or not-applied.");
+    let record = Number.isSafeInteger(actionId) ? this.storage.actions.get(actionId) : undefined;
+    let settleable = (current: ActionRecord | undefined): current is ActionRecord & {type: "action"} =>
+      current?.type === "action" && (current.workflowRun !== undefined || current.executedAs !== undefined) &&
+      current.state === "pending" && current.lastAttempt?.outcome === "unknown" && current.applyStartedAt === undefined;
+    if (!settleable(record)) throw new Error(WORKFLOW_WRITE_SETTLE_REFUSED);
+    await this.withActionClaim(actionId, async () => {
+      let current = this.storage.actions.get(actionId);
+      if (!settleable(current)) throw new Error(WORKFLOW_WRITE_SETTLE_REFUSED);
+      let at = new Date();
+      this.storage.actions.put({
+        ...current,
+        state: outcome === "applied" ? "approved" : "failed",
+        appliedAt: at,
+        settled: { outcome, by: { type: by.type, id: by.id, name: by.name }, at },
+      });
+    });
+    logger.info("workflow run write settled", { event: "workflow.run.write_settled", actionId, operation: outcome });
+    this.settleRunOfAction(actionId);
+  }
+
+  /**
    * Who may read and run a published definition beyond its owner and the people it is shared with
    * (FAC-122): today's rule, the whole workspace, until the product decision lands. Tests set it.
    */
@@ -17938,6 +18040,16 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
     let roleOf = await this.impl.definitionRoles();
     return this.impl.cancelWorkflowRun(invocationId, profile, roleOf(profile.id));
   }
+  async retryWorkflowRun(invocationId: string): Promise<RequestedRun> {
+    return this.impl.retryWorkflowRun(invocationId, await this.#getClientProfile());
+  }
+  // FAC-117 K2: whoever may decide the action here (#requireDecider, as for approve and reject).
+  async resolveWorkflowRunWrite(actionId: number, outcome: "applied" | "not-applied"): Promise<void> {
+    let action = Number.isSafeInteger(actionId) ? this.impl.storage.actions.get(actionId) : undefined;
+    if (action?.type !== "action") throw new Error(`No such action: ${actionId}`);
+    await this.#requireDecider(action);
+    return this.impl.resolveWorkflowRunWrite(actionId, outcome, await this.#getClientProfile());
+  }
 
   /**
    * Deletes an ordinary hook immediately; a workflow trigger is paused first and retired after
@@ -19113,6 +19225,12 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     let profile = await retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger);
     return this.impl.cancelWorkflowRun(invocationId, profile, "use");
   }
+  async retryWorkflowRun(invocationId: string): Promise<RequestedRun> {
+    let profile = await retryOnDoReset(() => this.#clientUser.whoami(), this.impl.logger);
+    return this.impl.retryWorkflowRun(invocationId, profile);
+  }
+  // A use collaborator decides no action here, so settles none (FAC-117 K2).
+  async resolveWorkflowRunWrite(_actionId: number, _outcome: "applied" | "not-applied"): Promise<void> { this.#deny(); }
   async pauseTrigger(_hookId: number): Promise<TriggerLifecycle> { this.#deny(); }
   async activateTrigger(_hookId: number): Promise<TriggerLifecycle | null> { this.#deny(); }
   async retireTrigger(_hookId: number): Promise<TriggerLifecycle> { this.#deny(); }
@@ -19805,6 +19923,8 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async provisionTriggerCredential(_hookId: number, _key: string): Promise<TriggerAssignment> { this.#deny(); }
   async listTriggerControls(): Promise<TriggerControl[]> { this.#deny(); }
   async cancelWorkflowRun(_invocationId: string): Promise<void> { this.#deny(); }
+  async retryWorkflowRun(_invocationId: string): Promise<RequestedRun> { this.#deny(); }
+  async resolveWorkflowRunWrite(_actionId: number, _outcome: "applied" | "not-applied"): Promise<void> { this.#deny(); }
   async pauseTrigger(_hookId: number): Promise<TriggerLifecycle> { this.#deny(); }
   async activateTrigger(_hookId: number): Promise<TriggerLifecycle | null> { this.#deny(); }
   async retireTrigger(_hookId: number): Promise<TriggerLifecycle> { this.#deny(); }
@@ -20882,6 +21002,14 @@ function sanitizeWorkflowScheduleCadence(value: unknown): WorkflowScheduleSummar
     freq: "weekly", interval: calendar.interval, byDay: calendar.byDay as string[],
     hour: calendar.hour, minute: calendar.minute, anchorMs: calendar.anchorMs,
   } };
+}
+
+// Whether a replay can match run write `record` to itself (FAC-112): only one recorded with its
+// `writeKey`, which a write whose description is incomplete never gets (`#runWrite`). A retry of a
+// run holding any other is refused (FAC-117 K2), since that write could be proposed and applied again.
+function runWriteMatchable(record: ActionRecord & {type: "action"}): boolean {
+  return record.workflowRun ? record.workflowRun.writeKey !== undefined
+    : record.executedAs ? record.executedAs.writeKey !== undefined : true;
 }
 
 function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {
