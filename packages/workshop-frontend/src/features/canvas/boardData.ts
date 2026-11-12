@@ -11,7 +11,7 @@
 // no batching.
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
-import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
+import { CANVAS_BOARD_WORKFLOWS, type CanvasBoardWorkflow, type CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
 import type { Board, InferOpsProjectSession, IssueActivity, IssueChanges, NewIssue, Revision } from '@inferos/gatekeeper-inferops/src/types'
 import type { BoardMetrics } from './boardMetrics'
 import { openInferOpsSession } from './inferopsConnection'
@@ -73,6 +73,13 @@ export const canonicalBoardRef = (targetRef: string): string =>
 
 export const boardRequestKey = (request: BoardRequest): string =>
   `${request.kind}|${request.version}|${canonicalBoardRef(request.targetRef)}|${request.params.workflow}|${request.params.showCompleted}`
+
+/**
+ * The workflow a board card's **Workflow** button switches to: the next of `CANVAS_BOARD_WORKFLOWS`
+ * (software, content, service), wrapping round. Presentation only, like every card param.
+ */
+export const nextBoardWorkflow = (workflow: CanvasBoardWorkflow): CanvasBoardWorkflow =>
+  CANVAS_BOARD_WORKFLOWS[(CANVAS_BOARD_WORKFLOWS.indexOf(workflow) + 1) % CANVAS_BOARD_WORKFLOWS.length]!
 
 /** The columns a card shows for its params. Presentation only: the whole board was read. */
 export const visibleColumns = (board: Board, params: BoardRequest['params']): Board['columns'] =>

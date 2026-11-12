@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { Board, Issue, IssueActivity, IssueChanges, NewIssue } from '@inferos/gatekeeper-inferops/src/types'
-import { BoardData, boardRequestKey, canonicalBoardRef, visibleColumns, type BoardRequest } from './boardData'
+import { BoardData, boardRequestKey, canonicalBoardRef, nextBoardWorkflow, visibleColumns, type BoardRequest } from './boardData'
 import { BoardMetrics, percentile } from './boardMetrics'
 
 const DEMO = 'inferops://demo.local/project/board/DEMO'
@@ -473,6 +473,24 @@ describe('BoardData', () => {
     expect(visibleColumns(full, { workflow: 'software', showCompleted: false }).map(c => c.state.id)).toEqual(['todo'])
     expect(visibleColumns(full, { workflow: 'software', showCompleted: true }).map(c => c.state.id)).toEqual(['todo', 'done'])
     expect(visibleColumns(full, { workflow: 'content', showCompleted: true }).map(c => c.state.id)).toEqual(['draft'])
+  })
+
+  // FAC-146: a service board (the residential-service ladder) shows its own columns, and only them.
+  it('shows a service board its own columns', () => {
+    const service = (id: string, name: string, group: Board['columns'][number]['state']['group'], position: number) =>
+      ({ state: { id, name, group, position, workflow: 'service' as const }, issues: [] })
+    const jobs: Board = { ...board([]), columns: [...board([]).columns,
+      service('enquiry', 'Enquiry', 'backlog', 10), service('quoted', 'Quoted', 'backlog', 11),
+      service('booked', 'Booked', 'unstarted', 12), service('completed', 'Completed', 'completed', 13)] }
+    expect(visibleColumns(jobs, { workflow: 'service', showCompleted: false }).map(c => c.state.name)).toEqual(['Enquiry', 'Quoted', 'Booked'])
+    expect(visibleColumns(jobs, { workflow: 'service', showCompleted: true }).map(c => c.state.name)).toEqual(['Enquiry', 'Quoted', 'Booked', 'Completed'])
+    expect(visibleColumns(jobs, { workflow: 'software', showCompleted: true }).every(c => c.state.workflow === 'software')).toBe(true)
+  })
+
+  it('steps a card through software, content and service, then round again', () => {
+    expect(nextBoardWorkflow('software')).toBe('content')
+    expect(nextBoardWorkflow('content')).toBe('service')
+    expect(nextBoardWorkflow('service')).toBe('software')
   })
 })
 

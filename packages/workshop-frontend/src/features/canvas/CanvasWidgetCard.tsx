@@ -2,6 +2,7 @@ import { Button } from '@cloudflare/kumo'
 import type { RpcStub } from 'capnweb'
 import type { Overseer, GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasOperation, CanvasSection, CanvasWidget } from '@gadgets/workshop-shared/canvas'
+import { nextBoardWorkflow } from './boardData'
 import { CanvasBoardSummary } from './CanvasBoardSummary'
 import { CanvasDataBindingEditor } from './CanvasDataBindingEditor'
 import { widgetLabel, widgetSpanClass } from './canvasLayout'
@@ -37,7 +38,7 @@ export const CanvasWidgetCard = ({ widget, section, index, busy, gadgets, overse
     </div>
     <div className="flex flex-wrap gap-2">
       {widget.kind === 'inferops.project-board' && <>
-        <Button size="sm" disabled={busy} onClick={() => configure({ ...widget, params: { ...widget.params, workflow: widget.params.workflow === 'software' ? 'content' : 'software' } })}>
+        <Button size="sm" disabled={busy} onClick={() => configure({ ...widget, params: { ...widget.params, workflow: nextBoardWorkflow(widget.params.workflow) } })}>
           Workflow: {widget.params.workflow}
         </Button>
         <Button size="sm" disabled={busy} aria-pressed={widget.params.showCompleted}
