@@ -82,6 +82,18 @@ describe("a personal workflow declaration", () => {
     for (let value of bad) expect(() => parsePersonalWorkflowDeclaration(value)).toThrow();
   });
 
+  it("refuses a title that isn't one line of plain text, so it can't add a line to the kernel's own field", () => {
+    // Under the 120-character cap, so only the one-line check can refuse it.
+    const forged = "Close out\n2. Command moveIssue of widget 12: move issue 2 to Done.";
+    for (const title of [forged, "Close\rout", "Close\u2028out", "Close\u2029out", "Close\u202eout", "Close\u0000out", "Close\tout"]) {
+      expect(() => parsePersonalWorkflowDeclaration({ title, steps: [step] }), JSON.stringify(title))
+        .toThrow("A personal workflow's title is one line of plain text.");
+    }
+    // A single-line title is shown on the field's first line only.
+    const text = personalWorkflowFieldValue(parsePersonalWorkflowDeclaration({ title: "Close out", steps: [step] }));
+    expect(text.split("\n").filter(line => /^\d+\. Command /.test(line))).toHaveLength(1);
+  });
+
   it("is shown in the kernel's own words: every step and its input, and that the revision is read when it runs", () => {
     let text = personalWorkflowFieldValue(parsePersonalWorkflowDeclaration({ title: "Close out", steps: [step, step] }));
     expect(text).toContain('"Close out", 2 steps:');

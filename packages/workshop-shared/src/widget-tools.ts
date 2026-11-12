@@ -205,6 +205,13 @@ const INDEX = /^(?:0|[1-9][0-9]*)$/;
 // Control and format characters (bidi overrides, zero-width), line and paragraph separators, and
 // lone surrogates: what keeps authored text to one visible line.
 const NOT_PLAIN_LINE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/u;
+/**
+ * Whether `text` is one visible line of plain text: no control or format character (bidi
+ * overrides, zero-width), no line or paragraph separator, no lone surrogate (`NOT_PLAIN_LINE`).
+ * For text shown inside the kernel's own words, such as a declared title in its appended field, so
+ * it can't add a line there (FAC-134).
+ */
+export const isPlainLine = (text: string): boolean => !NOT_PLAIN_LINE.test(text);
 // What an error message may not keep: `NOT_PLAIN_LINE` less line feed.
 const NOT_ERROR_TEXT = /[^\n\P{Cc}]|[\p{Cf}\p{Zl}\p{Zp}\p{Cs}]/gu;
 

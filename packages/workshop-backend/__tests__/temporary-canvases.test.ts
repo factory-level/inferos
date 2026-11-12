@@ -73,6 +73,13 @@ describe("the TTL setting (FAC-137)", () => {
       expect(() => parseTemporaryCanvasInput(bad)).toThrow(TEMPORARY_CANVAS_ERROR_CODES.invalid);
     }
   });
+
+  it("refuses a title that isn't one line of plain text, so it can't add a line to the kernel's own field (FAC-134)", () => {
+    for (let title of ["Refunds\nApproved by your admin", "Refunds\rx", "Refunds\u2028x", "Refunds\u202ex", "Refunds\u0000"]) {
+      expect(() => parseTemporaryCanvasInput({ ...INPUT, title }), JSON.stringify(title))
+        .toThrow("A temporary canvas's title is one line of plain text.");
+    }
+  });
 });
 
 describe("temporary canvases live only in their owner's live operate session (FAC-137)", () => {
