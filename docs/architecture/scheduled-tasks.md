@@ -1,3 +1,14 @@
+---
+title: Scheduled tasks
+design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/workflows.md
+covers:
+  - packages/gatekeeper-scheduler/src/schedule-driver.ts
+  - packages/workshop-backend/src/overseer.ts
+  - packages/workshop-shared/src/workflow-definition.ts
+  - packages/workshop-backend/__tests__/workflow-invocation.test.ts
+updated: 2026-11-12
+---
+
 # Scheduled Tasks
 
 Scheduled Tasks is an InferOS gatekeeper whose durable driver stores schedules under both the

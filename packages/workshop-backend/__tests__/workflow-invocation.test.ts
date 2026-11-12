@@ -22,12 +22,12 @@ const headOf = (id: number) => (id === GADGET ? commit(1) : undefined);
 const everyoneBuilds = () => "build" as const;
 
 /** A workspace store with one published definition pinned to trigger HOOK. */
-function pinned(audience = WORKSPACE_AUDIENCE) {
+function pinned(audience = WORKSPACE_AUDIENCE, publish = true) {
   let durable = makeMockStorage();
   let storage = makeOverseerStorage(durable);
   let store = new WorkspaceWorkflowDefinitionStore(durable, storage, undefined, audience);
   let saved = store.save(ADA, { title: "Refund", gadgetId: GADGET }, headOf, "build");
-  store.publish(ADA, saved.id, 1);
+  if (publish) store.publish(ADA, saved.id, 1);
   store.pinTrigger(ADA.id, HOOK, GADGET, { definitionId: saved.id, revision: 1, mode: "pinned" });
   return { durable, storage, store, definitionId: saved.id };
 }
@@ -103,29 +103,49 @@ describe("through the Overseer", () => {
                                                           scheduleTitle?: string;
                                                           scheduleRead?: () => Promise<any>;
                                                           secondSchedule?: boolean;
+                                                          extraScheduleCount?: number;
+                                                          scheduleReadCounter?: { value: number };
+                                                          hookEnabled?: boolean;
                                                           shareRights?: { read?: boolean; run?: boolean; edit?: boolean };
                                                           privateDefinition?: boolean;
+                                                          unpublished?: boolean;
+                                                          operate?: boolean;
                                                           controlInvokers?: string[];
                                                           workspaceId?: string } = {}) {
-    let { durable, storage, store, definitionId } = pinned(opts.privateDefinition ? SHARED_ONLY_AUDIENCE : WORKSPACE_AUDIENCE);
+    let { durable, storage, store, definitionId } = pinned(opts.privateDefinition ? SHARED_ONLY_AUDIENCE : WORKSPACE_AUDIENCE, !opts.unpublished);
     if (opts.shareRights) store.share(ADA, definitionId, OPERATOR, opts.shareRights, "use");
     store.setControl(ADA, HOOK, { label: "Issue refund", invokers: opts.controlInvokers ?? [OPERATOR] });
     let invoke = vi.fn(opts.invoke ?? (async () => {}));
-    let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true,
+    let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: opts.hookEnabled ?? true,
       ...(opts.schedule ? { vendorId: "scheduler" } : {}),
-      controller: { invoke, getWorkflowSchedule: opts.scheduleRead ?? (async () => opts.schedule ? {
+      controller: { invoke, getWorkflowSchedule: opts.scheduleRead ?? (async () => {
+        if (opts.schedule) { if (opts.scheduleReadCounter) opts.scheduleReadCounter.value++; return {
         scheduleId: "schedule-1", title: opts.scheduleTitle ?? "Nightly report", description: "Run report",
         cadence: { kind: "interval" as const, everyMs: 60_000, anchorMs: 0 }, status: "active" as const,
         nextFire: 60_000, failureCode: "must-not-leak",
-      } : null) } };
+        }; }
+        return null;
+      }) } };
     let secondHook = opts.secondSchedule ? {
       id: HOOK + 1, gadgetId: GADGET, gatekeeperId: 50, enabled: true, vendorId: "scheduler",
       controller: { getWorkflowSchedule: async () => ({
         scheduleId: "schedule-2", title: "Second schedule", description: "Independent result",
-        cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "active",
+        cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0, internalToken: "must-not-cross-rpc" }, status: "active",
       }) },
     } : undefined;
     if (secondHook) store.pinTrigger(ADA.id, HOOK + 1, GADGET, { definitionId, revision: 1, mode: "pinned" });
+    let extraHooks = Array.from({ length: opts.extraScheduleCount ?? 0 }, (_, index) => {
+      let id = HOOK + 2 + index;
+      store.pinTrigger(ADA.id, id, GADGET, { definitionId, revision: 1, mode: "pinned" });
+      return { id, gadgetId: GADGET, gatekeeperId: 50, enabled: true, vendorId: "scheduler",
+        controller: { getWorkflowSchedule: async () => {
+          if (opts.scheduleReadCounter) opts.scheduleReadCounter.value++;
+          return ({
+          scheduleId: `schedule-${id}`, title: `Schedule ${id}`, description: "Test",
+          cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "active",
+          });
+        } } };
+    });
     let takenInvocations = new Map<string, boolean>();
     let impl = {
       takenInvocations,
@@ -146,14 +166,16 @@ describe("through the Overseer", () => {
       storage: Object.assign(storage, {
         containsRestrictedData: { get: () => false },
         title: { get: () => "Test Workspace" },
-        operateSession: { get: () => false },
-        boundHooks: { get: (id: number) => (id === HOOK ? hook : id === secondHook?.id ? secondHook : undefined), list: () => [hook, ...(secondHook ? [secondHook] : [])] },
+        operateSession: { get: () => opts.operate ?? false },
+        boundHooks: { get: (id: number) => [hook, ...(secondHook ? [secondHook] : []), ...extraHooks].find(candidate => candidate.id === id),
+          list: () => [hook, ...(secondHook ? [secondHook] : []), ...extraHooks] },
         gatekeepers: { get: () => undefined },
       }),
       users: {
         idFromString: (id: string) => id,
         get: (id: string) => ({
-          whoami: async () => ADA, recordSharedGadgetOpen: async () => {},
+          whoami: async () => ADA, operateSessionWorkspaceId: async () => opts.workspaceId ?? "workspace-id",
+          recordSharedGadgetOpen: async () => {},
           holdsSharedConfiguration: async () => opts.canBuild ?? true,
           workflowInvokeAnswer: async () => {
             askedInvoke.push(id);
@@ -351,6 +373,55 @@ describe("through the Overseer", () => {
     let unshared = await session("use", { schedule: true, privateDefinition: true });
     expect(await unshared.overseer.listReadableWorkflowSchedules()).toEqual([]);
     expect((await unshared.overseer.listReadableWorkflowSchedules()).some(({ title }) => title === "Nightly report")).toBe(false);
+  });
+
+  it("shows an unpublished schedule to its builder only", async () => {
+    let useReader = await session("use", { schedule: true, unpublished: true });
+    let builder = await session("build", { schedule: true, unpublished: true });
+    expect(await useReader.overseer.listReadableWorkflowSchedules()).toEqual([]);
+    expect((await builder.overseer.listReadableWorkflowSchedules()).map(({ title }) => title)).toEqual(["Nightly report"]);
+  });
+
+  it("does not expose disabled or expired definitions through stale scheduler hooks", async () => {
+    let disabled = await session("build", { schedule: true, hookEnabled: false });
+    expect(await disabled.overseer.listReadableWorkflowSchedules()).toEqual([]);
+
+    let expired = await session("build", { schedule: true });
+    let stored = expired.store.list(ADA.id, "build")[0];
+    expect(stored).toBeDefined();
+    // Remove the trigger pin, then make the retained record expired. A stale bound hook must not
+    // make the definition readable again.
+    expired.store.pinTrigger(ADA.id, HOOK, GADGET, null);
+    let record = (expired.store as unknown as { storage: { workflowDefinitions: { put(value: unknown): void } } }).storage.workflowDefinitions;
+    record.put({ ...stored, expiresAt: new Date(Date.now() - 1) });
+    expect(expired.store.canReadDefinition(BUILDER, stored.id, "build")).toBe(false);
+    expect(await expired.overseer.listReadableWorkflowSchedules()).toEqual([]);
+  });
+
+  it("omits nextFire for inactive schedules", async () => {
+    let reader = await session("build", { schedule: true, scheduleRead: async () => ({
+      scheduleId: "schedule-1", title: "Nightly report", description: "Run report",
+      cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "expired", nextFire: 60_000,
+    }) });
+    expect(await reader.overseer.listReadableWorkflowSchedules()).toEqual([{
+      hookId: HOOK, scheduleId: "schedule-1", title: "Nightly report", description: "Run report",
+      cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "expired",
+    }]);
+  });
+
+  it("denies schedule reads through the Operate interface", async () => {
+    let operate = await session("build", { schedule: true, operate: true });
+    await expect(operate.overseer.listReadableWorkflowSchedules()).rejects.toThrow(/operate session/i);
+  });
+
+  it("caps independent scheduler reads at the configured safety bound", async () => {
+    let reads = { value: 0 };
+    let capped = await session("build", { schedule: true, extraScheduleCount: 110, scheduleReadCounter: reads });
+    // Count actual controller reads at the boundary; the scheduler controller calls are bounded
+    // before they are started, not only filtered from the returned list afterward.
+    let result = await capped.overseer.listReadableWorkflowSchedules();
+    expect(result).toHaveLength(100);
+    expect(reads.value).toBe(100);
   });
 
   it("removes schedule metadata, including title, when a reader's share is revoked", async () => {

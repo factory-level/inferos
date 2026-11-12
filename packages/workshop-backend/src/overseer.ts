@@ -19823,11 +19823,10 @@ async function listReadableWorkflowSchedules(
           timer = setTimeout(() => reject(new Error("Schedule summary read timed out.")), SCHEDULE_READ_TIMEOUT_MS);
         }),
       ]);
-      if (!isSafeWorkflowScheduleSummary(schedule)) return null;
+      let safeSchedule = sanitizeWorkflowScheduleSummary(schedule);
+      if (!safeSchedule) return null;
       return {
-        hookId: hook.id, scheduleId: schedule.scheduleId, title: schedule.title,
-        description: schedule.description, cadence: schedule.cadence, status: schedule.status,
-        ...(schedule.status === "active" && schedule.nextFire !== undefined ? { nextFire: schedule.nextFire } : {}),
+        hookId: hook.id, ...safeSchedule,
       } satisfies WorkflowScheduleSummary;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
@@ -19837,34 +19836,56 @@ async function listReadableWorkflowSchedules(
   return summaries.toSorted((a, b) => a.hookId - b.hookId);
 }
 
-function isSafeWorkflowScheduleSummary(value: unknown): value is Omit<WorkflowScheduleSummary, "hookId"> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+function sanitizeWorkflowScheduleSummary(value: unknown): Omit<WorkflowScheduleSummary, "hookId"> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   let summary = value as Record<string, unknown>;
   if (typeof summary.scheduleId !== "string" || summary.scheduleId.length < 1 || summary.scheduleId.length > 128 ||
       typeof summary.title !== "string" || summary.title.length < 1 || summary.title.length > 120 ||
       typeof summary.description !== "string" || summary.description.length > 1_000 ||
       !["active", "dead", "completed", "expired"].includes(String(summary.status)) ||
-      (summary.nextFire !== undefined && (typeof summary.nextFire !== "number" || !Number.isFinite(summary.nextFire)))) return false;
-  let cadence = summary.cadence;
-  if (!cadence || typeof cadence !== "object" || Array.isArray(cadence)) return false;
-  let valueCadence = cadence as Record<string, unknown>;
-  const finite = (entry: unknown) => typeof entry === "number" && Number.isFinite(entry);
+      (summary.nextFire !== undefined && (typeof summary.nextFire !== "number" || !Number.isFinite(summary.nextFire)))) return null;
+  let cadence = sanitizeWorkflowScheduleCadence(summary.cadence);
+  if (!cadence) return null;
+  let status = summary.status as WorkflowScheduleSummary["status"];
+  return {
+    scheduleId: summary.scheduleId, title: summary.title, description: summary.description, cadence, status,
+    ...(status === "active" && typeof summary.nextFire === "number" ? { nextFire: summary.nextFire } : {}),
+  };
+}
+
+function sanitizeWorkflowScheduleCadence(value: unknown): WorkflowScheduleSummary["cadence"] | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  let cadence = value as Record<string, unknown>;
   const nonempty = (entry: unknown, max: number) => typeof entry === "string" && entry.length > 0 && entry.length <= max;
-  if (valueCadence.kind === "interval") return typeof valueCadence.everyMs === "number" && finite(valueCadence.everyMs) &&
-    valueCadence.everyMs > 0 && finite(valueCadence.anchorMs);
-  if (valueCadence.kind === "once") return finite(valueCadence.fireAt) && nonempty(valueCadence.timeZone, 100);
-  if (valueCadence.kind !== "calendar" || !nonempty(valueCadence.timeZone, 100)) return false;
-  let rule = valueCadence.rule;
-  if (!rule || typeof rule !== "object" || Array.isArray(rule)) return false;
+  if (cadence.kind === "interval") {
+    if (typeof cadence.everyMs !== "number" || !Number.isFinite(cadence.everyMs) || cadence.everyMs <= 0 ||
+        typeof cadence.anchorMs !== "number" || !Number.isFinite(cadence.anchorMs)) return null;
+    return { kind: "interval", everyMs: cadence.everyMs, anchorMs: cadence.anchorMs };
+  }
+  if (cadence.kind === "once") {
+    if (typeof cadence.fireAt !== "number" || !Number.isFinite(cadence.fireAt) || !nonempty(cadence.timeZone, 100)) return null;
+    return { kind: "once", fireAt: cadence.fireAt, timeZone: cadence.timeZone as string };
+  }
+  if (cadence.kind !== "calendar" || !nonempty(cadence.timeZone, 100)) return null;
+  let rule = cadence.rule;
+  if (!rule || typeof rule !== "object" || Array.isArray(rule)) return null;
   let calendar = rule as Record<string, unknown>;
-  if (typeof calendar.interval !== "number" || !finite(calendar.interval) || calendar.interval <= 0 ||
-      typeof calendar.minute !== "number" || !finite(calendar.minute) || calendar.minute < 0 || calendar.minute > 59 ||
-      !finite(calendar.anchorMs)) return false;
-  if (calendar.freq === "hourly") return true;
-  if (typeof calendar.hour !== "number" || !finite(calendar.hour) || calendar.hour < 0 || calendar.hour > 23) return false;
-  return calendar.freq === "daily" ||
-    (calendar.freq === "weekly" && Array.isArray(calendar.byDay) && calendar.byDay.length > 0 &&
-      calendar.byDay.length <= 7 && calendar.byDay.every(day => ["MO", "TU", "WE", "TH", "FR", "SA", "SU"].includes(String(day))));
+  if (typeof calendar.interval !== "number" || !Number.isFinite(calendar.interval) || calendar.interval <= 0 ||
+      typeof calendar.minute !== "number" || !Number.isFinite(calendar.minute) || calendar.minute < 0 || calendar.minute > 59 ||
+      typeof calendar.anchorMs !== "number" || !Number.isFinite(calendar.anchorMs)) return null;
+  if (calendar.freq === "hourly") return { kind: "calendar", timeZone: cadence.timeZone as string, rule: {
+    freq: "hourly", interval: calendar.interval as number, minute: calendar.minute as number, anchorMs: calendar.anchorMs as number,
+  } };
+  if (typeof calendar.hour !== "number" || !Number.isFinite(calendar.hour) || calendar.hour < 0 || calendar.hour > 23) return null;
+  if (calendar.freq === "daily") return { kind: "calendar", timeZone: cadence.timeZone as string, rule: {
+    freq: "daily", interval: calendar.interval as number, hour: calendar.hour as number, minute: calendar.minute as number, anchorMs: calendar.anchorMs as number,
+  } };
+  if (calendar.freq !== "weekly" || !Array.isArray(calendar.byDay) || calendar.byDay.length < 1 ||
+      calendar.byDay.length > 7 || !calendar.byDay.every(day => ["MO", "TU", "WE", "TH", "FR", "SA", "SU"].includes(String(day)))) return null;
+  return { kind: "calendar", timeZone: cadence.timeZone as string, rule: {
+    freq: "weekly", interval: calendar.interval, byDay: calendar.byDay as string[],
+    hour: calendar.hour, minute: calendar.minute, anchorMs: calendar.anchorMs,
+  } };
 }
 
 function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {

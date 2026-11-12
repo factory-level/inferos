@@ -182,8 +182,12 @@ describe("ScheduleDriver", () => {
       title: "Workspace B", description: "B only", gadgetId,
     }, now);
 
-    expect(await driver.getWorkflowSummary("workspace-a", "same-id")).toMatchObject({ title: "Workspace A" });
-    expect(await driver.getWorkflowSummary("workspace-b", "same-id")).toMatchObject({ title: "Workspace B" });
+    const workspaceA = await driver.getWorkflowSummary("workspace-a", "same-id");
+    const workspaceB = await driver.getWorkflowSummary("workspace-b", "same-id");
+    expect(workspaceA).toMatchObject({ title: "Workspace A" });
+    expect(workspaceB).toMatchObject({ title: "Workspace B" });
+    expect(Object.keys(workspaceA ?? {}).toSorted()).toEqual(["cadence", "description", "nextFire", "scheduleId", "status", "title"]);
+    expect(Object.keys(workspaceB ?? {}).toSorted()).toEqual(["cadence", "description", "nextFire", "scheduleId", "status", "title"]);
     await driver.revoke();
     expect(await driver.getWorkflowSummary("workspace-a", "same-id")).toBeNull();
     expect(await driver.getWorkflowSummary("workspace-b", "same-id")).toBeNull();
