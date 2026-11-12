@@ -156,14 +156,15 @@ describe("a published console's widget embedded in a Wiki page", () => {
     await expect(used.getEmbeddedWidget(s.created.id, "0", s.frozen)).rejects.toThrow(/changed/);
   });
 
-  // FAC-15 R-4, a characterization test: it demonstrates the architecture as it stands, and fails
-  // loudly if that ever changes. A published console's widget is ONE frozen install shared by every
-  // operator of the console, so the widget's own server (its Gadget Durable Object) holds one state:
-  // what one operator's session writes there, another operator's session reads. This is by design
-  // (ADR 0013 records it as a go/no-go property); it is not isolation between operators. Mitigations
-  // today: publishing needs configuration:publish, installs are frozen and reviewed at publication,
-  // and the frame sees no governed data (FAC-15 gap G-1). Per-operator Gadget partitioning would close it.
-  it("shared console install: a widget's own server state is shared across operators (by design, ADR 0013)", async () => {
+  // FAC-15 R-4: a characterization test of a KNOWN P0 GAP (inferops ADR 0013, W3: "no writable state
+  // shared between viewers of a data widget"; "rows reach another viewer by any route" is a no-go). A
+  // published console's widget is one frozen install shared by every operator of the console, so the
+  // widget's own server (its Gadget Durable Object) holds one state: what one operator's session writes
+  // there, another operator's session reads. That is not isolation between operators. It is safe today
+  // only because no governed data reaches a code-running widget (FAC-15 gap G-1). It must be closed,
+  // by per-operator Gadget partitioning, before W3's data requirements reach an authored widget; then
+  // invert this test so it asserts operator B sees none of operator A's state.
+  it("known P0 gap (ADR 0013 W3): a widget's own server state is shared across operators of a console install", async () => {
     const s = await publishedSpace("sharedinstall");
     const [otherName] = nextUsernames("sharedother");
     const other = await signUp(publicApi, otherName!);
