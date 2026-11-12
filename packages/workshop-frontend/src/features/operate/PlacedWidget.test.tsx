@@ -47,8 +47,8 @@ afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlo
 const render = async (shown: WidgetPlacement, handlers: { onRemove?: () => void; onFilters?: (f: Record<string, string>) => void } = {},
     canChange: (change: string) => boolean = () => true) => {
   await act(async () => root.render(<PlacedWidget placement={shown} api={undefined} viewer={null}
-    session={{} as RpcStub<OperateSession>} sessionWorkspace={{} as RpcStub<Overseer>} busy={false} focused={false}
-    canChange={canChange} onChange={() => {}} onFilters={handlers.onFilters ?? (() => {})} onRemove={handlers.onRemove ?? (() => {})} />))
+    session={{} as RpcStub<OperateSession>} sessionWorkspace={{} as RpcStub<Overseer>} focused={false}
+    edit={{ busy: false, canChange, onChange: () => {}, onFilters: handlers.onFilters ?? (() => {}), onRemove: handlers.onRemove ?? (() => {}) }} />))
 }
 const button = (label: string) => container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!
 
@@ -97,6 +97,17 @@ it("keeps a board's completed-issues filter on the placement", async () => {
   const box = container.querySelector<HTMLInputElement>('label input[type="checkbox"]')!
   await act(async () => box.click())
   expect(onFilters).toHaveBeenCalledWith({ showCompleted: 'false' })
+})
+
+// FAC-137: a temporary canvas shows its placements as placed, with nothing to arrange or filter.
+it('shows a placement with nothing to arrange when it is given no edit controls', async () => {
+  await act(async () => root.render(<PlacedWidget placement={placement({ type: 'builtin', kind: 'project/board',
+    target: 'inferops://acme.operations/project/board/ENG' }, { showCompleted: 'true' })} api={undefined} viewer={null}
+    session={{} as RpcStub<OperateSession>} sessionWorkspace={{} as RpcStub<Overseer>} focused={false} />))
+  expect(seen.boards.at(-1)).toEqual({ workflow: 'software', showCompleted: true })
+  expect(container.querySelector('[role="toolbar"]')).toBeNull()
+  expect(container.querySelector('input[type="checkbox"]')).toBeNull()
+  expect(container.querySelectorAll('button')).toHaveLength(0)
 })
 
 it('offers only the arrangement the grid would take', async () => {
