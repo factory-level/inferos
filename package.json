@@ -17,7 +17,6 @@
     "stage:config": "node scripts/stage/stage.ts config",
     "stage:deploy": "node scripts/stage/stage.ts deploy",
     "stage:delete": "node scripts/stage/stage.ts delete",
-    "stage:company-storage": "node scripts/stage/company-storage-cli.ts",
     "dev-client": "cd packages/workshop-frontend && pnpm run dev",
     "dev-server": "node scripts/run-dev-server.ts",
     "canvas": "node scripts/consumer/canvas.ts .",
@@ -31,6 +30,7 @@
     "docs:check": "scripts/check-docs.sh",
     "check:fast": "node scripts/check-fast.ts",
     "check:full": "node scripts/check-full.ts",
+    "factory:ci": "node scripts/ci/pipeline.ts --target=local",
     "check:dev-secrets": "node scripts/check-gatekeeper-dev-secrets.ts",
     "lint:check": "vp lint",
     "lint:fix": "vp lint --fix",
@@ -44,7 +44,6 @@
   "devDependencies": {
     "@gadgets/scripts": "workspace:*",
     "@types/node": "26.1.0",
-    "miniflare": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plus": "catalog:",
