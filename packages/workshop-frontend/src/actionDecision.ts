@@ -48,13 +48,21 @@ export const blockedText = (reason: string): string =>
 /**
  * Where a decision came from (FAC-119 K2, `ActionLogEntry.context`), in a person's words: which
  * workflow trigger's run, whether it runs as the trigger's assigned account, and who asked for it
- * (you, or another person, never named here), or an agent's turn. Null when the entry says nothing
- * more than who asked.
+ * (you, or another person, never named here), or an agent's turn: for the operate agent's request
+ * (FAC-14), the person it asked for, by name. Null when the entry says nothing more than who asked.
  */
 export const contextText = (entry: ActionEntry, viewerProfileId?: string | null): string | null => {
   const context = entry.context
   if (!context) return null
-  if (context.kind === 'agent-turn') return "From the agent's turn in a chat"
+  if (context.kind === 'agent-turn') {
+    // FAC-14: the operate agent's request runs on the connection's own account once approved, so
+    // the decider is told whose request it is. The name is the person's profile name, never authority.
+    if (context.onBehalfOf) {
+      return context.onBehalfOf.profileId === viewerProfileId ? 'Requested by the operate agent for you'
+        : `Requested by the operate agent for ${context.onBehalfOf.name}`
+    }
+    return "From the agent's turn in a chat"
+  }
   const trigger = context.triggerLabel ? `the workflow trigger “${context.triggerLabel}”` : 'a workflow trigger'
   const asker = context.requestedBy === null ? ', which fired by itself'
     : context.requestedBy === undefined ? ''

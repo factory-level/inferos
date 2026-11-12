@@ -68,6 +68,20 @@ function approveDescribedBy(): string | null {
 }
 
 describe('ActivityNotifications', () => {
+  // FAC-14: the dropdown's Approve is a decision too, so it names who an operate-agent request is for.
+  it("names the person an operate-agent request is for, beside Approve", async () => {
+    const server = makeOverseer()
+    await view.render(<ActivityNotifications overseer={server.overseer} onViewActivity={() => {}} />)
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [entry(1, {
+      description: { title: 'Move ENG-1 to Done', description: 'Moves it.', implementsRevert: false },
+      context: { kind: 'agent-turn', onBehalfOf: { profileId: 'ada', name: 'Ada Lovelace' } },
+    })] })
+    flushFrames()
+    expect(document.body.textContent).toContain('Requested by the operate agent for Ada Lovelace')
+    expect(approveDescribedBy()).toContain('Requested by the operate agent for Ada Lovelace')
+  })
+
   it('shows the review notice and the untruncated request while restricted', async () => {
     const description = await renderPending(true)
     expect(document.body.textContent).toContain(RESTRICTED_APPROVAL_COPY)
