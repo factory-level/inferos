@@ -63,6 +63,12 @@ export type TargetFacts = {
   backend: string;
   /** The shell's environment (names only are read for credentials). */
   env: Record<string, string | undefined>;
+  /**
+   * The target's own variable files, by name (`ENV_FILES`), as read through any symlink (a pnpm wt
+   * worktree's `.env` points at the main checkout's), or null when absent. Read only for which
+   * credential names they set; their values are never printed.
+   */
+  envFiles: Record<string, string | null>;
 };
 
 /**
@@ -83,7 +89,26 @@ export function rehearsalRefusal(target: string, facts: TargetFacts): string | n
   if (facts.backend !== "not-running") return `${target}'s InferOps backend is ${facts.backend}; run pnpm local inferops down first`;
   const credentials = forbiddenCredentials(facts.env as NodeJS.ProcessEnv);
   if (credentials.length > 0) return `the shell holds ${credentials.join(", ")}; run from a clean shell (env -i PATH="$PATH" HOME="$HOME" bash)`;
+  // The stack reads these files too, so a credential there reaches it whatever the shell holds.
+  for (const [file, text] of Object.entries(facts.envFiles)) {
+    if (text === null) continue;
+    const named = forbiddenCredentials(envFileVariables(text) as NodeJS.ProcessEnv);
+    if (named.length > 0) return `${target}/${file} sets ${named.join(", ")}; give the rehearsal a worktree whose ${file} holds no credential`;
+  }
   return null;
+}
+
+/** The variable files a target's stack reads, which must hold no credential (FAC-141). */
+export const ENV_FILES = [".env", ".dev.vars", ".env.worktree"] as const;
+
+/** `NAME=value` (or `export NAME=value`) lines of a dotenv file, by name; comments and blanks skipped. */
+export function envFileVariables(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (match) out[match[1]!] = match[2]!.replace(/^(["'])(.*)\1$/, "$2").trim();
+  }
+  return out;
 }
 
 /** Why `adminUrl` or `database` must not be touched, or null: localhost, and only `expected`. */
@@ -172,6 +197,10 @@ async function main(): Promise<number> {
       stack: String(stack.report?.stack ?? "unknown"),
       backend: String(backend.report?.backend ?? "unknown"),
       env,
+      envFiles: Object.fromEntries(ENV_FILES.map(file => {
+        const path = join(target, file);
+        return [file, existsSync(path) ? readFileSync(path, "utf8") : null];
+      })),
     });
     report.worktree = target;
     if (refusal) record(`guards: ${refusal}`, false);

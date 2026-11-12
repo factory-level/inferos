@@ -6,14 +6,14 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { databaseRefusal, manifestDifferences, rehearsalRefusal, stateManifest, type TargetFacts } from "./recovery-rehearsal.ts";
+import { databaseRefusal, envFileVariables, manifestDifferences, rehearsalRefusal, stateManifest, type TargetFacts } from "./recovery-rehearsal.ts";
 import { isLocalStackUrl, summarize } from "./rehearsal-operator.ts";
 
 const ROOT = "/repo/inferOS";
 const TARGET = `${ROOT}/.worktrees/rehearsal`;
 const facts = (overrides: Partial<TargetFacts> = {}): TargetFacts => ({
   realPath: TARGET, repoRoot: ROOT, trackedChanges: "", stack: "not-running", backend: "not-running",
-  env: { PATH: "/usr/bin", HOME: "/home/x" }, ...overrides,
+  env: { PATH: "/usr/bin", HOME: "/home/x" }, envFiles: { ".env": null, ".dev.vars": null, ".env.worktree": null }, ...overrides,
 });
 
 test("a clean, idle worktree under .worktrees/ in a clean shell passes", () => {
@@ -84,4 +84,18 @@ test("the operator signs in only to a local stack, and reports an action's code,
   assert.deepEqual(summarize({ id: 4, state: "failed", type: "action", lastAttempt: { outcome: "notApplied", code: "STALE_REVISION" } }),
     { id: 4, state: "failed", type: "action", failure: "STALE_REVISION" });
   assert.deepEqual(summarize({ id: 5, state: "pending", type: "action" }), { id: 5, state: "pending", type: "action" });
+});
+
+test("a credential set in the target's .env, .dev.vars or .env.worktree is refused, naming the file, never the value", () => {
+  for (const file of [".env", ".dev.vars", ".env.worktree"]) {
+    for (const line of ["ANTHROPIC_API_KEY=sk-ant-secret-value", "export CLOUDFLARE_API_TOKEN='tok-secret'"]) {
+      const refusal = rehearsalRefusal(TARGET, facts({ envFiles: { ".env": null, ".dev.vars": null, ".env.worktree": null, [file]: `# local\n${line}\n` } }));
+      assert.match(refusal!, new RegExp(`${file.replace(".", "\\.")} sets`), `${file}: ${line}`);
+      assert.doesNotMatch(refusal!, /secret/);
+    }
+  }
+  // Ports, an empty value and a comment name no credential.
+  const harmless = "VITE_PORT=9150\nBACKEND_PORT=9151\nANTHROPIC_API_KEY=\n# ANTHROPIC_API_KEY=sk-ant-x\n";
+  assert.equal(rehearsalRefusal(TARGET, facts({ envFiles: { ".env": harmless, ".dev.vars": null, ".env.worktree": harmless } })), null);
+  assert.deepEqual(envFileVariables("export A=1\nB = 'two'\n#C=3\n"), { A: "1", B: "two" });
 });
