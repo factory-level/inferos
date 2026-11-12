@@ -13,6 +13,7 @@ import {
   WORKFLOW_RUN_HISTORY_SWEEP_BATCH, WORKFLOW_RUN_START_WINDOW_MS,
   WORKFLOW_RUN_HISTORY_ADMISSION_SWEEP_BATCHES, WORKFLOW_RUN_HISTORY_SWEEP_RETRY_MS,
   type WorkflowDefinitionProvenance, type WorkflowRequiredBinding, WORKFLOW_RUN_RETRY_REFUSED,
+  WORKFLOW_RUN_RETRY_WINDOW_MS,
 } from "@gadgets/workshop-shared/workflow-definition";
 import type { OverseerStorage } from "./overseer";
 import type { HookOccurrence } from "@gadgets/workshop-shared/gatekeeper";
@@ -1348,18 +1349,22 @@ export class WorkspaceWorkflowDefinitionStore {
    * of the same run, queued again with its own call, its run id and its attempts kept, so the
    * deployment's `attempts` bounds it and the writes it proposes again are matched to those it made.
    * In one transaction: refused unless its result is `failed` (`notFailed`), for a cancelled run
-   * (`cancelled`), at `attempts` starts (`exhausted`), without its kept call (`noCall`), and past the
-   * per-person and per-trigger run rates, which a retry counts against as a request does. The caller
-   * checks who may retry, the trigger and the writes first.
+   * (`cancelled`), at `attempts` starts (`exhausted`), once its trigger runs another definition or
+   * revision than the run did (`repinned`), past `WORKFLOW_RUN_RETRY_WINDOW_MS` since it was admitted
+   * (`tooOld`), without its kept call (`noCall`), and past the per-person and per-trigger run rates,
+   * which a retry counts against as a request does. The caller checks who may retry, the trigger and
+   * the writes first.
    */
   retryRun(deliveryId: number, by: AiChatAuthorInfo, attempts: number): StoredWorkflowDelivery {
     let retried = this.durableStorage.transactionSync(() => {
       let delivery = this.storage.workflowDeliveries.get(deliveryId);
+      let now = Date.now();
       requireRetryable(delivery, attempts);
+      // Again here, after the caller's awaits: a repin that landed meanwhile is seen.
+      this.#requireSameRunNow(delivery, now);
       let execution = delivery.execution;
       let call = this.storage.endedRunCalls.get(deliveryId);
       if (!call || call.hookId !== delivery.hookId) throw new Error(WORKFLOW_RUN_RETRY_REFUSED.noCall);
-      let now = Date.now();
       this.#checkRate(delivery.hookId, by.id, now);
       let logId = this.storage.nextWorkflowInvocationLogId.get();
       this.storage.nextWorkflowInvocationLogId.put(logId + 1);
@@ -1385,11 +1390,28 @@ export class WorkspaceWorkflowDefinitionStore {
 
   /**
    * Refuse retrying run `deliveryId` from its stored state alone (FAC-117 K2), as `retryRun` does in
-   * its transaction, so the overseer can answer before its awaits: `notFailed`, `cancelled` or
-   * `exhausted`.
+   * its transaction, so the overseer can answer before its awaits: `notFailed`, `cancelled`,
+   * `exhausted`, `repinned` or `tooOld`.
    */
   requireRetryable(deliveryId: number, attempts: number): void {
-    requireRetryable(this.storage.workflowDeliveries.get(deliveryId), attempts);
+    let delivery = this.storage.workflowDeliveries.get(deliveryId);
+    requireRetryable(delivery, attempts);
+    this.#requireSameRunNow(delivery, Date.now());
+  }
+
+  /**
+   * Refuse retrying `delivery` at `now` unless it would run what a fresh request runs (r1 on FAC-117
+   * K2): its trigger's current pin (`pinOf`, a follow-latest pin read as the revision it resolves to)
+   * is still the run's own definition and revision (`repinned`), and it was admitted no more than
+   * `WORKFLOW_RUN_RETRY_WINDOW_MS` ago (`tooOld`). A retry re-runs the call as admitted, so without
+   * this it would run superseded code, as the trigger's assignment for an assigned one.
+   */
+  #requireSameRunNow(delivery: StoredWorkflowDelivery, now: number): void {
+    let pin = this.pinOf(delivery.hookId);
+    if (!pin || pin.definitionId !== delivery.definitionId || pin.revision !== delivery.revision) {
+      throw new Error(WORKFLOW_RUN_RETRY_REFUSED.repinned);
+    }
+    if (now - new Date(delivery.at).getTime() > WORKFLOW_RUN_RETRY_WINDOW_MS) throw new Error(WORKFLOW_RUN_RETRY_REFUSED.tooOld);
   }
 
   /** When run `deliveryId` was admitted, or undefined when there's no record of it. */

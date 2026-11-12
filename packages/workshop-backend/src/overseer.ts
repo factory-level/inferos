@@ -13411,13 +13411,16 @@ class OverseerImpl implements AgentHooks {
    * of the same run (`WorkspaceWorkflowDefinitionStore.retryRun`), so `attempts` bounds it and every
    * write it proposes again is matched to the one it made, never applied twice (`#runWrite`). Only the
    * person who asked; anyone else, and a run that doesn't exist, are told "No such run.". Before
-   * anything is queued: the trigger live, enabled and active (not draining, paused or retired); the
-   * run's own state (failed, not cancelled, attempts left: `requireRetryable`); no
-   * write of the run that a replay can't match (its description incomplete), since that one could be
-   * proposed and applied again; and the person's own admission again, as when the run starts
-   * (`requireRunRequester`: the trigger's control lists them, the same executor, their right to run
-   * the definition, and their InferOps `workflow:invoke` in the run's company). The trigger is read
-   * once more after that last await.
+   * anything is queued: the trigger live, enabled and active (not draining, paused or retired), and
+   * with assignments off not assigned, as a fresh request is refused (FAC-102); the run's own state
+   * (failed, not cancelled, attempts left, its trigger still pinned to the run's own definition and
+   * revision, admitted within `WORKFLOW_RUN_RETRY_WINDOW_MS`: `requireRetryable`, checked again in
+   * `retryRun`'s transaction); no write of the run that a replay can't match (its description
+   * incomplete), since that one could be proposed and applied again; and the person's own admission
+   * again, as when the run starts (`requireRunRequester`: the trigger's control lists them, the same
+   * executor, their right to run the definition, and their InferOps `workflow:invoke` in the run's
+   * company). After that last await the trigger is read once more, then the local re-check
+   * (`revalidate`), then the run is queued, with no await between them (the FAC-104 order).
    */
   async retryWorkflowRun(invocationId: string, caller: AiChatAuthorInfo): Promise<RequestedRun> {
     let store = this.workflowDefinitionStore();
@@ -13427,16 +13430,19 @@ class OverseerImpl implements AgentHooks {
     let requireStarts = () => {
       requireLiveHook(this, hookId);
       this.requireTriggerStarts(hookId);
+      // Assignments off (FAC-102): refused here, as a fresh request is, never left to fail at its start.
+      if (!workflowAssignmentsEnabled(this.env) && store.assignmentOf(hookId)) throw new Error(WORKFLOW_ASSIGNMENTS_DISABLED);
     };
     requireStarts();
-    // Its own state first, so a cancelled or spent run is told so, never refused as admission.
+    // Its own state first, so a cancelled, spent, repinned or old run is told so, never refused as admission.
     store.requireRetryable(deliveryId, this.runLimits().attempts);
     let runId = delivery.run?.runId;
     if (runId !== undefined && this.#runWrites(runId).some(record => !runWriteMatchable(record))) {
       throw new Error(WORKFLOW_RUN_RETRY_REFUSED.unmatchable);
     }
-    await requireRunRequester(this, hookId, deliveryId);
+    let check = await requireRunRequester(this, hookId, deliveryId);
     requireStarts();
+    check.revalidate();
     store.retryRun(deliveryId, caller, this.runLimits().attempts);
     let retried = { hookId, deliveryId, ...(runId ? { runId } : {}) };
     logger.info("workflow run retried", { event: "workflow.run.retried", ...retried });

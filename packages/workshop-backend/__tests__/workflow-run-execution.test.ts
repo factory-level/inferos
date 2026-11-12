@@ -17,10 +17,10 @@ import { onlyExplicitAlarms, takeSkippedFiring } from "./test-worker.js";
 import { RUN_REQUESTER_REVOKED, WORKFLOW_RUN_CANCELLED, invokeWorkflowTrigger, type OverseerDurableObject } from "../src/overseer.js";
 import {
   DEFAULT_WORKFLOW_RUN_LIMITS, TRIGGER_LIFECYCLE_REFUSED, WORKFLOW_BINDINGS_NEEDED, WORKFLOW_BINDINGS_NOT_OWNERS,
-  WORKFLOW_RUN_RETRY_REFUSED, WORKFLOW_WRITE_SETTLE_REFUSED,
+  WORKFLOW_RUN_RETRY_REFUSED, WORKFLOW_RUN_RETRY_WINDOW_MS, WORKFLOW_WRITE_SETTLE_REFUSED,
 } from "@gadgets/workshop-shared/workflow-definition";
 import { manualOnly } from "../src/auto-approval.js";
-import { actionDescriptionDigest } from "../src/system-run.js";
+import { WORKFLOW_ASSIGNMENTS_DISABLED, actionDescriptionDigest } from "../src/system-run.js";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -1252,6 +1252,99 @@ describe("retrying a failed run, and settling a write whose outcome is unknown (
       impl.settleRunOfAction(write.id);
       expect(deliveryOf(impl, summary.deliveryId).result).toMatchObject({ outcome: "failed" });
       await expect(impl.retryWorkflowRun(summary.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_RUN_RETRY_REFUSED.unmatchable);
+    });
+  });
+
+  // r1 on FAC-117 K2: a retry re-runs the call as admitted, so it runs only what a fresh request
+  // would: the trigger's current definition and revision, within a day of the run's admission, and
+  // with assignments off never an assigned trigger's run.
+  /** Repins the trigger to revision 2, as a builder does when revision 1 was wrong. */
+  const repin = (impl: any) => {
+    let pin = impl.storage.workflowTriggerPins.get(HOOK);
+    impl.storage.workflowTriggerPins.put({ ...pin, revision: 2, mode: "pinned" });
+  };
+  const nothingQueued = (impl: any, deliveryId: number) => {
+    expect(deliveryOf(impl, deliveryId).execution).toMatchObject({ state: "failed" });
+    expect(deliveryOf(impl, deliveryId).execution.retries).toBeUndefined();
+    expect([...impl.storage.workflowRunQueue.list()]).toEqual([]);
+  };
+
+  it("is refused once the trigger runs another revision, and for a run admitted too long ago, queueing nothing", async () => {
+    let name = `k2-retry-repinned-${crypto.randomUUID()}`;
+    let ids = await ranOnce(name, lost);
+    await withImpl(name, async impl => {
+      repin(impl);
+      await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_RUN_RETRY_REFUSED.repinned);
+      nothingQueued(impl, ids.deliveryId);
+    });
+    let old = `k2-retry-old-${crypto.randomUUID()}`;
+    let aged = await ranOnce(old, lost);
+    await withImpl(old, async impl => {
+      let delivery = deliveryOf(impl, aged.deliveryId);
+      impl.storage.workflowDeliveries.put({ ...delivery, at: new Date(Date.now() - WORKFLOW_RUN_RETRY_WINDOW_MS - 60_000) });
+      await expect(impl.retryWorkflowRun(aged.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_RUN_RETRY_REFUSED.tooOld);
+      nothingQueued(impl, aged.deliveryId);
+    });
+  });
+
+  it("is refused when the trigger is repinned while the person's admission is re-checked", async () => {
+    let name = `k2-retry-repin-race-${crypto.randomUUID()}`;
+    let ids = await ranOnce(name, lost);
+    await withImpl(name, async impl => {
+      // The repin lands during requireRunRequester's await, after the early check passed.
+      onPrototype(impl, "definitionRoles", async function (this: any) {
+        repin(this);
+        return () => "use";
+      });
+      await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_RUN_RETRY_REFUSED.repinned);
+      nothingQueued(impl, ids.deliveryId);
+    });
+  });
+
+  it("is refused when the person loses the trigger's control while InferOps is asked again (FAC-104 order)", async () => {
+    let name = `k2-retry-recheck-race-${crypto.randomUUID()}`;
+    let ids = await ranOnce(name, lost);
+    await withImpl(name, async impl => {
+      // The run's company is asked again where the deployment names the authority; the control
+      // listing them goes while that answer is pending, so only the re-read after it can see it.
+      let delivery = deliveryOf(impl, ids.deliveryId);
+      impl.storage.workflowDeliveries.put({ ...delivery, run: { ...delivery.run, company: "acme" } });
+      let { env: realEnv, users: realUsers } = impl;
+      impl.env = { ...realEnv, SHARED_CONFIGURATION_GATEKEEPER: "scheduler" };
+      impl.users = {
+        idFromName: (n: string) => realUsers.idFromName(n),
+        idFromString: (id: string) => id,
+        get: () => ({
+          workflowInvokeAnswer: async () => {
+            impl.workflowDefinitionStore().setControl(ADA, HOOK, { label: "Run refunds", invokers: ["someone-else"] });
+            return { holds: true, company: "acme" };
+          },
+        }),
+      };
+      try {
+        await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow(RUN_REQUESTER_REVOKED);
+      } finally {
+        impl.env = realEnv;
+        impl.users = realUsers;
+      }
+      nothingQueued(impl, ids.deliveryId);
+    });
+  });
+
+  it("is refused at retry for an assigned trigger's run while assignments are off, as a fresh request is", async () => {
+    let name = `k2-retry-assigned-${crypto.randomUUID()}`;
+    // Admitted as the trigger's assignment, and ended failed: assignments are off in this suite.
+    let ids = await withImpl(name, impl => {
+      let delivery = admitted(impl, { assigned: true });
+      impl.queueWorkflowRun(HOOK, delivery.deliveryId, "onSchedule", [FIRING]);
+      runsAs(impl, "gadget-bindings", lost);
+      return { deliveryId: delivery.deliveryId, invocationId: deliveryOf(impl, delivery.deliveryId).invocation.id };
+    });
+    await settled(name, ids.deliveryId);
+    await withImpl(name, async impl => {
+      expect(deliveryOf(impl, ids.deliveryId)).toMatchObject({ run: { executor: { kind: "service_account" } }, result: { outcome: "failed" } });
+      await expect(impl.retryWorkflowRun(ids.invocationId, OPERATOR)).rejects.toThrow(WORKFLOW_ASSIGNMENTS_DISABLED);
+      nothingQueued(impl, ids.deliveryId);
     });
   });
 

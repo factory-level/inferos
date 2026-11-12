@@ -548,7 +548,15 @@ export const WORKFLOW_RUN_RETRY_REFUSED = {
   exhausted: "This run has used all its attempts. Start a new run instead.",
   unmatchable: "This run proposed a write that can't be matched if it runs again. Start a new run instead.",
   noCall: "This run can't be retried. Start a new run instead.",
+  repinned: "This trigger now runs another revision of its workflow. Start a new run instead.",
+  tooOld: "This run is too old to retry. Start a new run instead.",
 } as const;
+
+/**
+ * How long after it was admitted a failed run may still be retried (FAC-117 K2): a retry repeats
+ * the person's request, so it is bounded as a fresh one would be stale, not by history retention.
+ */
+export const WORKFLOW_RUN_RETRY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Why a run's write can't be settled (FAC-117 K2): only a workflow run's write whose outcome is
