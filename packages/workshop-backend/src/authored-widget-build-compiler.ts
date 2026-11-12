@@ -86,7 +86,11 @@ export async function compileAuthoredWidgetWithWasm(authoredFiles: Readonly<Reco
 }
 
 function authoredSourcesPlugin(files: Map<string, string>): Plugin {
-  const vfs = dependencies as { files: Record<string, string>; resolutions: Record<string, string>; roots: Record<string, string> };
+  const vfs = dependencies as { files: Record<string, string>; resolutions: Record<string, string>; roots: Record<string, string>;
+    disabled?: readonly { module: string; package: string; path: string; reason: string }[] };
+  // FAC-15: the browser-field disabled modules the reviewed closure names, each loaded as an empty
+  // module. Any other disabled module is refused like any edge outside the closure.
+  const listedDisabled = new Set((vfs.disabled ?? []).map(entry => entry.module));
   return { name: "authored-widget-vfs", setup(api) {
     api.onResolve({ filter: /.*/ }, args => {
       if (args.kind === "entry-point") return { path: "__gadget_entry__.tsx", namespace: "widget" };
@@ -111,6 +115,11 @@ function authoredSourcesPlugin(files: Map<string, string>): Plugin {
         loader: args.path.endsWith(".css") ? "js" : "tsx", resolveDir: "/" };
     });
     api.onLoad({ filter: /.*/, namespace: "dependencies" }, args => {
+      if (args.path.startsWith("/(disabled):")) {
+        return listedDisabled.has(args.path)
+          ? { contents: "", loader: "js", resolveDir: "/" }
+          : { errors: [{ text: "Dependency outside the reviewed closure." }] };
+      }
       const contents = vfs.files[args.path];
       return contents === undefined ? { errors: [{ text: "Missing dependency file." }] } : {
         contents: args.path === vfs.roots["@refinedev/core"] ? stripRefineTelemetry(contents) : contents,
