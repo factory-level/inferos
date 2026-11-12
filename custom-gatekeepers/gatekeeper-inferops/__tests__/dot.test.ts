@@ -221,6 +221,8 @@ describe("deciding a proposal", () => {
     });
     const confirm = (await hooks.dotCalls()).find(c => c.path.endsWith("/confirm"))!;
     expect(confirm.key).toBe(PROPOSAL);
+    // An issue proposal names no run.
+    expect(JSON.parse(confirm.body ?? "null")).toEqual({});
     // Applied once: approving again sends nothing more.
     await hooks.applyDot(actionId);
     expect((await hooks.dotCalls()).filter(c => c.path.endsWith("/confirm"))).toHaveLength(1);
@@ -280,7 +282,10 @@ describe("deciding a workflow-run proposal", () => {
     expect(applied.failure).toBeNull();
     expect(applied.result).toMatchObject({ kind: "dot-confirm", proposalId: PROPOSAL, runId: "run-1" });
     expect(await hooks.dotEffectsAsked()).toEqual(["invoked"]);
-    expect((await hooks.dotCalls()).find(c => c.path.endsWith("/confirm"))?.key).toBe(PROPOSAL);
+    const confirm = (await hooks.dotCalls()).find(c => c.path.endsWith("/confirm"));
+    expect(confirm?.key).toBe(PROPOSAL);
+    // It names the run it started, so InferOps accepts that run's outcome only (FAC-134).
+    expect(JSON.parse(confirm?.body ?? "null")).toEqual({ runId: "run-1" });
     // Applied once: approving again starts nothing more.
     await hooks.applyDot(actionId, { status: "started", runId: "run-2" });
     expect(await hooks.dotEffectsAsked()).toEqual(["invoked"]);
