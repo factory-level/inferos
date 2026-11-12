@@ -3,6 +3,8 @@ title: Operate mode
 design: https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/operate-mode.md
 covers:
   - packages/workshop-backend/src/workspace-readiness.ts
+  - packages/workshop-frontend/src/features/operate/WorkspaceReadiness.tsx
+  - packages/workshop-frontend/src/features/operate/WorkspaceReadiness.test.tsx
   - packages/workshop-backend/__tests__/workspace-readiness.test.ts
   - packages/workshop-backend/__tests__/console-widget-events.test.ts
   - packages/workshop-backend/__tests__/workflow-dynamic-definitions.test.ts
@@ -1188,6 +1190,7 @@ A workflow definition is the reusable description of a workflow (FAC-107, [workf
   - `published-console`: at least one console with a published revision; `blocked` while consoles are off.
 - **Computed, not stored.** `OverseerImpl.workspaceReadinessInputs()` reads the workspace's connections, gadgets and consoles and the owner's gatekeeper vendors at the time of the call, and `workspaceReadiness()` (`src/workspace-readiness.ts`) decides. Nothing is written, so asking again answers the same while nothing changed. No InferOps call is made: a bound resource the person's own InferOps authority no longer reaches shows when they open it.
 - **Who.** Build only, with the shared workspace's `build` authority (`#requireSharedConfiguration("build", "shared")`). The use and operate interfaces refuse it (`workshop-use-role.test.ts` lists it).
+- **Where it shows.** The console builder's first step (`ConsoleBuilder`), once the chosen workspace is open for building, shows `WorkspaceReadiness`: each item with the server's detail and next action, and "InferOS side: ready" only when `deploymentReady` is, never a bare "Ready" for the whole environment. A failed read says so rather than showing an empty list, and "Check again" asks the server again.
 
 ## Configuration
 
