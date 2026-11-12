@@ -300,6 +300,15 @@ export type TableSummary = { id: string; label: string };
 export const DOT_PROPOSAL_STATUSES = ["proposed", "confirming", "confirmed", "handed-off", "declined", "failed", "expired", "unknown"] as const;
 
 /** A Dot proposal as InferOps reads it (`chatbot.proposal_list`), its status derived at read time. */
+/** A run outcome as `chatbot.proposal_run_outcome` takes it (FAC-134): fixed fields, never what the run returned. */
+export type DotRunOutcomeWire = {
+  kind: "workflow-run";
+  runId: string;
+  outcome: "succeeded" | "failed" | "uncertain";
+  reasonCode?: string;
+  ranAs: "gadget_bindings" | "service_account";
+};
+
 export type DotProposalWire = {
   id: string;
   tool: string;
@@ -382,6 +391,12 @@ export interface InferOpsClient {
   confirmDotProposal(conversationId: string, proposalId: string, idempotencyKey: string): Promise<DotProposalWire>;
   /** Decline one proposal (`chatbot.proposal_decline`); nothing is written. */
   declineDotProposal(conversationId: string, proposalId: string): Promise<DotProposalWire>;
+  /**
+   * Record how the InferOS run a confirmed hand-off started came out (`chatbot.proposal_run_outcome`,
+   * FAC-134) under the person's own token. InferOps keeps it once per proposal: the same run again
+   * answers as recorded, another is CONFLICT.
+   */
+  recordDotRunOutcome(conversationId: string, proposalId: string, run: DotRunOutcomeWire): Promise<DotProposalWire>;
   /** Add a comment to an issue in the bound project, with a replayable key and exact head. */
   commentIssue(projectKey: string, issueId: string, body: string, expectedRevision: Revision, idempotencyKey: string): Promise<void>;
   /** Published joined reads, narrowed to the bound project by the HTTP adapter. */

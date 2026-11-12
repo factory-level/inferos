@@ -295,6 +295,65 @@ describe("deciding a workflow-run proposal", () => {
     expect(calls.some(c => c.path.endsWith("/confirm"))).toBe(false);
   });
 
+  it("asks the kernel for its run's outcome when it declares the run (FAC-134)", async () => {
+    const { hooks } = await staged(script({ proposals: [workflow()] }));
+    const [action] = (await hooks.log()).actions;
+    expect(action).toMatchObject({ workflowRun: { reference: REFERENCE, reportOutcome: true } });
+  });
+
+  // FAC-134: the kernel reports the run's outcome at least once; it is recorded once per run id.
+  const outcomeOf = (runId: string, extra: Record<string, unknown> = {}) => ({
+    kind: "workflow-run" as const, runId, outcome: "failed" as const, reason: "runtime-error",
+    requestedBy: "p1", ranAs: "gadget_bindings" as const, actionApplied: true, ...extra,
+  });
+  const runOutcomeCalls = async (hooks: Awaited<ReturnType<typeof staged>>["hooks"]) =>
+    (await hooks.dotCalls()).filter(c => c.path.endsWith("/run-outcome"));
+
+  it("records its run's outcome in InferOps as the person, once: a second delivery changes nothing", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [workflow()], confirm: { outcome: { handedOff: true } } }));
+    await hooks.applyDot(actionId, { status: "started", runId: "run-1" });
+    expect(await hooks.dotRunOutcome(actionId, outcomeOf("run-1"))).toBeNull();
+    const [call] = await runOutcomeCalls(hooks);
+    expect(call!.method).toBe("POST");
+    expect(call!.path.endsWith(`/proposals/${PROPOSAL}/run-outcome`)).toBe(true);
+    // Fixed fields only, the kernel's reason as InferOps' reason code; nothing the run returned.
+    expect(JSON.parse(call!.body!)).toEqual({ kind: "workflow-run", runId: "run-1", outcome: "failed", ranAs: "gadget_bindings", reasonCode: "runtime-error" });
+    // The kernel delivering it again: no second request, nothing new recorded.
+    expect(await hooks.dotRunOutcome(actionId, outcomeOf("run-1"))).toBeNull();
+    expect(await runOutcomeCalls(hooks)).toHaveLength(1);
+    expect(await hooks.dotReportedRuns(actionId)).toEqual([
+      { runId: "run-1", outcome: "failed", reasonCode: "runtime-error", ranAs: "gadget_bindings", actionApplied: true, inferops: "recorded" },
+    ]);
+  });
+
+  it("records a different run id on the same action once each", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [workflow()], confirm: { outcome: { handedOff: true } } }));
+    await hooks.applyDot(actionId, { status: "started", runId: "run-1" });
+    for (const runId of ["run-1", "run-2", "run-1", "run-2"]) expect(await hooks.dotRunOutcome(actionId, outcomeOf(runId))).toBeNull();
+    expect((await runOutcomeCalls(hooks)).map(c => JSON.parse(c.body!).runId)).toEqual(["run-1", "run-2"]);
+    expect((await hooks.dotReportedRuns(actionId) as { runId: string }[]).map(r => r.runId)).toEqual(["run-1", "run-2"]);
+  });
+
+  it("keeps InferOps' refusal for good, and lets a passing failure be retried", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [workflow()], confirm: { outcome: { handedOff: true } },
+      runOutcome: { status: 503, code: "UNAVAILABLE" } }));
+    await hooks.applyDot(actionId, { status: "started", runId: "run-1" });
+    // Unavailable: thrown, so the kernel tries again; nothing recorded yet.
+    expect(await hooks.dotRunOutcome(actionId, outcomeOf("run-1"))).not.toBeNull();
+    expect(await hooks.dotReportedRuns(actionId)).toEqual([]);
+    // Refused for good (another run already there): kept as refused, never retried.
+    await hooks.dotScript(script({ proposals: [workflow()], confirm: { outcome: { handedOff: true } }, runOutcome: { status: 409, code: "PROPOSAL_RUN_RECORDED" } }));
+    expect(await hooks.dotRunOutcome(actionId, outcomeOf("run-1"))).toBeNull();
+    expect(await hooks.dotReportedRuns(actionId)).toEqual([expect.objectContaining({ runId: "run-1", inferops: "refused" })]);
+  });
+
+  it("ignores an outcome for an action that isn't a workflow-run proposal of this binding", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [proposal()] }));
+    expect(await hooks.dotRunOutcome(actionId, outcomeOf("run-1"))).toBeNull();
+    expect(await hooks.dotRunOutcome(actionId + 99, outcomeOf("run-1"))).toBeNull();
+    expect(await runOutcomeCalls(hooks)).toEqual([]);
+  });
+
   it("refused by the kernel, it is not applied, in the refusal's kind, and is declined in InferOps, never confirmed", async () => {
     const { hooks, actionId } = await staged(script({ proposals: [workflow()] }));
     const { failure } = await hooks.applyDot(actionId, { status: "refused", kind: "permission", reason: "You can't run this trigger." });
