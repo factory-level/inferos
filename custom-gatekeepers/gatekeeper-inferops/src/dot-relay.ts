@@ -161,8 +161,8 @@ const RUN_AUTHORITIES = new Set(["gadget_bindings", "service_account"]);
  */
 const RUN_REASON_CODES: Record<WorkflowRunFailure | WorkflowRunUncertainty, true> = {
   "requester-revoked": true, "assignment-changed": true, "trigger-gone": true, "bindings-needed": true, cancelled: true,
-  "timed-out": true, "attempts-exhausted": true, "runtime-error": true,
-  "action-unknown": true, "lost-after-write": true, "not-started": true,
+  "timed-out": true, "attempts-exhausted": true, "runtime-error": true, "step-refused": true,
+  "action-unknown": true, "lost-after-write": true, "not-started": true, "step-unknown": true,
 };
 
 /**
