@@ -502,6 +502,33 @@ describe("the console workspace's step entry (the lead's D1 (B))", () => {
     expect(w.board.transitions).toEqual([[ISSUE, DONE, "7"]]);
   });
 
+  it("bounds a step whose console workspace doesn't answer in time: the session's own bound gives step-unknown, and its next run still runs", async () => {
+    let w = await consoleWorkspace();
+    let other = await consoleWorkspace();
+    let s = await operateSession(w);
+    // The same person, offered a console in a second workspace.
+    other.people.set(uid(PERSON), w.people.get(uid(PERSON))!);
+    let stuck = await created(s, w);
+    let fine = await created(s, other, [step(other)]);
+    // W's step entry answers only after 20 s, past the session's bound (100 ms + its 5 s margin),
+    // so W's own deadline can't end it: only the session's bound can. (A promise that never settles
+    // would be cancelled by the runtime as hung, which proves nothing about the bound.)
+    // (On the implementation the Durable Object delegates to: RPC reaches only its class's methods.)
+    await withImpl(w.name, impl => {
+      impl.requestPersonalWorkflowStep = () =>
+        new Promise(resolve => setTimeout(() => resolve({ status: "requested" }), 20_000));
+    });
+    await withImpl(s.name, impl => { impl.personalWorkflowStepDeadlineMs = 100; });
+    await run(s, runRef(s, stuck));
+    await run(s, runRef(s, fine));
+    await advance(s);
+    let ended = await runs(s);
+    expect(ended.find(r => r.workflowId === stuck)).toMatchObject({ state: "uncertain", reason: "step-unknown", results: [{ status: "unknown" }] });
+    expect(ended.find(r => r.workflowId === fine)).toMatchObject({ state: "succeeded", results: [{ status: "requested" }] });
+    expect(w.board.transitions).toEqual([]);
+    expect(other.board.transitions).toEqual([[ISSUE, DONE, "7"]]);
+  }, 30_000);
+
   it("requests a step once, ever: a second request for it during its sending window places nothing (r1's LOW 2)", async () => {
     let w = await consoleWorkspace();
     let s = await operateSession(w);
