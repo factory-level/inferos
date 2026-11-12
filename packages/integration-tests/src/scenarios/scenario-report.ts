@@ -62,10 +62,14 @@ export function scenarioVerdict(expected: readonly string[], cases: readonly Sce
     && isolation.checked && isolation.unmockedRequests === 0 ? "PASS" : "FAIL";
 }
 
-/** The tested commit and whether the tree had local changes, from git where it can be read. */
+/**
+ * The tested commit and whether the tested code differs from it, from git where it can be read: only
+ * changes to tracked files count (`--untracked-files=no`), so an unrelated untracked file in the
+ * checkout doesn't mark a run dirty.
+ */
 export function scenarioRevision(cwd: string): ScenarioReport["revision"] {
   const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-  try { return { commit: git("rev-parse", "HEAD"), dirty: git("status", "--porcelain").length > 0 }; }
+  try { return { commit: git("rev-parse", "HEAD"), dirty: git("status", "--porcelain", "--untracked-files=no").length > 0 }; }
   catch { return { commit: "unknown", dirty: null }; }
 }
 

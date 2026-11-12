@@ -16,6 +16,7 @@ Create documents from [`_template.md`](_template.md).
 | [Configuration ownership and required settings](configuration-reference.md) | A starting settings inventory for the setup skills, grounded in current code. |
 | [ChatGPT subscription feasibility findings](chatgpt-feasibility.md) | Official protocol evidence and the unresolved personal Cloudflare deployment question. |
 | [Reusable authoring and widget evidence](authoring-and-canvas-evidence.md) | What AI Trader and InferOps already provide, and what still needs a native adapter. |
+| [Governed widgets launch gate evidence](widget-launch-gate-evidence.md) | FAC-15: the end-to-end widget scenario, the security regression, the known P0 gaps, and the go/no-go recommendation. |
 | [Vertical customization decision matrix](vertical-decision-matrix.md) | Choose native primitives, custom code and external services by concrete workflow. |
 | [Priority vertical research](priority-verticals.md) | Deeper extension boundaries for field operations, IT, DevOps, industrial and medical workflows. |
 | [Research source ledger](research-sources.md) | Dated sources, repository revisions and explicit evidence limits. |

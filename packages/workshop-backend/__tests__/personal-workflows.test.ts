@@ -30,6 +30,8 @@ import {
   PERSONAL_WORKFLOW_FIELD_LABEL, PERSONAL_WORKFLOW_RUN_FIELD_LABEL, type OverseerDurableObject,
 } from "../src/overseer.js";
 import { bumpAuthzGeneration } from "../src/sharing";
+import { OPERATE_AGENT_TOOL_NAMES } from "../src/agent";
+import { actionContextOf } from "../src/overseer.js";
 import { openFakeOverseer } from "./fixtures.js";
 import { onlyExplicitAlarms } from "./test-worker.js";
 
@@ -66,6 +68,8 @@ async function withImpl<T>(name: string, fn: (impl: any, instance: OverseerDurab
 type Board = {
   revision: string; company: string | null; transitions: string[][]; reads: number;
   callers: any[]; onRead?: () => void;
+  /** An issue whose read never answers (a gatekeeper that hangs, r1's LOW 1). */
+  hangOn?: string;
 };
 /** Who W's fake user Durable Objects say each person is. */
 type Person = { profileId: string; session: string | null; company: string };
@@ -112,7 +116,12 @@ async function consoleWorkspace(opts: { person?: Partial<Person>; role?: "use" |
       connectionCompany: async () => board.company,
       startSession: async (queue: any) => ({
         openIssue: async (issueId: string) => ({
-          read: async () => { board.reads++; board.onRead?.(); return { revision: board.revision }; },
+          read: async () => {
+            board.reads++;
+            if (issueId === board.hangOn) return await new Promise<never>(() => {});
+            board.onRead?.();
+            return { revision: board.revision };
+          },
           transition: async (toStateId: string, expectedRevision: string) => {
             board.transitions.push([issueId, toStateId, expectedRevision]);
             return await queue.submitAction(nextAction++, {
@@ -372,6 +381,9 @@ describe("running a personal workflow", () => {
       expect(action).toMatchObject({ state: "pending", gatekeeperId: BOARD,
         caller: { from: "operateAgent", profileId: PERSON, sessionWorkspaceId: s.id, personalWorkflowStep: { runId: answer.runId } } });
       expect(action.description.fields).toContainEqual({ label: "Expected revision", kind: "inline", value: "12" });
+      // r1's LOW 3: the decider is told it is a step of the person's own approved personal workflow.
+      expect(actionContextOf(action)).toMatchObject({ kind: "agent-turn", onBehalfOf: { profileId: PERSON },
+        personalWorkflowStep: { runId: answer.runId, index: expect.any(Number) } });
       expect(autoApprovalRule(await withImpl(w.name, impl => impl.storage), () => "build" as any, BOARD, action.description)).toBeUndefined();
     }
     let [ended] = await runs(s);
@@ -473,6 +485,69 @@ describe("running a personal workflow", () => {
 });
 
 describe("the console workspace's step entry (the lead's D1 (B))", () => {
+  it("bounds a step whose gatekeeper never answers: step-unknown, and the session's next run isn't held (r1's LOW 1)", async () => {
+    let w = await consoleWorkspace();
+    let s = await operateSession(w);
+    let stuck = await created(s, w, [step(w, { issueId: ISSUE_2, toStateId: DONE })]);
+    let fine = await created(s, w, [step(w)]);
+    w.board.hangOn = ISSUE_2;
+    w.impl.personalWorkflowStepDeadlineMs = 500;
+    await withImpl(s.name, impl => { impl.personalWorkflowStepDeadlineMs = 500; });
+    await run(s, runRef(s, stuck));
+    await run(s, runRef(s, fine));
+    await advance(s);
+    let ended = await runs(s);
+    expect(ended.find(r => r.workflowId === stuck)).toMatchObject({ state: "uncertain", reason: "step-unknown", results: [{ status: "unknown" }] });
+    expect(ended.find(r => r.workflowId === fine)).toMatchObject({ state: "succeeded", results: [{ status: "requested" }] });
+    expect(w.board.transitions).toEqual([[ISSUE, DONE, "7"]]);
+  });
+
+  it("bounds a step whose console workspace doesn't answer in time: the session's own bound gives step-unknown, and its next run still runs", async () => {
+    let w = await consoleWorkspace();
+    let other = await consoleWorkspace();
+    let s = await operateSession(w);
+    // The same person, offered a console in a second workspace.
+    other.people.set(uid(PERSON), w.people.get(uid(PERSON))!);
+    let stuck = await created(s, w);
+    let fine = await created(s, other, [step(other)]);
+    // W's step entry answers only after 20 s, past the session's bound (100 ms + its 5 s margin),
+    // so W's own deadline can't end it: only the session's bound can. (A promise that never settles
+    // would be cancelled by the runtime as hung, which proves nothing about the bound.)
+    // (On the implementation the Durable Object delegates to: RPC reaches only its class's methods.)
+    await withImpl(w.name, impl => {
+      impl.requestPersonalWorkflowStep = () =>
+        new Promise(resolve => setTimeout(() => resolve({ status: "requested" }), 20_000));
+    });
+    await withImpl(s.name, impl => { impl.personalWorkflowStepDeadlineMs = 100; });
+    await run(s, runRef(s, stuck));
+    await run(s, runRef(s, fine));
+    await advance(s);
+    let ended = await runs(s);
+    expect(ended.find(r => r.workflowId === stuck)).toMatchObject({ state: "uncertain", reason: "step-unknown", results: [{ status: "unknown" }] });
+    expect(ended.find(r => r.workflowId === fine)).toMatchObject({ state: "succeeded", results: [{ status: "requested" }] });
+    expect(w.board.transitions).toEqual([]);
+    expect(other.board.transitions).toEqual([[ISSUE, DONE, "7"]]);
+  }, 30_000);
+
+  it("requests a step once, ever: a second request for it during its sending window places nothing (r1's LOW 2)", async () => {
+    let w = await consoleWorkspace();
+    let s = await operateSession(w);
+    let id = await created(s, w);
+    await run(s, runRef(s, id));
+    let [started] = await runs(s);
+    await withImpl(s.name, impl => impl.storage.personalWorkflowRuns.put({ ...started, sending: 0 }));
+    let person = { userId: uid(PERSON), profileId: PERSON, sessionWorkspaceId: s.id };
+    let ask = () => withImpl(w.name, (_impl, instance) => (instance as any).requestPersonalWorkflowStep(person, { runId: started.runId, index: 0 }));
+    expect(await ask()).toEqual({ status: "requested" });
+    expect(await ask()).toEqual({ status: "refused", detail: "This step's request was already asked for." });
+    expect(w.board.transitions).toHaveLength(1);
+    expect(await pendingIn(w)).toHaveLength(1);
+  });
+
+  it("is no operate agent tool: none is named for a personal workflow or its steps (r1's LOW 4)", () => {
+    expect(OPERATE_AGENT_TOOL_NAMES.filter(name => /personal|workflowStep|PersonalWorkflow/i.test(name))).toEqual([]);
+  });
+
   it("requests nothing for a session that isn't running that step, another person's session, or itself", async () => {
     let w = await consoleWorkspace();
     let s = await operateSession(w);

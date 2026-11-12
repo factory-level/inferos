@@ -65,6 +65,8 @@ export const contextText = (entry: ActionEntry, viewerProfileId?: string | null)
   }
   // A declared run alone (FAC-120 round 6, `context.declaredRun`) names no origin here; the UI PR shows the run.
   if (context.kind === 'declared-run') return null
+  // Likewise a declared temporary canvas alone (FAC-137, `context.declaredCanvas`); its UI PR shows it.
+  if (context.kind === 'declared-canvas') return null
   const trigger = context.triggerLabel ? `the workflow trigger “${context.triggerLabel}”` : 'a workflow trigger'
   const asker = context.requestedBy === null ? ', which fired by itself'
     : context.requestedBy === undefined ? ''

@@ -69,6 +69,23 @@ it('runs the console’s current frozen install, opened through that workspace w
   root = createRoot(container)
 })
 
+// FAC-15 P-3, parity: a Wiki embed decides nothing. It shows no approval control, and it asks its
+// workspace only to resolve and open the widget: never to approve, reject or list actions.
+it('decides nothing: no approval control, and nothing asked of the workspace but resolving and opening', async () => {
+  const k = kernel(AVAILABLE)
+  const touched = new Set<string>()
+  const recording = new Proxy(k.workspace, { get(target, key, receiver) {
+    if (typeof key === 'string') touched.add(key)
+    return Reflect.get(target, key, receiver)
+  } })
+  k.openGadget.mockImplementation(() => recording)
+  await render()
+  expect(text()).toContain('Counter')
+  const labels = [...container.querySelectorAll('button')].map(button => button.textContent?.trim() ?? '')
+  expect(labels.filter(label => /approve|deny|reject/i.test(label))).toEqual([])
+  expect([...touched].filter(key => !['resolveEmbeddedWidget', 'getEmbeddedWidget', 'then'].includes(key))).toEqual([])
+})
+
 it('says a newer publication runs another version than the link was written for, and still shows it', async () => {
   kernel({ ...AVAILABLE, version: 2 })
   await render()
