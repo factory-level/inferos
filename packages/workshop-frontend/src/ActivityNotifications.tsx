@@ -6,6 +6,7 @@ import type { Overseer } from '@gadgets/workshop-shared/api'
 import { CountBadge } from './components/CountBadge'
 import { IncompleteDescriptionNotice, isDescriptionIncomplete } from './components/IncompleteDescriptionNotice'
 import { ActionFields, entryFields, fieldCountLabel } from './components/ActionFields'
+import { DeclaredRunNotice } from './components/DeclaredRunNotice'
 import { ResolveButton } from './components/ResolveButton'
 import { contextText } from './actionDecision'
 import { RestrictedApprovalNotice } from './components/RestrictedApprovalNotice'
@@ -100,15 +101,19 @@ export default function ActivityNotifications({
               // Who the request is for, or where it came from (FAC-14), said beside Approve too.
               const contextId = `${noticeId}-context-${action.id}`
               const context = action.type === 'action' ? contextText(action) : null
+              // FAC-120: a declared run, from the kernel's marker, said beside Approve too.
+              const runId = `${noticeId}-run-${action.id}`
+              const declaredRun = action.type === 'action' ? action.context?.declaredRun : undefined
+              const unrestrictedIds = [...(context ? [contextId] : []), ...(declaredRun ? [runId] : [])]
               const describedBy = restricted
                 ? [
                   noticeId,
-                  ...(context ? [contextId] : []),
+                  ...unrestrictedIds,
                   requestId,
                   ...(fields.length > 0 ? [fieldsId] : []),
                   ...(incomplete ? [incompleteId] : []),
                 ].join(' ')
-                : context ? contextId : undefined
+                : unrestrictedIds.length > 0 ? unrestrictedIds.join(' ') : undefined
               return (
                 <div
                   key={action.id}
@@ -132,6 +137,9 @@ export default function ActivityNotifications({
                         <span id={contextId} className="mt-1 block text-[11.5px] leading-4 tracking-[-0.1px] text-kumo-inactive">
                           {context}
                         </span>
+                      )}
+                      {action.type === 'action' && (
+                        <DeclaredRunNotice context={action.context} id={runId} className="mt-1" />
                       )}
                       <span id={requestId} className={`mt-1.5 block whitespace-pre-wrap text-[12.5px] leading-[18px] tracking-[-0.2px] text-kumo-subtle ${restricted ? '' : 'line-clamp-2'}`}>
                         {action.description.description}

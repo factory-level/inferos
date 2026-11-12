@@ -82,6 +82,41 @@ describe('ActivityNotifications', () => {
     expect(approveDescribedBy()).toContain('Requested by the operate agent for Ada Lovelace')
   })
 
+  // FAC-120: the dropdown's Approve starts a declared run too, so it names the run, from the kernel's
+  // marker, as InferOS's, and says so to a screen reader with Approve.
+  it("names a declared run beside Approve, from the kernel's marker, shown by InferOS", async () => {
+    const reference = 'inferops://acme.operations/inferos/workflow-trigger/abc/11?definition="d"&revision="2"'
+    const server = makeOverseer()
+    await view.render(<ActivityNotifications overseer={server.overseer} onViewActivity={() => {}} />)
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [entry(1, {
+      description: { title: 'Run the refund workflow', description: 'Starts it.', implementsRevert: false },
+      context: { kind: 'declared-run', declaredRun: { reference } },
+    })] })
+    flushFrames()
+    expect(document.body.textContent).toContain(`Workflow run this approval starts:${reference}`)
+    expect(document.body.textContent).toContain('Shown by InferOS')
+    expect(approveDescribedBy()).toContain(reference)
+  })
+
+  // Both at once: an operate-agent request on someone's behalf that also starts a declared run.
+  it('names both who the request is for and the run it starts, beside Approve', async () => {
+    const reference = 'inferops://acme.operations/inferos/workflow-trigger/abc/12?definition="d"&revision="3"'
+    const server = makeOverseer()
+    await view.render(<ActivityNotifications overseer={server.overseer} onViewActivity={() => {}} />)
+    await server.resolveSubscription()
+    await server.resolvePendingQuery({ entries: [entry(1, {
+      description: { title: 'Run the refund workflow', description: 'Starts it.', implementsRevert: false },
+      context: { kind: 'agent-turn', onBehalfOf: { profileId: 'ada', name: 'Ada Lovelace' }, declaredRun: { reference } },
+    })] })
+    flushFrames()
+    expect(document.body.textContent).toContain('Requested by the operate agent for Ada Lovelace')
+    expect(document.body.textContent).toContain(`Workflow run this approval starts:${reference}`)
+    const described = approveDescribedBy()
+    expect(described).toContain('Requested by the operate agent for Ada Lovelace')
+    expect(described).toContain(reference)
+  })
+
   it('shows the review notice and the untruncated request while restricted', async () => {
     const description = await renderPending(true)
     expect(document.body.textContent).toContain(RESTRICTED_APPROVAL_COPY)
