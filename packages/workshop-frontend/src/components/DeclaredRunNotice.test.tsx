@@ -37,6 +37,7 @@ describe('the declared run on a decision (FAC-120)', () => {
   it("shows it beside another origin, as an agent's turn on someone's behalf", () => {
     show(entry({ context: { kind: 'agent-turn', onBehalfOf: { profileId: 'ada', name: 'Ada' }, declaredRun: { reference: REFERENCE } } }))
     expect(container.textContent).toContain(REFERENCE)
+    expect(container.textContent).toContain('Requested by the operate agent for Ada')
   })
 
   it("never reads it from a field: a connection's field with the kernel's label shows no run", () => {

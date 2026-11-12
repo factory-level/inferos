@@ -22,10 +22,10 @@ export const DeclaredRunNotice = ({ context, id, className = '' }: {
   const reference = context?.declaredRun?.reference
   if (!reference) return null
   return (
-    <p id={id} className={`m-0 flex flex-wrap items-center gap-1.5 text-[11.5px] leading-4 text-kumo-default ${className}`}>
+    <span id={id} className={`flex flex-wrap items-center gap-1.5 text-[11.5px] leading-4 text-kumo-default ${className}`}>
       <Badge variant="secondary">{DECLARED_RUN_PROVENANCE}</Badge>
       <span>{DECLARED_RUN_TEXT}:</span>
       <span className="break-all font-mono text-kumo-subtle">{reference}</span>
-    </p>
+    </span>
   )
 }
