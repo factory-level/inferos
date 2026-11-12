@@ -305,6 +305,96 @@ describe("deciding a workflow-run proposal", () => {
   });
 });
 
+// FAC-137: the Dot's proposal of a temporary canvas (inferops `inferos_canvas_compose`). The kernel
+// creates it, as the person approving it, from what the action declared at submit (its approved
+// effects, scripted here); InferOps makes nothing for it.
+describe("deciding a temporary canvas proposal", () => {
+  const BOARD = "inferops://acme.operations/project/board/ENG";
+  const CARD = "inferops://acme.operations/project/issue-card/ENG-7";
+  const GONE = "This canvas expired or was removed since it was created. Ask your Dot for it again.";
+  const compose = (input: Record<string, unknown> = {
+    title: "Release week",
+    placements: [{ ref: BOARD, layout: "small", filters: { status: "open" } }, { ref: CARD, layout: "half" }, { ref: BOARD }],
+  }) => proposal({ tool: "inferos_canvas_compose", input });
+
+  it("is staged as its own kind, declaring to the kernel the canvas it will create, sizes as packed grid cells", async () => {
+    const { hooks } = await staged(script({ proposals: [compose()] }));
+    const [action] = (await hooks.log()).actions;
+    expect(action).toMatchObject({
+      kind: "inferops.dot-canvas-compose", title: "Your Dot proposes a temporary canvas", implementsRevert: false,
+      temporaryCanvas: { title: "Release week", placements: [
+        { ref: { type: "builtin", kind: "project/board", target: BOARD }, layout: { x: 0, y: 0, w: 4, h: 4 }, filters: { status: "open" } },
+        { ref: { type: "builtin", kind: "project/issue-card", target: CARD }, layout: { x: 4, y: 0, w: 6, h: 6 }, filters: {} },
+        // `large` when absent, and too wide for the row, so it starts the next one.
+        { ref: { type: "builtin", kind: "project/board", target: BOARD }, layout: { x: 0, y: 6, w: 12, h: 8 }, filters: {} },
+      ] },
+    });
+    expect(JSON.stringify(action)).toContain("project/issue-card: " + CARD);
+  });
+
+  it.each([
+    ["a list filter, which the kernel has no place for", { ref: BOARD, filters: { status: ["open", "closed"] } }],
+    ["a number filter", { ref: BOARD, filters: { limit: 5 } }],
+    ["a reference that isn't an inferops:// widget", { ref: "https://example.com/board" }],
+    ["an unknown size", { ref: BOARD, layout: "huge" }],
+    ["an unknown field", { ref: BOARD, position: { x: 0 } }],
+  ])("is unreadable whole with %s: never a partial canvas, and approving it asks the kernel nothing", async (_what, odd) => {
+    const { hooks, actionId } = await staged(script({ proposals: [compose({ title: "Mixed", placements: [{ ref: CARD }, odd] })] }));
+    const [action] = (await hooks.log()).actions;
+    expect(action).not.toHaveProperty("temporaryCanvas");
+    expect(JSON.stringify(action)).toContain("a canvas InferOS can't read");
+    const { failure } = await hooks.applyDotCanvas(actionId, { status: "created", canvasId: "c-1" });
+    expect(failure).toMatchObject({ outcome: "notApplied", retryable: false, kind: "policy" });
+    expect(await hooks.dotEffectsAsked()).toEqual([]);
+    expect((await hooks.dotCalls()).some(c => c.path.endsWith("/confirm"))).toBe(false);
+  });
+
+  it("creates nothing, and asks InferOps nothing, without a person's approval", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [compose()] }));
+    const { failure } = await hooks.applyDot(actionId);
+    expect(failure).toMatchObject({ outcome: "notApplied", retryable: false, kind: "policy" });
+    expect(await hooks.dotEffectsAsked()).toEqual([]);
+    expect((await hooks.dotCalls()).some(c => c.path.endsWith("/confirm"))).toBe(false);
+  });
+
+  it("has the kernel create it, then confirms the hand-off keyed by the proposal id, with the canvas on the receipt", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [compose()], confirm: { outcome: { handedOff: true } } }));
+    const applied = await hooks.applyDotCanvas(actionId, { status: "created", canvasId: "c-1" });
+    expect(applied.failure).toBeNull();
+    expect(applied.result).toMatchObject({ kind: "dot-confirm", proposalId: PROPOSAL, canvasId: "c-1" });
+    expect((await hooks.dotCalls()).find(c => c.path.endsWith("/confirm"))?.key).toBe(PROPOSAL);
+    // Applied once: approving again creates nothing more.
+    await hooks.applyDotCanvas(actionId, { status: "created", canvasId: "c-2" });
+    expect(await hooks.dotEffectsAsked()).toEqual(["canvas"]);
+  });
+
+  it("refused by the kernel, it is not applied, never retryable, in the refusal's kind, and declined in InferOps", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [compose()] }));
+    const { failure } = await hooks.applyDotCanvas(actionId, { status: "refused", kind: "permission", reason: "You can't use one of these widgets." });
+    // A permission refusal elsewhere may be approved again once granted; the kernel's is final.
+    expect(failure).toMatchObject({ outcome: "notApplied", retryable: false, kind: "permission", message: "You can't use one of these widgets." });
+    const calls = await hooks.dotCalls();
+    expect(calls.some(c => c.path.endsWith(`/proposals/${PROPOSAL}/decline`))).toBe(true);
+    expect(calls.some(c => c.path.endsWith("/confirm"))).toBe(false);
+  });
+
+  it("a canvas gone since an uncertain first attempt is not applied and not retryable (K2's TEMPORARY_CANVAS_GONE)", async () => {
+    const { hooks, actionId } = await staged(script({ proposals: [compose()] }));
+    // The kernel created the canvas, but its answer was lost: uncertain, and safe to send again.
+    const first = await hooks.applyDotCanvas(actionId, "throw");
+    expect(first.failure).toMatchObject({ outcome: "unknown", retryable: true });
+    // By the retry the canvas expired or was removed: the kernel says so, and creates nothing.
+    const { failure } = await hooks.applyDotCanvas(actionId, { status: "refused", kind: "policy", reason: GONE });
+    expect(failure).toMatchObject({ outcome: "notApplied", retryable: false, kind: "policy", message: GONE });
+    expect(await hooks.dotAction(actionId)).toEqual({ status: "failed", message: GONE });
+    // Settled: approving again replays the refusal and asks the kernel nothing more.
+    const again = await hooks.applyDotCanvas(actionId, { status: "created", canvasId: "c-2" });
+    expect(again.failure).toMatchObject({ outcome: "notApplied", retryable: false, message: GONE });
+    expect(await hooks.dotEffectsAsked()).toEqual(["canvas", "canvas"]);
+    expect((await hooks.dotCalls()).some(c => c.path.endsWith("/confirm"))).toBe(false);
+  });
+});
+
 describe("declining a proposal records only what InferOps confirmed (r2)", () => {
   it("keeps a decline InferOps didn't answer pending, says so, and can decline it again", async () => {
     const { hooks, actionId } = await staged(script({ proposals: [proposal()], decline: { status: 503, code: "UNAVAILABLE" } }));
