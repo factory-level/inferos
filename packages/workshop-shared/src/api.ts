@@ -1479,6 +1479,31 @@ export type AdminResourceVendor = {
 );
 
 /**
+ * One item of a workspace's deployment readiness (FAC-144, `Overseer.getWorkspaceReadiness`):
+ * `ready`; `attention`, something a builder here can do (`action` says what); or `blocked`, which
+ * waits on the deployment itself, such as an InferOps resource kind turned off. Computed from what
+ * the workspace holds when asked, never from what a page shows.
+ */
+export type WorkspaceReadinessItem = {
+  name: "inferops-connection" | "records-binding" | "workflow-policy-binding" | "published-console";
+  status: "ready" | "attention" | "blocked";
+  /** What the server found, in its own words. */
+  detail: string;
+  /** What to do next, or null when the item is ready. */
+  action: string | null;
+};
+
+/**
+ * A workspace's deployment readiness (FAC-144): its items, and `deploymentReady` only when every
+ * item is ready. It is this InferOS workspace's side only; the company's InferOps side (people,
+ * model, flags) is InferOps' own `company.readiness`.
+ */
+export type WorkspaceReadiness = {
+  deploymentReady: boolean;
+  items: WorkspaceReadinessItem[];
+};
+
+/**
  * A connectable third-party service: its vendor id, display metadata, and the resource types it
  * offers (empty for an auto-provisioning gatekeeper like the Context Library). Returned by both
  * listGatekeeperVendors and listAddableGatekeepers so the connect UI treats both uniformly.
@@ -3106,6 +3131,15 @@ export interface Overseer extends RpcTarget {
    * (see `publishedConsole()`). Creating, replacing, publishing and deleting need build access.
    */
   listConsoles(): Promise<OperateConsole[]>;
+
+  /**
+   * This workspace's deployment readiness (FAC-144): whether a person's InferOps account is
+   * connected, whether a gadget is bound to an InferOps custom table and to a workflow policy (each
+   * `blocked` while the deployment turns that kind off), and whether a console is published. Read
+   * only, and the same answer again while nothing changed. Build only, with the shared workspace's
+   * `build` authority; use and operate are refused.
+   */
+  getWorkspaceReadiness(): Promise<WorkspaceReadiness>;
   /**
    * Every widget install of this workspace a console could register, each with its stable
    * version, what its current commit offers and, when a console can't offer it now, the reason a

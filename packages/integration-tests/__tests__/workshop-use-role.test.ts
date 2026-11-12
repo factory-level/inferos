@@ -135,6 +135,8 @@ const DENIED_OVERSEER: Record<Exclude<keyof Overseer, keyof RpcTarget | UseSurfa
   pinTriggerDefinition: ws => ws.pinTriggerDefinition(1, null),
   getTriggerDefinition: ws => ws.getTriggerDefinition(1),
   listWorkflowDeliveries: ws => ws.listWorkflowDeliveries("definition"),
+  // Deployment readiness (FAC-144) is a build-only read; a use collaborator is told nothing of it.
+  getWorkspaceReadiness: ws => ws.getWorkspaceReadiness(),
   // Run-history discovery is a build-only read; use collaborators cannot enumerate definitions.
   listReadableWorkflowHistories: ws => ws.listReadableWorkflowHistories(),
   setTriggerControl: ws => ws.setTriggerControl(1, null),

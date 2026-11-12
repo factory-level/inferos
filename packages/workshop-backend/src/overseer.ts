@@ -44,6 +44,7 @@ import {
 import { collaboratorAccountName } from "./account-subject";
 import type { UserDirectoryDurableObject } from "./user-directory";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
+import { workspaceReadiness, type ReadinessInputs } from "./workspace-readiness";
 import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
 import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { commandInputProblem, isReservedToolMethod, parseToolEnvelope, parseWidgetToolFile, plainJsonProblem, WIDGET_COMMANDS, WIDGET_TOOL_LIMITS, widgetToolValueProblem, type WidgetCommandName } from "@gadgets/workshop-shared/widget-tools";
@@ -153,7 +154,7 @@ import { createWorkshopLogger, obsContext } from "./observability";
 import { traceAgentTurn, traceToolApproval } from "./agent-tracing";
 import { retryOnDoReset, wrapDoStubForTelemetry } from "./do-retry";
 import type { ChatGatewayRpcTarget, SubmitExternalMessageResult } from "@gadgets/workshop-shared/external-message-gateway";
-import { createOperateSessionError, OPERATE_SESSION_ERROR_CODES, WIDGET_SEARCH_LIMIT, type BoundViewDescription, type GadgetExportFormat, type GovernedSessionHandle } from "@gadgets/workshop-shared/api";
+import { createOperateSessionError, OPERATE_SESSION_ERROR_CODES, WIDGET_SEARCH_LIMIT, type BoundViewDescription, type GadgetExportFormat, type GovernedSessionHandle, type WorkspaceReadiness } from "@gadgets/workshop-shared/api";
 import {
   governedResourceOf, type GovernedCommandReceipt, type GovernedDescription, type GovernedListResult, type GovernedRow,
   type GovernedWriteSession,
@@ -13273,6 +13274,40 @@ class OverseerImpl implements AgentHooks {
     return null;
   }
 
+  /**
+   * What this workspace's deployment readiness is decided from (FAC-144, `workspaceReadiness`), read
+   * now: its connections, the connections its gadgets bind (provisional edges excluded), its
+   * published consoles (null while consoles are off) and the URL patterns the deployment's InferOps
+   * gatekeeper offers (null when there is none to ask). Reads only.
+   */
+  async workspaceReadinessInputs(): Promise<ReadinessInputs> {
+    let connections = Array.from(this.storage.gatekeepers.list(), record => ({
+      id: record.id, vendorId: gatekeeperVendorId(record),
+      resourceUrl: record.resourceUrl ?? gatekeeperResourceUrl(record), connected: record.connectedBy !== undefined,
+    }));
+    let boundConnectionIds = new Set<number>();
+    for (let gadget of this.storage.gadgets.list()) {
+      if (gadget.type !== "gadget" || gadget.pending) continue;
+      for (let binding of Object.values(gadget.bindings ?? {})) {
+        if (!binding.pending) boundConnectionIds.add(binding.target);
+      }
+    }
+    let publishedConsoles: number | null;
+    try {
+      publishedConsoles = this.#consoleStore().listPublished().length;
+    } catch {
+      publishedConsoles = null;
+    }
+    let inferopsPatterns: string[] | null;
+    try {
+      let vendor = (await this.#listGatekeeperVendorsCached()).find(v => v.id.toLowerCase() === "inferops");
+      inferopsPatterns = vendor ? vendor.supportedResources.map(r => r.urlPattern) : null;
+    } catch {
+      inferopsPatterns = null;
+    }
+    return { connections, boundConnectionIds, publishedConsoles, inferopsPatterns };
+  }
+
   #consoleStore(): WorkspaceConsoleStore {
     if (!this.ownerId) throw new Error("Workspace has been deleted.");
     return new WorkspaceConsoleStore(this.ctx.storage, this.storage, this.env, this.frozenInstalls());
@@ -15855,6 +15890,11 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   }
 
   async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().list(); }
+  /** See Overseer.getWorkspaceReadiness: build, with the shared workspace's `build` authority. */
+  async getWorkspaceReadiness(): Promise<WorkspaceReadiness> {
+    await this.#requireSharedConfiguration("build", "shared");
+    return workspaceReadiness(await this.impl.workspaceReadinessInputs());
+  }
   // Read first, then checked, as a save is (see createConsole).
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> {
     let store = this.#consoleStore();
@@ -18662,6 +18702,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
   // read-only: a console is references and presentation, and grants nothing. Drafts, and every
   // write, stay build-only.
   async listConsoles(): Promise<OperateConsole[]> { return this.#consoleStore().listPublished(); }
+  async getWorkspaceReadiness(): Promise<WorkspaceReadiness> { this.#deny(); }
   async listConsoleWidgetCandidates(): Promise<ConsoleWidgetCandidate[]> { this.#deny(); }
   async createConsole(_content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
   async replaceConsole(_id: string, _expectedRevision: string, _content: OperateConsoleContent): Promise<OperateConsole> { this.#deny(); }
@@ -19169,6 +19210,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async getCanvas(id: string): Promise<CanvasDefinition | null> { this.#live(); return this.owner.getCanvas(id); }
   async listFlows(): Promise<OperateFlow[]> { this.#live(); return this.owner.listFlows(); }
   async listConsoles(): Promise<OperateConsole[]> { this.#live(); return this.owner.listConsoles(); }
+  async getWorkspaceReadiness(): Promise<WorkspaceReadiness> { this.#deny(); }
   async getConsole(id: string, source: ConsoleSource): Promise<OperateConsole | null> {
     this.#live(); return this.owner.getConsole(id, source);
   }
