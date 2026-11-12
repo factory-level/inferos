@@ -13,7 +13,7 @@
 //   inferops://<company>.<workspace>/inferos/console-command/<workspace>/<console>/<widget>/<command>?revision="<n>"
 //   inferops://<company>.<workspace>/inferos/personal-workflow/<workspace>/<id>
 
-import { commandInputProblem, isPlainLine, type WidgetCommandName } from "./widget-tools";
+import { commandInputProblem, plainTitle, type WidgetCommandName } from "./widget-tools";
 
 /** The kind segment of a console command reference. */
 export const CONSOLE_COMMAND_KIND = "inferos/console-command";
@@ -181,7 +181,7 @@ export function personalWorkflowStepInputProblem(command: WidgetCommandName | st
 /**
  * `value` as a personal workflow declaration (`ActionDescription.personalWorkflow`), or a thrown
  * error naming what is wrong (never a value): a title of 1 to `PERSONAL_WORKFLOW_LIMITS.titleChars`
- * characters on one line of plain text (`isPlainLine`) and 1 to `PERSONAL_WORKFLOW_LIMITS.steps` steps, each exactly `{reference, input}`, a
+ * characters, one line of plain text with single ASCII spaces (`plainTitle`), and 1 to `PERSONAL_WORKFLOW_LIMITS.steps` steps, each exactly `{reference, input}`, a
  * console command reference and the transition's input without its revision. Only the shape is
  * checked here: whether each command is offered to the approver is checked at approval, in each
  * console's own workspace.
@@ -192,12 +192,14 @@ export function parsePersonalWorkflowDeclaration(value: unknown): PersonalWorkfl
   }
   let { title, steps, ...extra } = value as Record<string, unknown>;
   if (Object.keys(extra).length > 0) throw new Error("A declared personal workflow has only a title and steps.");
-  if (typeof title !== "string" || title.trim().length === 0 || title.trim().length > PERSONAL_WORKFLOW_LIMITS.titleChars) {
+  let trimmed = typeof title === "string" ? title.replace(/^ +| +$/g, "") : "";
+  if (trimmed.length === 0 || trimmed.length > PERSONAL_WORKFLOW_LIMITS.titleChars) {
     throw new Error(`A personal workflow's title is 1 to ${PERSONAL_WORKFLOW_LIMITS.titleChars} characters.`);
   }
   // Refused, never flattened: the kernel's own field quotes it, so it is one line of plain text or
   // the declaration isn't valid (a title with a line break could add lines in InferOS's voice).
-  if (!isPlainLine(title)) throw new Error("A personal workflow's title is one line of plain text.");
+  let plain = plainTitle(title as string);
+  if (plain === null) throw new Error("A personal workflow's title is one line of plain text.");
   if (!Array.isArray(steps) || steps.length === 0 || steps.length > PERSONAL_WORKFLOW_LIMITS.steps) {
     throw new Error(`A personal workflow has 1 to ${PERSONAL_WORKFLOW_LIMITS.steps} steps.`);
   }
@@ -213,7 +215,7 @@ export function parsePersonalWorkflowDeclaration(value: unknown): PersonalWorkfl
     let { issueId, toStateId } = input as { issueId: string; toStateId: string };
     return { reference: consoleCommandRef(ref), input: { issueId, toStateId } };
   });
-  return { title: title.trim(), steps: checked };
+  return { title: plain, steps: checked };
 }
 
 /**

@@ -14,7 +14,7 @@ import {
   type WidgetPlacement,
   type WidgetPlacementInput,
 } from "./widget-placements.js";
-import { isPlainLine } from "./widget-tools.js";
+import { plainTitle } from "./widget-tools.js";
 
 /** One temporary canvas, as its owner reads it. */
 export type TemporaryCanvas = {
@@ -117,7 +117,7 @@ function invalid(message: string): never {
 
 /**
  * Checks a temporary canvas to create, from anyone: a non-empty title of at most
- * `TEMPORARY_CANVAS_LIMITS.title` characters on one line of plain text (`isPlainLine`), and from one to `TEMPORARY_CANVAS_LIMITS.placements`
+ * `TEMPORARY_CANVAS_LIMITS.title` characters, one line of plain text with single ASCII spaces (`plainTitle`), and from one to `TEMPORARY_CANVAS_LIMITS.placements`
  * placements, each checked as a personal placement is (`parseWidgetPlacementInput`) and naming no
  * id, which the kernel mints. Only these fields are read: nothing in it names a workspace to write
  * to, a console or a company.
@@ -126,13 +126,15 @@ export function parseTemporaryCanvasInput(input: unknown): TemporaryCanvasInput 
   if (typeof input !== "object" || input === null) invalid("A temporary canvas has a title and placements.");
   let raw = input as Record<string, unknown>;
   if (typeof raw.title !== "string") invalid("A temporary canvas has a title.");
-  let title = raw.title.trim();
-  if (title.length === 0 || title.length > TEMPORARY_CANVAS_LIMITS.title) {
+  // Only ASCII spaces are trimmed, so a forbidden character at either end is checked, not stripped.
+  let trimmed = raw.title.replace(/^ +| +$/g, "");
+  if (trimmed.length === 0 || trimmed.length > TEMPORARY_CANVAS_LIMITS.title) {
     invalid(`A temporary canvas's title is 1 to ${TEMPORARY_CANVAS_LIMITS.title} characters.`);
   }
   // One line of plain text (FAC-134): the kernel's own field names the canvas by it, and a line
   // break could add a line there in InferOS's voice. Refused, never flattened.
-  if (!isPlainLine(title)) invalid("A temporary canvas's title is one line of plain text.");
+  let title = plainTitle(raw.title);
+  if (title === null) invalid("A temporary canvas's title is one line of plain text.");
   if (!Array.isArray(raw.placements) || raw.placements.length === 0 ||
       raw.placements.length > TEMPORARY_CANVAS_LIMITS.placements) {
     invalid(`A temporary canvas has 1 to ${TEMPORARY_CANVAS_LIMITS.placements} placements.`);

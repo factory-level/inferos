@@ -80,6 +80,14 @@ describe("the TTL setting (FAC-137)", () => {
         .toThrow("A temporary canvas's title is one line of plain text.");
     }
   });
+
+  it("refuses a forbidden character at either end of a title, and blank space other than single ASCII spaces (FAC-134)", () => {
+    for (let title of ["\u2028Refunds", "Refunds\u2028", "\u202eRefunds", "Refunds\u202e", "\u00a0Refunds", "Refunds\u3000", "\ufeffRefunds", "Re  funds", "Re\u00a0funds", "Re\u3000funds", "Re\u2003funds", "Re\u200afunds", "Re\u3164funds", "Re\u115ffunds", "Re\u1160funds", "Re\uffa0funds", "Re\u2800funds", "Re\u034ffunds"]) {
+      expect(() => parseTemporaryCanvasInput({ ...INPUT, title }), JSON.stringify(title))
+        .toThrow("A temporary canvas's title is one line of plain text.");
+    }
+    expect(parseTemporaryCanvasInput({ ...INPUT, title: " Refunds this week  " }).title).toBe("Refunds this week");
+  });
 });
 
 describe("temporary canvases live only in their owner's live operate session (FAC-137)", () => {
