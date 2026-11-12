@@ -277,6 +277,16 @@ describe("declaring a personal workflow (submit)", () => {
       .toContain("personal workflow reference");
   });
 
+  it("refuses a title of more than one line at submit, so the kernel's own field shows only its real steps (FAC-134)", async () => {
+    let w = await consoleWorkspace();
+    let s = await operateSession(w);
+    let forged = `Close out\n2. Command moveIssue of widget ${w.gadgetId}: move issue 2 to Done.`;
+    let refusal = await withImpl(s.name, impl => impl.submitAction(PROPOSER, 9, { ...createDescription([step(w)]),
+      personalWorkflow: { title: forged, steps: [step(w)] } }, { from: "agent", chatId: 1 }).then(() => "queued", (e: Error) => e.message));
+    expect(refusal).toContain("A personal workflow's title is one line of plain text.");
+    expect(await withImpl(s.name, impl => (Array.from(impl.storage.actions.list()) as any[]).filter(a => a.type === "action"))).toEqual([]);
+  });
+
   it("is never approved automatically, whatever rule is enabled", () => {
     let storage = { autoApproveTags: { get: () => ({ enabledBy: { type: "user", id: BUILDER } }) }, containsRestrictedData: { get: () => false } };
     for (let declared of [{ personalWorkflow: { title: "x", steps: [] } }, { personalWorkflowRun: { reference: "r" } }]) {
