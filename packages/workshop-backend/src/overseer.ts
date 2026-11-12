@@ -19802,21 +19802,69 @@ async function listReadableWorkflowSchedules(
     impl: Pick<OverseerImpl, "storage" | "workflowDefinitionStore">,
     viewer: string, role: CollaboratorRole): Promise<WorkflowScheduleSummary[]> {
   let store = impl.workflowDefinitionStore();
-  let summaries: WorkflowScheduleSummary[] = [];
-  for (let hook of impl.storage.boundHooks.list()) {
-    if (hook.vendorId !== "scheduler" || !hook.enabled) continue;
+  const MAX_SCHEDULE_HOOK_READS = 100;
+  const SCHEDULE_READ_TIMEOUT_MS = 2_000;
+  const hooks = [...impl.storage.boundHooks.list()].filter(hook => {
+    if (hook.vendorId !== "scheduler" || !hook.enabled) return false;
     let pin = store.pinOf(hook.id);
-    if (!pin || !store.canReadDefinition(viewer, pin.definitionId, role)) continue;
+    return !!pin && !!store.canReadDefinition(viewer, pin.definitionId, role);
+  }).slice(0, MAX_SCHEDULE_HOOK_READS);
+  let reads = hooks.flatMap(hook => {
     let read = (hook.controller as unknown as HookController<RpcTarget>).getWorkflowSchedule;
-    if (typeof read !== "function") continue;
-    let schedule = await read.call(hook.controller);
-    if (schedule) summaries.push({
-      hookId: hook.id, scheduleId: schedule.scheduleId, title: schedule.title,
-      description: schedule.description, cadence: schedule.cadence, status: schedule.status,
-      ...(schedule.status === "active" && schedule.nextFire !== undefined ? { nextFire: schedule.nextFire } : {}),
-    });
-  }
+    if (typeof read !== "function") return [];
+    return [{ hook, read }];
+  });
+  let results = await Promise.allSettled(reads.map(async ({ hook, read }) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      let schedule = await Promise.race([
+        Promise.resolve().then(() => read.call(hook.controller)),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Schedule summary read timed out.")), SCHEDULE_READ_TIMEOUT_MS);
+        }),
+      ]);
+      if (!isSafeWorkflowScheduleSummary(schedule)) return null;
+      return {
+        hookId: hook.id, scheduleId: schedule.scheduleId, title: schedule.title,
+        description: schedule.description, cadence: schedule.cadence, status: schedule.status,
+        ...(schedule.status === "active" && schedule.nextFire !== undefined ? { nextFire: schedule.nextFire } : {}),
+      } satisfies WorkflowScheduleSummary;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }));
+  let summaries = results.flatMap(result => result.status === "fulfilled" && result.value ? [result.value] : []);
   return summaries.toSorted((a, b) => a.hookId - b.hookId);
+}
+
+function isSafeWorkflowScheduleSummary(value: unknown): value is Omit<WorkflowScheduleSummary, "hookId"> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  let summary = value as Record<string, unknown>;
+  if (typeof summary.scheduleId !== "string" || summary.scheduleId.length < 1 || summary.scheduleId.length > 128 ||
+      typeof summary.title !== "string" || summary.title.length < 1 || summary.title.length > 120 ||
+      typeof summary.description !== "string" || summary.description.length > 1_000 ||
+      !["active", "dead", "completed", "expired"].includes(String(summary.status)) ||
+      (summary.nextFire !== undefined && (typeof summary.nextFire !== "number" || !Number.isFinite(summary.nextFire)))) return false;
+  let cadence = summary.cadence;
+  if (!cadence || typeof cadence !== "object" || Array.isArray(cadence)) return false;
+  let valueCadence = cadence as Record<string, unknown>;
+  const finite = (entry: unknown) => typeof entry === "number" && Number.isFinite(entry);
+  const nonempty = (entry: unknown, max: number) => typeof entry === "string" && entry.length > 0 && entry.length <= max;
+  if (valueCadence.kind === "interval") return typeof valueCadence.everyMs === "number" && finite(valueCadence.everyMs) &&
+    valueCadence.everyMs > 0 && finite(valueCadence.anchorMs);
+  if (valueCadence.kind === "once") return finite(valueCadence.fireAt) && nonempty(valueCadence.timeZone, 100);
+  if (valueCadence.kind !== "calendar" || !nonempty(valueCadence.timeZone, 100)) return false;
+  let rule = valueCadence.rule;
+  if (!rule || typeof rule !== "object" || Array.isArray(rule)) return false;
+  let calendar = rule as Record<string, unknown>;
+  if (typeof calendar.interval !== "number" || !finite(calendar.interval) || calendar.interval <= 0 ||
+      typeof calendar.minute !== "number" || !finite(calendar.minute) || calendar.minute < 0 || calendar.minute > 59 ||
+      !finite(calendar.anchorMs)) return false;
+  if (calendar.freq === "hourly") return true;
+  if (typeof calendar.hour !== "number" || !finite(calendar.hour) || calendar.hour < 0 || calendar.hour > 23) return false;
+  return calendar.freq === "daily" ||
+    (calendar.freq === "weekly" && Array.isArray(calendar.byDay) && calendar.byDay.length > 0 &&
+      calendar.byDay.length <= 7 && calendar.byDay.every(day => ["MO", "TU", "WE", "TH", "FR", "SA", "SU"].includes(String(day))));
 }
 
 function requireLiveHook(impl: OverseerImpl, hookId: number): BoundHookRecord {

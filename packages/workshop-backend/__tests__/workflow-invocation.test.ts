@@ -101,6 +101,8 @@ describe("through the Overseer", () => {
                                                           assignmentsEnabled?: boolean;
                                                           schedule?: boolean;
                                                           scheduleTitle?: string;
+                                                          scheduleRead?: () => Promise<any>;
+                                                          secondSchedule?: boolean;
                                                           shareRights?: { read?: boolean; run?: boolean; edit?: boolean };
                                                           privateDefinition?: boolean;
                                                           controlInvokers?: string[];
@@ -111,11 +113,19 @@ describe("through the Overseer", () => {
     let invoke = vi.fn(opts.invoke ?? (async () => {}));
     let hook = { id: HOOK, gadgetId: GADGET, gatekeeperId: 50, enabled: true,
       ...(opts.schedule ? { vendorId: "scheduler" } : {}),
-      controller: { invoke, getWorkflowSchedule: async () => opts.schedule ? {
+      controller: { invoke, getWorkflowSchedule: opts.scheduleRead ?? (async () => opts.schedule ? {
         scheduleId: "schedule-1", title: opts.scheduleTitle ?? "Nightly report", description: "Run report",
         cadence: { kind: "interval" as const, everyMs: 60_000, anchorMs: 0 }, status: "active" as const,
         nextFire: 60_000, failureCode: "must-not-leak",
-      } : null } };
+      } : null) } };
+    let secondHook = opts.secondSchedule ? {
+      id: HOOK + 1, gadgetId: GADGET, gatekeeperId: 50, enabled: true, vendorId: "scheduler",
+      controller: { getWorkflowSchedule: async () => ({
+        scheduleId: "schedule-2", title: "Second schedule", description: "Independent result",
+        cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "active",
+      }) },
+    } : undefined;
+    if (secondHook) store.pinTrigger(ADA.id, HOOK + 1, GADGET, { definitionId, revision: 1, mode: "pinned" });
     let takenInvocations = new Map<string, boolean>();
     let impl = {
       takenInvocations,
@@ -137,7 +147,7 @@ describe("through the Overseer", () => {
         containsRestrictedData: { get: () => false },
         title: { get: () => "Test Workspace" },
         operateSession: { get: () => false },
-        boundHooks: { get: (id: number) => (id === HOOK ? hook : undefined), list: () => [hook] },
+        boundHooks: { get: (id: number) => (id === HOOK ? hook : id === secondHook?.id ? secondHook : undefined), list: () => [hook, ...(secondHook ? [secondHook] : [])] },
         gatekeepers: { get: () => undefined },
       }),
       users: {
@@ -155,7 +165,7 @@ describe("through the Overseer", () => {
     let askedInvoke: string[] = [];
     let overseer = await openFakeOverseer({}, { role, impl, workspaceId: opts.workspaceId });
     void durable;
-    return { overseer, store, invoke, hook, askedInvoke, takenInvocations };
+    return { overseer, store, definitionId, invoke, hook, askedInvoke, takenInvocations };
   }
 
   it("lets a listed Operator run the trigger, handing its gatekeeper only a server-made invocation", async () => {
@@ -340,6 +350,38 @@ describe("through the Overseer", () => {
 
     let unshared = await session("use", { schedule: true, privateDefinition: true });
     expect(await unshared.overseer.listReadableWorkflowSchedules()).toEqual([]);
+    expect((await unshared.overseer.listReadableWorkflowSchedules()).some(({ title }) => title === "Nightly report")).toBe(false);
+  });
+
+  it("removes schedule metadata, including title, when a reader's share is revoked", async () => {
+    let reader = await session("use", { schedule: true, privateDefinition: true, shareRights: { read: true } });
+    expect((await reader.overseer.listReadableWorkflowSchedules()).map(({ title }) => title)).toEqual(["Nightly report"]);
+    reader.store.share(ADA, reader.definitionId, OPERATOR, null, "build");
+    expect(await reader.overseer.listReadableWorkflowSchedules()).toEqual([]);
+  });
+
+  it("omits a hanging or malformed schedule without blocking independent readable schedules", async () => {
+    let hanging = await session("use", {
+      schedule: true, secondSchedule: true,
+      scheduleRead: () => new Promise<never>(() => {}),
+    });
+    vi.useFakeTimers();
+    try {
+      let result = hanging.overseer.listReadableWorkflowSchedules();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(result).resolves.toEqual([{
+        hookId: HOOK + 1, scheduleId: "schedule-2", title: "Second schedule", description: "Independent result",
+        cadence: { kind: "interval", everyMs: 60_000, anchorMs: 0 }, status: "active",
+      }]);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    let malformed = await session("use", {
+      schedule: true, secondSchedule: true,
+      scheduleRead: async () => ({ scheduleId: "bad", title: "x".repeat(121), description: "bad", cadence: {}, status: "unknown" }),
+    });
+    expect((await malformed.overseer.listReadableWorkflowSchedules()).map(({ title }) => title)).toEqual(["Second schedule"]);
   });
 
   it("keeps schedule reads inside each workspace context", async () => {
