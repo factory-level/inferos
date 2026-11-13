@@ -1,4 +1,5 @@
 import { projectOperatePage } from "./operate-agui-protocol.js";
+import type { OperateConsole, OperateConsoleContent } from "@gadgets/workshop-shared/operate-console";
 import { WorkspaceKind, AiChatMessage, AiChatAuthorInfo, AiToolCall, AiChatMessageBody, AgentSpawnerConfig, AiChatStreamEvent, BlueprintOutput, ChatGadgetPin, WorkpieceId, type AiModelConfig, isTextLikeAttachmentMimeType, validateBindingName } from '@gadgets/workshop-shared/api';
 import { applyCodeChange, codeChangeSerializedSize, replaceSpanChange, type CodeContent,
   type CodeChange, type FileChange } from '@gadgets/workshop-shared/code-change';
@@ -172,6 +173,12 @@ export type AiChatAgentContext = {
   operateReadOnly?: true;
   /** Explicit console-read policy; page-only chats never acquire C6 tools on reopen. */
   operateConsoleRead?: true;
+  /**
+   * The console that belongs to no workspace this chat helps author (ADR 0021), set once when the
+   * chat is created, after checking its creator may author it. Such a chat is offered only the
+   * canvas and console tools, and they reach that console's pages and draft, never this workspace's.
+   */
+  consoleId?: string;
   /** Chat ID, corresponds to `chatMeta`. */
   chatId: number;
 
@@ -871,7 +878,18 @@ export interface AgentHooks {
    * The workspace's saved canvases and the deployment's composition catalog, or null when the
    * installation has durable views disabled (the canvas tools are then not offered).
    */
-  getCanvasAccess(): AgentCanvasAccess | null;
+  getCanvasAccess(chatId: number): AgentCanvasAccess | null;
+}
+
+/**
+ * The console tool's view of the one console a chat helps author (ADR 0021): its draft, read and
+ * replaced as its creator's own controls do. It can't publish, share or delete.
+ */
+export interface AgentConsoleAccess {
+  /** The console's draft as `initiator` reads it. */
+  read(initiator: AiChatAuthorInfo): Promise<OperateConsole>;
+  /** Replace the draft at the expected revision as `initiator`. */
+  replace(initiator: AiChatAuthorInfo, expectedRevision: string, content: OperateConsoleContent): Promise<OperateConsole>;
 }
 
 /**
@@ -884,7 +902,9 @@ export interface AgentCanvasAccess {
   /** What the deployment offers for composition. */
   catalog: CanvasCatalog;
   /** Every page of this workspace, nested parts and attachments included. */
-  listPages(): CanvasPage[];
+  listPages(initiator: AiChatAuthorInfo): CanvasPage[] | Promise<CanvasPage[]>;
+  /** Present only for a chat that helps author a console (`AiChatAgentContext.consoleId`). */
+  console?: AgentConsoleAccess;
   /** Create a page as `initiator`, as the controls' `createCanvas` does. */
   create(initiator: AiChatAuthorInfo, content: CanvasContent): Promise<CanvasPage>;
   /** Apply page operations at the expected revision as `initiator`, as the controls' `editCanvasPage` does. */
@@ -1340,6 +1360,18 @@ let LIST_BLUEPRINTS_TOOL_DESCRIPTION = `
 List the blueprints available to the user: their own published blueprints, their blueprint library, and this deployment's featured blueprints. A blueprint is a shareable snapshot of a Gadget's code; instantiate one as a new Gadget by passing its \`blueprintId\` to \`createGadget\`. There is no search — read the list and pick the best match yourself.
 `.trim();
 
+/** What a chat that helps author a console (`AiChatAgentContext.consoleId`) is offered, and nothing else. */
+const CONSOLE_ASSISTANT_TOOLS: readonly string[] = ["listCanvases", "editCanvas", "editConsole"];
+
+let EDIT_CONSOLE_TOOL_DESCRIPTION = `
+Reads or changes the draft of the console this chat helps build: its name and its navigation, the
+ordered views operators move between, each showing one or more of the console's canvases (pages).
+Call it with no arguments to read the draft and its revision. To change it, pass that revision as
+expectedRevision with the new title, the whole new views list, or both. A page you created with
+editCanvas appears to operators only once a view shows it. You change the draft only: you can't
+publish, share or delete the console, and operators keep the published revision until its builder
+publishes.`.trim();
+
 let LIST_CANVASES_TOOL_DESCRIPTION = `
 List this workspace's canvases (saved pages: their nested objects, widgets and attachments, and current revisions), plus what this installation lets you place on them: enabled widget kinds, blueprints offered as widgets, and screen templates. Call this before \`editCanvas\`.
 `.trim();
@@ -1530,7 +1562,7 @@ function findEditPos(content: string, textToReplace: string): number {
  * selected and authorizes nothing (`CanvasTarget`); this only stops an edit naming one canvas while
  * changing another, or a part that's gone.
  */
-function requireTargetOn(access: AgentCanvasAccess, canvasId: string, written: string): void {
+async function requireTargetOn(access: AgentCanvasAccess, initiator: AiChatAuthorInfo, canvasId: string, written: string): Promise<void> {
   let target = parseCanvasTarget(written);
   if (!target || target.kind === "workspace") {
     throw new Error(`"${written}" isn't a canvas target. Write page:<id>, page:<id>/node:<id> or page:<id>/attachment:<id>.`);
@@ -1538,7 +1570,7 @@ function requireTargetOn(access: AgentCanvasAccess, canvasId: string, written: s
   if (target.pageId !== canvasId) {
     throw new Error(`Target ${written} is on another canvas than ${canvasId}. Change the canvas the target names.`);
   }
-  let page = access.listPages().find(candidate => candidate.id === canvasId);
+  let page = (await access.listPages(initiator)).find(candidate => candidate.id === canvasId);
   if (page && !resolveCanvasTarget(page, target)) {
     throw new Error(`Target ${written} isn't on canvas ${canvasId} any more. Call listCanvases to see its current parts.`);
   }
@@ -3324,7 +3356,7 @@ async function runAgentPass(
   };
 
   let requireCanvasAccess = () => {
-    let access = hooks.getCanvasAccess();
+    let access = hooks.getCanvasAccess(chatId);
     if (!access) throw new Error("Saved canvases are not enabled for this installation.");
     return access;
   };
@@ -3915,6 +3947,47 @@ async function runAgentPass(
       }
     }),
 
+    editConsole: defineTool({
+      name: "editConsole",
+      label: "Edit console",
+      description: EDIT_CONSOLE_TOOL_DESCRIPTION,
+      parameters: Type.Object({
+        expectedRevision: Type.Optional(Type.String({
+          description: "The console revision your change is based on. Omit to only read the console.",
+        })),
+        title: Type.Optional(Type.String({description: "A new name for the console."})),
+        views: Type.Optional(Type.Array(Type.Object({type: Type.String()}, {additionalProperties: true}), {
+          description: "The whole navigation, in order: {id, title, type: \"screen\", screen: <canvas id>} " +
+              "or {id, title, type: \"rollup\", screens: [<canvas ids>]}. The first view opens first.",
+        })),
+      }),
+      execute: async (toolCallId, {expectedRevision, title, views}) => {
+        try {
+          let access = requireCanvasAccess().console;
+          if (!access) throw new Error("This chat has no console to edit.");
+          let saved = await access.read(initiator);
+          if (expectedRevision !== undefined) {
+            if (expectedRevision !== saved.revision) {
+              throw new Error(`The console changed: its revision is ${saved.revision}. Read it again before retrying.`);
+            }
+            let {id: _id, revision: _revision, published: _published, ...content} = saved;
+            saved = await access.replace(initiator, expectedRevision, {
+              ...content, ...(title !== undefined ? {title} : {}),
+              ...(views !== undefined ? {views: views as OperateConsoleContent["views"]} : {}),
+            });
+          } else if (title !== undefined || views !== undefined) {
+            throw new Error("Pass expectedRevision (from reading the console) to change it.");
+          }
+          let output = jsonToolResultText({console: {revision: saved.revision, title: saved.title, views: saved.views,
+            published: saved.published ? {revision: saved.published.revision} : null}});
+          return toolResult(output, { output });
+        } catch (error) {
+          toolCallNotes.set(toolCallId, { error: toolErrorText(error) });
+          throw error;
+        }
+      }
+    }),
+
     listCanvases: defineTool({
       name: "listCanvases",
       label: "List canvases",
@@ -3924,7 +3997,7 @@ async function runAgentPass(
         try {
           let access = requireCanvasAccess();
           let output = jsonToolResultText({
-            canvases: access.listPages().map(summarizeCanvas),
+            canvases: (await access.listPages(initiator)).map(summarizeCanvas),
             catalog: {
               widgetKinds: access.catalog.widgetKinds,
               blueprints: access.catalog.blueprints,
@@ -3994,7 +4067,7 @@ async function runAgentPass(
             if (templateId !== undefined || title !== undefined) {
               throw new Error("title and templateId apply only when creating; use a renamePage operation instead.");
             }
-            if (target !== undefined) requireTargetOn(access, canvasId, target);
+            if (target !== undefined) await requireTargetOn(access, initiator, canvasId, target);
             page = await access.editPage(initiator, canvasId, expectedRevision, ops);
           }
           let output = jsonToolResultText({success: true, canvas: summarizeCanvas(page)});
@@ -4331,11 +4404,13 @@ async function runAgentPass(
     }),
   });
 
-  if (!hooks.getCanvasAccess()) {
+  let canvasAccess = hooks.getCanvasAccess(chatId);
+  if (!canvasAccess) {
     // Durable views are off for this installation: there is nothing to list or edit.
     tools = Object.fromEntries(Object.entries(tools)
         .filter(([name]) => name !== "listCanvases" && name !== "editCanvas"));
   }
+  if (!canvasAccess?.console) delete tools.editConsole;
 
   if (!consoleTools) {
     delete tools.listConsoleTools;
@@ -4375,6 +4450,20 @@ async function runAgentPass(
     // assertMayModifyWorkpiece).
     tools = Object.fromEntries(SPAWNED_AGENT_TOOLS.filter(name => name in tools)
         .map(name => [name, tools[name]]));
+  }
+
+  if (agentContext.consoleId !== undefined) {
+    // A console's helper edits that console and nothing else: it builds no software and reaches
+    // no workspace. Execution is guarded as well as advertisement, as for a read-only chat below.
+    const allowed = new Set(CONSOLE_ASSISTANT_TOOLS);
+    for (const tool of Object.values(tools)) {
+      const execute = tool.execute;
+      tool.execute = (...args) => {
+        if (!allowed.has(tool.name)) throw new Error("This chat can only change its console's pages and draft.");
+        return execute(...args);
+      };
+    }
+    tools = Object.fromEntries(Object.entries(tools).filter(([name]) => allowed.has(name)));
   }
 
   if (agentContext.operateReadOnly) {

@@ -357,6 +357,48 @@ export class ConsoleDurableObject extends DurableObject<Cloudflare.Env> {
     return summaryOf(this.#home, stored, role);
   }
 
+  // --- The console's chat helper (AiChatAgentContext.consoleId) ---
+  //
+  // Reached only from the workspace engine, for a chat bound to this console, with the profile id
+  // of the person whose message started the turn. Each call reads that person's role here, exactly
+  // as their own controls do, so the chat can do nothing they can't, and stops when they lose it.
+
+  /** Every page, as `profileId`'s own page list. */
+  async agentListPages(profileId: string): Promise<CanvasPage[]> {
+    requireRole(this.#home, profileId, "build");
+    return canvasStore(this.#home).listPages();
+  }
+
+  /** Creates a page as `profileId`. */
+  async agentCreatePage(profileId: string, content: CanvasContent): Promise<CanvasPage> {
+    requireRole(this.#home, profileId, "build");
+    let store = canvasStore(this.#home);
+    return store.getPage(store.create(content).id)!;
+  }
+
+  /** Applies page operations at the expected revision as `profileId`. */
+  async agentEditPage(profileId: string, id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage> {
+    requireRole(this.#home, profileId, "build");
+    return canvasStore(this.#home).editPage(id, expectedRevision, operations);
+  }
+
+  /** The draft as `profileId` reads it. */
+  async agentReadConsole(profileId: string): Promise<OperateConsole> {
+    requireRole(this.#home, profileId, "build");
+    return outward(this.#home, consoleStore(this.#home).get(consoleIdOf(this.#home), "draft"))!;
+  }
+
+  /** Replaces the draft at the expected revision as `profileId`, refusing what only a workspace holds. */
+  async agentReplaceConsole(profileId: string, expectedRevision: string, content: OperateConsoleContent): Promise<OperateConsole> {
+    requireRole(this.#home, profileId, "build");
+    if (content.widgets?.length || content.hostBoards?.length || content.boundViews?.length || content.flows?.length) {
+      throw new Error(CONSOLE_WORKSPACE_ONLY);
+    }
+    let saved = consoleStore(this.#home).replace(consoleIdOf(this.#home), expectedRevision, content);
+    await refreshListings(this.#home);
+    return outward(this.#home, saved);
+  }
+
   /** See AuthenticatedApi.openConsoleReading(). The caller has authenticated `profileId`. */
   async openReading(profileId: string): Promise<ConsoleReading> {
     requireRole(this.#home, profileId, "use");

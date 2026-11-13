@@ -558,6 +558,8 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // The owner-only workspace behind this person's operate session, once claimed. Never listed
       // by listGadgets().
       operateSessionWorkspaceId: <string | null>null,
+      // The hidden workspace that hosts this person's console chat helpers (claimConsoleAssistantWorkspace).
+      consoleAssistantWorkspaceId: <string | null>null,
 
       // The operate session's page as of its latest event, with that event. Always the replay of
       // `operateEvents` (applyOperateEvent), maintained by dispatchOperateEvent().
@@ -1367,8 +1369,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
     let result: GadgetMetadataWithTimestamps[] = [];
     let operateSessionWorkspaceId = this.storage.operateSessionWorkspaceId.get();
+    let consoleAssistantWorkspaceId = this.storage.consoleAssistantWorkspaceId.get();
     for (let gadget of this.storage.gadgets.list()) {
-      if (isFullyCreated(gadget) && gadget.id !== operateSessionWorkspaceId) {
+      if (isFullyCreated(gadget) && gadget.id !== operateSessionWorkspaceId && gadget.id !== consoleAssistantWorkspaceId) {
         result.push(gadget);
       }
     }
@@ -1379,6 +1382,25 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   //
   // Each method runs synchronously against storage, so concurrent calls (two tabs, or a tab and the
   // agent) are serialized by the Durable Object and never interleave.
+
+  /**
+   * Returns the id of the hidden workspace that hosts this person's console chat helpers (ADR
+   * 0021), registering `candidateId` (a fresh Overseer id the caller has not opened yet) if there is
+   * none. It holds chats only, is never listed among their workspaces, and no console names it. It
+   * is kept across a company change.
+   */
+  async claimConsoleAssistantWorkspace(candidateId: string): Promise<string> {
+    let existing = this.storage.consoleAssistantWorkspaceId.get();
+    if (existing && this.storage.gadgets.get(existing)) return existing;
+    this.storage.gadgets.put({ id: candidateId, title: "Console assistant", created: new Date() });
+    this.storage.consoleAssistantWorkspaceId.put(candidateId);
+    return candidateId;
+  }
+
+  /** The console chat helpers' workspace id as recorded, or null when there is none. */
+  async consoleAssistantWorkspaceId(): Promise<string | null> {
+    return this.storage.consoleAssistantWorkspaceId.get();
+  }
 
   /**
    * Returns the operate session's workspace id, registering `candidateId` (a fresh Overseer id the

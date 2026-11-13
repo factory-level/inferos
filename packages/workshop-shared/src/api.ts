@@ -1434,6 +1434,13 @@ export interface AuthenticatedApi extends RpcTarget {
   /** Opens a console of `newConsole` for authoring. Only its owner and `build` collaborators may. */
   openConsoleAuthoring(id: string): Promise<RpcStub<ConsoleAuthoring>>;
 
+  /**
+   * Opens the caller's own console assistant workspace, created on first use: where the chats that
+   * help author their consoles run (`Overseer.newConsoleAssistantChat`). It is never listed among
+   * their workspaces, and no console names it.
+   */
+  openConsoleAssistant(): Promise<RpcStub<Overseer>>;
+
   // TODO:
   // - Edit permissions on a connected account.
 }
@@ -4038,6 +4045,16 @@ export interface Overseer extends RpcTarget {
   /** Start a durable read-only chat in the owner's Operate workspace, using their model.
    * consoleRead explicitly adds the flag-gated C6 read tools; omission remains page-only. */
   newOperateReadChat(message: string, consoleRead?: boolean): Promise<number>;
+
+  /**
+   * Starts a chat that helps author one console that belongs to no workspace (ADR 0021), in the
+   * caller's own console assistant workspace (`AuthenticatedApi.openConsoleAssistant`) and nowhere
+   * else. The caller must be able to author the console. The chat is bound to that console for
+   * good, and is offered only the tools that list and change its pages and its draft, each call
+   * checked against the role of the person whose message started the turn. It can't publish,
+   * share or delete the console.
+   */
+  newConsoleAssistantChat(consoleId: string, message: string, modelId: string | null): Promise<number>;
 
   /** Fresh authorized console projection for a console-read chat; marks taint before discovery.
    * Null means disabled, unavailable or no longer authorized. It grants no capabilities. */

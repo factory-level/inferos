@@ -40,6 +40,12 @@ export type AgentSessionOptions = {
    * since an operate session cannot delete its workspace.
    */
   operateSession?: boolean;
+  /**
+   * Chat as the helper of a console that belongs to no workspace, in the account's console
+   * assistant workspace: called once the account exists, it returns that console's id. The
+   * workspace is kept on close.
+   */
+  consoleAssistant?: (api: RpcStub<AuthenticatedApi>) => Promise<string>;
   ambientVendorIds?: readonly string[];
   /**
    * Runs once the account exists, before its workspace is opened: connect accounts the way the
@@ -453,6 +459,7 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
   readonly #turnTimeoutMs: number;
   readonly #costAccountingTimeoutMs: number;
   readonly #deleteWorkspaceOnClose: boolean;
+  readonly #consoleId: string | undefined;
   readonly #pendingRpcs = new Set<Disposable>();
   #chatSubscriberStub: RpcStub<ChatSubscriber> | undefined;
   #chatSubscription: RpcStub<{}> | undefined;
@@ -482,7 +489,9 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
     turnTimeoutMs: number;
     costAccountingTimeoutMs: number;
     deleteWorkspaceOnClose: boolean;
+    consoleId?: string;
   }) {
+    this.#consoleId = options.consoleId;
     this.username = options.username;
     this.#baseUrl = options.baseUrl;
     this.#workspaceId = options.workspaceId;
@@ -725,7 +734,8 @@ class WorkshopAgentSessionImpl implements WorkshopAgentSession {
   }
 
   async #startChat(prompt: string, observer: TurnObserver, capsules?: CapsuleSpecifier[]): Promise<void> {
-    const creating = this.#workspace.newChat(prompt, this.#modelId, capsules);
+    const creating = this.#consoleId === undefined ? this.#workspace.newChat(prompt, this.#modelId, capsules)
+      : this.#workspace.newConsoleAssistantChat(this.#consoleId, prompt, this.#modelId);
     this.#pendingRpcs.add(creating);
     creating.then(chatId => {
       const status = observer.outcome?.status;
@@ -1059,7 +1069,10 @@ export async function openAgentSession(
 
     await options.prepare?.(authenticated, username);
 
-    if (options.operateSession) {
+    const consoleId = await options.consoleAssistant?.(authenticated);
+    if (consoleId !== undefined) {
+      workspace = await authenticated.openConsoleAssistant();
+    } else if (options.operateSession) {
       using operate = await authenticated.getOperateSession();
       workspace = await operate.getWorkspace();
     } else {
@@ -1077,7 +1090,8 @@ export async function openAgentSession(
       accounts,
       turnTimeoutMs: options.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS,
       costAccountingTimeoutMs: options.costAccountingTimeoutMs ?? 0,
-      deleteWorkspaceOnClose: !options.operateSession,
+      deleteWorkspaceOnClose: !options.operateSession && consoleId === undefined,
+      consoleId,
     });
     await session.initialize();
     return session;

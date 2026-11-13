@@ -668,6 +668,16 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
 
   // --- Consoles that belong to no workspace (console-object.ts) ---
 
+  async openConsoleAssistant(): Promise<RpcStub<Overseer>> {
+    let id = await this.#user.claimConsoleAssistantWorkspace(this.overseers.newUniqueId().toString());
+    // Opened once first so the workspace knows its owner, as a new workspace is, then marked.
+    (await this.#openGadgetInternal(id))[Symbol.dispose]();
+    await this.overseers.get(this.overseers.idFromString(id)).markConsoleAssistant(this.#userId.toString());
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
+    return this.#openGadgetInternal(id);
+  }
+
   #console(id: string): DurableObjectStub<ConsoleDurableObject> {
     let consoles = this.ctx.exports.ConsoleDurableObject;
     try {
