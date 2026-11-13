@@ -124,11 +124,11 @@ const compatibilityFlags = ['experimental', 'nodejs_compat', 'allow_irrevocable_
 
 /**
  * The `backend` project's pool workers: `BACKEND_TEST_WORKERS` when set (a positive integer, or the
- * config refuses to load), otherwise four, or one fewer than the cores when there are fewer.
+ * config refuses to load), otherwise four, or the available cores when there are fewer.
  */
 function backendWorkers(): number {
   let value = process.env.BACKEND_TEST_WORKERS
-  if (value === undefined || value === '') return Math.max(1, Math.min(4, availableParallelism() - 1))
+  if (value === undefined || value === '') return Math.max(1, Math.min(4, availableParallelism()))
   if (!/^[1-9][0-9]*$/.test(value)) {
     throw new Error(`BACKEND_TEST_WORKERS must be a positive integer, not ${JSON.stringify(value)}`)
   }
