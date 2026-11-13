@@ -348,28 +348,44 @@ describe('WorkflowTriggersPanel', () => {
   it('keeps recent history delivery reads to at most four concurrent requests', async () => {
     let active = 0
     let maximumActive = 0
-    const listWorkflowDeliveries = vi.fn<Overseer['listWorkflowDeliveries']>(async definitionId => {
+    const pendingReads: Array<() => void> = []
+    const listWorkflowDeliveries = vi.fn<Overseer['listWorkflowDeliveries']>(definitionId => new Promise(resolve => {
       active += 1
       maximumActive = Math.max(maximumActive, active)
-      await new Promise(resolve => setTimeout(resolve, 0))
-      active -= 1
-      return [{
-        definitionId, hookId: 1, revision: 1, commitId: 'd'.repeat(40), at: new Date(0),
-      }]
-    })
+      pendingReads.push(() => {
+        active -= 1
+        resolve([{ definitionId, hookId: 1, revision: 1, commitId: 'd'.repeat(40), at: new Date(0) }])
+      })
+    }))
     const listReadableWorkflowHistories = vi.fn<Overseer['listReadableWorkflowHistories']>()
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce(Array.from({ length: 9 }, (_, index) => ({ definitionId: `history-${index}` })))
     await render({ listReadableWorkflowHistories, listWorkflowDeliveries })
     await act(async () => {})
     listWorkflowDeliveries.mockClear()
-    maximumActive = 0
+    await act(async () => { button('Recent')!.click() })
+    expect(listWorkflowDeliveries).toHaveBeenCalledTimes(4)
+    expect(maximumActive).toBe(4)
+    expect(active).toBe(4)
+
     await act(async () => {
-      button('Recent')!.click()
-      await new Promise(resolve => setTimeout(resolve, 30))
+      pendingReads.splice(0, 4).forEach(resolve => resolve())
+      await Promise.resolve()
+    })
+    expect(listWorkflowDeliveries).toHaveBeenCalledTimes(8)
+    expect(active).toBe(4)
+    expect(maximumActive).toBe(4)
+
+    await act(async () => {
+      pendingReads.splice(0, 4).forEach(resolve => resolve())
+      await Promise.resolve()
     })
     expect(listWorkflowDeliveries).toHaveBeenCalledTimes(9)
+    expect(active).toBe(1)
     expect(maximumActive).toBe(4)
+
+    await act(async () => { pendingReads.splice(0, 1).forEach(resolve => resolve()) })
+    expect(active).toBe(0)
   })
 
   it('says so when there are no triggers', async () => {
