@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { useRouterState } from '@tanstack/react-router'
 import { useUiFeatureFlag } from '../../FeatureFlagsContext'
 import { useServerConfig } from '../../ServerConfigContext'
-import { modeForPath, rememberBuildLocation, type AppMode } from './operateMode'
+import { modeForPath, rememberLocation, type AppMode } from './operateMode'
 
 /**
  * Whether the Build | Operate split is offered: the `operate-mode` UI flag is on and the deployment
@@ -15,10 +15,10 @@ export const useOperateModeAvailable = () => {
   return enabled && composableViews
 }
 
-/** The current mode, derived from the URL, while remembering each Build location for the toggle. */
+/** The current mode, derived from the URL, while remembering each mode's last location for the toggle. */
 export const useAppMode = (): AppMode => {
   const pathname = useRouterState({ select: (s) => s.location.pathname })
   const href = useRouterState({ select: (s) => s.location.href })
-  useEffect(() => rememberBuildLocation(pathname, href), [pathname, href])
+  useEffect(() => rememberLocation(pathname, href), [pathname, href])
   return modeForPath(pathname)
 }
