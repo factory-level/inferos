@@ -3,7 +3,7 @@ import { EventType, omitOptionalNulls, type AgentCapabilities, type Event, type 
 import { RunAgentInputSchema } from "@ag-ui/core/schemas";
 import { z } from "zod";
 import type { AiChatMessage, OperateReadRun } from "@gadgets/workshop-shared/api";
-import type { OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
+import { consoleWorkspaceId, type OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import type { OperateConsoleRead } from "@gadgets/workshop-shared/operate-console";
 
 /** Bounded snapshot of the existing subject roster, without profile names or other user data. */
@@ -68,7 +68,7 @@ export function projectOperatePage({seq, state}: OperateSessionSnapshot) {
     presentation: state.presentation,
     board: state.board ? {workspaceId: state.board.workspaceId, boardRef: state.board.boardRef,
       issueId: state.board.issueId} : null,
-    console: state.console ? {workspaceId: state.console.workspaceId, consoleId: state.console.consoleId,
+    console: state.console ? {workspaceId: consoleWorkspaceId(state.console), consoleId: state.console.consoleId,
       source: state.console.source, revision: state.console.revision,
       viewId: state.console.viewId, screenId: state.console.screenId} : null,
     flow: state.flow ? {workspaceId: state.flow.workspaceId, flowId: state.flow.flowId,

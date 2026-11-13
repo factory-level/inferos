@@ -69,6 +69,9 @@ export const CONSOLE_CHANGED =
 /** The message an offered-tool lookup refused by the console-tools switch carries. */
 export const CONSOLE_TOOLS_OFF = "Console tools are turned off for this installation.";
 
+/** What the operate agent is told of a console that belongs to no workspace (ADR 0021): it holds no widgets, so no tools. */
+export const CONSOLE_OFFERS_NO_TOOLS = "This console offers no tools.";
+
 /**
  * Whether console tools are on: `CONSOLE_TOOLS` exactly `"true"`; anything else, or unset, is off.
  * While off, publication snapshots no tools (`ConsoleWidgetFreeze.tools`) and no tool is offered

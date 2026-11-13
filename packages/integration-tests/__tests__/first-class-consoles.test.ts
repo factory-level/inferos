@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { getOperateSessionErrorCode, OPERATE_SESSION_ERROR_CODES } from "@gadgets/workshop-shared/api";
 import { startHarness } from "../src/harness.js";
 import { NetworkInterceptor } from "../src/network-interceptor.js";
 import { connect, signUp } from "../src/rpc-client.js";
@@ -99,4 +100,47 @@ it("publishes for the people it is shared with, who read only the published revi
   await authoring.removeCollaborator("fcoperator");
   await expect(reading.getConsole()).rejects.toThrow(/access/);
   expect(await operator.listMyConsoles()).toEqual([]);
+}));
+
+const consoleChanged = (error: unknown) => getOperateSessionErrorCode(error) === OPERATE_SESSION_ERROR_CODES.consoleChanged;
+
+it("opens in the operate session of a person it is shared with, by its own id and no workspace", () => withHarness(true, async url => {
+  using api = connect(url);
+  using owner = await signUp(api, "fcsessionowner");
+  const { id } = await owner.newConsole("Dispatch");
+  using authoring = await owner.openConsoleAuthoring(id);
+  const [page] = await authoring.listCanvases();
+  using operator = await signUp(api, "fcsessionoperator");
+  await authoring.addCollaborator("fcsessionoperator", "use");
+  using session = await operator.getOperateSession();
+  const open = { type: "openConsole", home: "console", consoleId: id, title: "Dispatch",
+    source: "published", revision: "1", fullChat: "available", viewId: "overview" } as const;
+
+  // Nothing opens before it is published, and a draft never opens in a session.
+  await expect(session.dispatch(open, 0)).rejects.toSatisfy(consoleChanged);
+  await authoring.publishConsole("0");
+  await expect(session.dispatch({ ...open, source: "draft" }, 0)).rejects.toSatisfy(consoleChanged);
+  await expect(session.dispatch({ ...open, viewId: "missing" }, 0)).rejects.toSatisfy(consoleChanged);
+  await expect(session.dispatch({ ...open, revision: "0" }, 0)).rejects.toSatisfy(consoleChanged);
+
+  let state = await session.dispatch(open, 0);
+  expect(state.state.console).toEqual({ home: "console", consoleId: id, title: "Dispatch", source: "published",
+    revision: "1", fullChat: "available", viewId: "overview", screenId: null });
+  // The operator still has no workspace beyond their own hidden session.
+  expect(await operator.listGadgets()).toEqual([]);
+
+  await expect(session.dispatch({ type: "showScreen", screenId: "elsewhere" }, state.seq)).rejects.toSatisfy(consoleChanged);
+  state = await session.dispatch({ type: "showScreen", screenId: page.id }, state.seq);
+  expect(state.state.console).toMatchObject({ screenId: page.id });
+
+  // Once it is published again, the next move is refused until the session reopens on the new revision.
+  await authoring.publishConsole("1");
+  await expect(session.dispatch({ type: "openView", viewId: "overview" }, state.seq)).rejects.toSatisfy(consoleChanged);
+  state = await session.dispatch({ ...open, revision: "2" }, state.seq);
+  expect(state.state.console).toMatchObject({ revision: "2" });
+
+  // Someone it is not shared with cannot open it in their session.
+  using stranger = await signUp(api, "fcsessionstranger");
+  using theirs = await stranger.getOperateSession();
+  await expect(theirs.dispatch({ ...open, revision: "2" }, 0)).rejects.toSatisfy(consoleChanged);
 }));

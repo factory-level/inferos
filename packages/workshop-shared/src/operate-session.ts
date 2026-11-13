@@ -177,11 +177,25 @@ export type OperateFlowRun = {
 export type OperatePresentation = "canvas" | "chat";
 
 /**
+ * Where a console lives: in a workspace, named by `workspaceId` (`home` absent, as in every run
+ * stored before there was another kind), or in an object of its own that belongs to no workspace
+ * (`home: "console"`, ADR 0021), which `consoleId` alone names.
+ */
+export type ConsoleHome = { home?: "workspace"; workspaceId: string } | { home: "console" };
+
+/** A run of a console that lives in a workspace. */
+export type WorkspaceConsoleRun = Extract<OperateConsoleRun, { workspaceId: string }>;
+
+/** The workspace a console lives in, or null for one that belongs to no workspace. */
+export function consoleWorkspaceId(home: ConsoleHome): string | null {
+  return home.home === "console" ? null : home.workspaceId;
+}
+
+/**
  * The console open in a session. What later events are checked against (its full chat setting) is
  * copied in when it opens, like a flow's steps, so the reducer needs nothing but the event.
  */
-export type OperateConsoleRun = {
-  workspaceId: string;
+export type OperateConsoleRun = ConsoleHome & {
   consoleId: string;
   title: string;
   /** Whether the published console is open, or its draft as a builder's preview. */
@@ -337,7 +351,15 @@ export type OperateEvent =
    * the console's full chat is `default` or `only`, and `canvas` otherwise.
    */
   | {
-    type: "openConsole"; workspaceId: string; consoleId: string; title: string;
+    type: "openConsole";
+    /**
+     * Where the console lives (see `ConsoleHome`): absent or `workspace` with `workspaceId`, or
+     * `console` for one that belongs to no workspace, which `consoleId` alone names and whose
+     * `workspaceId` is not read. One member, not two, because RPC validation picks a union member
+     * by `type`; the reducer refuses a workspace home with no `workspaceId`.
+     */
+    home?: "workspace" | "console"; workspaceId?: string;
+    consoleId: string; title: string;
     source: ConsoleSource; revision: string; fullChat: ConsoleFullChat; viewId: string;
   }
   /** Show another view of the open console. */
@@ -464,7 +486,7 @@ function checkRef(ref: OperateRef): void {
 
 function checkIds(ids: string[]): void {
   for (let id of ids) {
-    if (id.length === 0 || id.length > MAX_OPERATE_ID_LENGTH) {
+    if (typeof id !== "string" || id.length === 0 || id.length > MAX_OPERATE_ID_LENGTH) {
       throw new OperateEventError(`Reference ids must be 1-${MAX_OPERATE_ID_LENGTH} characters.`);
     }
   }
@@ -650,8 +672,13 @@ function applyEvent(state: OperatePageState, event: OperateEvent): OperatePageSt
       };
     }
     case "openConsole": {
-      let { workspaceId, consoleId, title, source, revision, fullChat, viewId } = event;
-      checkIds([workspaceId, consoleId, viewId]);
+      let { consoleId, title, source, revision, fullChat, viewId } = event;
+      // Only these two homes exist; the home's own fields are copied, never anything else sent.
+      if (event.home !== undefined && event.home !== "console" && event.home !== "workspace") {
+        throw new OperateEventError("A console lives in a workspace or on its own.");
+      }
+      checkIds(event.home === "console" ? [consoleId, viewId] : [event.workspaceId!, consoleId, viewId]);
+      let home: ConsoleHome = event.home === "console" ? { home: "console" } : { workspaceId: event.workspaceId! };
       checkTitle(title);
       if (!CONSOLE_SOURCES.includes(source)) {
         throw new OperateEventError("A console opens as published or as a draft.");
@@ -666,7 +693,7 @@ function applyEvent(state: OperatePageState, event: OperateEvent): OperatePageSt
           fullChat === "default" || fullChat === "only" ? "chat" : "canvas";
       return {
         ...state, presentation, board: null,
-        console: { workspaceId, consoleId, title, source, revision, fullChat, viewId, screenId: null },
+        console: { ...home, consoleId, title, source, revision, fullChat, viewId, screenId: null },
       };
     }
     case "openView": {
@@ -729,6 +756,9 @@ function applyEvent(state: OperatePageState, event: OperateEvent): OperatePageSt
     }
     case "companyChanged":
       return INITIAL_OPERATE_PAGE;
+    default:
+      // Never stored as a page: an event of a type this reducer does not know is refused.
+      throw new OperateEventError("Unknown operate event.");
   }
 }
 

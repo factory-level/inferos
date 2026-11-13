@@ -23,7 +23,7 @@ import { consoleEventMismatch, consoleScreenMove, type ConsoleRef, type HostBoar
 import { boundViewsEnabled, describeBoundView } from "./console-store.js";
 import { HOST_BOARDS_OFF, HostBoardSelectionRelay, hostBoardsEnabled, readByDeadline, type HostBoardContext, type HostBoardSelectionState } from "./host-boards.js";
 import type { OperateFlowContent } from '@gadgets/workshop-shared/operate-flow';
-import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateFlowPage, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
+import { consoleWorkspaceId, type OperateBoardRef, type OperateEvent, type OperateEventRecord, type OperateFlowPage, type OperateHandover, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import {
@@ -728,6 +728,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return new OperateSessionImpl(() => this.#user, async () => {
       return this.#openGadgetInternal(await claim(), undefined, undefined, true);
     }, id => this.#openGadgetInternal(id),
+    id => this.#openConsole(id, console => console.openReading(this.#userId.name!)),
     userId => wrapDoStubForTelemetry(this.users.get(this.users.idFromName(userId))),
     boardRef => this.ctx.exports.SubjectPresenceDurableObject.getByName(boardRef), {
       enabled: () => hostBoardsEnabled(this.env),
@@ -809,6 +810,7 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   constructor(private user: () => DurableObjectStub<UserDurableObject>,
       private openWorkspace: () => Promise<NativeRpcStub<Overseer>>,
       private openConsoleWorkspace: (id: string) => Promise<NativeRpcStub<Overseer>>,
+      private openConsoleReading: (id: string) => Promise<NativeRpcStub<ConsoleReading>>,
       private otherUser: (userId: string) => DurableObjectStub<UserDurableObject>,
       private subjectPresence: (boardRef: string) => DurableObjectStub<SubjectPresenceDurableObject>,
       private hostBoards: HostBoardDeps) {
@@ -825,10 +827,13 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
           run.revision !== console.revision) {
         return null;
       }
-      using workspace = await this.openConsoleWorkspace(run.workspaceId);
+      // A console that belongs to no workspace has no host boards or bound views (ADR 0021).
+      let home = consoleWorkspaceId(run);
+      if (home === null) return null;
+      using workspace = await this.openConsoleWorkspace(home);
       let saved = await workspace.getConsole(console.consoleId, console.source);
       if (!saved || saved.revision !== console.revision) return null;
-      return { workspaceId: run.workspaceId, console: saved, sessionSeq: page.seq };
+      return { workspaceId: home, console: saved, sessionSeq: page.seq };
     } catch {
       return null;
     }
@@ -973,8 +978,16 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     if (!target) return;  // No console is open: the reducer refuses the event.
     let saved;
     try {
-      using workspace = await this.openConsoleWorkspace(target.workspaceId);
-      saved = await workspace.getConsole(target.consoleId, target.source);
+      // An event's home is as the reducer reads it: on its own, else the workspace it names.
+      let home = target.home === "console" ? null : target.workspaceId ?? "";
+      if (home === null) {
+        // Read through the caller's own access to the console itself; only its publication opens.
+        using reading = await this.openConsoleReading(target.consoleId);
+        saved = target.source === "published" ? await reading.getConsole() : undefined;
+      } else {
+        using workspace = await this.openConsoleWorkspace(home);
+        saved = await workspace.getConsole(target.consoleId, target.source);
+      }
     } catch {
       saved = undefined;
     }
@@ -996,9 +1009,9 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     let run = page.state.console;
     await checkFlowStart(event, {
       published: async () => {
-        if (run?.source !== "published" || run.workspaceId !== event.workspaceId) return undefined;
+        if (run?.source !== "published" || consoleWorkspaceId(run) !== event.workspaceId) return undefined;
         try {
-          using workspace = await this.openConsoleWorkspace(run.workspaceId);
+          using workspace = await this.openConsoleWorkspace(event.workspaceId);
           let saved = await workspace.getConsole(run.consoleId, "published");
           if (!saved || saved.revision !== run.revision) return undefined;
           return saved.published?.flows?.find(flow => flow.id === event.flowId);
@@ -1230,13 +1243,13 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   async #wiredEffects(ref: OperateWidgetRef, event: string): Promise<{ navigation?: WidgetNavigation; prompt?: WidgetPrompt }> {
     let page = await this.user().getOperatePage();
     let run = page.state.console;
-    if (!run || page.state.flow || run.source !== "published" || run.workspaceId !== ref.workspaceId ||
+    if (!run || page.state.flow || run.source !== "published" || consoleWorkspaceId(run) !== ref.workspaceId ||
         run.consoleId !== ref.consoleId || run.revision !== ref.revision) {
       return {};
     }
     let saved, shown;
     try {
-      using workspace = await this.openConsoleWorkspace(run.workspaceId);
+      using workspace = await this.openConsoleWorkspace(ref.workspaceId);
       saved = await workspace.getConsole(run.consoleId, "published");
       let view = saved?.views.find(candidate => candidate.id === run.viewId);
       let screenId = run.screenId ?? (view?.type === "screen" ? view.screen : null);

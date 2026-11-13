@@ -149,6 +149,14 @@ function consoleIdOf(home: ConsoleHome): string {
   return id;
 }
 
+/**
+ * The console as it is named outside this object: by the object's own id, which is the only id a
+ * caller holds. The id the store minted stays inside.
+ */
+function outward<T extends OperateConsole | null>(home: ConsoleHome, console: T): T {
+  return console && { ...console, id: home.id };
+}
+
 function summaryOf(home: ConsoleHome, console: OperateConsole, role: CollaboratorRole): Omit<ConsoleSummary, "created"> {
   return { id: home.id, title: console.title, role, published: console.published !== null };
 }
@@ -157,7 +165,7 @@ function summaryOf(home: ConsoleHome, console: OperateConsole, role: Collaborato
  * Refreshes the console's listing for its owner and everyone it is shared with. A listing is
  * presentation only (opening checks access again), so a failure is logged and nothing is undone.
  */
-async function refreshListings(home: ConsoleHome): Promise<void> {
+async function refreshListings(home: ConsoleHome, publishedRevision?: string): Promise<void> {
   let stored = consoleStore(home).get(consoleIdOf(home), "draft");
   if (!stored) return;
   let people = [
@@ -166,7 +174,11 @@ async function refreshListings(home: ConsoleHome): Promise<void> {
       user: home.users.get(home.users.idFromName(collaborator.profile.id)), role: collaborator.role ?? "use",
     })),
   ];
-  let results = await Promise.allSettled(people.map(person => person.user.recordConsole(summaryOf(home, stored, person.role))));
+  let results = await Promise.allSettled(people.map(async person => {
+    await person.user.recordConsole(summaryOf(home, stored, person.role));
+    // An open operate session showing an earlier revision is told, so it reopens on this one.
+    if (publishedRevision !== undefined) await person.user.noticeConsoleRevision(null, home.id, publishedRevision);
+  }));
   for (let result of results) {
     if (result.status === "rejected") {
       logger.warn("failed to list a console for someone it is shared with", {
@@ -186,7 +198,7 @@ class ConsoleReadingImpl extends RpcTarget implements ConsoleReading {
   }
 
   async getConsole(): Promise<OperateConsole | null> {
-    return this.#store().get(consoleIdOf(this.home), "published");
+    return outward(this.home, this.#store().get(consoleIdOf(this.home), "published"));
   }
   async getConsoleScreen(screenId: string): Promise<CanvasDefinition | null> {
     return this.#store().screen(consoleIdOf(this.home), screenId, "published");
@@ -228,7 +240,7 @@ class ConsoleAuthoringImpl extends RpcTarget implements ConsoleAuthoring {
   }
 
   async getConsole(source: ConsoleSource): Promise<OperateConsole | null> {
-    return this.#consoles().get(this.#id, source);
+    return outward(this.home, this.#consoles().get(this.#id, source));
   }
   async getConsoleScreen(screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null> {
     return this.#consoles().screen(this.#id, screenId, source);
@@ -244,7 +256,7 @@ class ConsoleAuthoringImpl extends RpcTarget implements ConsoleAuthoring {
     }
     let saved = store.replace(this.#id, expectedRevision, content);
     await refreshListings(this.home);
-    return saved;
+    return outward(this.home, saved);
   }
 
   async validateConsoleDraft(): Promise<ConsoleDraftProblem[]> {
@@ -264,8 +276,8 @@ class ConsoleAuthoringImpl extends RpcTarget implements ConsoleAuthoring {
     // Access is read again after the awaits above, in the same step as the write.
     requireRole(this.home, this.profileId, "build");
     let published = store.publish(this.#id, expectedRevision, undefined, undefined, { id: profile.id, name: profile.name });
-    await refreshListings(this.home);
-    return published;
+    await refreshListings(this.home, published.revision);
+    return outward(this.home, published);
   }
 
   async listCollaborators(): Promise<CollaboratorInfo[]> {

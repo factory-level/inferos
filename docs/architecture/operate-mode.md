@@ -78,6 +78,9 @@ covers:
   - packages/workshop-shared/src/widget-tools.ts
   - packages/workshop-backend/src/console-store.ts
   - packages/workshop-backend/src/console-object.ts
+  - packages/workshop-frontend/src/routes/consoles_.$id.tsx
+  - packages/workshop-frontend/src/routes/consoles.tsx
+  - packages/workshop-frontend/src/pages/consoles
   - packages/integration-tests/__tests__/first-class-consoles.test.ts
   - packages/workshop-backend/src/host-boards.ts
   - packages/workshop-backend/src/tool-lane.ts
@@ -654,7 +657,10 @@ A console can also be an object of its own (`ConsoleDurableObject` in `console-o
 - **What is refused.** The stores are given the deployment's catalog without the `inferos.gadget` kind, so a page cannot place one. `replaceConsole` refuses registered widgets, host boards, bound views and flows (`CONSOLE_WORKSPACE_ONLY`).
 - **Publishing and sharing.** `publishConsole` asks `holdsSharedConfiguration("publish")` of the caller's user object and records who published. Only the owner adds and removes people, by account name. Share links are not offered.
 
-Operate does not list or open these consoles yet, and no chat authors them; both are the next steps of `plans/first-class-consoles.md`. `first-class-consoles.test.ts` covers creation with no workspace, the separate listing, page and draft writes, the refusals, publication, a `use` collaborator reading only the published revision, and removal.
+- **In an operate session.** A console run and the `openConsole` event carry a home (`ConsoleHome` in `operate-session.ts`): a workspace, named by `workspaceId` (the home is absent in every run stored before, so stored sessions read unchanged), or `home: "console"`, where `consoleId` is the console object's own id and no workspace id is stored. `consoleWorkspaceId` gives the workspace or null. The reducer copies only the home's own fields, refuses any other home, and now refuses an event of a type it does not know instead of storing nothing. `OperateSessionImpl.#checkConsoleEvent` reads a console home through the caller's own `ConsoleReading`, and only its publication opens; a draft never does. Host boards, bound views, widget state, wired effects and a console's published flows belong to a workspace, so each returns its existing empty or refused result for a console home. The operate agent is refused navigation and tools on one (`CONSOLE_OFFERS_NO_TOOLS`). A publication tells the owner's and every collaborator's open session through `noticeConsoleRevision(null, consoleId, revision)`; `OperateSessionUpdate.consoleRevision.workspaceId` is null for it. The outward id of the console (`OperateConsole.id` in every result) is the object's id; the id the store mints stays inside.
+- **In the Workshop.** Build has Consoles (`/consoles`, `ConsolesPage`): the person's consoles from `listMyConsoles`, and New console, which asks for a name and nothing else. `/consoles/$id` is the creator (`ConsoleCreatorPage`): the page editor (`CanvasWorkspacePane` with `pagesOnly`, storing through `ConsoleAuthoring`) beside the console's name, navigation (`ConsoleViewEditor`), publish checks (`DraftProblemsList`), Publish and sharing by account name. Boards and Wikis on a page preview through the person's own operate session workspace, where their connections are. In Operate, the home lists these consoles above the workspace-stored ones (`OwnConsoleTiles`, `useMyConsoles`); a published one opens as `OwnConsolePage`, which reads it through `openConsoleReading`, resolves its boards in the viewer's session workspace with `BoardConnectPrompt`, and reopens by itself on a newer publication. New console on the Operate home now goes to `/consoles`.
+
+No chat authors these consoles yet, the Operate sidebar shows no view menu for one (the page has its own), and the workspace-first `ConsoleBuilder` still serves `?setup=<id>` for editing workspace-stored consoles; these are the next steps of `plans/first-class-consoles.md`. `first-class-consoles.test.ts` covers creation with no workspace, the separate listing, page and draft writes, the refusals, publication, a `use` collaborator reading only the published revision, removal, and the session opening one by its own id, refusing a draft and an unpublished or foreign console, and refusing navigation after a republish until it reopens.
 
 ### Console widget registry
 

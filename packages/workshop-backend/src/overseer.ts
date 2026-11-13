@@ -6,7 +6,7 @@ import {
 import { actionProposal, approvalCorrelation, approvalExpired, approvalSnapshot, validateApprovalRequest } from "./operate-approval";
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import { canvasRunEffects, canvasRunEventsHeard, type CanvasPage, type CanvasPageOperation, type CanvasRunEvent } from "@gadgets/workshop-shared/canvas-model";
-import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
+import { consoleWorkspaceId, type OperateConsoleRun, type OperateEvent, type OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
@@ -63,7 +63,7 @@ import type { UserDirectoryDurableObject } from "./user-directory";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { workspaceReadiness, type ReadinessInputs } from "./workspace-readiness";
 import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
-import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
+import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_OFFERS_NO_TOOLS, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { commandInputProblem, isReservedToolMethod, parseToolEnvelope, parseWidgetToolFile, plainJsonProblem, WIDGET_COMMANDS, WIDGET_TOOL_LIMITS, widgetToolValueProblem, type WidgetCommandName } from "@gadgets/workshop-shared/widget-tools";
 import { parseWorkflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
 import { WIDGET_STATES_FILE, parseWidgetStates, widgetEventsFrom, widgetStateKey, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
@@ -8089,7 +8089,7 @@ class OverseerImpl implements AgentHooks {
       let user = this.users.get(this.users.idFromName(invocation.requestedBy));
       let page = await user.getOperatePage();
       let open = page.state.console;
-      if (!open || page.state.flow || open.source !== "published" || open.workspaceId !== workspaceId) {
+      if (!open || page.state.flow || open.source !== "published" || consoleWorkspaceId(open) !== workspaceId) {
         return settle("undelivered", "not-shown");
       }
       let consoles = this.publishedConsoleForRun(open.consoleId);
@@ -12376,7 +12376,10 @@ class OverseerImpl implements AgentHooks {
     let page = await owner.getOperatePage();
     let run = page.state.console;
     if (!run || run.source !== "published") throw new Error("No published console is open on the user's page.");
-    let saved = await this.#workspaceStub(run.workspaceId)?.getPublishedConsoleFor(caller, run.consoleId)
+    // A console that belongs to no workspace offers the agent no navigation yet (ADR 0021).
+    let home = consoleWorkspaceId(run);
+    if (home === null) throw new Error(CONSOLE_OFFERS_NO_TOOLS);
+    let saved = await this.#workspaceStub(home)?.getPublishedConsoleFor(caller, run.consoleId)
         .catch(() => null);
     let mismatch = saved ? consoleEventMismatch(saved, run, event) : null;
     if (!saved || mismatch !== null) {
@@ -13767,7 +13770,7 @@ class OverseerImpl implements AgentHooks {
   async consoleSessionCheck(user: DurableObjectStub<UserDurableObject>, consoleId: string,
       revision: string): Promise<OperateConsoleRun> {
     let open = (await user.getOperatePage()).state.console;
-    if (open?.workspaceId !== this.ctx.id.toString() || open.consoleId !== consoleId ||
+    if (!open || consoleWorkspaceId(open) !== this.ctx.id.toString() || open.consoleId !== consoleId ||
         open.source !== "published" || open.revision !== revision) {
       throw new ConsoleNotOpenError(`Console ${consoleId} at revision ${revision} is not open in your operate session.`);
     }
@@ -15205,10 +15208,12 @@ class OverseerImpl implements AgentHooks {
     if (!open || open.source !== "published") return {reason: "No published console is open in this operate session."};
     let caller = {userId: this.ownerId, profileId: await this.getOwnerProfileId(),
       sessionWorkspaceId: this.ctx.id.toString()};
+    let home = consoleWorkspaceId(open);
+    if (home === null) return {reason: CONSOLE_OFFERS_NO_TOOLS};
     let ns = this.ctx.exports.OverseerDurableObject;
     let workspace;
     try {
-      workspace = ns.get(ns.idFromString(open.workspaceId));
+      workspace = ns.get(ns.idFromString(home));
     } catch {
       return {reason: "The open console's workspace does not exist."};
     }
@@ -15219,7 +15224,7 @@ class OverseerImpl implements AgentHooks {
   async #sessionConsoleStillOpen(owner: DurableObjectStub<UserDurableObject>, was: OperateConsoleRun)
       : Promise<boolean> {
     let open = (await owner.getOperatePage()).state.console;
-    return open?.workspaceId === was.workspaceId && open.consoleId === was.consoleId &&
+    return !!open && consoleWorkspaceId(open) === consoleWorkspaceId(was) && open.consoleId === was.consoleId &&
         open.source === "published" && open.revision === was.revision &&
         open.viewId === was.viewId && open.screenId === was.screenId;
   }

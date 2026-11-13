@@ -18,7 +18,7 @@ import {
   AGENT_VIEW_LIMITS, parseAgentPlacementProposal, parseAgentWidgetView,
   type AgentPlacementProposal, type AgentViewOverlay, type AgentWidgetView,
 } from '@gadgets/workshop-shared/agent-widgets';
-import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
+import { applyOperateEvent, consoleWorkspaceId, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchUnavailableReason, mergeWidgetSearches } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -1994,7 +1994,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let page = this.#operatePage();
     let run = page.state.console;
     if (page.seq !== request.pageSeq || page.state.flow || run?.source !== "published" ||
-        run.workspaceId !== request.workspaceId || run.consoleId !== request.consoleId || run.revision !== request.revision) {
+        consoleWorkspaceId(run) !== request.workspaceId || run.consoleId !== request.consoleId || run.revision !== request.revision) {
       return "refused";
     }
     try {
@@ -2026,10 +2026,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * revision, and must not supersede it. (A run from before revisions were recorded has "", read
    * as 0.)
    */
-  async noticeConsoleRevision(workspaceId: string, consoleId: string, revision: string | null): Promise<void> {
+  async noticeConsoleRevision(workspaceId: string | null, consoleId: string, revision: string | null): Promise<void> {
     let current = this.#operatePage();
     let run = current.state.console;
-    if (run?.workspaceId !== workspaceId || run.consoleId !== consoleId) return;
+    if (!run || consoleWorkspaceId(run) !== workspaceId || run.consoleId !== consoleId) return;
     if (revision !== null && BigInt(run.revision || "0") >= BigInt(revision)) return;
     for (let subscriber of this.#operateSubscribers) {
       subscriber.update({ ...current, consoleRevision: { workspaceId, consoleId, revision } });

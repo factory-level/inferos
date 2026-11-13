@@ -765,9 +765,9 @@ export type OperateSessionUpdate = OperateSessionSnapshot & {
    * published again at a later `revision`, or deleted (null), since the session opened it. It is a
    * hint that grants and logs nothing: the page still names the revision it opened, which the
    * kernel goes on refusing, so a client closes what it shows of that revision and reloads its
-   * consoles.
+   * consoles. `workspaceId` is null for a console that belongs to no workspace.
    */
-  consoleRevision?: { workspaceId: string; consoleId: string; revision: string | null };
+  consoleRevision?: { workspaceId: string | null; consoleId: string; revision: string | null };
 };
 
 /** Machine-readable codes for expected `OperateSession` failures. */

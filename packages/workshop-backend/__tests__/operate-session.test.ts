@@ -236,6 +236,26 @@ describe("operate page state machine", () => {
         .toMatchObject({ source: "draft", revision: "4" });
     });
 
+    it("opens a console that belongs to no workspace, storing no workspace id", () => {
+      let own: OperateEvent = { type: "openConsole", home: "console", consoleId: "c1", title: "Dispatch",
+        source: "published", revision: "2", fullChat: "off", viewId: "overview" };
+      let state = replayOperateEvents([own, { type: "showScreen", screenId: "board" }]);
+      expect(state.console).toEqual({ home: "console", consoleId: "c1", title: "Dispatch", source: "published",
+        revision: "2", fullChat: "off", viewId: "overview", screenId: "board" });
+      // Nothing else a caller sends beside the home is copied in.
+      let padded = { ...own, workspaceId: "ws9" } as unknown as OperateEvent;
+      expect(replayOperateEvents([padded]).console).not.toHaveProperty("workspaceId");
+      // A workspace console still needs its workspace, and no other home exists.
+      let { workspaceId: _w, ...unhomed } = openConsole() as Extract<OperateEvent, { type: "openConsole" }> & { workspaceId: string };
+      expect(() => replayOperateEvents([unhomed as unknown as OperateEvent])).toThrow(OperateEventError);
+      expect(() => replayOperateEvents([{ ...own, home: "elsewhere" } as unknown as OperateEvent])).toThrow(OperateEventError);
+    });
+
+    it("refuses an event of a type it does not know, changing nothing", () => {
+      expect(() => applyOperateEvent(INITIAL_OPERATE_PAGE, { type: "noSuchEvent" } as unknown as OperateEvent))
+        .toThrow(OperateEventError);
+    });
+
     it("applies to a page stored before consoles existed once it is filled from the initial page", () => {
       let { console: _c, presentation: _p, ...old } = replayOperateEvents([{ type: "open", ref: screen("a") }]);
       let stored: OperatePageState = { ...INITIAL_OPERATE_PAGE, ...old };
