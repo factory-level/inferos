@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { adminUrlRefusal, databaseRefusal, envFileVariables, manifestDifferences, expectedDatabase, rehearsalRefusal, rehearse, serverRefusal, stateManifest, type RehearsalIo, type RunResult, type TargetFacts } from "./recovery-rehearsal.ts";
+import { adminUrlRefusal, databaseRefusal, envFileVariables, manifestDifferences, composeIdentity, expectedDatabase, rehearsalRefusal, rehearse, serverRefusal, stateManifest, type RehearsalIo, type RunResult, type TargetFacts } from "./recovery-rehearsal.ts";
 import { isLocalStackUrl, summarize } from "./rehearsal-summary.ts";
 
 const ROOT = "/repo/inferOS";
@@ -128,17 +128,42 @@ function worktree(): { repoRoot: string; target: string } {
 /** An io whose commands are recorded and answered from `answers` (by command line), otherwise idle and clean. */
 const COMPOSE_ID = "7666333140302553138";
 
+const CONTAINER = "82483e72342570e7b3fb204bfd0876d67e9ba3aaa938a4305ce9535b5f6ffdd2";
+const LABELS = '{"com.docker.compose.project":"inferops","com.docker.compose.service":"postgres"}';
+
+/** Docker as the inferops Compose project's one postgres container answers, any part overridden. */
+function dockerAnswers(over: { ps?: Partial<RunResult>; labels?: Partial<RunResult>; exec?: Partial<RunResult> } = {}, seen: string[] = []) {
+  return (argv: string[]): RunResult => {
+    seen.push(argv.join(" "));
+    const ok = (r: Partial<RunResult> | undefined, stdout: string) => ({ code: 0, stdout, stderr: "", ...r });
+    if (argv[0] === "compose") return ok(over.ps, `${CONTAINER}\n`);
+    if (argv[0] === "inspect") return ok(over.labels, LABELS);
+    if (argv[0] === "exec") return ok(over.exec, `${COMPOSE_ID}\n`);
+    return { code: 1, stdout: "", stderr: "unexpected docker command" };
+  };
+}
+
 type SpyOver = {
   env?: Record<string, string>; answers?: Record<string, Partial<RunResult>>;
   server?: string | null; compose?: string | null; worktreeEnv?: string;
+  /** The registry's entries for the target: its port base (default 8787, the stack's default port), or none. */
+  registered?: number[];
+  docker?: Parameters<typeof dockerAnswers>[0];
 };
 
 function spyIo(over: SpyOver = {}) {
   const commands: string[] = [];
   /** The identity reads, in order: the only database contact allowed before the guards pass. */
   const identities: string[] = [];
+  /** Every docker command the guards ran. */
+  const dockerCalls: string[] = [];
   const { repoRoot, target } = worktree();
   if (over.worktreeEnv !== undefined) writeFileSync(join(target, ".env.worktree"), over.worktreeEnv);
+  const registry = { version: 1 as const, worktrees: (over.registered ?? [8787]).map(portBase => ({
+    name: "rehearsal", path: target, mainCheckout: repoRoot, branch: "rehearsal", portBase, createdAt: "2026-11-13T00:00:00Z" })) };
+  const docker = over.compose === null ? dockerAnswers({ ps: { stdout: "" } }, dockerCalls)
+    : over.compose !== undefined ? dockerAnswers({ exec: { stdout: `${over.compose}\n` } }, dockerCalls)
+    : dockerAnswers(over.docker, dockerCalls);
   const answers: Record<string, Partial<RunResult>> = {
     "pnpm -s local status --json": { stdout: '{"stack":"not-running"}' },
     "pnpm -s local inferops status --json": { stdout: '{"backend":"not-running"}' },
@@ -156,15 +181,20 @@ function spyIo(over: SpyOver = {}) {
     spawnDetached: argv => { commands.push(argv.join(" ")); },
     wait: async () => {},
     serverIdentity: () => { identities.push("server"); return over.server === undefined ? COMPOSE_ID : over.server; },
-    composeIdentity: () => { identities.push("compose"); return over.compose === undefined ? COMPOSE_ID : over.compose; },
+    docker: argv => { if (argv[0] === "exec") identities.push("compose"); return docker(argv); },
+    registry: () => registry,
   };
-  return { io, commands, identities };
+  return { io, commands, identities, dockerCalls };
 }
 
 const refusals: [string, SpyOver, RegExp][] = [
   ["a localhost tunnel to another server (another system_identifier)", { server: "7399112233445566778" }, /not the local Compose Postgres/],
   ["a server whose identity can't be read", { server: null }, /could not be read over the admin URL/],
-  ["no Compose Postgres container to compare with", { compose: null }, /container running/],
+  ["no Compose Postgres container to compare with", { compose: null }, /no running postgres container/],
+  ["two postgres containers in the Compose project", { docker: { ps: { stdout: `${CONTAINER}\n${CONTAINER.replace(/^8/, "9")}\n` } } }, /needs exactly one/],
+  ["a Compose container with another project's labels", { docker: { labels: { stdout: '{"com.docker.compose.project":"other","com.docker.compose.service":"postgres"}' } } }, /not labelled inferops\/postgres/],
+  ["a checkout the pnpm wt registry doesn't hold", { registered: [] }, /not in the pnpm wt registry/],
+  ["an edited .env.worktree naming another port than the registry's", { worktreeEnv: "VITE_BACKEND_HOST=localhost:8850\n" }, /registry holds 8787/],
   ["an untracked file", { answers: { "git status --porcelain": { stdout: "?? notes.txt\n" } } }, /untracked files/],
   ["a git status that fails", { answers: { "git status --porcelain": { code: 128 } } }, /git status failed/],
   ["a non-local Postgres admin URL", { env: { INFEROPS_PG_ADMIN_URL: "postgres://u:pw@db.example.com/postgres" } }, /only against localhost/],
@@ -205,7 +235,7 @@ test("the server must be the local Compose Postgres, by system_identifier, read 
   assert.equal(serverRefusal(COMPOSE_ID, COMPOSE_ID), null);
   assert.match(serverRefusal("7399112233445566778", COMPOSE_ID)!, /tunnel or proxy/);
   assert.match(serverRefusal(null, COMPOSE_ID)!, /could not be read/);
-  assert.match(serverRefusal(COMPOSE_ID, null)!, /container running/);
+  assert.match(serverRefusal(COMPOSE_ID, null)!, /could not be read/);
 });
 
 test("a refusal before connecting never reads the server: no identity query on a non-local or overridden URL", async () => {
@@ -216,15 +246,21 @@ test("a refusal before connecting never reads the server: no identity query on a
   }
 });
 
-test("the expected database is the checkout's own inferos_<port>, from its port rules, never what up reports", async () => {
-  const { target } = worktree();
-  assert.equal(expectedDatabase(target, {}), "inferos_8787");
+test("the expected database is the registry's port for this worktree, and the stack's own port settings must agree", async () => {
+  const { repoRoot, target } = worktree();
+  const registry = (portBase: number, path = target) => ({ version: 1 as const, worktrees: [
+    { name: "rehearsal", path, mainCheckout: repoRoot, branch: "b", portBase, createdAt: "2026-11-13T00:00:00Z" }] });
+  assert.deepEqual(expectedDatabase(target, repoRoot, registry(8787), {}), { database: "inferos_8787" });
   writeFileSync(join(target, ".env.worktree"), "VITE_BACKEND_HOST=localhost:8850\n");
-  assert.equal(expectedDatabase(target, {}), "inferos_8850");
-  assert.equal(expectedDatabase(target, { VITE_BACKEND_HOST: "localhost:8860" }), "inferos_8860", "the shell wins, as for the stack");
+  assert.deepEqual(expectedDatabase(target, repoRoot, registry(8850), {}), { database: "inferos_8850" });
+  // .env.worktree is gitignored, so an edit leaves the tree clean: it must agree with the registry.
+  assert.match((expectedDatabase(target, repoRoot, registry(8860), {}) as { refusal: string }).refusal, /registry holds 8860/);
+  assert.match((expectedDatabase(target, repoRoot, registry(8850), { VITE_BACKEND_HOST: "localhost:8870" }) as { refusal: string }).refusal, /port 8870/);
+  assert.match((expectedDatabase(target, repoRoot, { version: 1, worktrees: [] }, {}) as { refusal: string }).refusal, /not in the pnpm wt registry/);
+  assert.match((expectedDatabase(target, repoRoot, registry(8850, "/elsewhere"), {}) as { refusal: string }).refusal, /not in the pnpm wt registry/);
 
   // up reports another stack's well-formed database: refused right after up, nothing reads or writes it.
-  const { io, commands } = spyIo({ worktreeEnv: "VITE_BACKEND_HOST=localhost:8850\n",
+  const { io, commands } = spyIo({ worktreeEnv: "VITE_BACKEND_HOST=localhost:8850\n", registered: [8850],
     answers: { "pnpm -s local inferops up --json": { stdout: '{"ok":true,"database":"inferos_8860"}' } } });
   const report = await rehearse(io);
   assert.match(String(report.failure), /this run's backend uses inferos_8850/);
@@ -232,9 +268,32 @@ test("the expected database is the checkout's own inferos_<port>, from its port 
   assert.deepEqual(after.filter(c => /local start|seed|pg_dump|pg_restore|psql|tar /.test(c)), [], after.join("\n"));
 });
 
+test("the container compared with is the one Compose names, labels checked: an environment override is ignored", async () => {
+  const seen: string[] = [];
+  assert.deepEqual(composeIdentity(dockerAnswers({}, seen)), { id: COMPOSE_ID });
+  assert.deepEqual(seen, [
+    "compose -p inferops ps -q postgres",
+    `inspect --format {{json .Config.Labels}} ${CONTAINER}`,
+    `exec ${CONTAINER} psql -U postgres -At -c SELECT system_identifier FROM pg_control_system()`,
+  ]);
+  for (const labels of ["{}", "not json", '{"com.docker.compose.project":"inferops","com.docker.compose.service":"db"}']) {
+    assert.match((composeIdentity(dockerAnswers({ labels: { stdout: labels } })) as { refusal: string }).refusal, /not labelled/, labels);
+  }
+  assert.match((composeIdentity(dockerAnswers({ ps: { code: 1 } })) as { refusal: string }).refusal, /no running postgres/);
+  assert.match((composeIdentity(dockerAnswers({ exec: { stdout: "not an id" } })) as { refusal: string }).refusal, /could not be read/);
+
+  // A container named in the environment (the old override) is never the one read.
+  const { io, dockerCalls } = spyIo({ env: { REHEARSAL_PG_CONTAINER: "some-other-postgres" },
+    answers: { "pnpm -s local inferops up --json": { code: 1, stdout: '{"ok":false}' } } });
+  await rehearse(io);
+  assert.ok(dockerCalls.length > 0);
+  assert.ok(dockerCalls.every(c => !c.includes("some-other-postgres")), dockerCalls.join("\n"));
+  assert.ok(dockerCalls.some(c => c.startsWith(`exec ${CONTAINER} `)));
+});
+
 test("the identity check runs before up, and up before anything else that touches a database", async () => {
   const { io, commands, identities } = spyIo({ answers: { "pnpm -s local inferops up --json": { code: 1, stdout: '{"ok":false}' } } });
   await rehearse(io);
-  assert.deepEqual(identities, ["server", "compose"]);
+  assert.deepEqual(identities, ["compose", "server"]);
   assert.equal(commands.find(c => WRITES.test(c)), "pnpm -s local inferops up --json");
 });

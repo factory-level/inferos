@@ -14,11 +14,15 @@
 //   - a shell holding cloud, deploy or model-provider credentials (`forbiddenCredentials`);
 //   - a Postgres admin URL whose host isn't localhost, or that carries a `host=`/`hostaddr=` override;
 //   - a Postgres server that isn't the local Compose Postgres: its `system_identifier`, read
-//     read-only over the admin URL, must equal the one read inside the Compose container itself
-//     (`docker exec`), so a localhost tunnel or proxy to another server is refused; an identifier
-//     that can't be read on either side, or a missing container, refuses too;
-//   - any database but the backend's own `inferos_<port>`, derived from this checkout's port rules
-//     (`resolveLocalStack` over the shell and `.env.worktree`), never from what `up` reports.
+//     read-only over the admin URL, must equal the one read inside the inferops Compose project's
+//     postgres container, found by Compose itself (`docker compose -p inferops ps -q postgres`,
+//     exactly one, its project and service labels checked), never named by the environment; so a
+//     localhost tunnel or proxy to another server is refused, and so is an unreadable identifier, no
+//     container, several, or one with other labels;
+//   - a checkout the `pnpm wt` registry (`~/.config/inferos/worktrees.json`, read only) doesn't
+//     hold exactly once, or whose port settings (the shell, then `.env.worktree`, as the stack reads
+//     them) disagree with its registered port: the database is `inferos_<registered port>`, never
+//     what `.env.worktree` (gitignored) or `up` says.
 // Every guard runs before any command that could touch a database or start a stack: before them,
 // only `pnpm local status`, `pnpm local inferops status`, `git status` and the two identity reads
 // run. After `up`, the database it reports must be the derived one before anything else runs
@@ -49,7 +53,10 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { backendDatabase, forbiddenCredentials } from "../local/inferops.ts";
+import { backendDatabase, forbiddenCredentials, INFEROPS_COMPOSE_PROJECT, INFEROPS_COMPOSE_SERVICE } from "../local/inferops.ts";
+import { readRegistry, registryPath, type Registry } from "../wt/registry.ts";
+import { portLayout } from "../wt/layout.ts";
+import { homedir } from "node:os";
 import { resolveLocalStack } from "../local/stack.ts";
 import { withWorktreeEnv } from "../worktree-env.ts";
 
@@ -163,9 +170,53 @@ export function serverRefusal(server: string | null, compose: string | null): st
   return null;
 }
 
-/** The database this checkout's backend uses: `inferos_<port>`, from the target's own port rules. */
-export function expectedDatabase(target: string, env: Record<string, string | undefined>): string {
-  return backendDatabase(resolveLocalStack(target, [], withWorktreeEnv(target, env as NodeJS.ProcessEnv)).port);
+/**
+ * The database this checkout's backend uses, or why there is none to trust: `inferos_<port>` for
+ * the backend port the `pnpm wt` registry holds for `realPath` (exactly one entry of this
+ * repository's), and only when the port the stack would really use (the shell, then
+ * `.env.worktree`, which is gitignored and so may be edited without dirtying the tree) agrees.
+ */
+export function expectedDatabase(realPath: string, repoRoot: string, registry: Registry,
+    env: Record<string, string | undefined>): { database: string } | { refusal: string } {
+  const entries = registry.worktrees.filter(entry => realOrNull(entry.path) === realPath && realOrNull(entry.mainCheckout) === repoRoot);
+  if (entries.length !== 1) {
+    return { refusal: `${realPath} is ${entries.length === 0 ? "not in" : "listed more than once in"} the pnpm wt registry; give the rehearsal a worktree made with pnpm wt new` };
+  }
+  const registered = portLayout(entries[0]!.portBase).backend;
+  let port: number;
+  try {
+    port = resolveLocalStack(realPath, [], withWorktreeEnv(realPath, env as NodeJS.ProcessEnv)).port;
+  } catch {
+    return { refusal: "the stack's port settings (VITE_BACKEND_HOST) do not parse" };
+  }
+  if (port !== registered) return { refusal: `the stack would run on port ${port}, but the pnpm wt registry holds ${registered} for this worktree; fix .env.worktree or the shell's VITE_BACKEND_HOST` };
+  return { database: backendDatabase(registered) };
+}
+
+/**
+ * The inferops Compose project's Postgres `system_identifier`, read inside its container, or why it
+ * can't be trusted. The container is found by Compose itself, never named by the environment:
+ * exactly one running container of the project's service, whose own project and service labels
+ * say so. `docker` runs one docker command and returns its result.
+ */
+export function composeIdentity(docker: (argv: string[]) => RunResult): { id: string } | { refusal: string } {
+  const ps = docker(["compose", "-p", INFEROPS_COMPOSE_PROJECT, "ps", "-q", INFEROPS_COMPOSE_SERVICE]);
+  const ids = ps.code === 0 ? ps.stdout.split("\n").map(line => line.trim()).filter(Boolean) : [];
+  if (ps.code !== 0 || ids.length === 0) return { refusal: `no running ${INFEROPS_COMPOSE_SERVICE} container in the ${INFEROPS_COMPOSE_PROJECT} Compose project; start the inferops Compose Postgres first` };
+  if (ids.length > 1) return { refusal: `${ids.length} ${INFEROPS_COMPOSE_SERVICE} containers in the ${INFEROPS_COMPOSE_PROJECT} Compose project; the rehearsal needs exactly one` };
+  const container = ids[0]!;
+  if (!/^[0-9a-f]{12,64}$/.test(container)) return { refusal: "docker compose ps named no container id" };
+  const inspect = docker(["inspect", "--format", "{{json .Config.Labels}}", container]);
+  let labels: Record<string, string> = {};
+  try {
+    labels = inspect.code === 0 ? JSON.parse(inspect.stdout) ?? {} : {};
+  } catch { /* unreadable labels are wrong labels */ }
+  if (labels["com.docker.compose.project"] !== INFEROPS_COMPOSE_PROJECT || labels["com.docker.compose.service"] !== INFEROPS_COMPOSE_SERVICE) {
+    return { refusal: `the container Compose named is not labelled ${INFEROPS_COMPOSE_PROJECT}/${INFEROPS_COMPOSE_SERVICE}` };
+  }
+  const read = docker(["exec", container, "psql", "-U", "postgres", "-At", "-c", IDENTITY_SQL]);
+  const id = identity(read.code, read.stdout);
+  return id === null ? { refusal: "the local Compose Postgres's system_identifier could not be read inside its container" } : { id };
 }
 
 /** Why `adminUrl` or `database` must not be touched, or null: a local admin URL, and only `expected`. */
@@ -219,8 +270,10 @@ export type RehearsalIo = {
   wait(ms: number): Promise<void>;
   /** The connected server's `system_identifier`, read-only over `adminUrl`, or null when unreadable. */
   serverIdentity(adminUrl: string): string | null;
-  /** The local Compose Postgres container's own `system_identifier`, read inside it, or null. */
-  composeIdentity(): string | null;
+  /** Runs one `docker` command (its arguments after `docker`): only `composeIdentity`'s reads. */
+  docker(argv: string[]): RunResult;
+  /** The `pnpm wt` registry, read only. */
+  registry(): Registry;
 };
 
 /** The rehearsal: the guards, then the six steps, then stopping what it started. Returns the report. */
@@ -274,12 +327,18 @@ export async function rehearse(io: RehearsalIo): Promise<Record<string, unknown>
     const refusal = rehearsalRefusal(target, facts);
     report.worktree = target;
     if (refusal) record(`guards: ${refusal}`, false);
-    // The database this run may touch, from the checkout's own port rules (never what `up` reports).
-    const expected = expectedDatabase(target, env);
+    // The database this run may touch: the registry's port for this worktree, which the stack's own
+    // port settings must agree with (never what `.env.worktree` alone or `up` reports).
+    const derived = expectedDatabase(facts.realPath!, io.repoRoot, io.registry(), env);
+    if ("refusal" in derived) record(`guards: ${derived.refusal}`, false);
+    const expected = (derived as { database: string }).database;
     const named = databaseRefusal(facts.adminUrl, expected, expected);
     if (named) record(`guards: ${named}`, false);
-    // The server, identified: connected read-only, before anything that writes.
-    const server = serverRefusal(io.serverIdentity(facts.adminUrl), io.composeIdentity());
+    // The server, identified: connected read-only, before anything that writes, against the
+    // container Compose itself names.
+    const compose = composeIdentity(argv => io.docker(argv));
+    if ("refusal" in compose) record(`guards: ${compose.refusal}`, false);
+    const server = serverRefusal(io.serverIdentity(facts.adminUrl), (compose as { id: string }).id);
     if (server) record(`guards: ${server}`, false);
     record("guards: dedicated clean worktree, nothing running, no credentials, the local Compose Postgres", true);
     const head = run(["git", "rev-parse", "HEAD"]).stdout.trim();
@@ -443,8 +502,15 @@ export async function rehearse(io: RehearsalIo): Promise<Record<string, unknown>
 
 /** The read-only query naming a Postgres cluster: its `system_identifier`, fixed at initdb. */
 const IDENTITY_SQL = "SELECT system_identifier FROM pg_control_system()";
-/** The inferops Compose project's Postgres container (`docker compose -p inferops`, service `postgres`). */
-const COMPOSE_PG_CONTAINER = "inferops-postgres-1";
+
+/** `path`'s real path, or null when it doesn't resolve. */
+function realOrNull(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
 
 /** A `system_identifier` from a successful read, or null: anything else is never taken as one. */
 function identity(status: number | null, stdout: string | null): string | null {
@@ -484,12 +550,13 @@ async function main(): Promise<number> {
         "-At", "-c", IDENTITY_SQL], { env: { PATH: env.PATH, HOME: env.HOME, PGPASSWORD: decodeURIComponent(url.password), PGCONNECT_TIMEOUT: "5" }, encoding: "utf8" });
       return identity(r.status, r.stdout);
     },
-    composeIdentity: () => {
-      const container = env.REHEARSAL_PG_CONTAINER || COMPOSE_PG_CONTAINER;
-      const r = spawnSync("docker", ["exec", container, "psql", "-U", "postgres", "-At", "-c", IDENTITY_SQL],
-        { env: { PATH: env.PATH, HOME: env.HOME }, encoding: "utf8" });
-      return identity(r.status, r.stdout);
+    docker: argv => {
+      // Only PATH and HOME: no DOCKER_HOST or DOCKER_CONTEXT from the shell picks another daemon.
+      const r = spawnSync("docker", argv, { env: { PATH: env.PATH, HOME: env.HOME }, encoding: "utf8" });
+      return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
     },
+    // The registry pnpm wt keeps under the person's home, never one an XDG_CONFIG_HOME points at.
+    registry: () => readRegistry(registryPath({}, homedir())),
   });
   writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify(report, null, 2));
