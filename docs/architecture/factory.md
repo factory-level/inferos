@@ -64,6 +64,14 @@ evidence. Local tests and emulated stages are not deployment proof. The factory'
 sandbox is the only sandbox allowed to receive the narrowly scoped stage smoke credentials; cloud,
 model-provider, and production credentials remain forbidden.
 
+A loopback or emulated stage must be named by exactly the origin InferOS answers as, which
+`.factory/sandbox.json` records: `http://localhost:<port>` for `up dev`, or the emulator's
+`http://127.0.0.1:<port>`. The other loopback host on the same port reaches the same server, but
+sign-in can't finish there: the sign-in popup's nonce is kept in storage for the stage's origin,
+and InferOS sends the popup back to its own origin, whose handoff page finds none ("This link isn't
+valid"), so the stage's tab waits for a token that never comes. `stage-probe` therefore fails
+`stage:origin`, naming the URL to use, and `stage-smoke` doesn't start the browser flow (FAC-145).
+
 ## References
 
 - [Design: local development](https://github.com/factory-level/inferops/blob/develop/docs/human/architecture/inferos/local-development.md)

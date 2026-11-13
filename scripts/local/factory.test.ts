@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { ProcessResult } from "./coding.ts";
-import { accessTokenFile, factoryConfig, forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, remoteStageInferopsUrl, requiredSmokeCredentials, runFactory, stageInferopsUrl, stageTarget, stateFile, VERIFY_IMAGES, writeState, type FactoryDeps } from "./factory.ts";
+import { accessTokenFile, factoryConfig, forbiddenCredentials, inferopsChildEnv, inferopsConnectEnv, inferopsSsoLayer, remoteStageInferopsUrl, requiredSmokeCredentials, runFactory, stageInferopsUrl, stageOriginProblem, stageTarget, stateFile, VERIFY_IMAGES, writeState, type FactoryDeps } from "./factory.ts";
 import { runLifecycle, defaultDeps } from "./lifecycle.ts";
 import { readBackendRecord } from "./inferops.ts";
 import type { DevServerRecord } from "./stack.ts";
@@ -401,9 +401,13 @@ test("a loopback stage's InferOps comes from the recorded --inferops-connect san
     const stage = stageTarget("http://127.0.0.1:8797");
     assert.equal(stageInferopsUrl(stage, root, {}), null);
     const state = (inferops: "mock" | "connected", url: string) => writeState(root, { sandbox: "dev", startedAt: "t", services: { inferos: { pid: 1, startedByFactory: true, url, inferops, inferopsUrl: inferops === "connected" ? "http://127.0.0.1:8980" : undefined } } });
-    state("connected", "http://localhost:8797");
+    state("connected", "http://127.0.0.1:8797");
     assert.equal(stageInferopsUrl(stage, root, {}), "http://127.0.0.1:8980");
     assert.equal(stageInferopsUrl(stageTarget("http://localhost:8787"), root, {}), null, "another port is another stage");
+    // FAC-145: the same port under the other loopback host is not the stage sign-in can finish on.
+    state("connected", "http://localhost:8797");
+    assert.equal(stageInferopsUrl(stage, root, {}), null, "127.0.0.1 is not the origin a localhost InferOS answers as");
+    assert.equal(stageInferopsUrl(stageTarget("http://localhost:8797"), root, {}), "http://127.0.0.1:8980");
     assert.equal(stageInferopsUrl(stage, root, { FACTORY_INFEROPS_URL: "http://127.0.0.1:9000/x" }), "http://127.0.0.1:9000");
     state("mock", "http://localhost:8797");
     assert.equal(stageInferopsUrl(stage, root, {}), null, "a mock InferOS is connected to nothing");
@@ -567,6 +571,33 @@ test("stage-smoke runs the InferOps readiness smoke only when doctor stage-probe
     assert.equal(missingResult.exitCode, 1, "a successful child exit without its structured evidence must fail closed");
     assert.match(String((missingResult.report.smoke as { error: string }).error), /result is missing or invalid/);
     assert.equal((await runFactory(["stage-smoke", "dev"], blocked.deps)).exitCode, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a loopback stage named by the other loopback host than InferOS answers as is refused before the smoke (FAC-145)", async () => {
+  const root = tempRoot();
+  try {
+    writeState(root, { sandbox: "dev", startedAt: "t", services: { inferos: { pid: 1, startedByFactory: true, url: "http://localhost:8797", inferops: "connected", inferopsUrl: "http://127.0.0.1:8980" } } });
+    const stage = stageTarget("http://127.0.0.1:8797");
+    assert.match(stageOriginProblem(stage, root)!, /the stage is http:\/\/127\.0\.0\.1:8797, but InferOS answers as http:\/\/localhost:8797.*set FACTORY_STAGE_URL=http:\/\/localhost:8797/);
+    assert.equal(stageOriginProblem(stageTarget("http://localhost:8797"), root), null, "the origin InferOS answers as");
+    assert.equal(stageOriginProblem(stageTarget("http://127.0.0.1:8787"), root), null, "another port is another stage, said by stage:inferops");
+    assert.equal(stageOriginProblem(stageTarget("http://127.0.0.1:8797", "emulated"), root), null, "an emulated stage is the emulator's own origin");
+
+    // Even with FACTORY_INFEROPS_URL naming the InferOps, which skips the recorded match.
+    const fake = fakeDeps(root, { env: LOOPBACK_ENV, answers: LOOPBACK_ANSWERS, bodies: STUB });
+    const doctor = await runFactory(["doctor", "stage-probe", "--json"], fake.deps);
+    assert.equal(doctor.exitCode, 1);
+    assert.match(doctor.headline, /FAIL\s+stage:origin: the stage is http:\/\/127\.0\.0\.1:8797, but InferOS answers as http:\/\/localhost:8797/);
+    const smoke = fakeDeps(root, { env: LOOPBACK_ENV, answers: LOOPBACK_ANSWERS, bodies: STUB });
+    const refused = await runFactory(["stage-smoke", "--json"], smoke.deps);
+    assert.equal(refused.exitCode, 1);
+    assert.equal(smoke.runInCalls.length, 0, "the browser flow never starts against an origin sign-in can't finish on");
+
+    const named = await runFactory(["doctor", "stage-probe", "--json"], fakeDeps(root, { env: { ...LOOPBACK_ENV, FACTORY_STAGE_URL: "http://localhost:8797" }, answers: LOOPBACK_ANSWERS, bodies: STUB }).deps);
+    assert.equal(named.exitCode, 0, named.headline);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
