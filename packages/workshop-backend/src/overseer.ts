@@ -13942,6 +13942,10 @@ class OverseerImpl implements AgentHooks {
       if (error instanceof TemporaryCanvasError && error.code === TEMPORARY_CANVAS_ERROR_CODES.unavailable) {
         return refuse("permission", TEMPORARY_CANVAS_NOT_YOURS);
       }
+      // The person sees the generic refusal; the log says why, so a misconfigured stack is
+      // diagnosable (r1 on inferos#501): e.g. a TTL setting that refuses creation, which names the
+      // setting and its range, never a value it holds.
+      this.logger.error("temporary canvas not created", { event: "operate.temporary_canvases.create.failed", error });
       return refuse("unavailable", TEMPORARY_CANVAS_NOT_CREATED);
     }
   }

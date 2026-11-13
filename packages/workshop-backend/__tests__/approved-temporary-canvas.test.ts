@@ -13,7 +13,8 @@ import type { ApprovedEffects, ApprovedTemporaryCanvas } from "@gadgets/workshop
 import { workflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
 import { autoApprovalRule } from "../src/auto-approval";
 import {
-  actionContextOf, TEMPORARY_CANVAS_FIELD_LABEL, TEMPORARY_CANVAS_GONE, TEMPORARY_CANVAS_NEEDS_APPROVAL, TEMPORARY_CANVAS_NOT_YOURS,
+  actionContextOf, TEMPORARY_CANVAS_FIELD_LABEL, TEMPORARY_CANVAS_GONE, TEMPORARY_CANVAS_NEEDS_APPROVAL, TEMPORARY_CANVAS_NOT_CREATED,
+  TEMPORARY_CANVAS_NOT_YOURS,
   TEMPORARY_CANVAS_WIDGET_UNAVAILABLE, type OverseerDurableObject,
 } from "../src/overseer.js";
 
@@ -51,6 +52,8 @@ type Applied = {
   shared: Record<string, unknown[]>;
   /** The effect's answer after the apply ended (revoked). */
   afterwards?: ApprovedTemporaryCanvas;
+  /** What the Overseer logged as an error during the apply. */
+  errors: { message: string; fields: any }[];
 };
 
 // Ada's own operate session (owner `uid("ada")`), whose user DO's widget search offers `offered` kinds.
@@ -59,9 +62,15 @@ type Applied = {
 async function applying(options: {
   description?: object; resolvedBy?: object; autoApproved?: boolean; executedAs?: object; retired?: boolean;
   offered?: string[]; during?: (effects: ApprovedEffects) => Promise<ApprovedTemporaryCanvas>;
+  /** Backend variables to run with, over the test's own (FAC-147: the TTL settings and DEV). */
+  vars?: Record<string, unknown>;
 } = {}): Promise<Applied> {
   return runInDurableObject(env.TEST_OVERSEER.getByName(`approved-canvas-${++counter}`), async (instance: OverseerDurableObject) => {
     let impl = (instance as unknown as { impl: any }).impl;
+    if (options.vars) impl.env = { ...impl.env, ...options.vars };
+    let errors: { message: string; fields: any }[] = [];
+    let error = impl.logger.error.bind(impl.logger);
+    impl.logger.error = (message: string, fields: any) => { errors.push({ message, fields }); return error(message, fields); };
     let offered = options.offered ?? [BOARD.kind, ISSUES.kind];
     impl.users = {
       idFromName: (profileId: string) => ({ toString: () => uid(profileId) }),
@@ -78,7 +87,7 @@ async function applying(options: {
     if (options.retired) impl.storage.operateSessionRetired.put(true);
     impl.storage.gatekeepers.put({ id: 41, resourceTitle: "Your Dot", class: {} as any,
       creationSpec: { type: "gatekeeper", vendorId: "inferops", resourceUrl: "test://x", typeUrlPattern: "test://*" } });
-    let applied: Applied = { impl, answers: [], stored: undefined, context: undefined, canvases: [], shared: {} };
+    let applied: Applied = { impl, answers: [], stored: undefined, context: undefined, canvases: [], shared: {}, errors };
     impl.getGatekeeperFacet = () => ({
       applyAction: async (_action: number, _cache: unknown, effects?: ApprovedEffects) => {
         applied.effects = effects;
@@ -232,6 +241,29 @@ async function approvedTwice(second: object, options: {
 
 const GRACE = { type: "user" as const, id: "grace", name: "Grace" };
 const NOT_YOURS = { status: "refused", kind: "permission", reason: TEMPORARY_CANVAS_NOT_YOURS };
+
+describe("a TTL in seconds through the approved effect: a local stack only (FAC-147, r1 on inferos#501)", () => {
+  it("is refused on a worker without DEV: nothing is created, the person sees the generic refusal, and the log names the setting", async () => {
+    let applied = await applying({
+      vars: { OPERATE_TEMPORARY_CANVAS_TTL_SECONDS: "60", DEV: undefined },
+      during: create,
+    });
+    expect(applied.answers[0]).toEqual({ status: "refused", kind: "unavailable", reason: TEMPORARY_CANVAS_NOT_CREATED });
+    expect(applied.canvases).toEqual([]);
+    let logged = applied.errors.find(e => e.fields?.event === "operate.temporary_canvases.create.failed");
+    expect(String(logged?.fields?.error?.message ?? logged?.fields?.error)).toMatch(/OPERATE_TEMPORARY_CANVAS_TTL_SECONDS is for a local stack only/);
+  });
+
+  it("sets the canvas's expiry in seconds on a local stack (DEV)", async () => {
+    let before = Date.now();
+    let applied = await applying({ vars: { OPERATE_TEMPORARY_CANVAS_TTL_SECONDS: "60", DEV: true }, during: create });
+    let after = Date.now();
+    expect(applied.answers[0]).toMatchObject({ status: "created" });
+    let expiresAt = (applied.answers[0] as any).expiresAt.getTime();
+    expect(expiresAt).toBeGreaterThanOrEqual(before + 60_000);
+    expect(expiresAt).toBeLessThanOrEqual(after + 60_000);
+  });
+});
 
 describe("once per action, across applies, for the same approver in the same live session (FAC-137 K2, r1 and r2)", () => {
   it("answers the same approver's retry in the same session with the one canvas it created", async () => {
