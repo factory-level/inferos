@@ -29,6 +29,10 @@ export function backendPorts(inferosPort: number): { inferosPort: number; infero
   return { inferosPort, inferosOrigin: `http://localhost:${inferosPort}`, apiPort, apiUrl: `http://localhost:${apiPort}` };
 }
 
+/** The inferops Compose project and service whose Postgres the backend uses (`up` starts it). */
+export const INFEROPS_COMPOSE_PROJECT = "inferops";
+export const INFEROPS_COMPOSE_SERVICE = "postgres";
+
 /** One database per InferOS stack, beside inferops' own `inferlab_<offset>` databases. */
 export function backendDatabase(inferosPort: number): string {
   return `inferos_${inferosPort}`;
@@ -469,7 +473,7 @@ async function ensurePostgres(deps: BackendDeps): Promise<string | null> {
   if (!existsSync(compose)) return `Postgres is not listening on ${host}:${port}, and ${compose} does not exist to start it; run bun run dev up (or bunx turbo run platform:up) in the inferops main checkout, or set INFEROPS_REPO, and retry`;
   const docker = { PATH: deps.env.PATH ?? "", HOME: deps.env.HOME ?? "" };
   deps.runCli(["docker", "network", "create", "inferlab"], docker);
-  const composeUp = deps.runCli(["docker", "compose", "-p", "inferops", "-f", compose, "up", "-d", "postgres"], docker);
+  const composeUp = deps.runCli(["docker", "compose", "-p", INFEROPS_COMPOSE_PROJECT, "-f", compose, "up", "-d", INFEROPS_COMPOSE_SERVICE], docker);
   if (composeUp.exitCode !== 0) return `docker compose up postgres failed: ${composeUp.stderr.trim().split("\n").at(-1) ?? ""}`;
   const deadline = deps.now() + 60_000;
   while (!ready()) {

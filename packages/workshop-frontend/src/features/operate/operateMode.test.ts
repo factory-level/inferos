@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { buildReturnHref, modeForPath, rememberBuildLocation, resetBuildLocationForTests } from './operateMode'
+import { buildReturnHref, modeForPath, operateReturnHref, rememberLocation, resetReturnLocationsForTests } from './operateMode'
 
 describe('modeForPath', () => {
   it('puts the InferOps Canvas routes in Operate', () => {
@@ -16,17 +16,28 @@ describe('modeForPath', () => {
   })
 })
 
-describe('Build return location', () => {
-  afterEach(resetBuildLocationForTests)
+describe('return locations', () => {
+  afterEach(resetReturnLocationsForTests)
 
-  it('falls back to Home before any Build location is seen', () => {
+  it('falls back to each mode\'s home before any location is seen', () => {
     expect(buildReturnHref()).toBe('/')
+    expect(buildReturnHref('/inferops-canvas')).toBe('/')
+    expect(operateReturnHref()).toBe('/inferops-canvas')
   })
 
-  it('returns to the last Build location, ignoring Operate locations', () => {
-    rememberBuildLocation('/workspaces', '/workspaces?sort=recent')
-    rememberBuildLocation('/inferops-canvas', '/inferops-canvas')
-    rememberBuildLocation('/workspace/w1/inferops-canvas', '/workspace/w1/inferops-canvas?view=s1')
+  it('returns a workspace canvas to its workspace when no Build location was seen', () => {
+    expect(buildReturnHref('/workspace/w1/inferops-canvas')).toBe('/workspace/w1')
+    rememberLocation('/workspaces', '/workspaces?sort=recent')
+    expect(buildReturnHref('/workspace/w1/inferops-canvas')).toBe('/workspaces?sort=recent')
+  })
+
+  it('remembers the last location of each mode separately', () => {
+    rememberLocation('/workspaces', '/workspaces?sort=recent')
+    rememberLocation('/inferops-canvas', '/inferops-canvas')
+    rememberLocation('/workspace/w1/inferops-canvas', '/workspace/w1/inferops-canvas?view=s1')
     expect(buildReturnHref()).toBe('/workspaces?sort=recent')
+    expect(operateReturnHref()).toBe('/workspace/w1/inferops-canvas?view=s1')
+    rememberLocation('/blueprints', '/blueprints')
+    expect(operateReturnHref()).toBe('/workspace/w1/inferops-canvas?view=s1')
   })
 })

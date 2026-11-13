@@ -17,7 +17,7 @@ function fakeDeps(root: string, opts: {
   record?: DevServerRecord | null;
   docker?: (argv: string[]) => ProcessResult;
   alive?: (pid: number) => boolean;
-  runIn?: (argv: string[]) => ProcessResult;
+  runIn?: (argv: string[], env: Record<string, string>, cwd: string) => ProcessResult;
   /** Response bodies by `<port><path>` (default `{ path }`). */
   bodies?: Record<string, unknown>;
   /** `Location` headers by `<port><path>`, for redirect answers. */
@@ -52,7 +52,7 @@ function fakeDeps(root: string, opts: {
     },
     runIn: (argv, env, cwd) => {
       runInCalls.push({ argv, env, cwd });
-      return opts.runIn?.(argv) ?? { exitCode: 0, stdout: "", stderr: "" };
+      return opts.runIn?.(argv, env, cwd) ?? { exitCode: 0, stdout: "", stderr: "" };
     },
     launch: (argv, env, _log, cwd) => {
       const pid = 4242 + launches.length + 1;
@@ -531,8 +531,8 @@ test("persona variables are a credentials FAIL in every sandbox but stage-probe"
 test("stage-smoke runs the InferOps readiness smoke only when doctor stage-probe is READY", async () => {
   const root = tempRoot();
   // The scripted smoke ships with the factory CI graph; this checkout runs it only when the file exists.
-    mkdirSync(join(root, "scripts", "preview"), { recursive: true });
-    writeFileSync(join(root, "scripts", "preview", "smoke.ts"), "");
+    mkdirSync(join(root, "scripts", "ci"), { recursive: true });
+    writeFileSync(join(root, "scripts", "ci", "stage-smoke.ts"), "");
   try {
     const { GROKBOT_OPERATE_USER: _operate, ...noOperate } = LOOPBACK_ENV;
     const blocked = fakeDeps(root, { env: noOperate, answers: LOOPBACK_ANSWERS, bodies: STUB });
@@ -541,17 +541,31 @@ test("stage-smoke runs the InferOps readiness smoke only when doctor stage-probe
     assert.equal(blocked.runInCalls.length, 0);
     assert.match(refused.headline, /the smoke did not run/);
 
-    const output = JSON.stringify({ ok: true, checks: [{ name: "inferops-readiness", ok: true }] });
     for (const exitCode of [0, 1]) {
-      const fake = fakeDeps(root, { env: { ...LOOPBACK_ENV, FACTORY_STAGE_URL: "http://127.0.0.1:1" }, answers: { ...LOOPBACK_ANSWERS, 1: 200 }, bodies: STUB, runIn: () => ({ exitCode, stdout: output, stderr: "" }) });
+      const fake = fakeDeps(root, {
+        env: { ...LOOPBACK_ENV, FACTORY_STAGE_URL: "http://127.0.0.1:1" }, answers: { ...LOOPBACK_ANSWERS, 1: 200 }, bodies: STUB,
+        runIn: (argv, env, cwd) => {
+          const runId = argv[argv.indexOf("--run-id") + 1]!;
+          assert.match(runId, /^factory-stage-smoke-/);
+          const resultDir = join(cwd, ".factory", "runs", runId, "stage-smoke");
+          mkdirSync(resultDir, { recursive: true });
+          writeFileSync(join(resultDir, "result.json"), JSON.stringify({ ok: exitCode === 0, checks: [{ name: "inferops-readiness", ok: exitCode === 0 }] }));
+          return { exitCode, stdout: "[factory] stage-smoke: PASS — all smoke oracles passed", stderr: "" };
+        },
+      });
       const result = await runFactory(["stage-smoke", "--stage-url", "http://127.0.0.1:8797", "--json"], fake.deps);
       assert.equal(result.exitCode, exitCode, result.headline);
       assert.equal(fake.runInCalls.length, 1);
-      assert.ok(fake.runInCalls[0]!.argv.some(arg => arg.endsWith("scripts/preview/smoke.ts")));
-      assert.ok(fake.runInCalls[0]!.argv.includes("--gatekeeper"));
+      assert.ok(fake.runInCalls[0]!.argv.some(arg => arg.endsWith("scripts/ci/stage-smoke.ts")));
+      assert.ok(fake.runInCalls[0]!.argv.includes("--run-id"));
+      assert.ok(!fake.runInCalls[0]!.argv.some(arg => arg.endsWith("scripts/preview/smoke.ts")));
       assert.equal(fake.runInCalls[0]!.env.FACTORY_STAGE_URL, "http://127.0.0.1:8797", "--stage-url wins over the environment");
-      assert.deepEqual((result.report.smoke as { report: unknown }).report, { ok: true, checks: [{ name: "inferops-readiness", ok: true }] });
+      assert.deepEqual((result.report.smoke as { report: unknown }).report, { ok: exitCode === 0, checks: [{ name: "inferops-readiness", ok: exitCode === 0 }] });
     }
+    const missing = fakeDeps(root, { env: { ...LOOPBACK_ENV, FACTORY_STAGE_URL: "http://127.0.0.1:1" }, answers: { ...LOOPBACK_ANSWERS, 1: 200 }, bodies: STUB });
+    const missingResult = await runFactory(["stage-smoke", "--stage-url", "http://127.0.0.1:8797", "--json"], missing.deps);
+    assert.equal(missingResult.exitCode, 1, "a successful child exit without its structured evidence must fail closed");
+    assert.match(String((missingResult.report.smoke as { error: string }).error), /result is missing or invalid/);
     assert.equal((await runFactory(["stage-smoke", "dev"], blocked.deps)).exitCode, 2);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -976,13 +990,13 @@ test("up dev runs the pinned backend through the lifecycle, records it, and down
 });
 
 
-test("stage-smoke reports the readiness smoke as absent when its script is not in this checkout", async () => {
+test("stage-smoke reports the scripted smoke as absent when its script is not in this checkout", async () => {
   const root = tempRoot();
   try {
     const fake = fakeDeps(root, { env: LOOPBACK_ENV, answers: LOOPBACK_ANSWERS, bodies: STUB });
     const result = await runFactory(["stage-smoke", "--json"], fake.deps);
     assert.equal(result.exitCode, 1);
-    assert.match(String(result.report.error), /smoke\.ts.*not in this checkout/);
+    assert.match(String(result.report.error), /stage-smoke\.ts.*not in this checkout/);
     assert.equal(fake.runInCalls.length, 0, "nothing was run");
   } finally {
     rmSync(root, { recursive: true, force: true });
