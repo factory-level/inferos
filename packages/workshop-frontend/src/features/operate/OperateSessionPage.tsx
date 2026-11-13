@@ -31,6 +31,7 @@ import { consoleEntries, findConsole, openConsoleEvent, type ConsoleEntry } from
 import { FlowPage } from './FlowPage'
 import { HandoverInbox } from './HandoverInbox'
 import { PersonalWorkflows } from './PersonalWorkflows'
+import { TemporaryCanvases } from './TemporaryCanvases'
 import { Delegates } from './Delegates'
 import { OperateChatPanel } from './OperateChatPanel'
 import { SessionApprovals } from './SessionApprovals'
@@ -238,10 +239,12 @@ export const OperateSessionPage = () => {
                   onCancel={() => void showHome()} onSaved={saved => { setSavedEntry(saved); void showHome() }} />
           : tools ? <InferOpsCanvasHome />
           : canvas ? operate.session
-            ? <div className="mx-auto w-full max-w-6xl px-5 pb-6 pt-4 sm:px-8">
+            ? <div className="mx-auto w-full max-w-6xl space-y-8 px-5 pb-6 pt-4 sm:px-8">
                 <PersonalCanvas api={authenticatedApi} viewer={accountKey ?? null} session={operate.session.stub}
                   sessionWorkspace={sessionWorkspace?.stub ?? null} recentEvents={operate.recentEvents} screens={screens}
                   currentBoard={state.board?.boardRef ?? null} focusedPlacement={search.placement} />
+                <TemporaryCanvases session={operate.session.stub} api={authenticatedApi} viewer={accountKey ?? null}
+                  sessionWorkspace={sessionWorkspace?.stub ?? null} />
               </div>
             : <p role="status" className="p-6 text-sm text-kumo-subtle">Opening your canvas…</p>
           : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={operate.dispatch}
