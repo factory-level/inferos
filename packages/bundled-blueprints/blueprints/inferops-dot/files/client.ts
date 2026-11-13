@@ -7,7 +7,7 @@
 // is, under Needs your approval: nothing here approves or declines.
 // ---------------------------------------------------------------------------
 
-import { DECIDE_WHERE, RUN_TOOLS, failureWords, proposalHeading, proposalWords, stepWords, workflowRunWords } from "./lib/dot.ts";
+import { DECIDE_WHERE, RUN_TOOLS, decisionWords, failureWords, proposalHeading, proposalWords, stepWords, workflowRunWords } from "./lib/dot.ts";
 import type {
   AskResult, Failure, GadgetStub, OpenResult, ShownConversation, ShownProgress, ShownProposal,
 } from "./lib/protocol.ts";
@@ -141,16 +141,20 @@ function renderProposals(conversation: ShownConversation): HTMLElement | null {
   if (conversation.proposals.length === 0) return null;
   const list = el("ul", {});
   for (const proposal of conversation.proposals) {
-    const words: { label: string; detail?: string; note?: string } = RUN_TOOLS.has(proposal.tool)
+    const base: { label: string; detail?: string; note?: string } = RUN_TOOLS.has(proposal.tool)
       ? workflowRunWords(proposal.status, proposal.run)
       : proposalWords(proposal.status, proposal.knowledge);
+    // A background decision's state (FAC-135): waiting for a reconnect, or what the run did after.
+    const decision = decisionWords(proposal);
+    const words = { ...base, ...(decision.label ? { label: decision.label, detail: decision.detail } : {}) };
     list.append(el("li", {},
       el("span", { class: `label${proposal.status.outcome === "unknown" ? " uncertain" : ""}` }, words.label),
       // A run's outcome is what InferOS reported, not something InferOps could check (FAC-134).
       words.note ? el("span", { class: "note" }, words.note) : null,
       el("span", { class: proposal.knowledge ? "heading" : "tool" }, proposalHeading(proposal)),
       renderTarget(proposal),
-      words.detail ? el("div", { class: "detail" }, words.detail) : null));
+      words.detail ? el("div", { class: "detail" }, words.detail) : null,
+      decision.resume ? el("div", { class: "resume" }, decision.resume) : null));
   }
   return el("section", { class: "proposals", "aria-label": "Changes your Dot proposed" },
     el("h2", {}, "Changes your Dot proposed"), list);

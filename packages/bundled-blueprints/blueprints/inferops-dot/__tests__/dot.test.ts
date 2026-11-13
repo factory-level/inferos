@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import {
-  DECIDE_WHERE, RUN_TOOLS, WORKFLOW_RUN_TOOL, classify, failureWords, knowledgeWrite, proposalHeading, proposalWords, shownProgress, shownProposal,
+  DECIDE_WHERE, RECONNECT_WORDS, RUN_TOOLS, WORKFLOW_RUN_TOOL, classify, decisionWords, failureWords, knowledgeWrite, proposalHeading, proposalWords, shownProgress, shownProposal,
   stepWords, workflowRunWords,
 } from "../files/lib/dot.ts";
 
@@ -184,5 +184,76 @@ describe("a workflow-run proposal's words", () => {
       run: { ...run("failed", { reasonCode: "runtime-error" }), extra: "x" } as never,
     }).run;
     expect(shownRun).toEqual({ runId: "run-1", outcome: "failed", reasonCode: "runtime-error", ranAs: "gadget_bindings" });
+  });
+});
+
+describe("a background decision's words (FAC-135)", () => {
+  const waiting = { outcome: "waiting" } as const;
+  const proposal = (extra: Record<string, unknown> = {}) => ({
+    id: "p1", tool: "issue_create", input: "{}", status: { outcome: "succeeded" as const }, receipt: null,
+    createdAt: "", expiresAt: "", ...extra,
+  });
+
+  it("reads waiting for your decision as before, with nothing more while the run waits", () => {
+    expect(decisionWords({ status: waiting })).toEqual({});
+    expect(decisionWords({ status: waiting, runStatus: "awaiting_decision" })).toEqual({});
+    expect(proposalWords(waiting).label).toBe("Waiting for your decision");
+  });
+
+  it("says it waits for you to reconnect when your sign-in has ended, and nothing is made meanwhile", () => {
+    expect(decisionWords({ status: waiting, runStatus: "awaiting_decision", waitsForReconnect: true })).toEqual(RECONNECT_WORDS);
+    expect(RECONNECT_WORDS.detail).toContain("Nothing is made meanwhile");
+    // Only the gatekeeper's flag says so: a waiting status alone, whatever its code, is waiting for the decision.
+    expect(decisionWords({ status: { outcome: "waiting", code: "FORBIDDEN" } })).toEqual({});
+    expect(shownProposal(proposal({ status: waiting, waitsForReconnect: true })).waitsForReconnect).toBe(true);
+    expect(shownProposal(proposal({ status: waiting, waitsForReconnect: false })).waitsForReconnect).toBeUndefined();
+  });
+
+  it("says what the Dot did after the decision, only once that decision resumed it, and that it ended refused when nothing was decided in time", () => {
+    expect(decisionWords({ status: { outcome: "succeeded" }, runStatus: "complete", resumed: true }).resume)
+      .toBe("Your Dot picked up your decision and answered below.");
+    expect(decisionWords({ status: { outcome: "rejected" }, runStatus: "running", resumed: true }).resume)
+      .toBe("Your Dot is answering after your decision.");
+    expect(decisionWords({ status: { outcome: "failed", code: "EXPIRED" }, runStatus: "refused" }).resume)
+      .toContain("Ended: nothing was decided in time");
+    for (const runStatus of ["error", "interrupted"] as const) {
+      expect(decisionWords({ status: { outcome: "failed" }, runStatus, resumed: true }).resume, runStatus).toContain("after your decision");
+    }
+  });
+
+  it("never says the Dot resumed from its run's status alone (r1 on #494)", () => {
+    // An undecided change, whatever its run is doing: nothing about a resume.
+    for (const runStatus of ["running", "complete", "error", "interrupted", "awaiting_decision"] as const) {
+      expect(decisionWords({ status: waiting, runStatus }), runStatus).toEqual({});
+      expect(decisionWords({ status: waiting, runStatus, resumed: true }), runStatus).toEqual({});
+      expect(decisionWords({ status: { outcome: "running" }, runStatus, resumed: true }), runStatus).toEqual({});
+    }
+    // Background resume off: every run ends complete, and a decided change's decision resumed nothing.
+    expect(decisionWords({ status: { outcome: "succeeded" }, runStatus: "complete" })).toEqual({});
+    expect(decisionWords({ status: { outcome: "rejected" }, runStatus: "complete" })).toEqual({});
+    // Only the gatekeeper's recorded `resumed` reaches the page, and only as true.
+    expect(shownProposal(proposal({ status: { outcome: "succeeded" }, resumed: true })).resumed).toBe(true);
+    expect(shownProposal(proposal({ status: { outcome: "succeeded" }, resumed: false })).resumed).toBeUndefined();
+    expect(shownProposal(proposal({ status: { outcome: "succeeded" } })).resumed).toBeUndefined();
+  });
+
+  it("reads the gatekeeper's own resumed field: the words for a resumed decision, none for one that resumed nothing", () => {
+    // Shaped as gatekeeper-inferops' `shownProposal` sends it (#493): `resumed` and
+    // `waitsForReconnect` always present as booleans, `input` as JSON text.
+    const fromGatekeeper = (resumed: boolean) => ({
+      id: "p-1", tool: "issue_create", input: "{}", status: { outcome: "succeeded" as const },
+      receipt: null, runStatus: "complete" as const, waitsForReconnect: false, resumed,
+      createdAt: "2026-11-13T00:00:00.000Z", expiresAt: "2026-11-20T00:00:00.000Z",
+    });
+    expect(decisionWords(shownProposal(fromGatekeeper(true) as never)).resume)
+      .toBe("Your Dot picked up your decision and answered below.");
+    expect(decisionWords(shownProposal(fromGatekeeper(false) as never))).toEqual({});
+  });
+
+  it("shows the client a run status it knows, and never another", () => {
+    expect(shownProposal(proposal({ runStatus: "awaiting_decision" })).runStatus).toBe("awaiting_decision");
+    expect(shownProposal(proposal({ runStatus: "refused" })).runStatus).toBe("refused");
+    expect(shownProposal(proposal({ runStatus: "paused" }) as never).runStatus).toBeUndefined();
+    expect(shownProposal(proposal()).runStatus).toBeUndefined();
   });
 });

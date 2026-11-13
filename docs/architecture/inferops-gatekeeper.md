@@ -848,6 +848,13 @@ FAC-133 (inferos [ADR 0013](../adr/0013-dot-runtime.md) decision 3). A seventh r
   - **Another company's connection** (`OTHER_COMPANY`) is final. The credential refuses it before sending, with a code that crosses RPC in its message; the account client restates it as unsent. So the confirm is not applied and not retried (kind `permission`), and the proposal is declined there, by `refuseDotProposal`'s rule for a refusal that stands.
   - **Field values only:** nothing InferOps wrote reaches the approval's prose.
   - **Tests:** `dot.test.ts`, "a decision the Dot waits for (FAC-135)"; `account.test.ts`, "the Dot's session start (FAC-135)" (the production entry, through a real bound connection: the shared connection and the demo refused before sending, the person's own account and token, and `OTHER_COMPANY` from the real credential, restated unsent, final, with nothing sent); `apply-outcomes.test.ts` (`OTHER_COMPANY`'s classification).
+- **Background decisions on the Dot page (FAC-135, inferops#2657):** each proposal also reads its Dot run's `runStatus` (from InferOps' `Proposal.runStatus`). `shownProposal` keeps only a status the page knows, and `waitsForReconnect` and `resumed` only when exactly `true`. `decisionWords` gives the four states:
+  - **waiting for your decision:** as before, with nothing more while the run waits (`awaiting_decision`);
+  - **waiting for you to reconnect:** the gatekeeper sets the proposal's `waitsForReconnect` while its decision is pending because its last confirm met a dead sign-in. A proposal's status alone can't tell: its receipt maps a dead sign-in to `FORBIDDEN`. It reads *Waiting for you to reconnect InferOps*, and says nothing is made meanwhile. It waits for the person only, never anyone else (ADR 0011 U3);
+  - **resumed:** only once decided **and** its own decision resumed the run (`DotProposal.resumed`, recorded by the gatekeeper from InferOps' answer; `runStatus` alone never says so, since with background resume off every run ends complete), a line saying what the run did after: *Your Dot picked up your decision and answered below.*, *…is answering after your decision.*, *…couldn't finish…* or *…was cut off*;
+  - **ended refused:** *Ended: nothing was decided in time, so your Dot stopped waiting.*
+
+  These are fixed words, never the run's own: those are in the conversation. Tests: the blueprint's `dot.test.ts`, "a background decision's words".
 - **Receipts** (`dotProposalStatus`), in FAC-97's words from InferOps' own status, read when asked:
 
   | InferOps | Receipt |
