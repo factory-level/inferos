@@ -32,7 +32,7 @@
 // The move is proposed through the gatekeeper's issue session (the API the board widget calls),
 // and approved by clicking Approve in the workspace's Activity panel.
 
-import { checkKnowledgeWrite, smokeOraclesPass, smokePersonaProblem, stageSmokeActionEvidence, STAGE_SMOKE_ORACLES, WIKI_BODY_APPLY_KIND, withStateRestoration, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
+import { checkKnowledgeWrite, smokeOraclesPass, smokePersonaProblem, stageSmokeActionEvidence, STAGE_SMOKE_ORACLES, waitForBoardWrite, WIKI_BODY_APPLY_KIND, withStateRestoration, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -282,7 +282,7 @@ async function pendingFor(overseer: Any, connectionId: number): Promise<{ id: nu
 }
 
 /** An action's state, found in the workspace's history. */
-async function actionState(overseer: Any, id: number, applyKind: typeof WIKI_BODY_APPLY_KIND): Promise<KnowledgeWriteOutcome> {
+async function actionState(overseer: Any, id: number, applyKind: string): Promise<KnowledgeWriteOutcome> {
   let beforeId: number | undefined;
   for (let page = 0; page < 10; page++) {
     const { entries, nextBeforeId } = await overseer.listActions({ beforeId, filter: "action" }) as { entries: { id: number; state?: string; type?: string; description?: { actionKind?: { tag?: string } }; lastAttempt?: { message?: string; code?: string; outcome?: string; retryable?: boolean; kind?: string } }[]; nextBeforeId?: number };
@@ -472,17 +472,19 @@ async function ownerFlow(browser: Any): Promise<void> {
       }
       const approveShot = `owner-0${step === "apply" ? 6 : 8}-approve-${step}.png`;
       const toastText = await approveInBrowser(page, bound.workspaceId, approveShot);
-      let actionEvidence: KnowledgeWriteOutcome | undefined;
-      if (step === "apply" && pending) {
-        actionEvidence = await actionState(bound.overseer, pending.id, WIKI_BODY_APPLY_KIND);
-        // A successful action can be visible in the action log shortly before the board API;
-        // failed or gate-refused actions are recorded immediately and must not time out here.
-        if (actionEvidence.state === "approved") {
-          await until(() => api2.issue(move.issueId), value => value.stateId === to, 60_000);
-        }
-      }
-      const after = await api2.issue(move.issueId);
-      const applied = after.stateId === to && BigInt(after.revision) > BigInt(before.revision);
+      // Keep the board oracle's full bounded wait for both apply and restore. The action log is
+      // polled alongside it under the same deadline, and is attached only if the board never moves.
+      const transition = await waitForBoardWrite({
+        readBoard: () => api2.issue(move.issueId),
+        boardApplied: value => value.stateId === to,
+        readAction: () => pending
+          ? actionState(bound.overseer, pending.id, "BOARD_WRITES")
+          : Promise.resolve(undefined),
+        actionFinished: value => value.state !== undefined && value.state !== "pending",
+      });
+      const after = transition.board;
+      const applied = transition.applied && BigInt(after.revision) > BigInt(before.revision);
+      const actionEvidence: KnowledgeWriteOutcome | undefined = applied ? undefined : transition.action;
       const fresh = await bound.session.readBoard() as Board;
       if (step === "apply") {
         const activityScreenshot = "owner-08-activity-history.png";
@@ -496,19 +498,20 @@ async function ownerFlow(browser: Any): Promise<void> {
           revisionBefore: before.revision,
           revisionAfter: after.revision,
           boardRevision: revisionOf(fresh, move.issueId),
-          action: actionEvidence ?? { id: pending?.id, state: "missing" },
+          ...(!applied ? { action: actionEvidence ?? { id: pending?.id, state: "missing" } } : {}),
           approvalToast: toastText,
           afterApproveScreenshot: approveShot.replace(/\.png$/, "-after-click.png"),
           activityHistoryScreenshot: activityScreenshotError ? null : activityScreenshot,
           activityScreenshotError,
         };
-        const actionDetail = JSON.stringify(actionEvidence ?? { id: pending?.id, state: "missing" });
+        const actionDetail = applied ? "" : `; action evidence=${JSON.stringify(actionEvidence ?? { id: pending?.id, state: "missing" })}`;
         const activityDetail = activityScreenshotError ? `; Activity screenshot failed: ${activityScreenshotError}` : `; Activity history screenshot=${activityScreenshot}`;
         if (!record("owner.applied", applied,
-          `InferOps API: ${move.identifier} ${after.stateId === to ? `now in ${toName}` : "NOT moved"}, revision ${before.revision} -> ${after.revision}; action evidence=${actionDetail}; toast=${JSON.stringify(toastText)}${activityDetail}`)) return;
+          `InferOps API: ${move.identifier} ${after.stateId === to ? `now in ${toName}` : "NOT moved"}, revision ${before.revision} -> ${after.revision}${actionDetail}; toast=${JSON.stringify(toastText)}${activityDetail}`)) return;
       } else {
-        notes.restored = { revisionBefore: before.revision, revisionAfter: after.revision };
-        record("owner.restored", applied, `InferOps API: ${move.identifier} ${after.stateId === to ? `back in ${toName}` : "NOT moved back"}, revision ${before.revision} -> ${after.revision}`);
+        notes.restored = { revisionBefore: before.revision, revisionAfter: after.revision, ...(!applied ? { action: actionEvidence ?? { id: pending?.id, state: "missing" } } : {}) };
+        record("owner.restored", applied,
+          `InferOps API: ${move.identifier} ${after.stateId === to ? `back in ${toName}` : "NOT moved back"}, revision ${before.revision} -> ${after.revision}${applied ? "" : `; action evidence=${JSON.stringify(actionEvidence ?? { id: pending?.id, state: "missing" })}`}`);
       }
     }
       },

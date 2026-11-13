@@ -30,6 +30,35 @@ export interface KnowledgeWriteOutcome {
   lastAttempt?: { code?: string; outcome?: string; retryable?: boolean; failureKind?: string };
 }
 
+/** Poll the authoritative board and the action log under one deadline. Action state is diagnostic;
+ * the board predicate alone decides success, so a pending read can never shorten the board wait. */
+export async function waitForBoardWrite<T, E>(steps: {
+  readBoard(): Promise<T>;
+  boardApplied(value: T): boolean;
+  readAction(): Promise<E | undefined>;
+  actionFinished(value: E): boolean;
+}, timeoutMs = 60_000, pollIntervalMs = 250): Promise<{ board: T; applied: boolean; action?: E }> {
+  const deadline = Date.now() + timeoutMs;
+  let board!: T;
+  let action: E | undefined;
+  let actionFinished = false;
+  while (true) {
+    const [nextBoard, nextAction] = await Promise.all([
+      steps.readBoard(),
+      actionFinished ? Promise.resolve(undefined) : steps.readAction(),
+    ]);
+    board = nextBoard;
+    if (nextAction !== undefined) {
+      action = nextAction;
+      actionFinished = steps.actionFinished(nextAction);
+    }
+    if (steps.boardApplied(board)) return { board, applied: true };
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { board, applied: false, action };
+    await new Promise(resolve => setTimeout(resolve, Math.min(pollIntervalMs, remaining)));
+  }
+}
+
 /** Project only bounded action evidence; never copy provider messages or action descriptions. */
 export function stageSmokeActionEvidence(entry: {
   id: number;
