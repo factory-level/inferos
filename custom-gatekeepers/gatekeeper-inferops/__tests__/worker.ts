@@ -458,6 +458,11 @@ export type DotScript = {
    * sent, as the account client restates the credential's refusal (stage `unsent`).
    */
   otherCompany?: boolean;
+  /**
+   * FAC-135: InferOps makes this many confirms (the first ones) but their answers are lost on the way
+   * back (a timeout); a later confirm under the same key answers with what it stored.
+   */
+  confirmLost?: number;
   /** FAC-135 (r1 on #493): `chatbot.proposal_list` answers only after this many ms (a slow InferOps). */
   listDelayMs?: number;
   /** FAC-135: the session start's staging deadline, in ms (the facet's own by default). */
@@ -546,6 +551,10 @@ class FakeDot {
         return refuse(confirm.status, confirm.code);
       }
       Object.assign(proposal, { status: "confirmed", outcome: confirm.outcome, decidedAt: "2026-11-10T12:01:00.000Z" });
+      if (this.script.confirmLost) {
+        this.script.confirmLost--;
+        throw new TypeError("The answer was lost on the way back.");
+      }
       return answer({ proposal });
     }
     return refuse(404, "NOT_FOUND");

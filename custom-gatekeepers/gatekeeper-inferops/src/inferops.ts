@@ -4493,6 +4493,8 @@ async function applyDotDecision(binding: DotBinding, actionId: number, effects?:
         // Already decided: settled to what InferOps holds; what resumed then is read later.
         decision = { proposal: await settledProposal(binding, record, error), resumed: null };
       }
+      // A run still resuming, or not yet (FAC-135): its end is learned at a later session start.
+      if (decision.resumed === null || decision.resumed.status === "running") binding.watch(record.conversationId);
       return { ...(marked as DotConfirmAction), status: "applied",
         confirmedOutcome: summarizeDotOutcome(decision.proposal.outcome), ...decided(decision) };
     },
@@ -4862,6 +4864,7 @@ async function rejectDotAction(binding: DotBinding, actionId: number): Promise<v
       // What the decline resumed (FAC-135): the proposing run, told it was declined.
       const now = binding.action(actionId);
       if (now && isDotAction(now)) binding.putAction({ ...now, ...decided(decision) });
+      if (decision.resumed === null || decision.resumed.status === "running") binding.watch(record.conversationId);
       return;
     }
     refusal = new InferOpsError("CONFLICT", "InferOps answered the decline with another status.");

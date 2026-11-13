@@ -959,6 +959,28 @@ describe("a decision the Dot waits for (FAC-135)", () => {
     expect(await hooks.dotRecord(actionId)).toMatchObject({ resumed: null, runStatus: "complete" });
   });
 
+  it("keeps a confirm whose answer timed out uncertain and replayable, never declined, and learns the run's end later", async () => {
+    const waiting = proposal({ expiresAt: "2099-11-10T12:00:00.000Z", runStatus: "awaiting_decision" });
+    // Staged by a read, not a turn: the decision itself has its conversation watched.
+    const { hooks, actionId } = await staged(script({
+      proposals: [waiting], confirmLost: 1, resumed: { runId: RUN, status: "running" }, runStatusAfter: "running",
+    }));
+    const lost = await hooks.applyDot(actionId);
+    expect(lost.failure).toMatchObject({ outcome: "unknown", retryable: true });
+    expect(await hooks.dotRecord(actionId)).toMatchObject({ status: "pending" });
+    expect((await hooks.dotCalls()).some(c => c.path.endsWith("/decline"))).toBe(false);
+    // The retry under the same key gets the stored answer: the run is still going.
+    expect((await hooks.applyDot(actionId)).failure).toBeNull();
+    const confirms = (await hooks.dotCalls()).filter(c => c.path.endsWith("/confirm"));
+    expect(confirms.map(c => c.key)).toEqual([PROPOSAL, PROPOSAL]);
+    expect(await hooks.dotRecord(actionId)).toMatchObject({ status: "applied", resumed: { runId: RUN, status: "running" } });
+    // Its end is read later, at the next session start.
+    await hooks.dotScript(script({ proposals: [{ ...waiting, status: "confirmed", runStatus: "complete" }] }));
+    await hooks.startDotSession();
+    await hooks.dotSweepSettled();
+    expect(await hooks.dotRecord(actionId)).toMatchObject({ runStatus: "complete" });
+  });
+
   it("stops watching a conversation once its proposals have expired", async () => {
     const { hooks, conversation } = await setup(cut({ proposals: [proposal({ expiresAt: "2020-01-01T00:00:00.000Z" })] }));
     await conversation.ask("File it");
