@@ -94,6 +94,12 @@
       "new_sqlite_classes": [
         "AuthoredWidgetBuildDurableObject"
       ]
+    },
+    {
+      "tag": "v6",
+      "new_sqlite_classes": [
+        "ConsoleDurableObject"
+      ]
     }
   ]
 }

@@ -39,7 +39,7 @@ export default defineGadgetsWorker({
 
     // All DO classes (UserDurableObject, OverseerDurableObject, AuthoredWidgetBuildDurableObject,
     // AdminSettings, PendingLogin,
-    // UserDirectoryDurableObject, SubjectPresenceDurableObject)
+    // UserDirectoryDurableObject, SubjectPresenceDurableObject, ConsoleDurableObject)
     // are reached via ctx.exports and need no explicit durable_objects binding.
     BLUEPRINTS: bindings.kv(),
     AVATARS: bindings.kv(),
@@ -80,4 +80,6 @@ export const migrations: DurableObjectMigration[] = [
   // Live presence on operate subjects: one in-memory roster per subject reference.
   { tag: "v4", new_sqlite_classes: ["SubjectPresenceDurableObject"] },
   { tag: "v5", new_sqlite_classes: ["AuthoredWidgetBuildDurableObject"] },
+  // A console that belongs to no workspace (ADR 0021): one object per console.
+  { tag: "v6", new_sqlite_classes: ["ConsoleDurableObject"] },
 ];

@@ -5,7 +5,7 @@ import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assis
 import { localApiModels } from './local-api-models.js';
 import { modelNotOfferedMessage } from './model-allowlist.js';
 import { isCloudflareLimitsEnabled } from './ai-gateway-billing/config.js';
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, getOperateSessionErrorCode, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, ConsoleSummary, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, getOperateSessionErrorCode, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
 import {
   WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, recoverWidgetState, widgetEventsFrom,
   type WidgetStateMachine, type WidgetStateSnapshot, widgetStateKeyPlacement,
@@ -497,6 +497,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // person is taken out of each one's live presence (SubjectPresenceDurableObject.leaveAll)
       // before anything else is served, so its roster stops reaching them.
       retiredSubjectPresence: collection<{ boardRef: string; revoked: boolean }>()({ primaryKey: "boardRef" }),
+      // The consoles that belong to no workspace (console-object.ts) this person owns or was added
+      // to: a listing only, never the `gadgets` table, so none appears among their workspaces.
+      consoles: collection<ConsoleSummary>()({ primaryKey: "id" }),
     },
     singletons: {
       operateReadGeneration: "1",
@@ -2134,6 +2137,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getGadget(id: string): Promise<GadgetMetadata | null> {
     return this.storage.gadgets.get(id) || null;
+  }
+
+  /**
+   * Lists a console that belongs to no workspace for this person, or refreshes its listing. A
+   * listing grants nothing: the console checks access at every open (ConsoleDurableObject).
+   */
+  async recordConsole(summary: Omit<ConsoleSummary, "created">): Promise<void> {
+    this.storage.consoles.put({ ...summary, created: this.storage.consoles.get(summary.id)?.created ?? new Date() });
+  }
+
+  /** Stops listing a console for this person: it was deleted, or it no longer admits them. */
+  async forgetConsole(id: string): Promise<void> {
+    this.storage.consoles.delete(id);
+  }
+
+  /** See AuthenticatedApi.listMyConsoles(). */
+  async listConsoles(): Promise<ConsoleSummary[]> {
+    return Array.from(this.storage.consoles.list()).toSorted((a, b) => b.created.getTime() - a.created.getTime());
   }
 
   async newGadget(id: string, title: string): Promise<void> {

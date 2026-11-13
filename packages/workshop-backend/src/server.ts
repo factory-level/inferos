@@ -18,7 +18,7 @@ import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import { checkFlowDestination } from './flow-navigation.js';
 import { deliverHandover } from './handover-delivery.js';
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, BoundViewDescription, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload, WIDGET_SEARCH_LIMIT } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, BoundViewDescription, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload, WIDGET_SEARCH_LIMIT, ConsoleSummary, ConsoleReading, ConsoleAuthoring } from '@gadgets/workshop-shared/api';
 import { consoleEventMismatch, consoleScreenMove, type ConsoleRef, type HostBoardEntry, type OperateConsole, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView } from '@gadgets/workshop-shared/operate-console';
 import { boundViewsEnabled, describeBoundView } from "./console-store.js";
 import { HOST_BOARDS_OFF, HostBoardSelectionRelay, hostBoardsEnabled, readByDeadline, type HostBoardContext, type HostBoardSelectionState } from "./host-boards.js";
@@ -87,6 +87,8 @@ export { LanguageModelGatekeeper, ArtifactPublisherGatekeeper };
 
 // Re-export entrypoint types from admin-settings.ts.
 export { AdminSettings };
+import { ConsoleDurableObject } from "./console-object.js";
+export { ConsoleDurableObject };
 
 // Re-export the deployment-wide user directory Durable Object.
 export { UserDirectoryDurableObject, SubjectPresenceDurableObject };
@@ -662,6 +664,61 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
     //     system doesn't know this.
     return new AdminApiImpl(this.adminSettings.getByName(""), adminUserId);
+  }
+
+  // --- Consoles that belong to no workspace (console-object.ts) ---
+
+  #console(id: string): DurableObjectStub<ConsoleDurableObject> {
+    let consoles = this.ctx.exports.ConsoleDurableObject;
+    try {
+      return consoles.get(consoles.idFromString(id));
+    } catch {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+    }
+  }
+
+  // A denial proves the caller's listing is stale, as for a shared workspace (#openGadgetInternal).
+  async #openConsole<T>(id: string, open: (console: DurableObjectStub<ConsoleDurableObject>) => Promise<T>): Promise<T> {
+    try {
+      return await open(this.#console(id));
+    } catch (err) {
+      if (getOpenGadgetErrorCode(err) === OPEN_GADGET_ERROR_CODES.workspaceAccessDenied) {
+        await this.#user.forgetConsole(id);
+      }
+      throw err;
+    }
+  }
+
+  async newConsole(title: string): Promise<ConsoleSummary> {
+    if (this.env.COMPOSABLE_VIEWS !== "true" || this.env.DURABLE_VIEWS !== "true") {
+      throw new Error("Durable views are disabled for this installation");
+    }
+    let user = this.#user;
+    if (!await user.holdsSharedConfiguration("build")) {
+      throw new Error("You don't have permission to build shared configuration.");
+    }
+    let [profile, company] = await Promise.all([user.whoami(), user.currentPresentationCompany()]);
+    let consoles = this.ctx.exports.ConsoleDurableObject;
+    let id = consoles.newUniqueId();
+    let summary = await consoles.get(id).initialize({ userId: this.#userId.toString(), profile, company }, title);
+    await user.recordConsole(summary);
+    return (await user.listConsoles()).find(listed => listed.id === summary.id)!;
+  }
+
+  async listMyConsoles(): Promise<ConsoleSummary[]> {
+    return retryOnDoReset(() => this.#user.listConsoles());
+  }
+
+  async openConsoleReading(id: string): Promise<RpcStub<ConsoleReading>> {
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
+    return this.#openConsole(id, console => console.openReading(this.#userId.name!));
+  }
+
+  async openConsoleAuthoring(id: string): Promise<RpcStub<ConsoleAuthoring>> {
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
+    return this.#openConsole(id, console => console.openAuthoring(this.#userId.toString(), this.#userId.name!));
   }
 
   async getOperateSession(): Promise<RpcStub<OperateSession>> {

@@ -77,6 +77,8 @@ covers:
   - packages/workshop-shared/src/bound-view.ts
   - packages/workshop-shared/src/widget-tools.ts
   - packages/workshop-backend/src/console-store.ts
+  - packages/workshop-backend/src/console-object.ts
+  - packages/integration-tests/__tests__/first-class-consoles.test.ts
   - packages/workshop-backend/src/host-boards.ts
   - packages/workshop-backend/src/tool-lane.ts
   - packages/workshop-backend/src/console-tools.ts
@@ -164,7 +166,7 @@ covers:
   - packages/workshop-backend/__tests__/operate-flow-start.test.ts
   - packages/workshop-backend/__tests__/operate-flow-navigation.test.ts
   - packages/workshop-backend/src/flow-navigation.ts
-updated: 2026-11-05
+updated: 2026-11-13
 ---
 
 # Operate mode
@@ -640,6 +642,19 @@ The check also holds after install. Each connection and model binding records wh
 `Overseer.upgradeInstall(version, gadgetId?)` is the only thing that moves an install: gadget `gadgetId`'s, or with no id the workspace's own, on its default gadget. It needs build access: `UseOverseerInterface` and `OperateOverseerInterface` deny it. It reads that version of the recorded blueprint and refuses a missing version and, through `assertUpgradeCompatible`, one whose kind differs from the install's or whose data contract is not equal to the installed one: a different contract is refused as needing migration, and an undeclared contract on either side as unknown. So an install of a version with no contract (including every install made before contracts) cannot be upgraded. It also refuses a version that needs a binding the gadget doesn't have on mainline (its `spawnerOnly` bindings aside; the error names each missing binding), and writes the version's files as a new commit on the gadget's head. It then re-checks that neither the head nor the pin moved during the awaits, fast-forwards the head, re-pins the install, and restarts the gadget. Bindings, storage, chats, grants and credentials are untouched, and nothing is read from the source workspace. A downgrade is the same call with an older version of the same contract. There is no migration or data rollback.
 
 A bound resource fails closed for anyone the install is shared with, through the observer check every non-owner open runs (`authorizeCollaborator` / `ensureObserver`; see `docs/observers.md`): a `use` viewer must name an account of their own for each gatekeeper bound into the gadget, and the gatekeeper's `addObserver` must admit it. A viewer with no account, no prompt channel, or an account the gatekeeper refuses gets an error that names the binding, the account and the gatekeeper's reason, and no workspace capability, so they never reach the gadget or the installer's connection; a refused first-time viewer stays registered with no gatekeeper. The check runs again on every open, so revoked access is refused on the next one. An operate session holds references only, so the same person's session can show the install's screen in its working set while rendering it still goes through `openGadget` and is refused. `operate-published.test.ts` covers each case against the test gatekeeper.
+
+### Consoles that belong to no workspace
+
+A console can also be an object of its own (`ConsoleDurableObject` in `console-object.ts`, [ADR 0021](../adr/0021-first-class-consoles.md)), created by name with `AuthenticatedApi.newConsole(title)`. It needs no workspace: its id is not a workspace id, `openGadget` refuses it, and it never appears in `listGadgets`.
+
+- **Storage.** One object per console holds the console, its pages, its published screen copies, its owner (`ConsoleOwner`: user id, profile, and the company they were working in, which nothing reads yet) and its collaborators. The storage has the same shape as the workspace's for the collections the stores read, so `WorkspaceCanvasStore`, `WorkspaceConsoleStore` and `SharingManager` are used unchanged. `gadgets`, `flows` and `boundHooks` are always empty.
+- **Creation.** `newConsole` requires both view flags and `holdsSharedConfiguration("build")`. `initialize` runs once, in one transaction: it creates one blank page titled Overview and a draft whose only view shows it, because the store refuses a console with no views.
+- **Listing.** Each person's user object has a `consoles` collection (`ConsoleSummary`: id, title, role, published), separate from `gadgets`. It is written when a console is created, saved, published or shared, and read by `listMyConsoles`. A listing grants nothing.
+- **Capabilities.** `openConsoleAuthoring` returns `ConsoleAuthoring` to the owner and `build` collaborators: the page methods under the workspace's own names, the draft (`getConsole`, `replaceConsole`, `validateConsoleDraft`), `publishConsole` and the collaborator methods. `openConsoleReading` returns `ConsoleReading` to anyone the console lists: the published revision, screens and pages only. Every method reads the caller's role again, so a removed person is refused on a capability they already hold. A refused open drops the caller's listing.
+- **What is refused.** The stores are given the deployment's catalog without the `inferos.gadget` kind, so a page cannot place one. `replaceConsole` refuses registered widgets, host boards, bound views and flows (`CONSOLE_WORKSPACE_ONLY`).
+- **Publishing and sharing.** `publishConsole` asks `holdsSharedConfiguration("publish")` of the caller's user object and records who published. Only the owner adds and removes people, by account name. Share links are not offered.
+
+Operate does not list or open these consoles yet, and no chat authors them; both are the next steps of `plans/first-class-consoles.md`. `first-class-consoles.test.ts` covers creation with no workspace, the separate listing, page and draft writes, the refusals, publication, a `use` collaborator reading only the published revision, and removal.
 
 ### Console widget registry
 

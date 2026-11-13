@@ -16,7 +16,8 @@ import { readWorkspaceConfiguration } from "./workspace-configuration";
 import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
 import type { GadgetRecord, OverseerStorage } from "./overseer";
 
-type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "canvasPages" | "consoleScreens" | "gadgets" | "flows" | "workspaceConfiguration" | "boundHooks">;
+/** The storage a console store reads and writes: a workspace's, or a console object's own. */
+export type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "canvasPages" | "consoleScreens" | "gadgets" | "flows" | "workspaceConfiguration" | "boundHooks">;
 
 /**
  * How publication creates and removes frozen installs (see `ConsoleWidgetEntry`). Both are called

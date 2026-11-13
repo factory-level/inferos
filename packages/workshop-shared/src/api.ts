@@ -1410,8 +1410,112 @@ export interface AuthenticatedApi extends RpcTarget {
    */
   getOperateSession(): Promise<RpcStub<OperateSession>>;
 
+  /**
+   * Creates a console that belongs to no workspace, with one blank page and a draft that shows it,
+   * and returns its summary. The caller owns it. Refused while saved views are off, and without
+   * the shared-configuration `build` permission where a deployment asks for one.
+   */
+  newConsole(title: string): Promise<ConsoleSummary>;
+
+  /**
+   * The consoles of `newConsole` the caller owns or was added to, newest first. Read from the
+   * caller's own record, so it opens no console. Consoles stored in a workspace are not listed
+   * here; `Overseer.listConsoles` lists those.
+   */
+  listMyConsoles(): Promise<ConsoleSummary[]>;
+
+  /**
+   * Opens a console of `newConsole` for reading its published revision. Anyone the console lists
+   * may; everyone else is refused, and a console the caller can no longer reach is dropped from
+   * `listMyConsoles`.
+   */
+  openConsoleReading(id: string): Promise<RpcStub<ConsoleReading>>;
+
+  /** Opens a console of `newConsole` for authoring. Only its owner and `build` collaborators may. */
+  openConsoleAuthoring(id: string): Promise<RpcStub<ConsoleAuthoring>>;
+
   // TODO:
   // - Edit permissions on a connected account.
+}
+
+/**
+ * One console that belongs to no workspace, as its owner or a collaborator lists it
+ * (`AuthenticatedApi.listMyConsoles`). A listing only: it grants nothing, and opening the console
+ * checks access again.
+ */
+export type ConsoleSummary = {
+  /** The console's own id, which names no workspace. */
+  id: string;
+  /** The console's title when it was last saved or published. */
+  title: string;
+  /** The caller's role: `build` for the owner and authors, `use` for operators. */
+  role: CollaboratorRole;
+  /** Whether a revision has been published, so operators have something to open. */
+  published: boolean;
+  /** When the console was created, or when the caller was added to it. */
+  created: Date;
+};
+
+/**
+ * A console of `AuthenticatedApi.newConsole` as its operators read it: the published revision
+ * only. It has no draft and no write. Access is checked again at every call, so a person removed
+ * from the console is refused at once.
+ */
+export interface ConsoleReading extends RpcTarget {
+  /** The published revision as operators see it, or null before the first publication. */
+  getConsole(): Promise<OperateConsole | null>;
+  /** A screen as it was published; null when the published revision does not show it. */
+  getConsoleScreen(screenId: string): Promise<CanvasDefinition | null>;
+  /** A screen's page as it was published; null when the published revision does not show it. */
+  getConsolePage(screenId: string): Promise<CanvasPage | null>;
+}
+
+/**
+ * A console of `AuthenticatedApi.newConsole` as its owner and `build` collaborators author it:
+ * its pages, its draft and its publication. The page methods behave as the `Overseer` methods of
+ * the same names do, over the console's own pages. Widgets a workspace built are refused, and so
+ * are registered widgets, host boards, bound views and flows, which only a workspace holds.
+ * Access is checked again at every call.
+ */
+export interface ConsoleAuthoring extends RpcTarget {
+  /** Every page of this console. */
+  listCanvases(): Promise<CanvasDefinition[]>;
+  /** One page, or null. */
+  getCanvas(id: string): Promise<CanvasDefinition | null>;
+  /** One page with its nested objects, or null. */
+  getCanvasPage(id: string): Promise<CanvasPage | null>;
+  /** Creates a page with a server-minted id at revision 0. */
+  createCanvas(content: CanvasContent): Promise<CanvasDefinition>;
+  /** Applies operations to a page at the expected revision. */
+  editCanvas(id: string, expectedRevision: string, operations: CanvasOperation[]): Promise<CanvasDefinition>;
+  /** Applies typed page operations at the expected revision. */
+  editCanvasPage(id: string, expectedRevision: string, operations: CanvasPageOperation[]): Promise<CanvasPage>;
+  /** Deletes a page at the expected revision. A page a view still shows fails the next save. */
+  deleteCanvas(id: string, expectedRevision: string): Promise<void>;
+  /** The draft, or the published revision as operators see it (null before the first publication). */
+  getConsole(source: ConsoleSource): Promise<OperateConsole | null>;
+  /** A screen of the draft as it is now, or as it was published. */
+  getConsoleScreen(screenId: string, source: ConsoleSource): Promise<CanvasDefinition | null>;
+  /** A screen's page of the draft as it is now, or as it was published. */
+  getConsolePage(screenId: string, source: ConsoleSource): Promise<CanvasPage | null>;
+  /** Replaces the draft at the expected revision. Operators keep the published revision. */
+  replaceConsole(expectedRevision: string, content: OperateConsoleContent): Promise<OperateConsole>;
+  /** Every problem that would stop the draft being published. Writes nothing. */
+  validateConsoleDraft(): Promise<ConsoleDraftProblem[]>;
+  /**
+   * Publishes the draft at the expected revision, freezing each screen as it is now. Refused
+   * without the shared-configuration `publish` permission where a deployment asks for one.
+   */
+  publishConsole(expectedRevision: string): Promise<OperateConsole>;
+  /** The people this console is shared with. */
+  listCollaborators(): Promise<CollaboratorInfo[]>;
+  /**
+   * Adds a person by account name with `role`, and lists the console for them. Null when no such
+   * account exists. Only the owner may.
+   */
+  addCollaborator(username: string, role: CollaboratorRole): Promise<CollaboratorInfo | null>;
+  /** Removes a person, who is refused at their next call. Only the owner may. */
+  removeCollaborator(profileId: string): Promise<void>;
 }
 
 /** Describes a gatekeeper's management app, for the Workshop nav + page. */
