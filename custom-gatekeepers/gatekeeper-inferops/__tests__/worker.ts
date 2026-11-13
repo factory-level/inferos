@@ -12,6 +12,7 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import { dotBindingOver } from "../src/inferops.js";
 import { openHttpInferOpsClient } from "../src/http-inferops.js";
+import { OTHER_COMPANY } from "../src/deployment-company.js";
 import {
   InferOpsAccountGatekeeper, InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsDotGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper, InferOpsWorkflowPolicyGatekeeper,
@@ -443,6 +444,31 @@ export type DotScript = {
   decline?: { status: number; code: string; settlesAs?: string };
   /** How recording a run outcome answers (FAC-134): recorded (the default), or a refusal. */
   runOutcome?: { status: number; code: string };
+  /**
+   * FAC-135: what a confirm or decline answers as `resumed`, the proposing run it resumed; absent,
+   * the answer has no `resumed` (an InferOps from before FAC-135).
+   */
+  resumed?: { runId: string; status: string } | null;
+  /** FAC-135: the run status InferOps holds on a proposal once it is decided, confirmed or refused. */
+  runStatusAfter?: string;
+  /** FAC-135: how `chatbot.proposal_list` answers: listed (the default), or a refusal (a dead sign-in). */
+  list?: { status: number; code: string };
+  /**
+   * FAC-135: the person's connection belongs to another company: the confirm is refused before it is
+   * sent, as the account client restates the credential's refusal (stage `unsent`).
+   */
+  otherCompany?: boolean;
+  /**
+   * FAC-135: InferOps makes this many confirms (the first ones) but their answers are lost on the way
+   * back (a timeout); a later confirm under the same key answers with what it stored.
+   */
+  confirmLost?: number;
+  /** FAC-135: a confirm answers 200 with the proposal stored as this status (a replay of a decided one). */
+  replayAs?: string;
+  /** FAC-135 (r1 on #493): `chatbot.proposal_list` answers only after this many ms (a slow InferOps). */
+  listDelayMs?: number;
+  /** FAC-135: the session start's staging deadline, in ms (the facet's own by default). */
+  sweepDeadlineMs?: number;
 };
 
 /** A Dot binding's props, as the vendor mints them. */
@@ -491,7 +517,12 @@ class FakeDot {
       }), { headers: { "content-type": "text/event-stream" } });
     }
     if (method === "POST" && /\/runs\/[0-9a-f-]+\/cancel$/.test(path)) return Response.json({ ok: true });
-    if (method === "GET" && path === `${base}/proposals`) return Response.json({ proposals: this.script.proposals });
+    if (method === "GET" && /^\/chatbot\/conversations\/[0-9a-f-]+\/proposals$/.test(path)) {
+      if (this.script.listDelayMs) await new Promise(resolve => setTimeout(resolve, this.script.listDelayMs));
+      if (this.script.list) return refuse(this.script.list.status, this.script.list.code);
+      if (path !== `${base}/proposals`) return refuse(404, "CONVERSATION_NOT_FOUND");
+      return Response.json({ proposals: this.script.proposals });
+    }
     const ran = /\/proposals\/([0-9a-f-]+)\/run-outcome$/.exec(path);
     if (method === "POST" && ran) {
       const proposal = this.script.proposals.find(p => p.id === ran[1]);
@@ -503,6 +534,10 @@ class FakeDot {
     if (method === "POST" && decided) {
       const proposal = this.script.proposals.find(p => p.id === decided[1]);
       if (!proposal) return refuse(404, "PROPOSAL_NOT_FOUND");
+      // InferOps resumes the proposing run with the decision, confirmed, declined or refused (FAC-135).
+      if (this.script.runStatusAfter !== undefined) Object.assign(proposal, { runStatus: this.script.runStatusAfter });
+      const answer = (body: { proposal: unknown }) =>
+        Response.json(this.script.resumed === undefined ? body : { ...body, resumed: this.script.resumed });
       if (decided[2] === "decline") {
         const decline = this.script.decline;
         if (decline) {
@@ -510,15 +545,23 @@ class FakeDot {
           return refuse(decline.status, decline.code);
         }
         Object.assign(proposal, { status: "declined", decidedAt: "2026-11-10T12:01:00.000Z" });
-        return Response.json({ proposal });
+        return answer({ proposal });
       }
       const confirm = this.script.confirm;
       if ("status" in confirm) {
         if (confirm.settlesAs) Object.assign(proposal, { status: confirm.settlesAs, decidedAt: "2026-11-10T12:01:00.000Z" });
         return refuse(confirm.status, confirm.code);
       }
+      if (this.script.replayAs) {
+        Object.assign(proposal, { status: this.script.replayAs, decidedAt: "2026-11-10T12:01:00.000Z" });
+        return answer({ proposal });
+      }
       Object.assign(proposal, { status: "confirmed", outcome: confirm.outcome, decidedAt: "2026-11-10T12:01:00.000Z" });
-      return Response.json({ proposal });
+      if (this.script.confirmLost) {
+        this.script.confirmLost--;
+        throw new TypeError("The answer was lost on the way back.");
+      }
+      return answer({ proposal });
     }
     return refuse(404, "NOT_FOUND");
   };
@@ -868,6 +911,40 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   }
 
   /** A workflow-policy session over a binding `bindAccount` made under `name`. */
+  /**
+   * The refusal a Dot facet with these props gives through its own `startSession` and first call
+   * (FAC-135, QA on #493), or null when it gives none.
+   */
+  async dotRefusal(props: DotProps): Promise<string | null> {
+    const exports = this.ctx.exports as unknown as TestExports;
+    const facet = this.ctx.facets.get<InferOpsDotGatekeeper>(`refusal/${props.accountId}/${props.host}`,
+      () => ({ class: exports.InferOpsDotGatekeeper({ props }) }));
+    try {
+      const session = await facet.startSession(new RpcStub(new TestDotQueue(this.#log)) as never);
+      await session.startConversation();
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** Applies action `actionId` on the Dot binding `bindAccount` made under `name` (FAC-135), as a person's approval with no effects. */
+  async applyBoundDot(name: string, actionId: number): Promise<ActionApplyFailure | null> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsDotGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    const outcome = await this.ctx.facets.get<InferOpsDotGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+      .applyAction(actionId, new RpcStub(new TestGitCache()));
+    return outcome && "failed" in outcome ? outcome.failed : null;
+  }
+
+  /** A Dot session over a Dot binding `bindAccount` made under `name`, entering the facet's own `startSession` (FAC-135). */
+  async startBoundDotSession(name: string): Promise<InferOpsDotSession> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsDotGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    return this.ctx.facets.get<InferOpsDotGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+      .startSession(new RpcStub(new TestDotQueue(this.#log)) as never);
+  }
+
   async startBoundWorkflowPolicySession(name: string): Promise<InferOpsWorkflowPolicySession> {
     const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsWorkflowPolicyGatekeeper>;
     if (!cls) throw new Error(`No binding named ${name}.`);
@@ -1330,6 +1407,8 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   // --- The Dot (FAC-133): the facet's own session, apply and reject, over the real HTTP client
   // and a scripted fake InferOps.
   #dot: FakeDot | null = null;
+  /** The staging each Dot session start began in the background (FAC-135). */
+  #sweeps: Promise<void>[] = [];
 
   #dotBinding() {
     if (!this.#dot) throw new Error("dotScript() first");
@@ -1337,9 +1416,14 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       baseUrl: "https://ops.example/api", host: "acme.operations", token: "iex_test-dot-token",
       workspaceId: "90000000-0000-4000-8000-000000000001", workspaceSlug: "operations",
     }, this.#dot.fetch as typeof fetch);
+    const used = this.#dot.script.otherCompany ? {
+      ...client,
+      confirmDotProposal: async () => { throw new InferOpsError("OTHER_COMPANY", OTHER_COMPANY, { stage: "unsent" }); },
+    } : client;
     return dotBindingOver(
       { accountId: "dot-account", connected: true, host: "acme.operations", workspaceId: "90000000-0000-4000-8000-000000000001" },
-      this.ctx.storage.kv, client);
+      this.ctx.storage.kv, used,
+      { background: work => { this.#sweeps.push(work); }, sweepDeadlineMs: this.#dot.script.sweepDeadlineMs });
   }
 
   /** What the fake InferOps answers from now on. */
@@ -1355,6 +1439,31 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
 
   async startDotSession(): Promise<InferOpsDotSession> {
     return this.#dotBinding().startSession(new RpcStub(new TestDotQueue(this.#log)) as never);
+  }
+
+  /** Waits for the staging every Dot session start so far began in the background (FAC-135). */
+  async dotSweepSettled(): Promise<void> {
+    await Promise.all(this.#sweeps);
+  }
+
+  /** The Dot facet's watch and the conversations evicted from it (r2 on #493). */
+  async dotWatched(): Promise<{ watched: string[]; evicted: string[] }> {
+    return this.#dotBinding().watched();
+  }
+
+  /** Watches a conversation as a turn would (FAC-135). */
+  async dotWatch(conversationId: string): Promise<void> {
+    this.#dotBinding().watch(conversationId);
+  }
+
+  /** A Dot action's record as the facet keeps it (FAC-135: its resumed run and run status). */
+  async dotRecord(actionId: number): Promise<Record<string, unknown> | null> {
+    return (this.#dotBinding().record(actionId) as Record<string, unknown> | undefined) ?? null;
+  }
+
+  /** When the Dot's session start found the person's sign-in gone (FAC-135), or null. */
+  async dotWaitsForReconnect(): Promise<string | null> {
+    return this.#dotBinding().waitsForReconnect();
   }
 
   /** Each time the kernel's approved effects were asked to start the declared run (FAC-120). */

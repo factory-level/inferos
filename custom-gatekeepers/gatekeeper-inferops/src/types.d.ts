@@ -1111,6 +1111,24 @@ export interface DotProposal {
   createdAt: string;
   /** After this it can no longer be approved. */
   expiresAt: string;
+  /**
+   * How the Dot's own turn that proposed this stands now: `awaiting_decision` while it waits for
+   * this decision, `running` once it carries on, then `complete`, `error` or `interrupted`, or
+   * `refused` when it ended because the change was refused. Null when that turn doesn't wait for
+   * the decision.
+   */
+  runStatus: "running" | "complete" | "interrupted" | "error" | "awaiting_decision" | "refused" | null;
+  /**
+   * True while it was approved but couldn't be made because your InferOps sign-in had ended: it is
+   * made once you reconnect InferOps and approve it again.
+   */
+  waitsForReconnect: boolean;
+  /**
+   * True once your decision on this change (approving or declining it) resumed the Dot's turn that
+   * proposed it. False until then, and when that turn carried on some other way: `runStatus` alone
+   * doesn't say your decision resumed it.
+   */
+  resumed: boolean;
 }
 
 /** How a workflow run your Dot's proposal started came out. */

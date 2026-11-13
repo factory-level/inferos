@@ -43,11 +43,17 @@ export type InferOpsErrorCode =
   /** The deployment has the InferOps integration turned off (`INFEROPS_ENABLED`, enablement.ts). */
   | "DISABLED"
   /** A Dot proposal that wasn't decided before it expired; it can't be confirmed now (FAC-133). */
-  | "EXPIRED";
+  | "EXPIRED"
+  /**
+   * The person's connection belongs to another company than this deployment's (FAC-135): refused
+   * before anything is sent, and it stands until they sign in to the right company.
+   */
+  | "OTHER_COMPANY";
 
 const ERROR_CODES: ReadonlySet<string> = new Set<InferOpsErrorCode>([
   "NOT_FOUND", "STALE_REVISION", "WORKFLOW_MISMATCH", "INVALID_STATE", "IDEMPOTENCY_CONFLICT",
   "INVALID_REQUEST", "CONFLICT", "RUN_ACTIVE", "UNAUTHORIZED", "FORBIDDEN", "UNAVAILABLE", "DISABLED", "EXPIRED",
+  "OTHER_COMPANY",
 ]);
 
 /**
@@ -325,6 +331,31 @@ export type DotProposalWire = {
   createdAt: string;
   expiresAt: string;
   decidedAt: string | null;
+  /**
+   * How the Dot run that proposed it stands (FAC-135): waiting for this decision
+   * (`awaiting_decision`), resumed and ended, or ended refused. Null when the run doesn't wait for
+   * it, and on an InferOps that doesn't report it.
+   */
+  runStatus: DotRunStatusWire | null;
+};
+
+/** A Dot run's status as InferOps reports it on a proposal (FAC-135). */
+export const DOT_RUN_STATUSES = ["running", "complete", "interrupted", "error", "awaiting_decision", "refused"] as const;
+export type DotRunStatusWire = (typeof DOT_RUN_STATUSES)[number];
+
+/** How a resumed run ended, as a confirm or decline answers it (FAC-135). */
+export const DOT_RESUMED_STATUSES = ["running", "complete", "awaiting_decision", "error", "interrupted"] as const;
+
+/**
+ * What a confirm or decline answers (FAC-135): the proposal, and the run it resumed. `resumed` is the
+ * proposing run itself (its id, never a new one), answered at once as `running` while the resume runs
+ * detached; null when nothing resumed in this answer: another decision is still pending, the run
+ * never waited, or it resumes when the conversation's busy run ends. Neither `running` nor null is
+ * final: the run's end is read later from the proposal's `runStatus` only.
+ */
+export type DotDecisionWire = {
+  proposal: DotProposalWire;
+  resumed: { runId: string; status: (typeof DOT_RESUMED_STATUSES)[number] } | null;
 };
 
 /** One message of a Dot conversation, as InferOps stores it. */
@@ -398,9 +429,9 @@ export interface InferOpsClient {
    */
   confirmDotProposal(
     conversationId: string, proposalId: string, idempotencyKey: string, opts?: { runId?: string },
-  ): Promise<DotProposalWire>;
-  /** Decline one proposal (`chatbot.proposal_decline`); nothing is written. */
-  declineDotProposal(conversationId: string, proposalId: string): Promise<DotProposalWire>;
+  ): Promise<DotDecisionWire>;
+  /** Decline one proposal (`chatbot.proposal_decline`); nothing is written. Answers as confirm does. */
+  declineDotProposal(conversationId: string, proposalId: string): Promise<DotDecisionWire>;
   /**
    * Record how the InferOS run a confirmed hand-off started came out (`chatbot.proposal_run_outcome`,
    * FAC-134) under the person's own token. InferOps keeps it once per proposal: the same run again
