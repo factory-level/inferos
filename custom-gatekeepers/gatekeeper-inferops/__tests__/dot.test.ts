@@ -801,6 +801,7 @@ describe("a decision the Dot waits for (FAC-135)", () => {
     const readsBefore = await read(hooks);
 
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     const { actions } = await hooks.log();
     expect(actions).toHaveLength(1);
     expect(actions[0]).toMatchObject({ kind: "inferops.dot-confirm", title: "Your Dot proposes: issue_create" });
@@ -809,6 +810,7 @@ describe("a decision the Dot waits for (FAC-135)", () => {
 
     // Started again (another tab, a second tile): nothing more is staged.
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     expect((await hooks.log()).actions).toHaveLength(1);
   });
 
@@ -817,25 +819,30 @@ describe("a decision the Dot waits for (FAC-135)", () => {
     await conversation.ask("File it");
     await hooks.dotScript(cut({ list: { status: 401, code: "UNAUTHORIZED" } }));
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     const since = await hooks.dotWaitsForReconnect();
     expect(since).not.toBeNull();
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     expect(await hooks.dotWaitsForReconnect()).toBe(since);
     expect((await hooks.log()).actions).toHaveLength(0);
     // Reconnected: the next start stages it, and the wait is over.
     await hooks.dotScript(cut());
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     expect((await hooks.log()).actions).toHaveLength(1);
     expect(await hooks.dotWaitsForReconnect()).toBeNull();
   });
 
   it("confirms an approval long after, records the resumed run by its own id, and a second approval sends nothing", async () => {
     const waiting = proposal({ createdAt: "2026-11-03T12:00:00.000Z", expiresAt: "2099-11-10T12:00:00.000Z", runStatus: "awaiting_decision" });
-    const { hooks, actionId } = await staged(script({
+    const { hooks, actionId, conversation } = await staged(script({
       proposals: [waiting], resumed: { runId: RUN, status: "complete" }, runStatusAfter: "complete",
     }));
     expect((await hooks.applyDot(actionId)).failure).toBeNull();
     expect(await hooks.dotRecord(actionId)).toMatchObject({ status: "applied", resumed: { runId: RUN, status: "complete" }, runStatus: "complete" });
+    // The page may say this decision resumed the Dot's turn.
+    expect((await conversation.read()).proposals[0]!.resumed).toBe(true);
     await hooks.applyDot(actionId);
     expect((await hooks.dotCalls()).filter(c => c.path.endsWith("/confirm"))).toHaveLength(1);
   });
@@ -851,10 +858,14 @@ describe("a decision the Dot waits for (FAC-135)", () => {
     // InferOps resumed it when the conversation's busy run ended.
     await hooks.dotScript(script({ proposals: [{ ...waiting, status: "confirmed", runStatus: "complete" }] }));
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     expect(await hooks.dotRecord(actionId)).toMatchObject({ resumed: null, runStatus: "complete" });
+    // The run ended, but not because this decision resumed it: the page claims nothing.
+    expect((await conversation.read()).proposals[0]!.resumed).toBe(false);
     // Nothing waits any more: the conversation is no longer watched, and the next start reads nothing.
     const before = await listed(hooks);
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     expect(await listed(hooks)).toBe(before);
   });
 
@@ -871,8 +882,10 @@ describe("a decision the Dot waits for (FAC-135)", () => {
     // A session start while it still runs: a running resume isn't its end, so it stays watched.
     await hooks.dotScript(script({ proposals: [{ ...waiting, status: "confirmed", runStatus: "running" }] }));
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     await hooks.dotScript(script({ proposals: [{ ...waiting, status: "confirmed", runStatus: "complete" }] }));
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     expect(await hooks.dotRecord(actionId)).toMatchObject({ resumed: { runId: RUN, status: "running" }, runStatus: "complete" });
   });
 
@@ -911,12 +924,119 @@ describe("a decision the Dot waits for (FAC-135)", () => {
     expect(await hooks.dotRecord(actionId)).toMatchObject({ status: "failed", runStatus: "refused" });
   });
 
+  it("returns the session at once while InferOps is slow, and stops staging at its deadline (r1 on #493)", async () => {
+    const { hooks, conversation } = await setup(cut());
+    await conversation.ask("File it");
+    await hooks.dotScript(cut({ listDelayMs: 3_000, sweepDeadlineMs: 200 }));
+    const started = Date.now();
+    await hooks.startDotSession();
+    expect(Date.now() - started).toBeLessThan(1_000);
+    await hooks.dotSweepSettled();
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect((await hooks.log()).actions).toHaveLength(0);
+  });
+
+  it("stops staging at the first answer that InferOps is unavailable (r1 on #493)", async () => {
+    const { hooks } = await setup(cut({ list: { status: 503, code: "UNAVAILABLE" } }));
+    await hooks.dotWatch("70000000-0000-4000-8000-0000000000aa");
+    await hooks.dotWatch("70000000-0000-4000-8000-000000000001");
+    await hooks.startDotSession();
+    await hooks.dotSweepSettled();
+    expect(await listed(hooks)).toBe(1);
+    expect((await hooks.log()).actions).toHaveLength(0);
+  });
+
+  it("keeps watching a conversation whose decision resumed nothing yet, until its run ends (r1 on #493)", async () => {
+    const waiting = proposal({ expiresAt: "2099-11-10T12:00:00.000Z", runStatus: "awaiting_decision" });
+    const { hooks, conversation } = await setup(script({ proposals: [waiting], resumed: null, runStatusAfter: "awaiting_decision" }));
+    await conversation.ask("File it");
+    await conversation.read();
+    const actionId = (await hooks.log()).actions[0]!.id;
+    expect((await hooks.applyDot(actionId)).failure).toBeNull();
+    // InferOps' conversation is still busy: nothing has resumed, so the conversation stays watched.
+    await hooks.dotScript(script({ proposals: [{ ...waiting, status: "confirmed", runStatus: "awaiting_decision" }] }));
+    await hooks.startDotSession();
+    await hooks.dotSweepSettled();
+    await hooks.dotScript(script({ proposals: [{ ...waiting, status: "confirmed", runStatus: "complete" }] }));
+    await hooks.startDotSession();
+    await hooks.dotSweepSettled();
+    expect(await hooks.dotRecord(actionId)).toMatchObject({ resumed: null, runStatus: "complete" });
+  });
+
+  it("keeps a confirm whose answer timed out uncertain and replayable, never declined, and learns the run's end later", async () => {
+    const waiting = proposal({ expiresAt: "2099-11-10T12:00:00.000Z", runStatus: "awaiting_decision" });
+    // Staged by a read, not a turn: the decision itself has its conversation watched.
+    const { hooks, actionId } = await staged(script({
+      proposals: [waiting], confirmLost: 1, resumed: { runId: RUN, status: "running" }, runStatusAfter: "running",
+    }));
+    const lost = await hooks.applyDot(actionId);
+    expect(lost.failure).toMatchObject({ outcome: "unknown", retryable: true });
+    expect(await hooks.dotRecord(actionId)).toMatchObject({ status: "pending" });
+    expect((await hooks.dotCalls()).some(c => c.path.endsWith("/decline"))).toBe(false);
+    // The retry under the same key gets the stored answer: the run is still going.
+    expect((await hooks.applyDot(actionId)).failure).toBeNull();
+    const confirms = (await hooks.dotCalls()).filter(c => c.path.endsWith("/confirm"));
+    expect(confirms.map(c => c.key)).toEqual([PROPOSAL, PROPOSAL]);
+    expect(await hooks.dotRecord(actionId)).toMatchObject({ status: "applied", resumed: { runId: RUN, status: "running" } });
+    // Its end is read later, at the next session start.
+    await hooks.dotScript(script({ proposals: [{ ...waiting, status: "confirmed", runStatus: "complete" }] }));
+    await hooks.startDotSession();
+    await hooks.dotSweepSettled();
+    expect(await hooks.dotRecord(actionId)).toMatchObject({ runStatus: "complete" });
+  });
+
+  it("reads a replay InferOps answers 409 (its flag off) after a lost answer as the made decision", async () => {
+    const waiting = proposal({ expiresAt: "2099-11-10T12:00:00.000Z" });
+    const { hooks, actionId } = await staged(script({ proposals: [waiting], confirmLost: 1 }));
+    expect((await hooks.applyDot(actionId)).failure).toMatchObject({ outcome: "unknown", retryable: true });
+    // The first confirm made it; the retry is a replay, refused as already decided.
+    await hooks.dotScript(script({ proposals: [{ ...waiting, status: "confirmed" }], confirm: { status: 409, code: "PROPOSAL_DECIDED" } }));
+    expect((await hooks.applyDot(actionId)).failure).toBeNull();
+    expect(await hooks.dotRecord(actionId)).toMatchObject({ status: "applied", resumed: null });
+  });
+
+  it("never applies a 200 replay of a proposal InferOps didn't make: it stands refused", async () => {
+    for (const stored of ["failed", "declined", "expired"]) {
+      const { hooks, actionId } = await staged(script({ proposals: [proposal()], replayAs: stored }));
+      expect((await hooks.applyDot(actionId)).failure, stored).toMatchObject({ outcome: "notApplied", retryable: false, code: "CONFLICT" });
+      expect(await hooks.dotRecord(actionId), stored).toMatchObject({ status: "failed" });
+    }
+    const { hooks, actionId } = await staged(script({ proposals: [proposal()], replayAs: "confirming" }));
+    expect((await hooks.applyDot(actionId)).failure).toMatchObject({ outcome: "unknown" });
+  });
+
+  it("refreshes a decision's run status from a read of the conversation alone (QA on #493)", async () => {
+    const waiting = proposal({ expiresAt: "2099-11-10T12:00:00.000Z", runStatus: "awaiting_decision" });
+    const { hooks, conversation } = await setup(script({ proposals: [waiting], resumed: null, runStatusAfter: "awaiting_decision" }));
+    await conversation.read();
+    const actionId = (await hooks.log()).actions[0]!.id;
+    expect((await hooks.applyDot(actionId)).failure).toBeNull();
+    await hooks.dotScript(script({ proposals: [{ ...waiting, status: "confirmed", runStatus: "complete" }] }));
+    await conversation.read();
+    expect(await hooks.dotRecord(actionId)).toMatchObject({ runStatus: "complete" });
+  });
+
+  it("records, and doesn't silently drop, a conversation evicted past the most it watches; reading it checks it (r2 on #493)", async () => {
+    const { hooks, conversation } = await setup();
+    await hooks.dotWatch("70000000-0000-4000-8000-000000000001");
+    for (let i = 0; i < 32; i++) await hooks.dotWatch(`70000000-0000-4000-8000-0000000001${String(i).padStart(2, "0")}`);
+    const kept = await hooks.dotWatched();
+    expect(kept.watched).toHaveLength(32);
+    expect(kept.watched).not.toContain("70000000-0000-4000-8000-000000000001");
+    expect(kept.evicted).toEqual(["70000000-0000-4000-8000-000000000001"]);
+    // The person opens it: its proposals are read and staged there, and the eviction is over.
+    await conversation.read();
+    expect((await hooks.dotWatched()).evicted).toEqual([]);
+  });
+
   it("stops watching a conversation once its proposals have expired", async () => {
     const { hooks, conversation } = await setup(cut({ proposals: [proposal({ expiresAt: "2020-01-01T00:00:00.000Z" })] }));
     await conversation.ask("File it");
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     const before = await listed(hooks);
     await hooks.startDotSession();
+    await hooks.dotSweepSettled();
     expect(await listed(hooks)).toBe(before);
   });
 });

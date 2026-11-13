@@ -4191,15 +4191,36 @@ class DotBinding extends ActionBinding {
     return this.kv.get<string[]>(DOT_WATCHED_KEY) ?? [];
   }
 
-  /** Watch `conversationId`, most recent last, at most `DOT_WATCHED_MAX` (the oldest dropped). */
+  /**
+   * Watch `conversationId`, most recent last, at most `DOT_WATCHED_MAX`. Past that the oldest is no
+   * longer checked at session start (r2 on #493): never silently, it is recorded (`evicted`) and said
+   * (`DOT_WATCH_EVICTED`), and it is checked again when the person opens that conversation.
+   */
   watch(conversationId: string): void {
     const watched = this.watched().filter(id => id !== conversationId);
     watched.push(conversationId);
+    const dropped = watched.slice(0, Math.max(0, watched.length - DOT_WATCHED_MAX));
+    if (dropped.length > 0) {
+      this.kv.put(DOT_EVICTED_KEY, [...this.evicted().filter(id => !dropped.includes(id)), ...dropped].slice(-DOT_WATCHED_MAX));
+      logger.warn(DOT_WATCH_EVICTED, { event: "dot.watch.evicted", host: this.host });
+    }
     this.kv.put(DOT_WATCHED_KEY, watched.slice(-DOT_WATCHED_MAX));
+    this.kv.put(DOT_EVICTED_KEY, this.evicted().filter(id => id !== conversationId));
   }
 
   unwatch(conversationId: string): void {
     this.kv.put(DOT_WATCHED_KEY, this.watched().filter(id => id !== conversationId));
+  }
+
+  /** Conversations no longer checked at session start because more than `DOT_WATCHED_MAX` waited. */
+  evicted(): string[] {
+    return this.kv.get<string[]>(DOT_EVICTED_KEY) ?? [];
+  }
+
+  /** The person opened `conversationId` and its proposals were read: an eviction of it is over. */
+  checked(conversationId: string): void {
+    const evicted = this.evicted();
+    if (evicted.includes(conversationId)) this.kv.put(DOT_EVICTED_KEY, evicted.filter(id => id !== conversationId));
   }
 
   /**
@@ -4220,6 +4241,13 @@ class DotBinding extends ActionBinding {
 /** Where the Dot facet keeps the conversations it watches (FAC-135), and how many at most. */
 const DOT_WATCHED_KEY = "dot:watched";
 const DOT_WATCHED_MAX = 32;
+
+/** Where the conversations evicted from the watch are recorded (r2 on #493). */
+const DOT_EVICTED_KEY = "dot:watchEvicted";
+
+/** Said when a watch is evicted: the session start no longer checks it, the conversation's own read does. */
+const DOT_WATCH_EVICTED =
+  `More than ${DOT_WATCHED_MAX} conversations wait for a decision: the oldest is checked when you open it.`;
 
 /** Set while the person's InferOps sign-in is gone (FAC-135): the session start waits for reconnect. */
 const DOT_RECONNECT_KEY = "dot:waitsForReconnect";
@@ -4256,13 +4284,24 @@ function stillWaiting(binding: DotBinding, proposals: readonly DotProposalWire[]
  * gone, it stops, stages nothing, and says once that the Dot waits for them to reconnect; it says
  * so again only after a sweep has succeeded since. It never fails the session it precedes.
  */
-async function stageLeftProposals(binding: DotBinding, queue: RpcStub<ApprovalQueue>): Promise<void> {
+async function stageLeftProposals(binding: DotBinding, queue: RpcStub<ApprovalQueue>, deadline: number): Promise<void> {
   for (const conversationId of binding.watched()) {
     let proposals: DotProposalWire[];
     try {
-      proposals = await binding.client.listDotProposals(conversationId);
+      const left = deadline - Date.now();
+      if (left <= 0) throw new DotSweepDeadline();
+      proposals = await withinDeadline(binding.client.listDotProposals(conversationId), left);
     } catch (error) {
+      // InferOps slow, down or off (r1 on #493): stop at once; the next session start tries again.
+      if (error instanceof DotSweepDeadline) {
+        logger.warn("dot stage left proposals stopped at its deadline", { event: "dot.stage_left.deadline", host: binding.host });
+        return;
+      }
       const code = inferOpsErrorCode(error);
+      if (code === "UNAVAILABLE" || code === "DISABLED") {
+        logger.warn("dot stage left proposals stopped", { event: "dot.stage_left.stopped", host: binding.host, code });
+        return;
+      }
       if (code === "UNAUTHORIZED") {
         if (!binding.kv.get(DOT_RECONNECT_KEY)) {
           binding.kv.put(DOT_RECONNECT_KEY, new Date().toISOString());
@@ -4285,15 +4324,43 @@ async function stageLeftProposals(binding: DotBinding, queue: RpcStub<ApprovalQu
   }
 }
 
-/** The person's Dot session, after staging what watched conversations left undecided (FAC-135). */
-async function openDotSession(binding: DotBinding, queue: RpcStub<ApprovalQueue>): Promise<InferOpsDotSession> {
+/** How long one session start's staging may take in all (r1 on #493): it then stops, to try again next time. */
+const DOT_SWEEP_DEADLINE_MS = 10_000;
+
+/** The staging sweep ran out of time. */
+class DotSweepDeadline extends Error {}
+
+/** `promise`, or a `DotSweepDeadline` after `ms`: a listing that doesn't answer in time isn't waited for. */
+async function withinDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await stageLeftProposals(binding, queue);
-  } catch (error) {
-    logger.warn("dot stage left proposals failed", {
-      event: "dot.stage_left.failed", host: binding.host, code: inferOpsErrorCode(error) ?? "UNKNOWN",
-    });
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new DotSweepDeadline()), ms);
+    })]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/**
+ * The person's Dot session, returned at once (r1 on #493): the staging of what watched conversations
+ * left undecided (FAC-135) runs in the background (`background`, the facet's `waitUntil`), on its own
+ * hold of the approval queue, within `deadlineMs` in all, and never delays or fails the session.
+ */
+function openDotSession(binding: DotBinding, queue: RpcStub<ApprovalQueue>, background: (work: Promise<void>) => void,
+    deadlineMs = DOT_SWEEP_DEADLINE_MS): InferOpsDotSession {
+  const sweepQueue = queue.dup();
+  background((async () => {
+    try {
+      await stageLeftProposals(binding, sweepQueue, Date.now() + deadlineMs);
+    } catch (error) {
+      logger.warn("dot stage left proposals failed", {
+        event: "dot.stage_left.failed", host: binding.host, code: inferOpsErrorCode(error) ?? "UNKNOWN",
+      });
+    } finally {
+      sweepQueue[Symbol.dispose]();
+    }
+  })());
   return new DotSessionImpl(binding, queue);
 }
 
@@ -4301,6 +4368,8 @@ async function openDotSession(binding: DotBinding, queue: RpcStub<ApprovalQueue>
 function shownProposal(proposal: DotProposalWire, receipt: Receipt | null, record?: DotConfirmAction): DotProposal {
   return {
     waitsForReconnect: record?.status === "pending" && record.signInRefusedAt !== undefined,
+    // Only this proposal's own decision resuming its run (an answer that named it), never a run's end alone.
+    resumed: record?.resumed !== undefined && record.resumed !== null,
     id: proposal.id, tool: proposal.tool, input: JSON.stringify(proposal.input), status: dotProposalStatus(proposal),
     receipt,
     run: proposal.run
@@ -4358,7 +4427,7 @@ export class InferOpsDotGatekeeper
   /** Only a person's own sign-in has a Dot: the stopgap connection is no one's. */
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsDotSession> {
     if (!this.ctx.props.connected) throw new InferOpsError("FORBIDDEN", DOT_NEEDS_OWN_SIGN_IN);
-    return openDotSession(this.#binding(), approvalQueue.dup());
+    return openDotSession(this.#binding(), approvalQueue.dup(), work => this.ctx.waitUntil(work));
   }
 
   /** Strategy A: a Dot's conversations are the person's alone, so no collaborator may observe them. */
@@ -4454,12 +4523,30 @@ async function applyDotDecision(binding: DotBinding, actionId: number, effects?:
         // Already decided: settled to what InferOps holds; what resumed then is read later.
         decision = { proposal: await settledProposal(binding, record, error), resumed: null };
       }
+      // A replayed confirm (PR 2, flag on) answers 200 with the proposal as stored, whatever the first
+      // decision was: only a made one is applied here (r1/lead on #493).
+      assertMade(decision.proposal);
+      // A run still resuming, or not yet (FAC-135): its end is learned at a later session start.
+      if (decision.resumed === null || decision.resumed.status === "running") binding.watch(record.conversationId);
       return { ...(marked as DotConfirmAction), status: "applied",
         confirmedOutcome: summarizeDotOutcome(decision.proposal.outcome), ...decided(decision) };
     },
   });
   if (failed && "failed" in failed) await recordRefusedRun(binding, record);
   return failed;
+}
+
+/**
+ * A confirm's answer that isn't a made decision (FAC-135): InferOps replays a decided proposal's
+ * confirm with 200 and the proposal as stored. Declined, failed or expired is a refusal that stands
+ * (proven by InferOps' answer); anything not settled is uncertain. Confirmed or handed off is made.
+ */
+function assertMade(proposal: DotProposalWire): void {
+  if (proposal.status === "confirmed" || proposal.status === "handed-off") return;
+  if (proposal.status === "declined" || proposal.status === "failed" || proposal.status === "expired") {
+    throw new InferOpsError("CONFLICT", "InferOps already decided this proposal, and didn't make it.", { stage: "refused" });
+  }
+  throw new InferOpsError("UNAVAILABLE", "InferOps hasn't settled this proposal yet.");
 }
 
 /**
@@ -4823,6 +4910,7 @@ async function rejectDotAction(binding: DotBinding, actionId: number): Promise<v
       // What the decline resumed (FAC-135): the proposing run, told it was declined.
       const now = binding.action(actionId);
       if (now && isDotAction(now)) binding.putAction({ ...now, ...decided(decision) });
+      if (decision.resumed === null || decision.resumed.status === "running") binding.watch(record.conversationId);
       return;
     }
     refusal = new InferOpsError("CONFLICT", "InferOps answered the decline with another status.");
@@ -4870,10 +4958,16 @@ async function rejectDotAction(binding: DotBinding, actionId: number): Promise<v
  * the session, apply and reject a facet runs, against a data source the suite chose. Reaches nothing
  * the caller didn't pass; not an entrypoint.
  */
-export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, client: InferOpsClient) {
+export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, client: InferOpsClient,
+    options: { background?: (work: Promise<void>) => void; sweepDeadlineMs?: number } = {}) {
   const binding = new DotBinding(props, { store: new ActionStore(kv), client, observers: () => [] });
   return {
-    startSession: (queue: RpcStub<ApprovalQueue>): Promise<InferOpsDotSession> => openDotSession(binding, queue.dup()),
+    startSession: (queue: RpcStub<ApprovalQueue>): InferOpsDotSession =>
+      openDotSession(binding, queue.dup(), options.background ?? (work => void work), options.sweepDeadlineMs),
+    /** Watch `conversationId` as a turn would (FAC-135), for tests. */
+    watch: (conversationId: string) => binding.watch(conversationId),
+    /** The watch as kept, and the conversations evicted from it (r2 on #493), for tests. */
+    watched: () => ({ watched: binding.watched(), evicted: binding.evicted() }),
     applyAction: (actionId: number, effects?: DotApprovedEffects) => applyDotAction(binding, actionId, effects),
     rejectAction: (actionId: number) => rejectDotAction(binding, actionId),
     workflowRunOutcome: (actionId: number, outcome: ApprovedRunOutcome) => recordDotRunOutcome(binding, actionId, outcome),
@@ -4986,6 +5080,7 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
     // now, so every one is decided where the person decides every other change.
     for (const proposal of read.proposals) await this.#stage(proposal);
     this.binding.noteRunStatus(read.proposals);
+    this.binding.checked(this.conversationId);
     await this.binding.observe(this.queue, {
       title: "Read your Dot conversation",
       description: `Read your Dot conversation "${plainInline(read.title, 80)}" in ${this.binding.host}: ` +

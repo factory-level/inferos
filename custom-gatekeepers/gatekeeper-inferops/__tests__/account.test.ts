@@ -28,6 +28,7 @@ const BOARD_URL = "inferops://acme.operations/project/board/DEMO";
 const SALES_URL = "inferops://acme.sales/project/board/DEMO";
 
 const OPS = "90000000-0000-4000-8000-000000000001";
+const DOT_CONVERSATION_ID = "70000000-0000-4000-8000-000000000001";
 const SALES = "90000000-0000-4000-8000-000000000002";
 const OTHER = "90000000-0000-4000-8000-00000000ffff";
 const MIND = "90000000-0000-4000-8000-000000000003";
@@ -156,6 +157,25 @@ class FakeInferLab {
   refreshes: string[] = [];
   exchanges = 0;
   apiCalls: ApiCall[] = [];
+  /** FAC-135: the person's Dot: one conversation, its proposals, and a turn whose stream is cut. */
+  dotProposals: Record<string, unknown>[] = [];
+
+  #dot(url: URL, method: string): Response {
+    const base = `/chatbot/conversations/${DOT_CONVERSATION_ID}`;
+    if (method === "POST" && url.pathname === "/chatbot/conversations") return Response.json({ id: DOT_CONVERSATION_ID, title: "New conversation" });
+    if (method === "GET" && url.pathname === base) {
+      return Response.json({ id: DOT_CONVERSATION_ID, title: "New conversation", panel: {}, updatedAt: "2026-11-10T12:00:00.000Z",
+        messages: [], nextCursor: null, activeRunId: null, proposals: this.dotProposals });
+    }
+    if (method === "GET" && url.pathname === `${base}/proposals`) return Response.json({ proposals: this.dotProposals });
+    if (method === "POST" && url.pathname === `${base}/runs`) {
+      // The stream is cut before its proposal's result is relayed: the browser closed mid-turn.
+      const frames = [{ type: "RUN_STARTED", threadId: DOT_CONVERSATION_ID, runId: "71000000-0000-4000-8000-000000000001" },
+        { type: "TEXT_MESSAGE_CONTENT", messageId: "m1", delta: "Let me file that" }];
+      return new Response(frames.map(f => `data: ${JSON.stringify(f)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
+    }
+    return Response.json({ error: { code: "NOT_FOUND", message: "no such Dot route" } }, { status: 404 });
+  }
   /** Refreshes and logouts presented with another fake's refresh token: refused, never applied. */
   #foreignAuth: ApiCall[] = [];
   /** What `GET /project/board-snapshot` answers instead of the bound board, when set. */
@@ -329,6 +349,7 @@ class FakeInferLab {
     if (!workspaceId || !this.memberships.has(workspaceId)) {
       return Response.json({ error: { code: "FORBIDDEN", message: "not a member" } }, { status: 403 });
     }
+    if (url.pathname.startsWith("/chatbot/")) return this.#dot(url, init.method ?? "GET");
     if (url.pathname.startsWith("/knowledge/")) {
       // InferOps' product gate, then the permission check: both answer 403 FORBIDDEN.
       if (!this.infermind.has(workspaceId)) {
@@ -2235,5 +2256,80 @@ describe("system credentials (FAC-102)", () => {
     await hooks().forgetSystem(RETIRED);
     expect(await hooks().provisionSystem(RETIRED, BOARD_URL, KEY)).toBe("The key wasn't accepted.");
     expect(await systemRead("system-retired", BOARD_URL, RETIRED)).toContain("No service account is provisioned");
+  });
+});
+
+// FAC-135 (r1 on #493): the production entry. A real Dot connection, bound through the account,
+// entered through the facet's own `startSession`: a turn cut mid-stream leaves a proposal, and the
+// next session start stages it in the background with the person's own token, never delaying the
+// session, with no read of the conversation.
+describe("the Dot's session start (FAC-135)", () => {
+  const vars = env as unknown as { INFEROPS_DOT_ENABLED?: string; INFEROPS_COMPANY?: string };
+  beforeEach(() => { vars.INFEROPS_DOT_ENABLED = "true"; });
+  afterEach(() => { delete vars.INFEROPS_DOT_ENABLED; delete vars.INFEROPS_COMPANY; });
+  const PROPOSAL = {
+    id: "72000000-0000-4000-8000-000000000001", tool: "issue_create", input: { projectId: "p1", title: "Fix the gate" },
+    status: "proposed", outcome: null, run: null, createdAt: "2026-11-10T12:00:00.000Z",
+    expiresAt: "2099-11-10T12:00:00.000Z", decidedAt: null, runStatus: "awaiting_decision",
+  };
+
+  it("refuses the shared connection and the demo through its own startSession, sending nothing (QA on #493)", async () => {
+    const before = inferlab.apiCalls.length;
+    const shared = await hooks().dotRefusal({ accountId: "dot-shared", connected: false, host: "acme.operations", workspaceId: OPS });
+    expect(shared).toContain("needs your own InferLab sign-in");
+    const demo = await hooks().dotRefusal({ accountId: "dot-demo", connected: true, host: "demo.local", workspaceId: OPS });
+    expect(demo).toContain("needs your own InferLab sign-in");
+    expect(inferlab.apiCalls.slice(before)).toEqual([]);
+  });
+
+  it("ends a decision as final, refused before sending, when the connection belongs to another company (QA on #493)", async () => {
+    const companyA = "a0000000-0000-4000-8000-00000000000a";
+    const companyB = "b0000000-0000-4000-8000-00000000000b";
+    inferlab.tenantId = companyA;
+    vars.INFEROPS_COMPANY = companyA;
+    const account = await connect("dot-other-company");
+    expect(await hooks().bindAccount("dot-co", account, "inferops://acme.operations/chatbot/dot")).toBeNull();
+    inferlab.dotProposals = [{ ...PROPOSAL }];
+    const staged = (await hooks().log()).actions.length;
+    const session = await hooks().startBoundDotSession("dot-co");
+    await (await session.openConversation(DOT_CONVERSATION_ID)).read();
+    const actions = (await hooks().log()).actions;
+    expect(actions).toHaveLength(staged + 1);
+    const actionId = actions.at(-1)!.id;
+
+    // The deployment now names another company: the person's credential refuses before sending.
+    vars.INFEROPS_COMPANY = companyB;
+    const before = inferlab.apiCalls.length;
+    const failure = await hooks().applyBoundDot("dot-co", actionId);
+    expect(failure).toMatchObject({ outcome: "notApplied", retryable: false, code: "OTHER_COMPANY", kind: "permission" });
+    // Declined by the rule for a refusal that stands, which that connection can't reach either: nothing was sent.
+    expect(inferlab.apiCalls.slice(before)).toEqual([]);
+    // Final: approving again sends nothing and answers the same.
+    expect(await hooks().applyBoundDot("dot-co", actionId)).toMatchObject({ outcome: "notApplied", retryable: false });
+    expect(inferlab.apiCalls.slice(before)).toEqual([]);
+  });
+
+  it("stages a proposal a cut turn left, in the background of the next session start, as the person", async () => {
+    const account = await connect("dot-session-start");
+    expect(await hooks().bindAccount("dot", account, "inferops://acme.operations/chatbot/dot")).toBeNull();
+    inferlab.dotProposals = [{
+      id: "72000000-0000-4000-8000-000000000001", tool: "issue_create", input: { projectId: "p1", title: "Fix the gate" },
+      status: "proposed", outcome: null, run: null, createdAt: "2026-11-10T12:00:00.000Z",
+      expiresAt: "2099-11-10T12:00:00.000Z", decidedAt: null, runStatus: "awaiting_decision",
+    }];
+    // The log is this file's own, shared by its tests: count from here.
+    const staged = (await hooks().log()).actions.length;
+    const first = await hooks().startBoundDotSession("dot");
+    await (await first.startConversation()).ask("File it");
+    expect((await hooks().log()).actions).toHaveLength(staged);
+
+    const before = inferlab.apiCalls.length;
+    await hooks().startBoundDotSession("dot");
+    await vi.waitFor(async () => expect((await hooks().log()).actions).toHaveLength(staged + 1));
+    expect((await hooks().log()).actions.at(-1)).toMatchObject({ kind: "inferops.dot-confirm", title: "Your Dot proposes: issue_create" });
+    const swept = inferlab.apiCalls.slice(before);
+    expect(swept.map(c => `${c.method} ${c.path}`)).toEqual([`GET /chatbot/conversations/${DOT_CONVERSATION_ID}/proposals`]);
+    expect(swept[0]!.token).toBe(inferlab.accessOf("refresh-1"));
+    expect(swept[0]!.workspaceId).toBe(OPS);
   });
 });

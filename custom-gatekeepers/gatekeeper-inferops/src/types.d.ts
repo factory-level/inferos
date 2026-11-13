@@ -1123,6 +1123,12 @@ export interface DotProposal {
    * made once you reconnect InferOps and approve it again.
    */
   waitsForReconnect: boolean;
+  /**
+   * True once your decision on this change (approving or declining it) resumed the Dot's turn that
+   * proposed it. False until then, and when that turn carried on some other way: `runStatus` alone
+   * doesn't say your decision resumed it.
+   */
+  resumed: boolean;
 }
 
 /** How a workflow run your Dot's proposal started came out. */
