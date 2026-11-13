@@ -28,7 +28,7 @@ const BLANK_TEMPLATE = ':blank'
 type Selection = { viewId: string | null; target: CanvasTarget }
 const onView = (target: CanvasTarget, pageId: string): CanvasTarget => target.kind === 'workspace' ? target : { ...target, pageId }
 
-export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, openWidgetId, onOpenWidgetChange, onAskAgent, codingDispatch, wikiEditable }: {
+export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewId, onViewChange, openWidgetId, onOpenWidgetChange, onAskAgent, codingDispatch, wikiEditable, pagesOnly }: {
   storage: CanvasStorage
   overseer: RpcStub<Overseer>
   /** Every gadget in the workspace, drafts included, keyed by workpiece ID. */
@@ -55,6 +55,12 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
    * session's screen shows Wikis read-only.
    */
   wikiEditable?: boolean
+  /**
+   * The views belong to something other than `overseer`'s workspace (a console that belongs to no
+   * workspace, ADR 0021): `overseer` then only resolves boards and Wikis, so the workspace's own
+   * settings and the page's configuration trace, which are that workspace's, are not offered.
+   */
+  pagesOnly?: boolean
 }) => {
   const [editing, setEditing] = useState(false)
   const canvas = useCanvasWorkspace(storage, viewId, editing)
@@ -184,7 +190,8 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
           <CanvasTargetTree page={page} selected={formatCanvasTarget(selected.target)} gadgets={gadgets} onSelect={select} />
           <section aria-label="Selected target" className="min-w-0 space-y-4">
             <CanvasTargetBreadcrumb path={path} gadgets={gadgets} onSelect={select} />
-            {selected.kind === 'workspace' && (storage.kind === 'durable'
+            {selected.kind === 'workspace' && (pagesOnly ? <p className="text-sm text-kumo-subtle">A console's pages have no workspace settings.</p>
+              : storage.kind === 'durable'
               ? <WorkspaceSettingsEditor overseer={overseer} />
               : <p className="text-sm text-kumo-subtle">Unsaved views have no workspace settings.</p>)}
             {selected.kind === 'page' && <>
@@ -210,7 +217,7 @@ export const CanvasWorkspacePane = ({ storage, overseer, gadgets, catalog, viewI
               </form>
               <CanvasAttachmentsEditor key={`${page.id}:${page.revision}`} target={page.id} node={undefined} attachments={page.attachments}
                 pages={pages} busy={canvas.busy} reader={overseer} hooks={overseer} gadgets={gadgets} onEdit={canvas.editPage} />
-              {storage.kind === 'durable' && <PageConfigurationPanel overseer={overseer} page={page} busy={canvas.busy} onEdit={canvas.editPage} />}
+              {storage.kind === 'durable' && !pagesOnly && <PageConfigurationPanel overseer={overseer} page={page} busy={canvas.busy} onEdit={canvas.editPage} />}
             </>}
             {selected.kind === 'object' && (() => {
               const index = active.sections.findIndex(section => section.id === selected.node.id)

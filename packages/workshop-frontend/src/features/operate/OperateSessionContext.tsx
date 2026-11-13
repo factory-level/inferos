@@ -1,3 +1,4 @@
+import { consoleWorkspaceId } from '@gadgets/workshop-shared/operate-session'
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import type { RpcStub } from 'capnweb'
 import {
@@ -58,7 +59,7 @@ type OperateSessionValue = {
 }
 
 /** A console revision a session had open when the kernel said it moved on. */
-export type StaleConsole = { workspaceId: string; consoleId: string; revision: string }
+export type StaleConsole = { workspaceId: string | null; consoleId: string; revision: string }
 
 const OperateSessionContext = createContext<OperateSessionValue | null>(null)
 
@@ -108,8 +109,8 @@ const AccountOperateSession = ({ children }: { children: ReactNode }) => {
       const notice = update.consoleRevision
       if (notice) {
         const run = update.state.console
-        if (run?.workspaceId === notice.workspaceId && run.consoleId === notice.consoleId && supersedes(notice.revision, run.revision)) {
-          setStaleConsole({ workspaceId: run.workspaceId, consoleId: run.consoleId, revision: run.revision })
+        if (run && consoleWorkspaceId(run) === notice.workspaceId && run.consoleId === notice.consoleId && supersedes(notice.revision, run.revision)) {
+          setStaleConsole({ workspaceId: consoleWorkspaceId(run), consoleId: run.consoleId, revision: run.revision })
           invalidateWorkspaceScreens()
         }
         return

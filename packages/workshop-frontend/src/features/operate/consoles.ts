@@ -1,3 +1,4 @@
+import { consoleWorkspaceId } from '@gadgets/workshop-shared/operate-session'
 import { SHARED_CONFIGURATION_REFUSED, type GadgetMetadataWithTimestamps, type GadgetSummary, type WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import { parseOperateConsoleContent, publishedConsole, type BoundViewEntry, type ConsoleSource, type ConsoleView, type HostBoardEntry, type OperateConsole, type OperateConsoleContent } from '@gadgets/workshop-shared/operate-console'
@@ -37,7 +38,7 @@ export const consoleRevision = (entry: ConsoleEntry, source: ConsoleSource): Con
 /** The listed console a session has open, as the revision it opened, if it is still there. */
 export const findConsole = (workspaces: readonly WorkspaceScreens[], run: OperateConsoleRun): ConsoleEntry | undefined => {
   const entry = consoleEntries(workspaces).find(candidate =>
-    candidate.workspace.id === run.workspaceId && candidate.console.id === run.consoleId)
+    candidate.workspace.id === consoleWorkspaceId(run) && candidate.console.id === run.consoleId)
   return entry && consoleRevision(entry, run.source)
 }
 

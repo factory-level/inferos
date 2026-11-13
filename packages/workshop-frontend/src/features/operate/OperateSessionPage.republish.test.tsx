@@ -55,6 +55,9 @@ const authenticatedApi = vi.hoisted(() => ({
   }),
 }))
 
+// The person's consoles that belong to no workspace: none here, unless a test lists some.
+const myConsoles = vi.hoisted(() => ({ state: { status: 'ready', consoles: [] } as import('./useMyConsoles').MyConsolesState }))
+vi.mock('./useMyConsoles', () => ({ useMyConsoles: () => myConsoles.state, invalidateMyConsoles: () => {} }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi }) }))
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true }, hostBoards: true }) }))
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => () => {}, useSearch: () => ({}) }))

@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as BlueprintsRouteImport } from './routes/blueprints'
+import { Route as ConsolesRouteImport } from './routes/consoles'
 import { Route as ContextRouteImport } from './routes/context'
 import { Route as ExploreRouteImport } from './routes/explore'
 import { Route as GatekeepersRouteImport } from './routes/gatekeepers'
@@ -23,6 +24,7 @@ import { Route as SignupRouteImport } from './routes/signup'
 import { Route as WorkspacesRouteImport } from './routes/workspaces'
 import { Route as BlueprintIdRouteImport } from './routes/blueprint.$id'
 import { Route as ConnectHandoffRouteImport } from './routes/connect.handoff'
+import { Route as ConsolesIdRouteImport } from './routes/consoles_.$id'
 import { Route as GadgetIdRouteImport } from './routes/gadget.$id'
 import { Route as GatekeepersAppIdRouteImport } from './routes/gatekeepers_.$appId'
 import { Route as WorkspaceIdRouteImport } from './routes/workspace.$id'
@@ -42,6 +44,11 @@ const AdminRoute = AdminRouteImport.update({
 const BlueprintsRoute = BlueprintsRouteImport.update({
   id: '/blueprints',
   path: '/blueprints',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ConsolesRoute = ConsolesRouteImport.update({
+  id: '/consoles',
+  path: '/consoles',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ContextRoute = ContextRouteImport.update({
@@ -99,6 +106,11 @@ const ConnectHandoffRoute = ConnectHandoffRouteImport.update({
   path: '/connect/handoff',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ConsolesIdRoute = ConsolesIdRouteImport.update({
+  id: '/consoles_/$id',
+  path: '/consoles/$id',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const GadgetIdRoute = GadgetIdRouteImport.update({
   id: '/gadget/$id',
   path: '/gadget/$id',
@@ -130,6 +142,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/blueprints': typeof BlueprintsRoute
+  '/consoles': typeof ConsolesRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
@@ -141,6 +154,7 @@ export interface FileRoutesByFullPath {
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/connect/handoff': typeof ConnectHandoffRoute
+  '/consoles/$id': typeof ConsolesIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
@@ -151,6 +165,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/blueprints': typeof BlueprintsRoute
+  '/consoles': typeof ConsolesRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
@@ -162,6 +177,7 @@ export interface FileRoutesByTo {
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/connect/handoff': typeof ConnectHandoffRoute
+  '/consoles/$id': typeof ConsolesIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
@@ -173,6 +189,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
   '/blueprints': typeof BlueprintsRoute
+  '/consoles': typeof ConsolesRoute
   '/context': typeof ContextRoute
   '/explore': typeof ExploreRoute
   '/gatekeepers': typeof GatekeepersRoute
@@ -184,6 +201,7 @@ export interface FileRoutesById {
   '/workspaces': typeof WorkspacesRoute
   '/blueprint/$id': typeof BlueprintIdRoute
   '/connect/handoff': typeof ConnectHandoffRoute
+  '/consoles_/$id': typeof ConsolesIdRoute
   '/gadget/$id': typeof GadgetIdRoute
   '/gatekeepers_/$appId': typeof GatekeepersAppIdRoute
   '/workspace/$id': typeof WorkspaceIdRoute
@@ -196,6 +214,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/blueprints'
+    | '/consoles'
     | '/context'
     | '/explore'
     | '/gatekeepers'
@@ -207,6 +226,7 @@ export interface FileRouteTypes {
     | '/workspaces'
     | '/blueprint/$id'
     | '/connect/handoff'
+    | '/consoles/$id'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
     | '/workspace/$id'
@@ -217,6 +237,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/blueprints'
+    | '/consoles'
     | '/context'
     | '/explore'
     | '/gatekeepers'
@@ -228,6 +249,7 @@ export interface FileRouteTypes {
     | '/workspaces'
     | '/blueprint/$id'
     | '/connect/handoff'
+    | '/consoles/$id'
     | '/gadget/$id'
     | '/gatekeepers/$appId'
     | '/workspace/$id'
@@ -238,6 +260,7 @@ export interface FileRouteTypes {
     | '/'
     | '/admin'
     | '/blueprints'
+    | '/consoles'
     | '/context'
     | '/explore'
     | '/gatekeepers'
@@ -249,6 +272,7 @@ export interface FileRouteTypes {
     | '/workspaces'
     | '/blueprint/$id'
     | '/connect/handoff'
+    | '/consoles_/$id'
     | '/gadget/$id'
     | '/gatekeepers_/$appId'
     | '/workspace/$id'
@@ -260,6 +284,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
   BlueprintsRoute: typeof BlueprintsRoute
+  ConsolesRoute: typeof ConsolesRoute
   ContextRoute: typeof ContextRoute
   ExploreRoute: typeof ExploreRoute
   GatekeepersRoute: typeof GatekeepersRoute
@@ -271,6 +296,7 @@ export interface RootRouteChildren {
   WorkspacesRoute: typeof WorkspacesRoute
   BlueprintIdRoute: typeof BlueprintIdRoute
   ConnectHandoffRoute: typeof ConnectHandoffRoute
+  ConsolesIdRoute: typeof ConsolesIdRoute
   GadgetIdRoute: typeof GadgetIdRoute
   GatekeepersAppIdRoute: typeof GatekeepersAppIdRoute
   WorkspaceIdRoute: typeof WorkspaceIdRoute
@@ -299,6 +325,13 @@ declare module '@tanstack/react-router' {
       path: '/blueprints'
       fullPath: '/blueprints'
       preLoaderRoute: typeof BlueprintsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/consoles': {
+      id: '/consoles'
+      path: '/consoles'
+      fullPath: '/consoles'
+      preLoaderRoute: typeof ConsolesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/context': {
@@ -378,6 +411,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ConnectHandoffRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/consoles_/$id': {
+      id: '/consoles_/$id'
+      path: '/consoles/$id'
+      fullPath: '/consoles/$id'
+      preLoaderRoute: typeof ConsolesIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/gadget/$id': {
       id: '/gadget/$id'
       path: '/gadget/$id'
@@ -420,6 +460,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
   BlueprintsRoute: BlueprintsRoute,
+  ConsolesRoute: ConsolesRoute,
   ContextRoute: ContextRoute,
   ExploreRoute: ExploreRoute,
   GatekeepersRoute: GatekeepersRoute,
@@ -431,6 +472,7 @@ const rootRouteChildren: RootRouteChildren = {
   WorkspacesRoute: WorkspacesRoute,
   BlueprintIdRoute: BlueprintIdRoute,
   ConnectHandoffRoute: ConnectHandoffRoute,
+  ConsolesIdRoute: ConsolesIdRoute,
   GadgetIdRoute: GadgetIdRoute,
   GatekeepersAppIdRoute: GatekeepersAppIdRoute,
   WorkspaceIdRoute: WorkspaceIdRoute,

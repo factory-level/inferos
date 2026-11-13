@@ -1,3 +1,4 @@
+import { consoleWorkspaceId } from '@gadgets/workshop-shared/operate-session'
 import { useEffect, useState, type RefObject } from 'react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import { parseCanvasDefinition, type CanvasDefinition } from '@gadgets/workshop-shared/canvas'
@@ -46,7 +47,7 @@ type Step = { status: 'loading' } | { status: 'unavailable'; reason: string } | 
  */
 const publishedStep = (run: OperateFlowRun, { open, entry, loading }: FlowConsole): Step => {
   if (loading) return { status: 'loading' }
-  if (!open || open.source !== 'published' || open.workspaceId !== run.workspaceId || !entry) {
+  if (!open || open.source !== 'published' || consoleWorkspaceId(open) !== run.workspaceId || !entry) {
     return { status: 'unavailable', reason: NOT_OPEN }
   }
   if (entry.console.revision !== open.revision) return { status: 'unavailable', reason: CHANGED }

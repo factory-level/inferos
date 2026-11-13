@@ -1,3 +1,4 @@
+import { consoleWorkspaceId } from '@gadgets/workshop-shared/operate-session'
 import { useRef, useState } from 'react'
 import { resolveWorkspaceSetting } from '@gadgets/workshop-shared/workspace-settings'
 import { chatWidgetsKey, type ResolvedChatWidgets } from './chatPaneWidgets'
@@ -16,7 +17,11 @@ import { AgentActivityNote } from './AgentActivityNote'
 import { PersonalCanvas } from './PersonalCanvas'
 import { InferOpsCanvasHome } from '../../pages/inferops-canvas/InferOpsCanvasHome'
 import { ConsoleDraftPreview } from './ConsoleDraftPreview'
+import type { ConsoleSummary } from '@gadgets/workshop-shared/api'
 import { ConsoleMosaic } from './ConsoleMosaic'
+import { openOwnConsoleEvent, OwnConsolePage } from './OwnConsolePage'
+import { OwnConsoleTiles } from './OwnConsoleTiles'
+import { useMyConsoles } from './useMyConsoles'
 import { ConsolePage } from './ConsolePage'
 import { ConsoleBuilder } from './ConsoleBuilder'
 import { ConsoleSettings } from './ConsoleSettings'
@@ -54,6 +59,7 @@ export const OperateSessionPage = () => {
   // Bound views read through host boards, so they are on only while both are.
   const boundViewsOn = hostBoardsOn && serverConfig?.boundViews === true
   const screens = useWorkspaceScreens(authenticatedApi, durableViews)
+  const myConsoles = useMyConsoles(authenticatedApi, durableViews)
   const sessionWorkspace = useSessionWorkspace(operate?.session ?? null)
   const [savedEntry, setSavedEntry] = useState<ConsoleEntry | null>(null)
   // The console draft a builder simulates (FAC-96): local to this page, never an operate event.
@@ -77,6 +83,15 @@ export const OperateSessionPage = () => {
     toasts.add({ title: refusalMessage(caught), variant: 'error' })
   }
   const send = (event: OperateEvent) => { operate?.dispatch(event).catch(notifyRefused) }
+  // A console that belongs to no workspace opens on its publication, read through the person's own access.
+  const openOwnConsole = async ({ id }: ConsoleSummary) => {
+    const reading = authenticatedApi.openConsoleReading(id)
+    try {
+      const published = await reading.getConsole()
+      if (!published) throw new Error('This console is not published yet.')
+      await operate?.dispatch(openOwnConsoleEvent(published))
+    } catch (caught) { notifyRefused(caught) } finally { reading[Symbol.dispose]() }
+  }
   const openConsole = (item: ConsoleEntry, source: ConsoleSource) => {
     const event = openConsoleEvent(item, source)
     if (event) send(event)
@@ -129,7 +144,7 @@ export const OperateSessionPage = () => {
   const visibleWidget = widgetTarget?.consoleId === consoleId ? widgetTarget : null
   // The kernel said the open revision moved on (republished or deleted elsewhere): it shows no board.
   const stale = operate.staleConsole
-  const runStale = !!run && stale?.workspaceId === run.workspaceId && stale.consoleId === run.consoleId && stale.revision === run.revision
+  const runStale = !!run && !!stale && stale.workspaceId === consoleWorkspaceId(run) && stale.consoleId === run.consoleId && stale.revision === run.revision
   // Shown only while the session still has that console revision open, and the revision lists it.
   // A board belongs to the run it was opened from: once the console is left, opened from another
   // source or revision, superseded, or covered by settings, setup or tools, it is closed for good,
@@ -205,7 +220,7 @@ export const OperateSessionPage = () => {
       {home && <>
         <Button variant="ghost" size="sm" onClick={() => void navigate({ to: '/inferops-canvas', search: { canvas: true } })}>My canvas</Button>
         <Button variant="ghost" size="sm" onClick={() => void navigate({ to: '/inferops-canvas', search: { tools: true } })}>Screens and flows</Button>
-        <Button variant="primary" size="sm" disabled={!durableViews} onClick={() => void navigate({ to: '/inferops-canvas', search: { setup: 'new' } })}><PlusIcon size={14} aria-hidden />New console</Button>
+        <Button variant="primary" size="sm" disabled={!durableViews} onClick={() => void navigate({ to: '/consoles', search: { new: true } })}><PlusIcon size={14} aria-hidden />New console</Button>
       </>}
       {(tools || canvas) && <Button size="sm" onClick={() => void showHome()}>All consoles</Button>}
       {entry && !state.flow && <Button size="sm" variant="ghost" aria-label="Console settings" title="Console settings" onClick={() => void navigate({ to: '/inferops-canvas', search: { settings: entry.console.id, workspace: entry.workspace.id } })}><SlidersHorizontalIcon size={16} aria-hidden /></Button>}
@@ -213,7 +228,7 @@ export const OperateSessionPage = () => {
         onClick={() => send({ type: 'setChatOpen', open: !state.chatOpen })}>{state.chatOpen ? 'Hide assistant' : 'Show assistant'}</Button>}
     </header>}
     {!configuring && <SessionApprovals session={sessionWorkspace}
-      screenWorkspaceId={state.flow?.workspaceId ?? run?.workspaceId ?? (state.focus?.type === 'screen' ? state.focus.workspaceId : null)}
+      screenWorkspaceId={state.flow?.workspaceId ?? (run ? consoleWorkspaceId(run) : null) ?? (state.focus?.type === 'screen' ? state.focus.workspaceId : null)}
       reviewing={state.reviewing} lastOutcome={state.lastApprovalOutcome} onEvent={operate.dispatch} />}
     {!configuring && <HandoverInbox handovers={state.handovers} workspace={sessionWorkspace} onEvent={operate.dispatch} />}
     {!configuring && <PersonalWorkflows workspace={sessionWorkspace} />}
@@ -251,6 +266,7 @@ export const OperateSessionPage = () => {
             : <p role="status" className="p-6 text-sm text-kumo-subtle">Opening your canvas…</p>
           : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={operate.dispatch}
               console={{ open: run, entry, loading: screens.status === 'loading', sessionWorkspace }} />
+          : run?.home === 'console' ? <OwnConsolePage run={run} board={state.board} sessionWorkspace={sessionWorkspace} onEvent={send} />
           : run && visibleWidget?.presentation === 'page' && run.screenId === visibleWidget.screenId ? <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />
           : run ? <ConsolePage run={run} entry={entry} loading={screens.status === 'loading'} board={state.board}
               sessionWorkspace={sessionWorkspace} onEvent={send} onPublish={setPublishing} onChatPaneWidgets={setPageChatWidgets} />
@@ -273,6 +289,8 @@ export const OperateSessionPage = () => {
                   <Button size="sm" variant="ghost" onClick={() => openConsole(savedEntry, 'draft')}>Open draft in Operate (live data)</Button>
                   <Button size="sm" variant="primary" onClick={() => setPublishing(savedEntry)}>Publish</Button>
                 </div>}
+                <OwnConsoleTiles consoles={myConsoles} onOpen={openOwnConsole}
+                  onEdit={console => void navigate({ to: '/consoles/$id', params: { id: console.id } })} />
                 <ConsoleMosaic key={savedEntry?.console.id} screens={screens} highlighted={savedEntry?.console.id} onSimulate={simulate}
                   onOpen={openConsole} onEdit={edit} onPublish={setPublishing} />
                 {state.workingSet.length > 0 && <nav aria-label="Open in this session" className="mt-4 flex flex-wrap gap-2">
@@ -287,7 +305,7 @@ export const OperateSessionPage = () => {
         offerWidgets={chatWidgets === 'console'}
         consoleActions={entry && run?.fullChat !== 'only' ? { entry, onOpenView: viewId => void openView(viewId), onOpenWidget: target => void openWidget(target), onOpenHostBoard: openHostBoard, onOpenBoundView: openBoundView } : undefined} />
     </div>
-    {!configuring && !tools && !boundViewShown && run && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
+    {!configuring && !tools && !boundViewShown && run && run.home !== 'console' && visibleWidget?.presentation === 'modal' && <ConsoleWidgetView workspaceId={run.workspaceId} source={run.source} revision={run.revision} target={visibleWidget} onClose={() => setWidgetTarget(null)} />}
     {!configuring && !tools && !boundViewShown && run && operate.session && shownHostBoard?.id !== undefined && <ConsoleHostBoard key={`${run.consoleId}/${run.source}/${run.revision}/${shownHostBoard.id}`}
       session={operate.session.stub} console={{ consoleId: run.consoleId, source: run.source, revision: run.revision }}
       entry={{ ...shownHostBoard, id: shownHostBoard.id }} onClose={() => setHostBoardTarget(null)} onRefused={refuseHostBoard}

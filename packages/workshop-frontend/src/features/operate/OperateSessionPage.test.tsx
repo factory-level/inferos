@@ -24,6 +24,9 @@ const testState = vi.hoisted(() => ({
   chatWidgets: {} as Record<string, 'console' | 'none' | null>,
 }))
 
+// The person's consoles that belong to no workspace: none here, unless a test lists some.
+const myConsoles = vi.hoisted(() => ({ state: { status: 'ready', consoles: [] } as import('./useMyConsoles').MyConsolesState }))
+vi.mock('./useMyConsoles', () => ({ useMyConsoles: () => myConsoles.state, invalidateMyConsoles: () => {} }))
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => testState.navigate, useSearch: () => testState.search }))
 vi.mock('./ConsoleWorkspaceShell', () => ({ ConsoleWorkspaceShell: ({ children }: { children: import('react').ReactNode }) => children }))
 vi.mock('./ConsoleBuilder', () => ({ ConsoleBuilder: () => <div data-testid="builder" /> }))
