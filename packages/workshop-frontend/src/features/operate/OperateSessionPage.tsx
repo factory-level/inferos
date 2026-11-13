@@ -291,7 +291,7 @@ export const OperateSessionPage = () => {
                 </div>}
                 <OwnConsoleTiles consoles={myConsoles} onOpen={openOwnConsole}
                   onEdit={console => void navigate({ to: '/consoles/$id', params: { id: console.id } })} />
-                <ConsoleMosaic key={savedEntry?.console.id} screens={screens} highlighted={savedEntry?.console.id} onSimulate={simulate}
+                <ConsoleMosaic key={savedEntry?.console.id} screens={screens} hideEmpty={myConsoles.status === 'ready' && myConsoles.consoles.length > 0} highlighted={savedEntry?.console.id} onSimulate={simulate}
                   onOpen={openConsole} onEdit={edit} onPublish={setPublishing} />
                 {state.workingSet.length > 0 && <nav aria-label="Open in this session" className="mt-4 flex flex-wrap gap-2">
                   {state.workingSet.map(ref => <Button key={ref.type === 'screen' ? `${ref.workspaceId}/${ref.screenId}` : ref.workspaceId}
