@@ -11,6 +11,7 @@ Create documents from [`_template.md`](_template.md).
 | [Choosing an InferOS extension](extension-capabilities.md) | A code-backed decision guide for choosing the smallest extension surface. |
 | [Fast local iteration and parallel worktrees](local-development.md) | `pnpm wt` worktrees with their own ports, overlay, seeded cache and linked secrets; the check tiers; `--gatekeepers`. |
 | [Local development and Cloudflare parity](local-cloud-parity.md) | Wrapper commands, the `pnpm local` lifecycle of the in-repo stack, and the limits of emulation. |
+| [Back up and restore one company's state](backup-and-recovery.md) | FAC-141's recovery rehearsal: InferOps Postgres and InferOS state restored together, each skew direction, and its refusals. |
 | [Deploy a persistent stage](stage-deploy.md) | `pnpm stage:deploy <stage>`: account, Access applications, InferLab registration, secrets and rollback. |
 | [Set up the grokbot tenant for dev-os](grokbot-dev-os.md) | The reserved grokbot personas on dev InferLab: seeding, Access policies, sign-in and persona switching, GROK board and Wiki data, smoke. |
 | [Configuration ownership and required settings](configuration-reference.md) | A starting settings inventory for the setup skills, grounded in current code. |
