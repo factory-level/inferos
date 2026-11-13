@@ -1,7 +1,7 @@
-import { useNavigate } from '@tanstack/react-router'
+import { useNavigate, useRouterState } from '@tanstack/react-router'
 import { Tooltip } from '@cloudflare/kumo'
 import { HammerIcon, PulseIcon } from '@phosphor-icons/react'
-import { buildReturnHref, OPERATE_HOME, type AppMode } from './operateMode'
+import { buildReturnHref, operateReturnHref, type AppMode } from './operateMode'
 
 const MODES = [
   { mode: 'build', label: 'Build', icon: HammerIcon },
@@ -9,18 +9,18 @@ const MODES = [
 ] as const
 
 /**
- * The Build | Operate segmented control at the top of the sidebar. It navigates rather than holding
- * state: Operate opens the InferOps Canvas, Build returns to the last Build page of this session.
+ * The Build | Operate segmented control at the top of both sidebars. It navigates rather than holding
+ * state: each side returns to the last page of that mode seen this session.
  * Collapsed, it stacks icon-only buttons that keep their names as accessible labels and tooltips.
  */
 export const ModeToggle = ({ mode, collapsed }: { mode: AppMode; collapsed: boolean }) => {
   const navigate = useNavigate()
+  const pathname = useRouterState({ select: (s) => s.location.pathname })
   const select = (next: AppMode) => {
     if (next === mode) return
-    if (next === 'operate') void navigate({ to: OPERATE_HOME })
     // The remembered location is a full href (path, search, hash), which takes precedence over
     // `to`; the typed options still require one.
-    else void navigate({ to: '.', href: buildReturnHref() })
+    void navigate({ to: '.', href: next === 'operate' ? operateReturnHref() : buildReturnHref(pathname) })
   }
 
   return (

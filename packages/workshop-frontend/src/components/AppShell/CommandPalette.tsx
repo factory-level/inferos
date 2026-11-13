@@ -4,6 +4,7 @@ import {
   Blueprint,
   MagnifyingGlass,
   Plus,
+  Pulse,
   SquaresFour,
 } from '@phosphor-icons/react'
 import { useKumoToastManager } from '@cloudflare/kumo'
@@ -12,6 +13,8 @@ import type { GadgetMetadataWithTimestamps, OutputFormatOffer } from '@gadgets/w
 import { FormatGlyph } from '../format/FormatVisuals'
 import { createFromFormat } from '../format/useOutputFormats'
 import { isImeComposing } from '../../keyboardEvent'
+import { operateReturnHref } from '../../features/operate/operateMode'
+import { useOperateModeAvailable } from '../../features/operate/useAppMode'
 
 // A ⌘K command palette: jump to a workspace or a primary destination. Because it's keyboard-driven
 // and opened many times a day, it deliberately has *no* open/close animation (instant feels faster
@@ -143,6 +146,7 @@ export default function CommandPalette({
 }) {
   const { authenticatedApi } = useAuthenticatedApi()
   const navigate = useNavigate()
+  const operateAvailable = useOperateModeAvailable()
   const toasts = useKumoToastManager()
 
   const [query, setQuery] = useState('')
@@ -254,6 +258,13 @@ export default function CommandPalette({
         icon: <Blueprint size={15} />,
         run: () => navigate({ to: '/explore' }),
       },
+      // The palette is mounted in Build only, so the one mode command it needs is the way out.
+      ...(operateAvailable ? [{
+        id: 'nav-operate',
+        label: 'Switch to Operate',
+        icon: <Pulse size={15} />,
+        run: () => navigate({ to: '.', href: operateReturnHref() }),
+      }] : []),
     ]
 
     const wsBase: Command[] = gadgets
@@ -303,7 +314,7 @@ export default function CommandPalette({
     const groups = built.filter((g) => g.items.length > 0)
     const flat = groups.flatMap((g) => g.items)
     return { groups, flat }
-  }, [query, gadgets, blueprints, formats, navigate, createFormat])
+  }, [query, gadgets, blueprints, formats, navigate, createFormat, operateAvailable])
 
   // Keep the active index in range as the result set changes.
   useEffect(() => {

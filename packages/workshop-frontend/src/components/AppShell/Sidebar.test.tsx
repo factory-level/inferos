@@ -65,7 +65,7 @@ import { INITIAL_OPERATE_PAGE, type OperatePageState } from '@gadgets/workshop-s
 import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import Sidebar from './Sidebar'
 import { OperateSidebar } from '../../features/operate/OperateSidebar'
-import { resetBuildLocationForTests } from '../../features/operate/operateMode'
+import { rememberLocation, resetReturnLocationsForTests } from '../../features/operate/operateMode'
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -123,7 +123,7 @@ describe('Sidebar modes', () => {
   afterEach(() => {
     act(() => root?.unmount())
     container.remove()
-    resetBuildLocationForTests()
+    resetReturnLocationsForTests()
     vi.clearAllMocks()
   })
 
@@ -155,15 +155,18 @@ describe('Sidebar modes', () => {
     expect(container.querySelector('[data-testid="workspace-lists"]')).not.toBeNull()
   })
 
-  it('offers independent console navigation without configuration controls', () => {
+  it('offers independent console navigation, with the mode toggle as the way back to Build', () => {
+    rememberLocation('/blueprints', '/blueprints?q=crm')
     goTo('/inferops-canvas')
     render()
-    expect(modeGroup()).toBeNull()
-    expect(button('Back to Build')).toBeUndefined()
+    expect(modeButton('Operate').getAttribute('aria-pressed')).toBe('true')
     expect(button('All consoles')?.getAttribute('aria-current')).toBe('page')
     expect(link('Home')).toBeUndefined()
     expect(link('Context Library')).toBeUndefined()
     expect(container.querySelector('[data-testid="workspace-lists"]')).toBeNull()
+
+    act(() => modeButton('Build').click())
+    expect(testState.navigate).toHaveBeenLastCalledWith({ to: '.', href: '/blueprints?q=crm' })
   })
 
   it("lists the open console's views, marks the shown one, and switches views through the session", async () => {
@@ -209,7 +212,7 @@ describe('Sidebar modes', () => {
     goTo('/blueprints?q=crm')
     render()
     act(() => modeButton('Operate').click())
-    expect(testState.navigate).toHaveBeenLastCalledWith({ to: '/inferops-canvas' })
+    expect(testState.navigate).toHaveBeenLastCalledWith({ to: '.', href: '/inferops-canvas' })
   })
 
   it('opens settings for the current console', () => {
@@ -228,6 +231,7 @@ describe('Sidebar modes', () => {
     render(true)
     expect(button('Settings')?.textContent).toBe('')
     expect(button('Overview')?.textContent).toBe('')
+    expect(modeButton('Build').textContent).toBe('')
     expect(button('Overview')?.getAttribute('aria-current')).toBe('page')
   })
 
