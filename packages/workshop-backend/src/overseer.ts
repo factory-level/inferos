@@ -56,7 +56,7 @@ import {
   personalWorkflowStepInputProblem, type PersonalWorkflow, type PersonalWorkflowStep,
 } from "@gadgets/workshop-shared/personal-workflow";
 import {
-  TEMPORARY_CANVAS_ERROR_CODES, TemporaryCanvasError, parseTemporaryCanvasInput, temporaryCanvasTtlMs,
+  TEMPORARY_CANVAS_ERROR_CODES, TemporaryCanvasError, parseTemporaryCanvasInput, temporaryCanvasTtlMsFor,
   type TemporaryCanvas,
 } from "@gadgets/workshop-shared/temporary-canvas";
 import type { UserDirectoryDurableObject } from "./user-directory";
@@ -13390,7 +13390,11 @@ class OverseerImpl implements AgentHooks {
   temporaryCanvasStore(): TemporaryCanvasStore {
     return new TemporaryCanvasStore(this.ctx.storage, this.storage, {
       now: () => Date.now(),
-      ttlMs: () => temporaryCanvasTtlMs(this.env.OPERATE_TEMPORARY_CANVAS_TTL_HOURS),
+      ttlMs: () => temporaryCanvasTtlMsFor({
+        hours: this.env.OPERATE_TEMPORARY_CANVAS_TTL_HOURS,
+        seconds: this.env.OPERATE_TEMPORARY_CANVAS_TTL_SECONDS,
+        local: this.env.DEV === true,
+      }),
       // As for dynamic definitions: wake for the next expiry whenever it changes.
       onChange: () => {
         if (this.toolLane) this.#updateAlarm();

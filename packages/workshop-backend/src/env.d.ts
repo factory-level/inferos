@@ -116,6 +116,10 @@ declare global {
       // How long an unsaved temporary canvas lasts, in whole hours from 1 to 720 (FAC-137). Unset is
       // the proposed default, 24 (temporary-canvas.ts `temporaryCanvasTtlMs`).
       OPERATE_TEMPORARY_CANVAS_TTL_HOURS?: string;
+      // A local stack only (FAC-147): the same TTL in whole seconds from 30 to 3600, so a journey can
+      // watch a canvas expire. Honoured only with DEV (set by scripts/run-dev-server.ts); anywhere
+      // else it refuses canvas creation, and the stage deploy refuses it (stage-config.ts).
+      OPERATE_TEMPORARY_CANVAS_TTL_SECONDS?: string;
       /** Proposed retention for terminal workflow runs; unset means 90 days (FAC-125). */
       WORKFLOW_RUN_HISTORY_RETENTION_DAYS?: string;
       /** Proposed per-workspace workflow run record cap; unset means 10,000 (FAC-125). */

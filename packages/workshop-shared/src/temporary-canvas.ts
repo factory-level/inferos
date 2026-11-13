@@ -80,6 +80,48 @@ export function temporaryCanvasTtlMs(setting: string | undefined): number {
   return hours * 60 * 60 * 1000;
 }
 
+/**
+ * Shortest TTL a local stack may set in seconds (FAC-147): long enough for a person or a browser
+ * agent to open, list and try to save a canvas before it expires.
+ */
+export const MIN_LOCAL_TEMPORARY_CANVAS_TTL_SECONDS = 30;
+
+/** Longest TTL in seconds: past an hour, `OPERATE_TEMPORARY_CANVAS_TTL_HOURS` says it. */
+export const MAX_LOCAL_TEMPORARY_CANVAS_TTL_SECONDS = 3600;
+
+/** The settings that decide a temporary canvas's TTL, as the backend's environment holds them. */
+export type TemporaryCanvasTtlSettings = {
+  /** `OPERATE_TEMPORARY_CANVAS_TTL_HOURS`: whole hours from 1 to 720, any deployment. */
+  hours: string | undefined;
+  /** `OPERATE_TEMPORARY_CANVAS_TTL_SECONDS`: whole seconds from 30 to 3600, a local stack only. */
+  seconds: string | undefined;
+  /** Whether this is a local stack (the backend's `DEV`, which only `scripts/run-dev-server.ts` sets). */
+  local: boolean;
+};
+
+/**
+ * A temporary canvas's TTL in milliseconds (FAC-147). The hours setting as `temporaryCanvasTtlMs`
+ * reads it, or, on a local stack only, `OPERATE_TEMPORARY_CANVAS_TTL_SECONDS`, so a journey can
+ * watch a canvas expire through the product's own sweep. Anything else throws, naming the
+ * setting, like `temporaryCanvasTtlMs`: seconds on a deployed worker (no `DEV`), both settings at
+ * once, or seconds that aren't whole and in range. So a variable set on a deployment refuses to
+ * create temporary canvases; it never shortens their expiry.
+ */
+export function temporaryCanvasTtlMsFor({ hours, seconds, local }: TemporaryCanvasTtlSettings): number {
+  if (seconds === undefined) return temporaryCanvasTtlMs(hours);
+  if (!local) {
+    throw new Error("OPERATE_TEMPORARY_CANVAS_TTL_SECONDS is for a local stack only; a deployment sets OPERATE_TEMPORARY_CANVAS_TTL_HOURS.");
+  }
+  if (hours !== undefined) {
+    throw new Error("Set OPERATE_TEMPORARY_CANVAS_TTL_SECONDS or OPERATE_TEMPORARY_CANVAS_TTL_HOURS, not both.");
+  }
+  let value = /^\d+$/.test(seconds) ? Number(seconds) : Number.NaN;
+  if (!(value >= MIN_LOCAL_TEMPORARY_CANVAS_TTL_SECONDS && value <= MAX_LOCAL_TEMPORARY_CANVAS_TTL_SECONDS)) {
+    throw new Error(`OPERATE_TEMPORARY_CANVAS_TTL_SECONDS must be a whole number of seconds from ${MIN_LOCAL_TEMPORARY_CANVAS_TTL_SECONDS} to ${MAX_LOCAL_TEMPORARY_CANVAS_TTL_SECONDS}.`);
+  }
+  return value * 1000;
+}
+
 /** Why a temporary canvas change was refused. */
 export const TEMPORARY_CANVAS_ERROR_CODES = Object.freeze({
   /** Another change landed first: read the canvas again and retry. */

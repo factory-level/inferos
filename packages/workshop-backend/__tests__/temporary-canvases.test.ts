@@ -7,7 +7,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import {
   DEFAULT_TEMPORARY_CANVAS_TTL_HOURS, TEMPORARY_CANVAS_ERROR_CODES, TEMPORARY_CANVAS_LIMITS, parseTemporaryCanvasInput,
-  temporaryCanvasTtlMs,
+  MAX_LOCAL_TEMPORARY_CANVAS_TTL_SECONDS, MIN_LOCAL_TEMPORARY_CANVAS_TTL_SECONDS, temporaryCanvasTtlMs, temporaryCanvasTtlMsFor,
 } from "@gadgets/workshop-shared/temporary-canvas";
 import { OPERATE_AGENT_TOOL_NAMES } from "../src/agent";
 import type { OverseerDurableObject } from "../src/overseer.js";
@@ -60,6 +60,29 @@ describe("the TTL setting (FAC-137)", () => {
     for (let bad of ["0", "721", "1.5", "-1", "", "24h"]) {
       expect(() => temporaryCanvasTtlMs(bad)).toThrow(/OPERATE_TEMPORARY_CANVAS_TTL_HOURS/);
     }
+  });
+
+  it("takes a TTL in seconds on a local stack only, and never with the hours setting (FAC-147)", () => {
+    const local = (seconds: string | undefined, hours?: string) => temporaryCanvasTtlMsFor({ hours, seconds, local: true });
+    expect(local("60")).toBe(60 * 1000);
+    expect(local(String(MIN_LOCAL_TEMPORARY_CANVAS_TTL_SECONDS))).toBe(30 * 1000);
+    expect(local(String(MAX_LOCAL_TEMPORARY_CANVAS_TTL_SECONDS))).toBe(HOUR);
+    for (let bad of ["29", "0", "3601", "1.5", "-60", "", "60s", "1e2"]) {
+      expect(() => local(bad)).toThrow(/OPERATE_TEMPORARY_CANVAS_TTL_SECONDS must be a whole number of seconds from 30 to 3600/);
+    }
+    expect(() => local("60", "1")).toThrow(/not both/);
+    // Unset, the hours contract holds unchanged, locally as on a deployment.
+    expect(local(undefined)).toBe(24 * HOUR);
+    expect(local(undefined, "2")).toBe(2 * HOUR);
+    expect(() => local(undefined, "0")).toThrow(/OPERATE_TEMPORARY_CANVAS_TTL_HOURS/);
+  });
+
+  it("refuses a TTL in seconds on a deployed worker (no DEV) instead of shortening expiry (FAC-147)", () => {
+    expect(() => temporaryCanvasTtlMsFor({ hours: undefined, seconds: "60", local: false }))
+      .toThrow(/OPERATE_TEMPORARY_CANVAS_TTL_SECONDS is for a local stack only/);
+    expect(() => temporaryCanvasTtlMsFor({ hours: "24", seconds: "60", local: false }))
+      .toThrow(/for a local stack only/);
+    expect(temporaryCanvasTtlMsFor({ hours: "2", seconds: undefined, local: false })).toBe(2 * HOUR);
   });
 
   it("checks what to create, minting the ids itself", () => {

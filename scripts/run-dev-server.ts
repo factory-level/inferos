@@ -746,6 +746,9 @@ for (const gk of gatekeepers) {
     // A stage's model bounds, to try them locally: e.g. MODEL_ALLOWLIST=claude-haiku-5-5
     // DAILY_AGENT_TURN_LIMIT=2 pnpm dev-server.
     "MODEL_ALLOWLIST", "DAILY_AGENT_TURN_LIMIT",
+    // A temporary canvas TTL in seconds (FAC-147), honoured only with DEV, which only this file
+    // sets: e.g. OPERATE_TEMPORARY_CANVAS_TTL_SECONDS=60 pnpm local start, to watch one expire.
+    "OPERATE_TEMPORARY_CANVAS_TTL_SECONDS",
     // Platform AI Gateway — makes the cross-provider model catalog available. CF_AI_GATEWAY
     // always needs CF_AI_GATEWAY_ACCOUNT_ID plus one transport: the WORKERS_AI binding
     // (start with --use-workers-ai-binding; CF_AI_GATEWAY_USE_BINDING=false opts out, e.g.
