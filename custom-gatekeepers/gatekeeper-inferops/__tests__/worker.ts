@@ -3,10 +3,11 @@
 // gatekeeper as a facet with props, hands it an approval queue that records what it is told, and
 // applies or rejects the actions it collected.
 
+import type { TemporaryCanvasInput } from "@gadgets/workshop-shared/temporary-canvas";
 import type { ActionResult } from "@gadgets/workshop-shared/action-outcome";
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
 import type {
-  ActionApplied, ActionApplyFailure, ActionFailureKind, ActionDescription, ApprovedRunOutcome, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
+  ActionApplied, ActionApplyFailure, ActionFailureKind, ActionDescription, ApprovedRunOutcome, ApprovedPersonalWorkflow, ApprovedTemporaryCanvas, ApprovedWorkflowRun, ApprovedDelegate, ConnectHandoff, GatekeeperUser, GatekeeperUserVerifier, GitCache,
   GitObjectType, GitOid, ObservationDescription,
 } from "@gadgets/workshop-shared/gatekeeper";
 import { dotBindingOver } from "../src/inferops.js";
@@ -245,6 +246,11 @@ export type QueueLog = {
     id: number; title: string; description: string; implementsRevert: boolean;
     /** The run the action declared to the kernel (FAC-120), if any. */
     workflowRun?: { reference: string };
+    /** The temporary canvas the action declared to the kernel (FAC-137), if any. */
+    temporaryCanvas?: TemporaryCanvasInput;
+    personalWorkflow?: { title: string; steps: { reference: string; input: { issueId: string; toStateId: string } }[] };
+    personalWorkflowRun?: { reference: string; reportOutcome?: boolean };
+    delegate?: ActionDescription["delegate"];
     /** Each field's label and shown value. */
     fields: Record<string, string>;
     /** Each list field's label and shown items. */
@@ -284,6 +290,10 @@ class TestApprovalQueue extends RpcTarget {
       labels: (description.fields ?? []).map(field => field.label),
       ...(description.actionKind ? { kind: description.actionKind.tag } : {}),
       ...(description.workflowRun ? { workflowRun: description.workflowRun } : {}),
+      ...(description.temporaryCanvas ? { temporaryCanvas: description.temporaryCanvas } : {}),
+      ...(description.personalWorkflow ? { personalWorkflow: description.personalWorkflow } : {}),
+      ...(description.personalWorkflowRun ? { personalWorkflowRun: description.personalWorkflowRun } : {}),
+      ...(description.delegate ? { delegate: description.delegate } : {}),
       complete: description.descriptionIsComplete === true,
       truncated: (description.fields ?? []).filter(field => "truncated" in field && field.truncated !== undefined)
         .map(field => field.label),
@@ -1363,8 +1373,30 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       | { status: "unknown"; reason: string })
       : Promise<{ failure: ActionApplyFailure | null; result: ActionResult | null }> {
     // The kernel's effects take no reference: the run is the one the action declared at submit.
-    const effects = run ? { invokeWorkflow: async () => { this.#effectsAsked.push("invoked"); return run; } } : undefined;
-    const outcome = await this.#dotBinding().applyAction(actionId, effects);
+    const effects = run ? {
+      invokeWorkflow: async () => { this.#effectsAsked.push("invoked"); return run; },
+      createTemporaryCanvas: async (): Promise<ApprovedTemporaryCanvas> => { throw new Error("No canvas was scripted."); },
+    } : undefined;
+    const outcome = await this.#dotBinding().applyAction(actionId, effects as never);
+    if (outcome && "failed" in outcome) return { failure: outcome.failed, result: null };
+    return { failure: null, result: outcome && "applied" in outcome ? outcome.applied.result ?? null : null };
+  }
+
+  /**
+   * Apply a Dot canvas action as a person's approval (FAC-137): the kernel's `createTemporaryCanvas`
+   * gives `answer`, or with `"throw"` rejects, as a kernel call whose answer was lost.
+   */
+  async applyDotCanvas(actionId: number, answer: ApprovedTemporaryCanvas | "throw")
+      : Promise<{ failure: ActionApplyFailure | null; result: ActionResult | null }> {
+    const effects = {
+      invokeWorkflow: async (): Promise<ApprovedWorkflowRun> => { throw new Error("No run was scripted."); },
+      createTemporaryCanvas: async () => {
+        this.#effectsAsked.push("canvas");
+        if (answer === "throw") throw new Error("The kernel's answer was lost.");
+        return answer;
+      },
+    };
+    const outcome = await this.#dotBinding().applyAction(actionId, effects as never);
     if (outcome && "failed" in outcome) return { failure: outcome.failed, result: null };
     return { failure: null, result: outcome && "applied" in outcome ? outcome.applied.result ?? null : null };
   }
@@ -1381,6 +1413,35 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
+  }
+
+  /**
+   * Applies a Dot action with the kernel's personal workflow effects (FAC-134 capability 2): each
+   * answers as given, and records that it was asked. The invoke effect is there too, never to be
+   * asked for a personal workflow.
+   */
+  async applyDotPersonal(actionId: number,
+      answers: { created?: ApprovedPersonalWorkflow; run?: ApprovedWorkflowRun; launched?: ApprovedDelegate })
+      : Promise<{ failure: ActionApplyFailure | null; asked: string[] }> {
+    const asked: string[] = [];
+    const effects = {
+      invokeWorkflow: async () => { asked.push("invoked"); return answers.run; },
+      createPersonalWorkflow: async () => { asked.push("created"); return answers.created; },
+      runPersonalWorkflow: async () => { asked.push("ran"); return answers.run; },
+      launchDelegate: async () => { asked.push("launched"); return answers.launched; },
+    } as never;
+    const outcome = await this.#dotBinding().applyAction(actionId, effects);
+    return { failure: outcome && "failed" in outcome ? outcome.failed : null, asked };
+  }
+
+  /** A Dot action's recorded personal workflow (FAC-134 capability 2), if it created one. */
+  async dotPersonalWorkflow(actionId: number): Promise<{ id: string; reference: string; expiresAt: string } | null> {
+    return this.ctx.storage.kv.get<{ personalWorkflow?: { id: string; reference: string; expiresAt: string } }>(`action:${actionId}`)?.personalWorkflow ?? null;
+  }
+
+  /** A Dot action's recorded delegate (FAC-134 capability 3), if it launched one. */
+  async dotDelegate(actionId: number): Promise<{ id: string } | null> {
+    return this.ctx.storage.kv.get<{ delegate?: { id: string } }>(`action:${actionId}`)?.delegate ?? null;
   }
 
   /** The run outcomes a Dot action recorded (FAC-134). */

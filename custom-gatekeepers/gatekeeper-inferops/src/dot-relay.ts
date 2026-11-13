@@ -153,7 +153,7 @@ function arr(value: unknown, what: string): unknown[] {
 }
 
 const RUN_OUTCOMES = new Set(["succeeded", "failed", "uncertain"]);
-const RUN_AUTHORITIES = new Set(["gadget_bindings", "service_account"]);
+const RUN_AUTHORITIES = new Set(["gadget_bindings", "service_account", "person"]);
 /**
  * Every fixed reason InferOS gives a failed or uncertain run (WorkflowRunFailure, WorkflowRunUncertainty),
  * and only those: the same set InferOps accepts (inferops#2644). Typed as a record, so a reason the
@@ -172,15 +172,18 @@ const RUN_REASON_CODES: Record<WorkflowRunFailure | WorkflowRunUncertainty, true
 function parseDotRun(raw: unknown): DotProposalWire["run"] {
   if (typeof raw !== "object" || raw === null) return null;
   const r = raw as Record<string, unknown>;
-  if (r.kind !== "workflow-run" || typeof r.runId !== "string" || r.runId.length === 0 || r.runId.length > 200 ||
+  if ((r.kind !== "workflow-run" && r.kind !== "personal-workflow" && r.kind !== "delegate") ||
+      // Only a delegate ran as the person (FAC-134 capability 3), and a delegate only as the person.
+      ((r.kind === "delegate") !== (r.ranAs === "person")) ||
+      typeof r.runId !== "string" || r.runId.length === 0 || r.runId.length > 200 ||
       typeof r.outcome !== "string" || !RUN_OUTCOMES.has(r.outcome) ||
       typeof r.ranAs !== "string" || !RUN_AUTHORITIES.has(r.ranAs) ||
       (r.reasonCode !== undefined && (typeof r.reasonCode !== "string" || !Object.hasOwn(RUN_REASON_CODES, r.reasonCode)))) {
     return null;
   }
   return {
-    kind: "workflow-run", runId: r.runId, outcome: r.outcome as "succeeded" | "failed" | "uncertain",
-    ranAs: r.ranAs as "gadget_bindings" | "service_account",
+    kind: r.kind, runId: r.runId, outcome: r.outcome as "succeeded" | "failed" | "uncertain",
+    ranAs: r.ranAs as "gadget_bindings" | "service_account" | "person",
     ...(typeof r.reasonCode === "string" ? { reasonCode: r.reasonCode } : {}),
   };
 }

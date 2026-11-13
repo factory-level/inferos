@@ -269,6 +269,7 @@ export default function Activity({
                   onReject={() => void resolveAction(record.id, 'deny')}
                   onReconnect={record.type === 'action' && record.gatekeeperId !== undefined
                     ? () => overseer.reconnectGatekeeper(record.gatekeeperId!) : undefined}
+                  onSettle={answer => overseer.resolveWorkflowRunWrite(record.id, answer)}
                   onAlwaysApprove={
                     autoApproveTarget &&
                     !isTagAutoApproved(autoApproveTarget.gatekeeperId, autoApproveTarget.actionKind.tag)
@@ -640,6 +641,7 @@ function ReviewRequest({
   onApprove,
   onReject,
   onReconnect,
+  onSettle,
   onAlwaysApprove,
 }: {
   record: ActionLogEntry
@@ -653,6 +655,8 @@ function ReviewRequest({
   onReject: () => void
   /** Reconnects the action's connection for a sign-in to renew (FAC-119 K2). */
   onReconnect?: () => Promise<ConnectFlowStart>
+  /** Settles a workflow run's write whose outcome is unknown (FAC-117 K2): this page is its deciders'. */
+  onSettle: (answer: 'applied' | 'not-applied') => Promise<void>
   onAlwaysApprove?: () => void
 }) {
   // So a run the viewer asked for says so (FAC-119), here as on every decision surface.
@@ -721,7 +725,7 @@ function ReviewRequest({
         </div>
       </div>
 
-      {record.type === 'action' && <ActionDecision entry={record} showOutcome={false} viewerProfileId={currentUser?.id} onReconnect={onReconnect} className="mt-1.5 max-w-2xl text-[12px]" />}
+      {record.type === 'action' && <ActionDecision entry={record} showOutcome={false} viewerProfileId={currentUser?.id} onReconnect={onReconnect} onSettle={onSettle} className="mt-1.5 max-w-2xl text-[12px]" />}
 
       {restricted && <RestrictedApprovalNotice id={noticeId} className="mt-2 max-w-2xl" />}
 

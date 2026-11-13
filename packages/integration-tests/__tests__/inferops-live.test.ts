@@ -1078,4 +1078,47 @@ describe.skipIf(!LIVE.baseUrl)("InferOps gatekeeper against a live InferOps", ()
       "Synthetic Workshop caller binding; local shared provider token, NOT live per-person66 proof.");
   });
 
+
+  it.skipIf(!WIKI_LIVE)("n. a Wiki page's reference (FAC-68): a page read and its search hits carry InferOps' own reference, and InferOps opens it and its alias with the same sections (needs INFEROPS_LIVE_WIKI_WORKSPACE_ID and _SLUG)", async () => {
+    await restartGatekeeper({
+      INFEROPS_WORKSPACE_ID: LIVE.wikiWorkspaceId, INFEROPS_WORKSPACE_SLUG: LIVE.wikiWorkspaceSlug,
+    });
+    const connection = await ws.newGatekeeper(accountId, wikiUrl(LIVE.wikiWorkspaceSlug));
+    if (!connection) throw new Error(`No connection for ${wikiUrl(LIVE.wikiWorkspaceSlug)}`);
+    const wiki = await connection.openSession() as RpcStub<InferOpsWikiSession>;
+    let page: WikiDocument | undefined;
+    for (const node of await wiki.listDocuments()) {
+      const read = await wiki.readDocument(node.slug);
+      if (read.sections.length > 0) { page = read; break; }
+    }
+    if (!page) throw new Error("No Wiki page with a section");
+    // The reference is InferOps' own, from its company list, never built by the gatekeeper.
+    const listed = await inferOps("/knowledge/company/documents", undefined, LIVE.wikiWorkspaceId) as
+      { documents: Array<{ id: string; ref: string }> };
+    const named = listed.documents.find(d => d.id === page!.id)?.ref;
+    if (!named) throw new Error("InferOps names no reference for the page");
+    expect(page.ref).toBe(named);
+    expect(named).toMatch(new RegExp(`^inferops://[a-z0-9-]+\\.${LIVE.wikiWorkspaceSlug}/knowledge/document/`));
+    // A search hit of the page names it the same way. The stopgap connection is shared, and search
+    // needs the person's own sign-in, so there it is refused, and the hits' reference is the
+    // gatekeeper suite's (wiki.test.ts, over the mock).
+    const word = /[A-Za-z]{5,}/.exec(page.sections[0]!.body)?.[0];
+    if (word) {
+      const searched = await wiki.searchWiki(word, { limit: 50 }).catch((error: unknown) => {
+        if (String(error).includes("needs your own InferLab sign-in")) return null;
+        throw error;
+      });
+      if (searched === null) note("n. search not checked live: the stopgap connection is shared, and search needs your own sign-in.");
+      for (const hit of (searched ?? []).filter(h => h.documentId === page!.id)) expect(hit.ref).toBe(named);
+    }
+    // InferOps opens the reference and its alias as the same page, with the sections the gatekeeper shows.
+    const host = /^inferops:\/\/([^/]+)\//.exec(named)![1];
+    for (const ref of [named, `inferops://${host}/knowledge/page/${page.id}`]) {
+      const opened = await inferOps(`/knowledge/company/resolve?ref=${encodeURIComponent(ref)}`, undefined,
+        LIVE.wikiWorkspaceId) as { document: { id: string }; sections: Array<{ id: string }>; ref: string };
+      expect(opened.document.id).toBe(page.id);
+      expect(opened.ref).toBe(named);
+      expect(opened.sections.map(s => s.id)).toEqual(page.sections.map(s => s.id));
+    }
+  });
 });

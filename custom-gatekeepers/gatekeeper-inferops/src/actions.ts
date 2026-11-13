@@ -227,6 +227,13 @@ export type DotConfirmAction = ActionBase & {
   /** FAC-120: the InferOS run an approved workflow-run proposal started, for the receipt. */
   runId?: string;
   /**
+   * FAC-134 capability 2: the personal workflow an approved create proposal made, in the person's
+   * own operate session, and its reference, which the person hands their Dot to run it.
+   */
+  personalWorkflow?: { id: string; reference: string; expiresAt: string };
+  /** FAC-134 capability 3: the delegate an approved delegate proposal launched, in the person's own operate session. */
+  delegate?: { id: string };
+  /**
    * FAC-134: each run outcome the kernel reported for this action, once per run id (the kernel
    * delivers at least once, so a repeat changes nothing), and what InferOps answered recording it.
    */
@@ -238,7 +245,7 @@ export type DotReportedRun = {
   runId: string;
   outcome: "succeeded" | "failed" | "uncertain";
   reasonCode?: string;
-  ranAs: "gadget_bindings" | "service_account";
+  ranAs: "gadget_bindings" | "service_account" | "person";
   /** Whether the approval that started it was recorded as applied (the kernel's `actionApplied`). */
   actionApplied: boolean;
   /** InferOps recorded it on the proposal, or refused it there for good (another run, not handed off). */

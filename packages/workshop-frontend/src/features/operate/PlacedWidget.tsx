@@ -89,7 +89,8 @@ const BoardBody = ({ placement, target, sessionWorkspace, onFilters }: {
   placement: WidgetPlacement
   target: BuiltinWidgetPlacementRef
   sessionWorkspace: RpcStub<Overseer> | null
-  onFilters: (filters: Record<string, string>) => void
+  /** Absent on a canvas the person can't arrange: the filter is then shown as it was placed. */
+  onFilters?: (filters: Record<string, string>) => void
 }) => {
   if (!sessionWorkspace) return <p role="status" className="p-3 text-sm text-kumo-subtle">Opening your session…</p>
   const showCompleted = placement.filters[SHOW_COMPLETED] === 'true'
@@ -98,8 +99,8 @@ const BoardBody = ({ placement, target, sessionWorkspace, onFilters }: {
     params: { workflow: 'software', showCompleted },
   }
   return <div className="flex min-h-0 flex-1 flex-col gap-2 p-2">
-    <Checkbox label="Show completed" checked={showCompleted}
-      onCheckedChange={(checked) => onFilters({ ...placement.filters, [SHOW_COMPLETED]: checked === true ? 'true' : 'false' })} />
+    {onFilters && <Checkbox label="Show completed" checked={showCompleted}
+      onCheckedChange={(checked) => onFilters({ ...placement.filters, [SHOW_COMPLETED]: checked === true ? 'true' : 'false' })} />}
     <div className="min-h-0 flex-1 overflow-auto">
       <CanvasBoardWidget widget={widget} overseer={sessionWorkspace} presentation="full"
         unboundAction={retry => <BoardConnectPrompt scope={sessionWorkspace} targetRef={target.target} onConnected={retry} />} />
@@ -112,24 +113,30 @@ const placementTitle = (placement: WidgetPlacement) => placement.ref.type === 'b
   ? `Board ${placement.ref.target.split('/').pop()}`
   : placement.ref.blueprintId
 
+/** The controls of a placement the person can arrange: move, resize, filter and remove it. */
+export type PlacementEdit = {
+  busy: boolean
+  canChange: (change: LayoutChange) => boolean
+  onChange: (change: LayoutChange) => void
+  onFilters: (filters: Record<string, string>) => void
+  onRemove: () => void
+}
+
 /**
- * One placement on the person's canvas: its widget, and the controls that move and resize it in
- * whole grid cells (by keyboard, touch or mouse; a control the grid or another placement would
- * refuse is disabled) and remove it.
+ * One placement on a canvas: its widget and, when `edit` is given (the person's own canvas), the
+ * controls that move and resize it in whole grid cells (by keyboard, touch or mouse; a control the
+ * grid or another placement would refuse is disabled) and remove it. Without `edit` (a temporary
+ * canvas, FAC-137) it is shown as placed, with nothing to arrange.
  */
-export const PlacedWidget = ({ placement, api, viewer, session, sessionWorkspace, busy, focused, canChange, onChange, onFilters, onRemove }: {
+export const PlacedWidget = ({ placement, api, viewer, session, sessionWorkspace, focused, edit }: {
   placement: WidgetPlacement
   api: RpcStub<AuthenticatedApi> | undefined
   viewer: object | null
   session: RpcStub<OperateSession>
   sessionWorkspace: RpcStub<Overseer> | null
-  busy: boolean
   /** The placement a deep link names. */
   focused: boolean
-  canChange: (change: LayoutChange) => boolean
-  onChange: (change: LayoutChange) => void
-  onFilters: (filters: Record<string, string>) => void
-  onRemove: () => void
+  edit?: PlacementEdit
 }) => {
   const title = placementTitle(placement)
   const height = placement.layout.h * CANVAS_ROW_PX - 96
@@ -139,19 +146,19 @@ export const PlacedWidget = ({ placement, api, viewer, session, sessionWorkspace
       style={{ minHeight: placement.layout.h * CANVAS_ROW_PX }}>
       <header className="flex flex-wrap items-center gap-1 border-b border-kumo-line px-3 py-1.5">
         <h3 className="m-0 min-w-0 flex-1 truncate text-sm font-medium text-kumo-default">{title}</h3>
-        <div role="toolbar" aria-label={`Arrange ${title}`} className="flex flex-wrap items-center gap-0.5">
+        {edit && <div role="toolbar" aria-label={`Arrange ${title}`} className="flex flex-wrap items-center gap-0.5">
           {CHANGES.map(({ change, label, icon }) => (
             <Button key={change} size="sm" variant="ghost" shape="square" aria-label={label} title={label}
-              disabled={busy || !canChange(change)} onClick={() => onChange(change)}>{icon}</Button>
+              disabled={edit.busy || !edit.canChange(change)} onClick={() => edit.onChange(change)}>{icon}</Button>
           ))}
           <Button size="sm" variant="ghost" shape="square" aria-label="Remove from canvas" title="Remove from canvas"
-            disabled={busy} onClick={onRemove}><TrashIcon size={14} aria-hidden /></Button>
-        </div>
+            disabled={edit.busy} onClick={edit.onRemove}><TrashIcon size={14} aria-hidden /></Button>
+        </div>}
       </header>
       {placement.ref.type === 'console-widget'
         ? <ConsoleWidgetBody api={api} viewer={viewer} session={session} placementId={placement.placementId}
             target={placement.ref} height={Math.max(height, 120)} />
-        : <BoardBody placement={placement} target={placement.ref} sessionWorkspace={sessionWorkspace} onFilters={onFilters} />}
+        : <BoardBody placement={placement} target={placement.ref} sessionWorkspace={sessionWorkspace} onFilters={edit?.onFilters} />}
     </article>
   )
 }

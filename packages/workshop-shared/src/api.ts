@@ -43,6 +43,7 @@ import type { AgentViewOverlay } from "./agent-widgets.js";
 import type { WidgetPlacementInput, WidgetPlacements } from "./widget-placements.js";
 import type { TemporaryCanvas } from "./temporary-canvas.js";
 import type { PersonalWorkflow } from "./personal-workflow.js";
+import type { DelegateSummary } from "./delegate.js";
 import type {
   ArtifactChange, ArtifactDigest, ArtifactKind, ArtifactManifest, ArtifactModelRequirement,
   ArtifactPin, ArtifactPublishResult, ArtifactQualification, ArtifactRef, ArtifactRefusal,
@@ -585,6 +586,15 @@ export interface OperateSession extends RpcTarget {
    * (`Overseer.listPersonalWorkflows`): each created by their own approval, not yet expired.
    */
   listPersonalWorkflows(): Promise<PersonalWorkflow[]>;
+
+  /**
+   * This person's delegates (FAC-134 capability 3, ADR 0020), in their own operate session workspace
+   * (`Overseer.listDelegates`): each launched by their own approval, newest first.
+   */
+  listDelegates(): Promise<DelegateSummary[]>;
+
+  /** Stops one of this person's running delegates (`Overseer.stopDelegate`). */
+  stopDelegate(delegateId: string): Promise<void>;
 
   /** Up to `limit` (at most 200) log entries after `afterSeq`, oldest first, for replay and audit. */
   listEvents(afterSeq: number, limit: number): Promise<OperateEventRecord[]>;
@@ -2967,6 +2977,17 @@ export interface Overseer extends RpcTarget {
    * nothing here creates, runs or changes one.
    */
   listPersonalWorkflows(): Promise<PersonalWorkflow[]>;
+  /**
+   * The caller's delegates (FAC-134 capability 3, ADR 0020, delegate.ts), newest first: only in their
+   * own live operate session workspace, and an empty list anywhere else. Each was launched by the
+   * caller's own approval; this reads its state, outcome and ceiling, never what its chat said.
+   */
+  listDelegates(): Promise<DelegateSummary[]>;
+  /**
+   * Stops one of the caller's own running delegates: it ends `failed`, reason `cancelled`, and its
+   * turn is cancelled. Refused anywhere but their own live operate session, and for anyone else's.
+   */
+  stopDelegate(delegateId: string): Promise<void>;
   /** One of the caller's temporary canvases; refused with `TEMPORARY_CANVAS_EXPIRED` past its expiry, else `TEMPORARY_CANVAS_NOT_FOUND`. */
   getTemporaryCanvas(id: string): Promise<TemporaryCanvas>;
   /**

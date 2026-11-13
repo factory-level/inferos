@@ -32,6 +32,17 @@ export function governedResourceOf(ref: string): GovernedResource | null {
   return parseTicketsQueueRef(ref) ? "tickets/queue" : null;
 }
 
+/**
+ * The workflows a board widget can show, matching InferOps' own (`content`, `software`, `service`;
+ * the gatekeeper's `Workflow`). A board card shows the columns of one of them. It is a presentation
+ * filter only and authorizes nothing. `service` is the residential-service ladder (Enquiry, Quoted,
+ * Booked, …; FAC-146).
+ */
+export const CANVAS_BOARD_WORKFLOWS = ["software", "content", "service"] as const;
+
+/** One of {@link CANVAS_BOARD_WORKFLOWS}. */
+export type CanvasBoardWorkflow = (typeof CANVAS_BOARD_WORKFLOWS)[number];
+
 /** Registered, renderer-owned project board. A target reference never grants resource access. */
 export interface CanvasProjectBoardWidget {
   /** Stable instance ID, unique across this definition. */
@@ -48,8 +59,8 @@ export interface CanvasProjectBoardWidget {
   size: "normal" | "wide" | "full";
   /** Presentation filters, never authorization constraints. */
   params: {
-    /** Workflow whose cards are displayed. */
-    workflow: "software" | "content";
+    /** Workflow whose cards are displayed: one of {@link CANVAS_BOARD_WORKFLOWS}. */
+    workflow: CanvasBoardWorkflow;
     /** Whether completed/cancelled cards remain visible. */
     showCompleted: boolean;
   };
@@ -178,6 +189,20 @@ export const CANVAS_WIKI_REF = /^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/kn
 
 /** Wiki page slug syntax accepted in an `inferops.wiki` widget's `page` parameter: URL-unreserved characters only. */
 export const CANVAS_WIKI_PAGE = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,199}$/;
+
+/**
+ * A page reference an `inferops.wiki` widget's `page` parameter may hold instead of a slug (FAC-68):
+ * `inferops://<host>/knowledge/document/<slug>` (a `/` in the slug carried as %2F) or the alias
+ * `…/knowledge/page/<uuid>`, as a Dot citation or a search hit names it. Its host must be the
+ * widget's own Wiki's; it opens that page, read with the widget's binding, and grants nothing.
+ */
+export const isCanvasWikiPageRef = (page: string, targetRef: string): boolean => {
+  const match = /^inferops:\/\/([A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\/knowledge\/(document|page)\/([^/?#]+)$/.exec(page);
+  if (!match || match[1] !== /^inferops:\/\/([^/]+)\//.exec(targetRef)?.[1]) return false;
+  if (match[2] === "page") return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(match[3]!);
+  if (/%(?!2[fF])/.test(match[3]!) || match[3]!.length > 600) return false;
+  return match[3]!.replace(/%2[fF]/g, "/").split("/").every(segment => CANVAS_WIKI_PAGE.test(segment) && segment !== "." && segment !== "..");
+};
 
 /** Ordered group of widgets with a curated responsive column count. */
 export interface CanvasSection {
@@ -311,7 +336,8 @@ function widget(value: unknown, options: CanvasReadOptions = {}): CanvasWidget {
     if (!CANVAS_WIKI_REF.test(w.targetRef)) return invalid("target reference");
     const dataBinding = parseDataBinding(w.dataBinding, "knowledge/wiki", w.targetRef);
     const params = record(w.params, ["page"], "widget parameters");
-    if (params.page !== null && (typeof params.page !== "string" || !CANVAS_WIKI_PAGE.test(params.page))) return invalid("wiki page");
+    if (params.page !== null && (typeof params.page !== "string" ||
+        !(CANVAS_WIKI_PAGE.test(params.page) || isCanvasWikiPageRef(params.page, w.targetRef)))) return invalid("wiki page");
     return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, dataBinding, size: w.size, params: { page: params.page } };
   }
   if (w.kind === "inferos.governed-table") {
@@ -325,10 +351,10 @@ function widget(value: unknown, options: CanvasReadOptions = {}): CanvasWidget {
   if (!/^inferops:\/\/[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\/project\/board\/[A-Za-z0-9_-]+$/.test(w.targetRef)) return invalid("target reference");
   const dataBinding = parseDataBinding(w.dataBinding, "project/board", w.targetRef);
   const params = record(w.params, ["workflow", "showCompleted"], "widget parameters");
-  if (params.workflow !== "software" && params.workflow !== "content") return invalid("workflow");
+  if (!(CANVAS_BOARD_WORKFLOWS as readonly unknown[]).includes(params.workflow)) return invalid("workflow");
   if (typeof params.showCompleted !== "boolean") return invalid("completed filter");
   return { id: id(w.id), kind: w.kind, version: w.version, targetRef: w.targetRef, dataBinding, size: w.size,
-    params: { workflow: params.workflow, showCompleted: params.showCompleted } };
+    params: { workflow: params.workflow as CanvasBoardWorkflow, showCompleted: params.showCompleted } };
 }
 
 function parseDataBinding(value: unknown, resource: CanvasDataBinding["resource"], ref: string): CanvasDataBinding {

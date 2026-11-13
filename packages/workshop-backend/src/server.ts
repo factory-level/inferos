@@ -8,6 +8,7 @@ import {
 import type { AgentViewOverlay } from "@gadgets/workshop-shared/agent-widgets";
 import type { TemporaryCanvas } from "@gadgets/workshop-shared/temporary-canvas";
 import type { PersonalWorkflow } from "@gadgets/workshop-shared/personal-workflow";
+import type { DelegateSummary } from "@gadgets/workshop-shared/delegate";
 import { canvasPageEffects } from "@gadgets/workshop-shared/canvas-model";
 import { parseReadRunSelectors } from "@gadgets/workshop-shared/operate-read-run";
 import type { OperateReadRun } from "@gadgets/workshop-shared/api";
@@ -1130,6 +1131,18 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   async listPersonalWorkflows(): Promise<PersonalWorkflow[]> {
     using workspace = await this.openWorkspace();
     return await workspace.listPersonalWorkflows();
+  }
+
+  /** FAC-134 capability 3: delegates live in the session's own workspace, like personal workflows. */
+  async listDelegates(): Promise<DelegateSummary[]> {
+    using workspace = await this.openWorkspace();
+    return await workspace.listDelegates();
+  }
+
+  /** Stops one of the person's own running delegates, in the session's own workspace. */
+  async stopDelegate(delegateId: string): Promise<void> {
+    using workspace = await this.openWorkspace();
+    await workspace.stopDelegate(delegateId);
   }
 
   async getTemporaryCanvas(id: string): Promise<TemporaryCanvas> {

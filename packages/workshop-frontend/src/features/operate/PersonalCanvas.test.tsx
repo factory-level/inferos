@@ -17,11 +17,12 @@ import type { LayoutChange } from './personalCanvas'
 
 vi.mock('./PlacedWidget', () => ({
   CANVAS_ROW_PX: 80,
-  PlacedWidget: ({ placement, canChange, onChange, onRemove }: {
-    placement: WidgetPlacement; canChange: (change: LayoutChange) => boolean; onChange: (change: LayoutChange) => void; onRemove: () => void
+  PlacedWidget: ({ placement, edit }: {
+    placement: WidgetPlacement
+    edit: { canChange: (change: LayoutChange) => boolean; onChange: (change: LayoutChange) => void; onRemove: () => void }
   }) => <article aria-label={`Placed ${placement.placementId}`}>
-    <button type="button" disabled={!canChange('right')} onClick={() => onChange('right')}>Move right</button>
-    <button type="button" onClick={onRemove}>Remove</button>
+    <button type="button" disabled={!edit.canChange('right')} onClick={() => edit.onChange('right')}>Move right</button>
+    <button type="button" onClick={edit.onRemove}>Remove</button>
   </article>,
 }))
 vi.mock('./WidgetFinder', () => ({

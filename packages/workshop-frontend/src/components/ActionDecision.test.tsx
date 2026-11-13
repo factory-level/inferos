@@ -13,8 +13,8 @@ import { ACTION_FAILURE_KINDS } from '@gadgets/workshop-shared/gatekeeper'
 import { GATEKEEPER_RECONNECT_REFUSED, type ConnectFlowStart } from '@gadgets/workshop-shared/api'
 import { RUN_DEFINITION_CHANGED } from '@gadgets/workshop-shared/action-outcome'
 import {
-  ACTION_FAILURE_KIND_TEXT, BLOCKED_UNKNOWN_TEXT, RECONNECT_GUIDANCE, RECONNECT_PROMPT, blockedText, contextText, decisionOf,
-  type ActionEntry,
+  ACTION_FAILURE_KIND_TEXT, BLOCKED_UNKNOWN_TEXT, RECONNECT_GUIDANCE, RECONNECT_PROMPT, SETTLE_QUESTION, SETTLE_WARNING,
+  blockedText, contextText, decisionOf, isSettleableRunWrite, type ActionEntry,
 } from '../actionDecision'
 import { ActionDecision } from './ActionDecision'
 import { ActionReceiptLine } from './ActionReceipt'
@@ -125,6 +125,12 @@ describe('where a decision came from (FAC-119 K2)', () => {
 
   // FAC-14: the operate agent's request applies on the connection's own account once approved, so
   // every decider is told whose request it is, by name, and the person themselves is told it is theirs.
+  it("names a step of a person's approved personal workflow as theirs, not the agent's (FAC-134)", () => {
+    const step = run({ kind: 'agent-turn', onBehalfOf: { profileId: 'ada', name: 'Ada Lovelace' }, personalWorkflowStep: { runId: 'r1', index: 1 } })
+    expect(contextText(step, 'someone-else')).toBe("Step 2 of Ada Lovelace's approved personal workflow")
+    expect(contextText(step, 'ada')).toBe('Step 2 of your approved personal workflow')
+  })
+
   it("names the person an operate-agent request is for, or says it is the viewer's own", () => {
     const forAda = run({ kind: 'agent-turn', onBehalfOf: { profileId: 'ada', name: 'Ada Lovelace' } })
     expect(contextText(forAda, 'ben')).toBe('Requested by the operate agent for Ada Lovelace')
@@ -164,5 +170,80 @@ describe('Reconnect (FAC-119 K2)', () => {
     await act(async () => root.render(<ActionDecision entry={signIn()} />))
     expect(reconnectButton()).toBeUndefined()
     expect(container.textContent).toContain(RECONNECT_GUIDANCE)
+  })
+})
+
+// FAC-117 K2: a person deciding a workflow run's write whose outcome is unknown says whether it
+// happened. Offered only where the surface passes onSettle, only for such a write, and never shown
+// as applied before the journal says so.
+describe('settling a run write whose outcome is unknown', () => {
+  const runContext = { kind: 'workflow-run', hookId: 4, assigned: false, runId: 'run-1' } as const
+  const unknown = (patch: Partial<ActionEntry> = {}) =>
+    entry({ context: runContext, lastAttempt: attempt({ outcome: 'unknown', kind: 'unavailable', retryable: false }), ...patch })
+  const buttonNamed = (name: string) => [...container.querySelectorAll('button')].find(b => b.textContent === name)
+  const renderWith = async (shown: ActionEntry, onSettle?: (answer: 'applied' | 'not-applied') => Promise<void>) => {
+    await act(async () => root.render(<ActionDecision entry={shown} onSettle={onSettle} />))
+  }
+
+  it('is offered only for a pending run write whose last attempt is unknown', () => {
+    expect(isSettleableRunWrite(unknown())).toBe(true)
+    for (const [why, shown] of [
+      ['not a run write', unknown({ context: undefined })],
+      ['not unknown', unknown({ lastAttempt: attempt({ outcome: 'notApplied', kind: 'policy' }) })],
+      ['an apply in flight', unknown({ applying: true })],
+      ['already decided', unknown({ state: 'failed' })],
+      ['already settled', unknown({ settled: { outcome: 'applied', by: { type: 'user', id: 'ada', name: 'Ada' }, at: new Date(0) } })],
+    ] as const) {
+      expect({ why, settleable: isSettleableRunWrite(shown) }).toEqual({ why, settleable: false })
+    }
+  })
+
+  it('offers no settling where the surface passes none, or for any other write', async () => {
+    await renderWith(unknown())
+    expect(container.textContent).not.toContain(SETTLE_QUESTION)
+    expect(container.textContent).toContain('check it at the service, then deny it.')
+    await renderWith(unknown({ context: undefined }), async () => {})
+    expect(container.textContent).not.toContain(SETTLE_QUESTION)
+  })
+
+  it('asks, warns that only the answer is recorded, confirms, and shows nothing applied until the journal does', async () => {
+    let finish!: () => void
+    const onSettle = vi.fn<(answer: 'applied' | 'not-applied') => Promise<void>>(() => new Promise<void>(resolve => { finish = resolve }))
+    await renderWith(unknown(), onSettle)
+    expect(container.textContent).toContain(SETTLE_QUESTION)
+    expect(container.textContent).toContain(SETTLE_WARNING)
+    expect(container.textContent).toContain('then say below whether it happened.')
+    await act(async () => { buttonNamed('It happened')!.click() })
+    // Nothing is sent before the person confirms.
+    expect(onSettle).not.toHaveBeenCalled()
+    await act(async () => { buttonNamed('Record it')!.click() })
+    expect(onSettle).toHaveBeenCalledWith('applied')
+    expect(buttonNamed('Recording…')!.disabled).toBe(true)
+    await act(async () => { finish() })
+    // The answer was sent; until the journal changes, the entry still reads as unknown and nothing
+    // claims it was settled or applied.
+    expect(container.textContent).toContain('Outcome unknown: it may or may not have applied')
+    expect(container.textContent).not.toContain('said this change happened')
+    expect(buttonNamed('Recording…')!.disabled).toBe(true)
+    // Once the journal has it, the entry reads as settled, by whom, and that nothing was sent again.
+    await renderWith(unknown({
+      state: 'approved', settled: { outcome: 'applied', by: { type: 'user', id: 'ada', name: 'Ada' }, at: new Date(0) },
+    }), onSettle)
+    expect(container.textContent).toContain('Ada said this change happened; nothing was sent again.')
+    expect(container.textContent).not.toContain(SETTLE_QUESTION)
+  })
+
+  it("shows a refusal in the server's words, and Back leaves without sending", async () => {
+    const onSettle = vi.fn<(answer: 'applied' | 'not-applied') => Promise<void>>(async () => {
+      throw new Error("Only a workflow run's write whose outcome is unknown can be settled.")
+    })
+    await renderWith(unknown(), onSettle)
+    await act(async () => { buttonNamed("It didn't happen")!.click() })
+    await act(async () => { buttonNamed('Back')!.click() })
+    expect(onSettle).not.toHaveBeenCalled()
+    await act(async () => { buttonNamed("It didn't happen")!.click() })
+    await act(async () => { buttonNamed('Record it')!.click() })
+    expect(onSettle).toHaveBeenCalledWith('not-applied')
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Only a workflow run's write whose outcome is unknown can be settled.")
   })
 })

@@ -2,7 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import type { RpcStub } from 'capnweb'
 import type { Overseer } from '@gadgets/workshop-shared/api'
 import type { ActionOutcome } from '@gadgets/workshop-shared/action-outcome'
-import type { RequestedRun, TriggerControl, WorkflowRunOutcome } from '@gadgets/workshop-shared/workflow-definition'
+import {
+  WORKFLOW_RUN_RETRY_REFUSED, WORKFLOW_RUN_RETRY_WINDOW_MS,
+  type RequestedRun, type TriggerControl, type WorkflowRunOutcome,
+} from '@gadgets/workshop-shared/workflow-definition'
 import { WorkshopButton } from '../../components/WorkshopControls'
 import { bindingsNeededText } from './duplicateText'
 
@@ -45,8 +48,20 @@ const timeOf = (at: Date) => at.toLocaleTimeString([], { hour: '2-digit', minute
 const newestRun = (overseer: RpcStub<Overseer>, hookId: number): Promise<RequestedRun | null> =>
   Promise.resolve().then(() => overseer.listRequestedRuns(hookId)).then(runs => runs[0] ?? null, () => null)
 
-const errorText = (err: unknown) =>
-  err instanceof Error && err.message ? err.message.replace(/^(?:\w*Error: )?/, '') : "Couldn't run this."
+const errorText = (err: unknown, fallback = "Couldn't run this.") =>
+  err instanceof Error && err.message ? err.message.replace(/^(?:\w*Error: )?/, '') : fallback
+
+/**
+ * Why the newest run can't be retried, from what the run itself says (FAC-117 K2), in the kernel's
+ * own words; null when only the server can tell (a repin, the trigger's state, the person's access),
+ * so the press asks it and a refusal is shown as it answers.
+ */
+export const retryBlockedText = (run: RequestedRun, now: number): string | null => {
+  if (run.reason === 'cancelled') return WORKFLOW_RUN_RETRY_REFUSED.cancelled
+  if (run.reason === 'attempts-exhausted') return WORKFLOW_RUN_RETRY_REFUSED.exhausted
+  if (now - new Date(run.requestedAt).getTime() > WORKFLOW_RUN_RETRY_WINDOW_MS) return WORKFLOW_RUN_RETRY_REFUSED.tooOld
+  return null
+}
 
 /**
  * The workflow runs this person may ask for (Overseer.listTriggerControls): only the controls
@@ -62,6 +77,12 @@ const errorText = (err: unknown) =>
  * A control whose workflow can't run until its connections are set up (FAC-123) is disabled for its
  * owner, the one person shown that and able to set them up, with the reason in the words its runs
  * are refused with. Anyone else presses it and is refused in those same words by the server.
+ *
+ * A newest run that failed offers Retry (FAC-117 K2), only ever for this person's own runs, which
+ * are all `listRequestedRuns` returns: another attempt of the same run. It is disabled, with the
+ * kernel's sentence, when the run itself says it can't be (cancelled, out of attempts, too old);
+ * otherwise the server decides, and a refusal is shown in its words. An uncertain run offers none:
+ * its unknown write is settled first, by a person who decides it.
  */
 export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> }) => {
   const [controls, setControls] = useState<Pick<TriggerControl, 'hookId' | 'label'>[]>([])
@@ -87,6 +108,8 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
     live.current = overseer
     setNewest(new Map())
     setBlocked(new Map())
+    // A press or retry belongs to the workspace it was made in: none carries over to another.
+    setPressed(new Map())
     // A backend without controls, or any failure, shows none rather than breaking the page.
     Promise.resolve().then(() => overseer.listTriggerControls())
       .then(list => {
@@ -119,17 +142,39 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
     return () => clearTimeout(timer)
   }, [following, answered])
 
+  const retry = async (hookId: number, run: RequestedRun) => {
+    const asked = overseer
+    setPressed(prev => new Map(prev).set(hookId, { status: 'sending' }))
+    let next: Pressed
+    let queued: RequestedRun | undefined
+    try {
+      queued = await asked.retryWorkflowRun(run.invocationId)
+      next = { status: 'requested', outcome: 'running', at: new Date() }
+    } catch (err) {
+      next = { status: 'refused', message: errorText(err, "Couldn't retry this run.") }
+    }
+    // An answer for a workspace this page has left (or a remount) is dropped: it would land on
+    // another workspace's control with the same hook id.
+    if (live.current !== asked) return
+    if (queued) setNewest(prev => new Map(prev).set(hookId, queued!))
+    setPressed(prev => new Map(prev).set(hookId, next))
+    if (next.status === 'requested') readRuns(asked, hookId)
+  }
+
   const press = async (hookId: number) => {
+    const asked = overseer
     setPressed(prev => new Map(prev).set(hookId, { status: 'sending' }))
     let next: Pressed
     try {
-      await overseer.invokeTrigger(hookId)
+      await asked.invokeTrigger(hookId)
       next = { status: 'requested', outcome: 'running', at: new Date() }
     } catch (err) {
       next = { status: 'refused', message: errorText(err) }
     }
+    // As for a retry: an answer for a workspace this page has left is dropped.
+    if (live.current !== asked) return
     setPressed(prev => new Map(prev).set(hookId, next))
-    if (next.status === 'requested') readRuns(overseer, hookId)
+    if (next.status === 'requested') readRuns(asked, hookId)
   }
 
   if (controls.length === 0) return null
@@ -139,6 +184,7 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
         const state = pressed.get(control.hookId)
         const last = newest.get(control.hookId)
         const cannotRun = blocked.get(control.hookId)
+        const retryBlocked = last?.outcome === 'failed' ? retryBlockedText(last, Date.now()) : null
         return (
           <div key={control.hookId} className="flex items-center gap-2">
             <WorkshopButton disabled={state?.status === 'sending' || cannotRun !== undefined}
@@ -158,6 +204,16 @@ export const WorkflowRunControls = ({ overseer }: { overseer: RpcStub<Overseer> 
               <span role="status" className="text-[12px] leading-4 text-kumo-subtle">
                 {RUN_REQUESTED_TEXT} (requested at {timeOf(state.at)})
               </span>
+            )}
+            {last?.outcome === 'failed' && (
+              <WorkshopButton aria-label={`Retry the last run of ${control.label}`}
+                disabled={state?.status === 'sending' || retryBlocked !== null}
+                onClick={() => retry(control.hookId, last)}>
+                Retry
+              </WorkshopButton>
+            )}
+            {retryBlocked && (
+              <span role="status" className="text-[12px] leading-4 text-kumo-subtle">{retryBlocked}</span>
             )}
             {state?.status === 'refused' && (
               <span role="alert" className="text-[12px] leading-4 text-kumo-danger">{state.message}</span>

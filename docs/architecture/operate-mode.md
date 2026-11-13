@@ -12,8 +12,14 @@ covers:
   - packages/workshop-shared/src/personal-workflow.test.ts
   - packages/workshop-backend/src/personal-workflow-store.ts
   - packages/workshop-backend/__tests__/personal-workflows.test.ts
+  - packages/workshop-shared/src/delegate.ts
+  - packages/workshop-shared/src/delegate.test.ts
+  - packages/workshop-backend/src/delegate-store.ts
+  - packages/workshop-backend/__tests__/delegates.test.ts
   - packages/workshop-backend/__tests__/temporary-canvases.test.ts
   - packages/workshop-backend/__tests__/approved-temporary-canvas.test.ts
+  - packages/workshop-frontend/src/features/operate/TemporaryCanvases.tsx
+  - packages/workshop-frontend/src/features/operate/TemporaryCanvases.test.tsx
   - packages/workshop-backend/__tests__/console-widget-events.test.ts
   - packages/workshop-backend/__tests__/workflow-dynamic-definitions.test.ts
   - packages/workshop-backend/__tests__/workflow-definition-expiry-alarm.test.ts
@@ -963,7 +969,7 @@ FAC-14 K2 (proposed design: inferops `docs/human/architecture/workspaces-and-can
 - **A deadline after submission.** The call's deadline races every await, the transition included. When it passes after the gatekeeper submitted, the agent is told the call timed out while the pending request stands; asking again is refused by the gatekeeper's pending-duplicate guard on that issue, so no second request is made, and the first is decided as usual.
 - **Result.** The answer is framed as untrusted: `{requested: true, decision: "pending"}`, or `{requested: false}` when the issue is already in that state; a refusal from the board (a stale revision, an unknown state) comes back as the tool's error, framed. The operate session marks the chat tainted before it asks, as for any console tool.
 - **The builder's binding (UI).** In console settings, each registered widget that declares commands lists them (`ConsoleCommandBindings`, under `ConsoleWidgetRegistry`): the commands are read from the install's commit (`readFilesAtCommit` of `tools.json`, parsed with `parseWidgetToolFile`), and each may be bound to one of this workspace's own InferOps board connections. The boards offered are the console's host board targets and any board reference the builder enters, each resolved only through this workspace (`getGatekeeperByResourceUrl`, then its creation spec: the `inferops` vendor and that same canonical board), so another workspace's connection is never offered. The bindings are saved with the draft (`ConsoleWidgetEntry.commands`) and checked again at publication, whose refusal the publish dialog shows in the server's words. Reading the commands and checking the boards each show a loading line and their own failure, never an empty list; with no board found, it says so; a person who may not edit sees that owners and editors bind commands.
-- **Who a request is for (UI).** `contextText` renders an `agent-turn` context's `onBehalfOf` as "Requested by the operate agent for <name>" ("for you" to that person), wherever a decision is shown (`ActionDecision`: Activity's rows, collapsed or not, the operate session's approvals and chat) and on the notification dropdown beside Approve, where it is also part of Approve's and Deny's accessible description.
+- **Who a request is for (UI).** `contextText` renders an `agent-turn` context's `onBehalfOf` as "Requested by the operate agent for <name>" ("for you" to that person), wherever a decision is shown (`ActionDecision`: Activity's rows, collapsed or not, the operate session's approvals and chat) and on the notification dropdown beside Approve, where it is also part of Approve's and Deny's accessible description. When the context also carries `personalWorkflowStep` (FAC-134 capability 2), it reads "Step <n> of <name>'s approved personal workflow" ("of your approved personal workflow" to that person) instead, since the request is the person's own approved workflow's, not the agent's.
 - **Not here (Option A).** A widget bringing its own connections, frozen at publication and used by a run-scoped worker, is a possible follow-up; today a command runs only on a connection the builder bound.
 - **Tests.** `workshop-backend/__tests__/console-commands.test.ts` runs W as a real `OverseerDurableObject` with fake user Durable Objects and a fake board facet: the frozen binding and the listing; one pending request with the `operateAgent` caller and nothing applied; no auto-approval under an enabled rule; the requesting person named in the action's context; the requester, with only `use`, refused when approving or rejecting their own request through the decision calls; one apply on approval and none on rejection; refusals, asking the board nothing, for an undeclared and an unbound command, a person without `use`, a page showing another console, forged callers, a person of a second company and a connection whose company can't be told, an input the template doesn't take, and a connection gone since publication; and publication refusing an undeclared command, a non-board connection and a connection not in the workspace, and offering nothing once a binding is dropped. `workshop-shared/src/widget-tools.test.ts` covers the declaration and the input check; `gatekeeper-inferops/__tests__/account.test.ts` covers `connectionCompany`.
 
@@ -1031,7 +1037,7 @@ FAC-134, capability 2 (the lead's decisions D1 (B), D2 (B) and D3, and r1's thre
   - **`personalWorkflow: {title, steps}`, to create one.** 1 to `PERSONAL_WORKFLOW_LIMITS.steps` (10) steps. Each is a console command's reference (`inferops://<company>.<workspace>/inferos/console-command/<workspace>/<console>/<widget>/<command>?revision="<n>"`) and the transition's input **without `expectedRevision`** (`personalWorkflowStepInputProblem`).
   - **`personalWorkflowRun: {reference, reportOutcome?}`, to run one.** The reference is `inferops://…/inferos/personal-workflow/<session workspace>/<id>`.
 
-  Submit checks the shape (`parsePersonalWorkflowDeclaration`, `parsePersonalWorkflowRef`) and appends the kernel's own last field:
+  Submit checks the shape (`parsePersonalWorkflowDeclaration`, `parsePersonalWorkflowRef`), refusing a title that isn't one line of plain text (`plainTitle`). That means no control or format character, line or paragraph separator, or lone surrogate (`isPlainLine`), and no blank space but single ASCII spaces: no run of spaces, no other whitespace, no filler such as U+3164. Only leading and trailing ASCII spaces are trimmed, and only after the check, so a forbidden character at either end is refused, not stripped. So the title can't add a line, or wrap onto one, in the kernel's voice. Then it appends the kernel's own last field:
   - **`PERSONAL_WORKFLOW_FIELD_LABEL`:** lists every step and its input, and says *the issue's revision is read when it runs* (`personalWorkflowFieldValue`).
   - **`PERSONAL_WORKFLOW_RUN_FIELD_LABEL`:** names the reference.
 
@@ -1076,9 +1082,64 @@ FAC-134, capability 2 (the lead's decisions D1 (B), D2 (B) and D3, and r1's thre
     - a run reference of another session;
     - the step sending the stored revision.
 - **Not covered:**
-  - **UI and gatekeeper:** the gatekeeper's actions for both markers, and the person's list of their workflows, are capability 2's next PR.
-  - **The decider's view:** `actionContextOf` gives the step's action an `agent-turn` context with `onBehalfOf` and `personalWorkflowStep: {runId, index}` (r1's LOW 3). Saying "a step of <person>'s approved personal workflow" in words is the UI's (#475).
+  - **UI and gatekeeper:** the gatekeeper's actions for both markers are in [InferOps gatekeeper](inferops-gatekeeper.md), and the person's list (`listPersonalWorkflows`, `PersonalWorkflows`) in [InferOps canvas](inferops-canvas.md).
+  - **The decider's view:** `actionContextOf` gives the step's action an `agent-turn` context with `onBehalfOf` and `personalWorkflowStep: {runId, index}` (r1's LOW 3). The UI words it as "Step <n> of <name>'s approved personal workflow" (`contextText`).
   - **Kept rows:** `personalWorkflowRuns` keeps the latest `PERSONAL_WORKFLOW_RUNS_KEPT` (100) ended runs.
+
+### Delegates
+
+FAC-134, capability 3 ([ADR 0020](https://github.com/factory-level/inferos/pull/485), proposed in inferos#485). A delegate is an agent chat in the person's own operate session, launched only by their own approval of an action that declared it. It has at most their authority at each moment, within a ceiling fixed at that approval.
+
+- **Declared** as `ActionDescription.delegate: {title, prompt, connections, tools?, reportOutcome?}`. It is one of the markers an action declares at most one of. Submit checks it with `parseDelegateDeclaration` (`workshop-shared/src/delegate.ts`):
+  - **the title:** one line of plain text (`plainTitle`), checked before anything is trimmed;
+  - **the prompt:** 1 to 4000 characters, with no format or control character except line breaks and tabs;
+  - **connections:** up to 8 gatekeeper vendor ids;
+  - **tools** (optional): up to 16, each in `DELEGATE_TOOLS`. That is `OPERATE_AGENT_TOOLS` without `requestConnection`, `operatePage`, `setWidgetView` and `proposePlacement`.
+
+  Anything else is refused, never flattened or narrowed. The kernel appends two reserved fields (r1 on #487):
+  - **`DELEGATE_FIELD_LABEL`**, whose value is `delegateFieldValue`: the ceiling's connection types and tools, and what any declared tool reaches beyond those connections (`DELEGATE_TOOL_REACH`: `callConsoleTool` asks for any command a console offers the person, each a request its builders decide; `webFetch` fetches public pages);
+  - **`DELEGATE_PROMPT_FIELD_LABEL`**: the Dot's prompt alone, as written. No line of it, wrapped or not, sits among the kernel's own words.
+
+   `autoApprovalRule` refuses the marker. **A delegate's own chat can't declare one:** submit refuses it (`DELEGATE_NO_RELAUNCH`) for an agent caller whose chat is a delegate, whichever gatekeeper it reaches.
+- **Launched** by `ApprovedEffects.launchDelegate()` (`#launchApprovedDelegate`). It is minted only for that marker and the person's own approval, memoised, and revoked after apply. It launches only:
+  - in the approver's own live operate session (`ownerProfileId`, not retired);
+  - never for an action a delegate's chat proposed (`record.caller`);
+  - once per action.
+
+  The ceiling is fixed then:
+  - **connections:** this session's connections of a declared type that an operate chat may use (not `excludeFromOperateChat`), named `<VENDOR>_<id>`;
+  - **tools:** the declared ones, or `DELEGATE_DEFAULT_TOOLS`.
+
+  The authorization generation is read before the awaits and checked again after them. The chat is created on the person's own account and model:
+  - its seed bindings are exactly the ceiling's connections;
+  - its first message is the prompt;
+  - `startAgent` is called with the owner as initiator.
+
+  The record goes in `delegates` (`delegate-store.ts`): its ceiling, the declared types, the generation, its state and outcome, never what its chat said.
+- **Checked on every call** (`assertDelegateMayCall`), in two places:
+  - **`startGatekeeperSession`**, for every binding call, before anything else: the target must be one of the ceiling's connections. No other connection the person holds, gadget, worktree or git is reachable (`DELEGATE_OUTSIDE_CEILING`).
+  - **Every tool call:** `agent.ts` offers a delegate's chat only its ceiling's tools (`delegateToolsFor`). That filter is the boundary. The `execute` wrapper checks the starter first on every call, and refusing a tool outside the ceiling there is defence in depth: no such tool reaches the turn, so that branch can't be tested apart from the filter (r1 on #487).
+
+  `#delegateRevoked` requires this to be the starter's live operate session (same owner, not retired), at the generation it was launched at. A grant, role or ownership change raises the generation, and a company switch retires the session. Either refuses the call and cancels the delegate: `failed`, `requester-revoked`, with its turn cancelled.
+- **Resuming re-verifies the starter.** `startAgent` asks `#delegateMayStart` before any turn of a delegate's chat. That covers a resume after an approval, after a restart, and for a delivered call. A revoked starter's turn never starts, the chat says why, and the delegate is cancelled.
+- **Outcome** (`settleDelegateAfterTurn`, from the turn's `finally`):
+  - **`failed`:** a turn that threw, with reason `cancelled` if it was cancelled, else `runtime-error`;
+  - **`succeeded`:** a turn that ended with nothing of the delegate's own pending (no action it proposed waiting, no call or resume due). That means its work ended, never that anything it asked for was made;
+  - **still running** otherwise, until those settle.
+
+  `stopDelegate` (the person's own only) ends it `failed`, `cancelled`. **Stopping leaves anything it already proposed** (an action waiting for approval) for the person to decide, as any pending action is. With `reportOutcome`, `reportDelegates` (from the alarm) hands `{kind: "delegate", runId, outcome, reason?, requestedBy, ranAs: "person"}` to the action's gatekeeper through `#handOnRunOutcome`'s rules, retried like a personal workflow run's. inferops#2653 takes that kind and `ranAs` only together.
+- **Read** with `Overseer.listDelegates` (`delegatesOf`): the person's own, in their own live session, as `DelegateSummary` (state, reason, declared connections, tools, chat). A use-role operator is denied both methods.
+- **Tests:**
+  - **`workshop-shared/src/delegate.test.ts`:** the declaration's fields and refusals (titles, prompts, connections, tools); the default tools; the field's words with a forged prompt.
+  - **`workshop-backend/__tests__/delegates.test.ts`**, a real operate session DO with a faux model:
+    - **Submit:** the field and reserved label; refusals; never auto-approved; a delegate's chat refused.
+    - **Launch:** the ceiling (its own InferOps connections; not another type, not an excluded one), seed bindings, prompt and initiator; once per action. Nothing for an automatic approval, another approver, a retired session or a delegate's own action.
+    - **Per call:** only ceiling connections, through `startGatekeeperSession` too; cancelled after a generation bump, another owner or a retired session.
+    - **Start:** no turn for a revoked starter.
+    - **Tools:** in a scripted turn, only the ceiling's tools are offered, and a call after a generation bump is refused and cancels it.
+    - **Outcome:** succeeded, runtime-error, still running while its action waits; reported once as the person's delegate run; listed and stopped only by its starter.
+- **Gatekeeper and UI:** the gatekeeper's action is in [InferOps gatekeeper](inferops-gatekeeper.md) ("Delegate proposals"), and the person's list and **Stop** (`Delegates`) in [InferOps canvas](inferops-canvas.md).
+- **Not covered:** A delegate's own console commands still place pending requests for the console's builders, as the person's would.
 
 ### Agent widget verbs
 
@@ -1100,7 +1161,7 @@ FAC-137 (K1): a person's temporary canvases, each a set of widget placements in 
 
 - **Where.** The `temporaryCanvases` collection of an Overseer, reached only through `OverseerImpl.temporaryCanvasesOf(userId)`: the workspace must be an operate session (`operateSession`), not retired by a company change (`operateSessionRetired`), and owned by `userId`. Anything else is `TEMPORARY_CANVASES_UNAVAILABLE`, naming nothing. So a canvas is per person and per company: a company change retires the session workspace (FAC-88), and its canvases with it, as for the rest of the person's presentation state.
 - **Reading and keeping.** `Overseer.listTemporaryCanvases`, `getTemporaryCanvas`, `saveTemporaryCanvas(id, expectedRevision)` and `removeTemporaryCanvas(id, expectedRevision)`: `OverseerClientInterface` answers for its own client user, `OperateOverseerInterface` forwards after its retired check, and `UseOverseerInterface` denies. `OperateSession` forwards each to the session's own workspace (`openWorkspace`). Each unsaved canvas carries the `expiresAt` the server set. A stale revision is `TEMPORARY_CANVAS_CONFLICT`.
-- **Creating.** `OverseerImpl.createTemporaryCanvasFor(userId, input)`, from input checked by `parseTemporaryCanvasInput`: a title (1 to 120 characters) and 1 to 64 placements, each checked as a personal placement is, with ids the kernel mints. Nothing in it names a workspace, console or company. No client or agent can call it; it is the path a person's own approval of their Dot's proposal takes (below). At most `TEMPORARY_CANVAS_LIMITS.canvases` (16) per session; creating sweeps first, so expired ones don't count.
+- **Creating.** `OverseerImpl.createTemporaryCanvasFor(userId, input)`, from input checked by `parseTemporaryCanvasInput`: a title (1 to 120 characters, one line of plain text with single ASCII spaces by `plainTitle`, checked before only ASCII spaces are trimmed, so it can't add a line to the kernel's field, FAC-134) and 1 to 64 placements, each checked as a personal placement is, with ids the kernel mints. Nothing in it names a workspace, console or company. No client or agent can call it; it is the path a person's own approval of their Dot's proposal takes (below). At most `TEMPORARY_CANVAS_LIMITS.canvases` (16) per session; creating sweeps first, so expired ones don't count.
 - **Expiry.** `expiresAt` is set when the canvas is created, from `OPERATE_TEMPORARY_CANVAS_TTL_HOURS` (whole hours from 1 to 720; unset is 24, a *proposed* default; anything else refuses to create rather than pick a duration). Saving removes it. Every read and write takes the clock inside one transaction: before `expiresAt` a save keeps the canvas; at or after it, a save or read is `TEMPORARY_CANVAS_EXPIRED`, swept or not, and `list` leaves it out. After the sweep it is `TEMPORARY_CANVAS_NOT_FOUND`.
 - **Cleanup.** `#sweepTemporary` runs `TemporaryCanvasStore.sweepExpired` beside the definitions' sweep, each in its own `try`. It deletes only expired, unsaved canvas records: no saved canvas, no other record of the workspace, nothing elsewhere. A canvas holds references, so no record it shows is touched, and no run started from one of its widgets is stopped: such a run is its widget's own workspace's run and names no canvas. `#updateAlarm` wakes for `nextExpiry`; the store calls `onChange` after every create, save and remove.
 - **No shared configuration.** None of these asks for `build` or `publish` (`requireSharedConfiguration`), and none writes a console, canvas page or the widget index: a temporary canvas is the person's own, not shared configuration ([Shared configuration](#shared-configuration)).
@@ -1120,7 +1181,15 @@ FAC-137 (K1): a person's temporary canvases, each a set of widget placements in 
   - **At submit** the kernel checks it (`parseTemporaryCanvasInput`, stored as checked), refuses an action that declares a run too, and appends its own last field, `TEMPORARY_CANVAS_FIELD_LABEL` ("<title> (<n> widgets)"). That label is reserved with the run's, folded the same way (`isReservedFieldLabel`). `ActionContext.declaredCanvas` (title and widget count, kind `declared-canvas` when nothing else is the origin) comes from the kernel's own record only.
   - **Never automatic.** `autoApprovalRule` approves no declared canvas.
   - **The effect.** `ApprovedEffects.createTemporaryCanvas()` is handed to `applyAction` only for a person's own approval (never an automatic one, an agent's or the system's, nor an assigned run's write) and revoked when it returns. `#createApprovedTemporaryCanvas` then: requires this workspace to be the approver's own live operate session (`temporaryCanvasesOf`; anyone else, or a retired session, is `TEMPORARY_CANVAS_NOT_YOURS`); checks every widget again as offered to them now, a console widget by its own workspace's `listWidgetInstancesFor` and a built-in kind by their own widget search, refusing the whole canvas if one isn't (`TEMPORARY_CANVAS_WIDGET_UNAVAILABLE`); and creates it, with the server's expiry. Idempotent per action, for the same approver in the same live session only (r2's HIGH): the record (`fac137:approvedCanvas:<action>`, `ApprovedCanvasRecord`) holds the canvas with the approver and session it was created for. A repeat, or a retry of the apply, first passes `temporaryCanvasesOf` again (the owner, a live session, not retired), then gets the stored canvas only if the record names that approver and session; anyone else, or a retired session, is `TEMPORARY_CANVAS_NOT_YOURS` and is never handed the stored canvas's id. It takes no arguments, so nothing at apply names another canvas. The stored answer also needs the canvas to still be there (r2's second HIGH): if the person has since removed it, or it expired, a retry is refused with `TEMPORARY_CANVAS_GONE` ("expired or removed"), is never reported as created, and creates nothing.
-- **Not built here.** The InferOps gatekeeper staging a Dot proposal as such an action (G1), and the UI (U1). Widget state is not yet keyed to a placement on a temporary canvas: `#widgetStateKey` knows only the person's personal canvas placements.
+- **The UI (U1).** `workshop-frontend/src/features/operate/TemporaryCanvases.tsx`, on the person's own canvas page ("My canvas") under their personal canvas, as **From your Dot**:
+  - It lists their temporary canvases through the session's own `listTemporaryCanvases`. Each has its title and widget count. An unsaved one shows "Temporary · expires <time> unless saved", with the server's `expiresAt` in a `<time>`; a saved one shows **Saved**.
+  - **Open** reads the canvas again (`getTemporaryCanvas`) and shows its placements on the same 12-column grid as the personal canvas. Each is a `PlacedWidget` with no `edit` controls, so nothing on it can be moved, resized, filtered or removed, and each widget opens through its own checked path, as on the personal canvas.
+  - **Save** (`saveTemporaryCanvas` at the revision it read) and **Remove…**, which asks for confirmation (`removeTemporaryCanvas`), are the person's own actions. The agent has none.
+  - **Expiry while it is shown:** once a canvas's `expiresAt` passes, it reads **Expired** with `TEMPORARY_CANVAS_EXPIRED`, closes, and offers no Open, Save or Remove, as the server then refuses them.
+  - **Refusals are said plainly and the list is read again:** `TEMPORARY_CANVAS_EXPIRED` (the save-vs-expiry race), `TEMPORARY_CANVAS_CONFLICT` and `TEMPORARY_CANVAS_NOT_FOUND`.
+  - **Its states are drawn:** loading, empty ("Ask your Dot to compose one"), error with **Try again**, and `TEMPORARY_CANVASES_UNAVAILABLE` (not the person's own session).
+  - **Tests:** `TemporaryCanvases.test.tsx`, plus `PlacedWidget.test.tsx` (no arrange or filter controls without `edit`).
+- **Not built yet.** Widget state is not keyed to a placement on a temporary canvas: `#widgetStateKey` knows only the person's personal canvas placements. A temporary canvas's own layout can't be changed: the kernel offers no RPC for it.
 
 ### Shared configuration
 
@@ -1333,7 +1402,10 @@ A workflow definition is the reusable description of a workflow (FAC-107, [workf
     - **A failed run is now `uncertain` only while a write of it is:** one unknown (`action-unknown`), or one still waiting or applying (`lost-after-write`). Once every write is decided or settled it reads `failed` with its own reason. It then gets its history expiry (FAC-125), stops holding its definition, and may be retried if it has attempts left.
     - The kernel doesn't infer "did it land?". For an InferOps write, the person can see it on the board (the expected revision moved); an optional gatekeeper probe is a follow-up.
   - **Terminal reasons (the addition).** `isLiveWorkflowDelivery` and the retention index treat a `failed` result, `cancelled`, `timed-out` and `attempts-exhausted` included, as terminal, as they did before. A cancelled run still running (it ends at its next guarded call) stays live.
-  - **Not here (the UI):** the retry and settle controls in the Build UI.
+  - **The UI (FAC-117's closing PR).**
+    - **Retry:** `WorkflowRunControls`, on the use and build pages, offers **Retry** beside the caller's own newest requested run when it failed. Those are the only runs `listRequestedRuns` returns, so another person's run never offers it. It is disabled, with the kernel's own sentence (`WORKFLOW_RUN_RETRY_REFUSED`), when the run itself says it can't be retried: cancelled, out of attempts, or admitted more than `WORKFLOW_RUN_RETRY_WINDOW_MS` ago. Otherwise `retryWorkflowRun` decides, and a refusal is shown in the server's words. An uncertain run offers no Retry.
+    - **Settle:** on Activity's pending requests (the decision presentation in [InferOps canvas](inferops-canvas.md)).
+    - **Lifecycle:** `WorkflowTriggersPanel` says a draining trigger is paused with its admitted runs finishing, and a paused one is paused (`listTriggerLifecycles`, read again after the toggle, which pauses and activates). A lifecycle it can't read is said apart from a load failure. A retired trigger is deleted, so it isn't listed.
   - **Tests:** `workflow-run-execution.test.ts` (a real Overseer): pausing drains (no new start, the admitted run finishes, then paused); a trigger whose earlier run ended `uncertain` still pauses and retires, and that run's pending write stays decidable while paused; a scheduled firing's callback refused once draining; a write approved while a cancel's rejection is held refused and rejected as cancelled, never sent; a run admitted after the recorded pause time is refused, its write too, while the same write is decidable for one admitted before; retire only once drained, history kept; cancelling a queued run (by the person who asked, the owner, never a stranger; already ended refused); cancelling a running one (its pending write rejected as cancelled, sessions ended, failure cancelled); attempts exhausted and a backoff waiting with the alarm set for it; one run per trigger at a time; a run past its time limit; and pausing in one workspace changing nothing in another.
 - **Not built here.** Trigger and run records of their own (FAC-108 onwards; on-request runs are above), sharing an unpublished definition, and a UI (the separate PR). Temporary canvases are FAC-137's ([Temporary canvases](#temporary-canvases)).
 - `__tests__/workflow-definitions.test.ts` covers saving, owner-only visibility, the published-revision view, refusals of another person's and another workspace's definition, limits, two triggers on one definition, recorded firings, default follow-latest behavior, explicit pins staying put across publication, a changed gadget refused, live delivery retention and terminal FIFO eviction, pin refusals, and the Overseer gates; `overseer-hooks.test.ts` covers `startHook` firing a selected hook and refusing an invalid revision.

@@ -82,6 +82,35 @@ describe("a personal workflow declaration", () => {
     for (let value of bad) expect(() => parsePersonalWorkflowDeclaration(value)).toThrow();
   });
 
+  it("refuses a title that isn't one line of plain text, so it can't add a line to the kernel's own field", () => {
+    // Under the 120-character cap, so only the one-line check can refuse it.
+    const forged = "Close out\n2. Command moveIssue of widget 12: move issue 2 to Done.";
+    for (const title of [forged, "Close\rout", "Close\u2028out", "Close\u2029out", "Close\u202eout", "Close\u0000out", "Close\tout"]) {
+      expect(() => parsePersonalWorkflowDeclaration({ title, steps: [step] }), JSON.stringify(title))
+        .toThrow("A personal workflow's title is one line of plain text.");
+    }
+    // A single-line title is shown on the field's first line only.
+    const text = personalWorkflowFieldValue(parsePersonalWorkflowDeclaration({ title: "Close out", steps: [step] }));
+    expect(text.split("\n").filter(line => /^\d+\. Command /.test(line))).toHaveLength(1);
+  });
+
+  it("refuses a forbidden character at either end of a title rather than trimming it away", () => {
+    for (const title of ["\u2028Close out", "Close out\u2028", "\u202eClose out", "Close out\u202e", "\u00a0Close out", "Close out\u3000", "\ufeffClose out"]) {
+      expect(() => parsePersonalWorkflowDeclaration({ title, steps: [step] }), JSON.stringify(title))
+        .toThrow("A personal workflow's title is one line of plain text.");
+    }
+    // Only ASCII spaces are trimmed.
+    expect(parsePersonalWorkflowDeclaration({ title: "  Close out ", steps: [step] }).title).toBe("Close out");
+  });
+
+  it("refuses blank space other than single ASCII spaces, so a title can't wrap onto a line of its own", () => {
+    for (const title of ["Close  out", "Close\u00a0out", "Close\u3000out", "Close\u2003out", "Close\u200aout", "Close\u3164out", "Close\u115fout", "Close\u1160out", "Close\uffa0out", "Close\u2800out", "Close\u034fout"]) {
+      expect(() => parsePersonalWorkflowDeclaration({ title, steps: [step] }), JSON.stringify(title))
+        .toThrow("A personal workflow's title is one line of plain text.");
+    }
+    expect(parsePersonalWorkflowDeclaration({ title: "Close out the week", steps: [step] }).title).toBe("Close out the week");
+  });
+
   it("is shown in the kernel's own words: every step and its input, and that the revision is read when it runs", () => {
     let text = personalWorkflowFieldValue(parsePersonalWorkflowDeclaration({ title: "Close out", steps: [step, step] }));
     expect(text).toContain('"Close out", 2 steps:');
