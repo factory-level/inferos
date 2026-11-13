@@ -68,15 +68,16 @@ node scripts/proof/recovery-rehearsal.ts --worktree "$PWD/.worktrees/<name>" --r
 5. **Skew 1, InferOS older.** It approves the move, restores only state A, and approves again. The replay is refused, and the issue's revision moved once.
 6. **Skew 2, InferOS newer.** It restores database A with state B. `pnpm local verify` reads the board, and the issue rows still equal pair A's.
 
-**Refusals.** It won't run, and touches nothing, when any of the following holds. Every check but the last runs before any command that could touch a database or start a stack: until they pass, only `pnpm local status`, `pnpm local inferops status` and `git status` run.
+**Refusals.** It won't run, and touches nothing, when any of the following holds. Every check runs before any command that could touch a database or start a stack. Until they pass, only `pnpm local status`, `pnpm local inferops status`, `git status` and the two identity reads below run.
 - the target is the main checkout, or not directly under `.worktrees/`;
 - the target has uncommitted changes or untracked files (`git status --porcelain`; ignored state such as `.wrangler/` and `.inferops/` doesn't count);
 - the target's stack or backend is already running;
 - the shell holds a cloud, deploy or model-provider credential;
 - the target's `.env`, `.dev.vars` or `.env.worktree` sets one (read through a symlink: a `pnpm wt` worktree's `.env` points at the main checkout's, so give the rehearsal a worktree without that link). The refusal names the file and the variable, never its value;
 - the Postgres admin URL (`INFEROPS_PG_ADMIN_URL`, else `postgres://postgres:postgres@localhost:5432/postgres`) has a host other than localhost, or a `host=` or `hostaddr=` query parameter in any case, which libpq would use instead of the URL's host;
-- the database isn't the backend's own `inferos_<port>` that this run started. This is known only once `inferops up` reports it, so it is checked straight after `up`, before anything reads or writes the database.
+- the server behind the admin URL isn't the local Compose Postgres. Its `system_identifier` is read read-only over the admin URL and must equal the one read inside the Compose container itself (`docker exec inferops-postgres-1`, or `REHEARSAL_PG_CONTAINER`). A localhost tunnel or proxy to another server is refused, and so is an identifier that can't be read on either side, or a missing container. Start the inferops Compose Postgres first;
+- the database isn't this checkout's own `inferos_<port>`. The port comes from the checkout's own port rules (the shell, then `.env.worktree`), never from what `inferops up` reports. Straight after `up`, the database it reports must be that one before anything reads or writes it.
 
 **When it ends.** It always stops the stack and the backend it started, and the report records whether both stopped. It drops no database: the backend's database is left restored to the rehearsal's last state, which the next `pnpm local inferops up` reuses. Archives are deleted after a passing run, and kept for a failing one.
 
-`scripts/proof/recovery-rehearsal.test.ts` covers each refusal offline. It also runs `rehearse` with a spy on every command, which shows that a refusal runs only the guards' reads, and never `up`, `start`, `stop`, `seed`, `pg_dump`, `psql` or `pg_restore`.
+`scripts/proof/recovery-rehearsal.test.ts` covers each refusal offline. It also runs `rehearse` with a spy on every command, which shows that a refusal runs only the guards' reads (and, for a server refusal, the identity reads), and never `up`, `start`, `stop`, `seed`, `pg_dump`, `psql` or `pg_restore`.

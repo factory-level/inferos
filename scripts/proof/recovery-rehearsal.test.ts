@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { adminUrlRefusal, databaseRefusal, envFileVariables, manifestDifferences, rehearsalRefusal, rehearse, stateManifest, type RehearsalIo, type RunResult, type TargetFacts } from "./recovery-rehearsal.ts";
+import { adminUrlRefusal, databaseRefusal, envFileVariables, manifestDifferences, expectedDatabase, rehearsalRefusal, rehearse, serverRefusal, stateManifest, type RehearsalIo, type RunResult, type TargetFacts } from "./recovery-rehearsal.ts";
 import { isLocalStackUrl, summarize } from "./rehearsal-summary.ts";
 
 const ROOT = "/repo/inferOS";
@@ -126,9 +126,19 @@ function worktree(): { repoRoot: string; target: string } {
 }
 
 /** An io whose commands are recorded and answered from `answers` (by command line), otherwise idle and clean. */
-function spyIo(over: { env?: Record<string, string>; answers?: Record<string, Partial<RunResult>> } = {}) {
+const COMPOSE_ID = "7666333140302553138";
+
+type SpyOver = {
+  env?: Record<string, string>; answers?: Record<string, Partial<RunResult>>;
+  server?: string | null; compose?: string | null; worktreeEnv?: string;
+};
+
+function spyIo(over: SpyOver = {}) {
   const commands: string[] = [];
+  /** The identity reads, in order: the only database contact allowed before the guards pass. */
+  const identities: string[] = [];
   const { repoRoot, target } = worktree();
+  if (over.worktreeEnv !== undefined) writeFileSync(join(target, ".env.worktree"), over.worktreeEnv);
   const answers: Record<string, Partial<RunResult>> = {
     "pnpm -s local status --json": { stdout: '{"stack":"not-running"}' },
     "pnpm -s local inferops status --json": { stdout: '{"backend":"not-running"}' },
@@ -145,11 +155,16 @@ function spyIo(over: { env?: Record<string, string>; answers?: Record<string, Pa
     },
     spawnDetached: argv => { commands.push(argv.join(" ")); },
     wait: async () => {},
+    serverIdentity: () => { identities.push("server"); return over.server === undefined ? COMPOSE_ID : over.server; },
+    composeIdentity: () => { identities.push("compose"); return over.compose === undefined ? COMPOSE_ID : over.compose; },
   };
-  return { io, commands };
+  return { io, commands, identities };
 }
 
-const refusals: [string, Parameters<typeof spyIo>[0], RegExp][] = [
+const refusals: [string, SpyOver, RegExp][] = [
+  ["a localhost tunnel to another server (another system_identifier)", { server: "7399112233445566778" }, /not the local Compose Postgres/],
+  ["a server whose identity can't be read", { server: null }, /could not be read over the admin URL/],
+  ["no Compose Postgres container to compare with", { compose: null }, /container running/],
   ["an untracked file", { answers: { "git status --porcelain": { stdout: "?? notes.txt\n" } } }, /untracked files/],
   ["a git status that fails", { answers: { "git status --porcelain": { code: 128 } } }, /git status failed/],
   ["a non-local Postgres admin URL", { env: { INFEROPS_PG_ADMIN_URL: "postgres://u:pw@db.example.com/postgres" } }, /only against localhost/],
@@ -184,4 +199,42 @@ test("a backend that reports any database but its own inferos_<port> is refused 
   const after = commands.slice(commands.indexOf("pnpm -s local inferops up --json") + 1);
   assert.deepEqual(after.filter(c => /local start|seed|pg_dump|pg_restore|psql|tar /.test(c)), [], after.join("\n"));
   assert.ok(after.includes("pnpm -s local inferops down"), "it stops the backend it started");
+});
+
+test("the server must be the local Compose Postgres, by system_identifier, read on both sides", () => {
+  assert.equal(serverRefusal(COMPOSE_ID, COMPOSE_ID), null);
+  assert.match(serverRefusal("7399112233445566778", COMPOSE_ID)!, /tunnel or proxy/);
+  assert.match(serverRefusal(null, COMPOSE_ID)!, /could not be read/);
+  assert.match(serverRefusal(COMPOSE_ID, null)!, /container running/);
+});
+
+test("a refusal before connecting never reads the server: no identity query on a non-local or overridden URL", async () => {
+  for (const url of ["postgres://u:pw@db.example.com/postgres", "postgres://postgres:postgres@localhost/postgres?host=db.example.com"]) {
+    const { io, identities } = spyIo({ env: { INFEROPS_PG_ADMIN_URL: url } });
+    await rehearse(io);
+    assert.deepEqual(identities, [], url);
+  }
+});
+
+test("the expected database is the checkout's own inferos_<port>, from its port rules, never what up reports", async () => {
+  const { target } = worktree();
+  assert.equal(expectedDatabase(target, {}), "inferos_8787");
+  writeFileSync(join(target, ".env.worktree"), "VITE_BACKEND_HOST=localhost:8850\n");
+  assert.equal(expectedDatabase(target, {}), "inferos_8850");
+  assert.equal(expectedDatabase(target, { VITE_BACKEND_HOST: "localhost:8860" }), "inferos_8860", "the shell wins, as for the stack");
+
+  // up reports another stack's well-formed database: refused right after up, nothing reads or writes it.
+  const { io, commands } = spyIo({ worktreeEnv: "VITE_BACKEND_HOST=localhost:8850\n",
+    answers: { "pnpm -s local inferops up --json": { stdout: '{"ok":true,"database":"inferos_8860"}' } } });
+  const report = await rehearse(io);
+  assert.match(String(report.failure), /this run's backend uses inferos_8850/);
+  const after = commands.slice(commands.indexOf("pnpm -s local inferops up --json") + 1);
+  assert.deepEqual(after.filter(c => /local start|seed|pg_dump|pg_restore|psql|tar /.test(c)), [], after.join("\n"));
+});
+
+test("the identity check runs before up, and up before anything else that touches a database", async () => {
+  const { io, commands, identities } = spyIo({ answers: { "pnpm -s local inferops up --json": { code: 1, stdout: '{"ok":false}' } } });
+  await rehearse(io);
+  assert.deepEqual(identities, ["server", "compose"]);
+  assert.equal(commands.find(c => WRITES.test(c)), "pnpm -s local inferops up --json");
 });

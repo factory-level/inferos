@@ -13,10 +13,15 @@
 //   - a target whose stack or backend is already running (it must be this run's own);
 //   - a shell holding cloud, deploy or model-provider credentials (`forbiddenCredentials`);
 //   - a Postgres admin URL whose host isn't localhost, or that carries a `host=`/`hostaddr=` override;
-//   - any database but the backend's own `inferos_<port>` that this run started.
-// Every guard but the last runs before any command that could touch a database or start a stack:
-// before it, only `pnpm local status`, `pnpm local inferops status` and `git status` run. The last
-// needs the database `inferops up` reports, so it runs after `up` and before anything else
+//   - a Postgres server that isn't the local Compose Postgres: its `system_identifier`, read
+//     read-only over the admin URL, must equal the one read inside the Compose container itself
+//     (`docker exec`), so a localhost tunnel or proxy to another server is refused; an identifier
+//     that can't be read on either side, or a missing container, refuses too;
+//   - any database but the backend's own `inferos_<port>`, derived from this checkout's port rules
+//     (`resolveLocalStack` over the shell and `.env.worktree`), never from what `up` reports.
+// Every guard runs before any command that could touch a database or start a stack: before them,
+// only `pnpm local status`, `pnpm local inferops status`, `git status` and the two identity reads
+// run. After `up`, the database it reports must be the derived one before anything else runs
 // (`rehearse`, whose commands are injected so the tests show this with a spy).
 // In a `finally`, it always stops the stack and the backend it started, and the report says
 // whether they stopped. It drops no database: the backend's own is left restored to the rehearsal's
@@ -44,7 +49,9 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { forbiddenCredentials } from "../local/inferops.ts";
+import { backendDatabase, forbiddenCredentials } from "../local/inferops.ts";
+import { resolveLocalStack } from "../local/stack.ts";
+import { withWorktreeEnv } from "../worktree-env.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 /** The acme operations workspace the stopgap bearer reaches (inferops seeds). */
@@ -144,6 +151,23 @@ export function adminUrlRefusal(adminUrl: string): string | null {
   return null;
 }
 
+/**
+ * Why the server behind the admin URL must not be touched, or null: its `system_identifier` must be
+ * read, and equal the local Compose Postgres container's own. A localhost URL alone proves nothing:
+ * a tunnel or proxy on localhost can reach any server.
+ */
+export function serverRefusal(server: string | null, compose: string | null): string | null {
+  if (compose === null) return "the local Compose Postgres's system_identifier could not be read (is its container running? start it with the inferops Compose project's postgres service); the rehearsal runs only against it";
+  if (server === null) return "the Postgres server's system_identifier could not be read over the admin URL; the rehearsal runs only against the local Compose Postgres";
+  if (server !== compose) return "the Postgres server behind the admin URL is not the local Compose Postgres (another system_identifier); a tunnel or proxy to another server is refused";
+  return null;
+}
+
+/** The database this checkout's backend uses: `inferos_<port>`, from the target's own port rules. */
+export function expectedDatabase(target: string, env: Record<string, string | undefined>): string {
+  return backendDatabase(resolveLocalStack(target, [], withWorktreeEnv(target, env as NodeJS.ProcessEnv)).port);
+}
+
 /** Why `adminUrl` or `database` must not be touched, or null: a local admin URL, and only `expected`. */
 export function databaseRefusal(adminUrl: string, database: string, expected: string): string | null {
   const admin = adminUrlRefusal(adminUrl);
@@ -193,6 +217,10 @@ export type RehearsalIo = {
   /** Starts `argv` in the target, detached, its output appended to `log`. */
   spawnDetached(argv: string[], log: string): void;
   wait(ms: number): Promise<void>;
+  /** The connected server's `system_identifier`, read-only over `adminUrl`, or null when unreadable. */
+  serverIdentity(adminUrl: string): string | null;
+  /** The local Compose Postgres container's own `system_identifier`, read inside it, or null. */
+  composeIdentity(): string | null;
 };
 
 /** The rehearsal: the guards, then the six steps, then stopping what it started. Returns the report. */
@@ -230,7 +258,7 @@ export async function rehearse(io: RehearsalIo): Promise<Record<string, unknown>
     // Guards, before anything starts: only reads run until they pass.
     const stack = json(["pnpm", "-s", "local", "status", "--json"]);
     const backend = json(["pnpm", "-s", "local", "inferops", "status", "--json"]);
-    const refusal = rehearsalRefusal(target, {
+    const facts: TargetFacts = {
       realPath: existsSync(target) ? realpathSync(target) : null,
       repoRoot: io.repoRoot,
       changes: target && existsSync(target) ? gitChanges(run(["git", "status", "--porcelain"])) : null,
@@ -242,10 +270,18 @@ export async function rehearse(io: RehearsalIo): Promise<Record<string, unknown>
         const path = join(target, file);
         return [file, existsSync(path) ? readFileSync(path, "utf8") : null];
       })),
-    });
+    };
+    const refusal = rehearsalRefusal(target, facts);
     report.worktree = target;
     if (refusal) record(`guards: ${refusal}`, false);
-    record("guards: dedicated clean worktree, nothing running, no credentials, a local Postgres", true);
+    // The database this run may touch, from the checkout's own port rules (never what `up` reports).
+    const expected = expectedDatabase(target, env);
+    const named = databaseRefusal(facts.adminUrl, expected, expected);
+    if (named) record(`guards: ${named}`, false);
+    // The server, identified: connected read-only, before anything that writes.
+    const server = serverRefusal(io.serverIdentity(facts.adminUrl), io.composeIdentity());
+    if (server) record(`guards: ${server}`, false);
+    record("guards: dedicated clean worktree, nothing running, no credentials, the local Compose Postgres", true);
     const head = run(["git", "rev-parse", "HEAD"]).stdout.trim();
     const stateDir = join(target, ".wrangler", "state");
     report.inferosRevision = head;
@@ -257,8 +293,8 @@ export async function rehearse(io: RehearsalIo): Promise<Record<string, unknown>
     const database = String(up.report?.database);
     report.inferopsRevision = up.report?.revision;
     report.database = database;
-    const admin = env.INFEROPS_PG_ADMIN_URL || DEFAULT_PG_ADMIN_URL;
-    const dbRefusal = databaseRefusal(admin, database, String(up.report?.database));
+    const admin = facts.adminUrl;
+    const dbRefusal = databaseRefusal(admin, database, expected);
     if (dbRefusal) record(`guards: ${dbRefusal}`, false);
     const dbUrl = (() => { const u = new URL(admin); u.pathname = `/${database}`; u.search = "sslmode=disable"; return u; })();
     const pgEnv = { PGPASSWORD: decodeURIComponent(dbUrl.password) };
@@ -405,6 +441,17 @@ export async function rehearse(io: RehearsalIo): Promise<Record<string, unknown>
   return report;
 }
 
+/** The read-only query naming a Postgres cluster: its `system_identifier`, fixed at initdb. */
+const IDENTITY_SQL = "SELECT system_identifier FROM pg_control_system()";
+/** The inferops Compose project's Postgres container (`docker compose -p inferops`, service `postgres`). */
+const COMPOSE_PG_CONTAINER = "inferops-postgres-1";
+
+/** A `system_identifier` from a successful read, or null: anything else is never taken as one. */
+function identity(status: number | null, stdout: string | null): string | null {
+  const id = (stdout ?? "").trim();
+  return status === 0 && /^\d{6,24}$/.test(id) ? id : null;
+}
+
 /** `git status --porcelain`'s output, trimmed, or null when git failed (a failure is never "clean"). */
 function gitChanges(r: RunResult): string | null {
   return r.code === 0 ? r.stdout.trim() : null;
@@ -431,6 +478,18 @@ async function main(): Promise<number> {
       spawn(argv[0]!, argv.slice(1), { cwd: target, env, stdio: ["ignore", log, log], detached: true }).unref();
     },
     wait: ms => new Promise(ok => setTimeout(ok, ms)),
+    serverIdentity: adminUrl => {
+      const url = new URL(adminUrl);
+      const r = spawnSync("psql", ["-h", url.hostname, "-p", url.port || "5432", "-U", decodeURIComponent(url.username), "-d", url.pathname.slice(1) || "postgres",
+        "-At", "-c", IDENTITY_SQL], { env: { PATH: env.PATH, HOME: env.HOME, PGPASSWORD: decodeURIComponent(url.password), PGCONNECT_TIMEOUT: "5" }, encoding: "utf8" });
+      return identity(r.status, r.stdout);
+    },
+    composeIdentity: () => {
+      const container = env.REHEARSAL_PG_CONTAINER || COMPOSE_PG_CONTAINER;
+      const r = spawnSync("docker", ["exec", container, "psql", "-U", "postgres", "-At", "-c", IDENTITY_SQL],
+        { env: { PATH: env.PATH, HOME: env.HOME }, encoding: "utf8" });
+      return identity(r.status, r.stdout);
+    },
   });
   writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
   console.log(JSON.stringify(report, null, 2));
