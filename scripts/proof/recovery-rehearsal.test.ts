@@ -2,17 +2,17 @@
 // refusal, so each test shows what it refuses and the one case that passes. Offline: nothing here
 // starts a stack, a backend or a database.
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { databaseRefusal, envFileVariables, manifestDifferences, rehearsalRefusal, stateManifest, type TargetFacts } from "./recovery-rehearsal.ts";
+import { adminUrlRefusal, databaseRefusal, envFileVariables, manifestDifferences, rehearsalRefusal, rehearse, stateManifest, type RehearsalIo, type RunResult, type TargetFacts } from "./recovery-rehearsal.ts";
 import { isLocalStackUrl, summarize } from "./rehearsal-summary.ts";
 
 const ROOT = "/repo/inferOS";
 const TARGET = `${ROOT}/.worktrees/rehearsal`;
 const facts = (overrides: Partial<TargetFacts> = {}): TargetFacts => ({
-  realPath: TARGET, repoRoot: ROOT, trackedChanges: "", stack: "not-running", backend: "not-running",
+  realPath: TARGET, repoRoot: ROOT, changes: "", adminUrl: "postgres://postgres:postgres@localhost:5432/postgres", stack: "not-running", backend: "not-running",
   env: { PATH: "/usr/bin", HOME: "/home/x" }, envFiles: { ".env": null, ".dev.vars": null, ".env.worktree": null }, ...overrides,
 });
 
@@ -30,9 +30,22 @@ test("the main checkout, a path outside .worktrees/, a nested path, a relative o
   assert.match(rehearsalRefusal(TARGET, facts({ realPath: null }))!, /does not exist/);
 });
 
-test("uncommitted changes, or a git that fails, are refused", () => {
-  assert.match(rehearsalRefusal(TARGET, facts({ trackedChanges: " M scripts/local/stack.ts" }))!, /uncommitted changes/);
-  assert.match(rehearsalRefusal(TARGET, facts({ trackedChanges: null }))!, /git status failed/);
+test("uncommitted changes, an untracked file, or a git that fails, are refused", () => {
+  assert.match(rehearsalRefusal(TARGET, facts({ changes: " M scripts/local/stack.ts" }))!, /uncommitted changes/);
+  assert.match(rehearsalRefusal(TARGET, facts({ changes: "?? scripts/local/new-step.ts" }))!, /untracked files/);
+  assert.match(rehearsalRefusal(TARGET, facts({ changes: null }))!, /git status failed/);
+});
+
+test("a Postgres admin URL that isn't localhost, or that overrides its host with host= or hostaddr=, is refused before anything starts", () => {
+  const local = "postgres://postgres:postgres@localhost:5432/postgres";
+  assert.equal(adminUrlRefusal(`${local}?sslmode=disable`), null);
+  assert.match(rehearsalRefusal(TARGET, facts({ adminUrl: "postgres://u:pw@db.example.com/postgres" }))!, /only against localhost/);
+  for (const query of ["?host=db.example.com", "?sslmode=disable&host=/cloudsql/p:r:i", "?HOST=10.0.0.5", "?hostaddr=10.0.0.5"]) {
+    const refusal = rehearsalRefusal(TARGET, facts({ adminUrl: `${local}${query}` }))!;
+    assert.match(refusal, /would override localhost/, query);
+    assert.doesNotMatch(refusal, /postgres:postgres/, "never the URL, which may hold a password");
+  }
+  assert.match(adminUrlRefusal("not a url")!, /does not parse/);
 });
 
 test("a stack or a backend already running, or anyone else's on the port, is refused", () => {
@@ -98,4 +111,77 @@ test("a credential set in the target's .env, .dev.vars or .env.worktree is refus
   const harmless = "VITE_PORT=9150\nBACKEND_PORT=9151\nANTHROPIC_API_KEY=\n# ANTHROPIC_API_KEY=sk-ant-x\n";
   assert.equal(rehearsalRefusal(TARGET, facts({ envFiles: { ".env": harmless, ".dev.vars": null, ".env.worktree": harmless } })), null);
   assert.deepEqual(envFileVariables("export A=1\nB = 'two'\n#C=3\n"), { A: "1", B: "two" });
+});
+
+// rehearse() with a spy for every command: a refusal runs only the guards' reads.
+const READS = ["pnpm -s local status --json", "pnpm -s local inferops status --json", "git status --porcelain"];
+const WRITES = /inferops up|local start|local stop|inferops down|local seed|local reset|pg_dump|pg_restore|psql|tar |rehearsal-operator/;
+
+/** A real, empty worktree directory under a fake repository root, so the path guards pass. */
+function worktree(): { repoRoot: string; target: string } {
+  const repoRoot = realpathSync(mkdtempSync(join(tmpdir(), "rehearsal-repo-")));
+  const target = join(repoRoot, ".worktrees", "rehearsal");
+  mkdirSync(target, { recursive: true });
+  return { repoRoot, target };
+}
+
+/** An io whose commands are recorded and answered from `answers` (by command line), otherwise idle and clean. */
+function spyIo(over: { env?: Record<string, string>; answers?: Record<string, Partial<RunResult>> } = {}) {
+  const commands: string[] = [];
+  const { repoRoot, target } = worktree();
+  const answers: Record<string, Partial<RunResult>> = {
+    "pnpm -s local status --json": { stdout: '{"stack":"not-running"}' },
+    "pnpm -s local inferops status --json": { stdout: '{"backend":"not-running"}' },
+    "git status --porcelain": { stdout: "" },
+    ...over.answers,
+  };
+  const io: RehearsalIo = {
+    target, repoRoot, work: mkdtempSync(join(tmpdir(), "rehearsal-work-")),
+    env: { PATH: "/usr/bin", HOME: "/home/x", ...over.env },
+    run: argv => {
+      const line = argv.join(" ");
+      commands.push(line);
+      return { code: 0, stdout: "", stderr: "", ...answers[line] };
+    },
+    spawnDetached: argv => { commands.push(argv.join(" ")); },
+    wait: async () => {},
+  };
+  return { io, commands };
+}
+
+const refusals: [string, Parameters<typeof spyIo>[0], RegExp][] = [
+  ["an untracked file", { answers: { "git status --porcelain": { stdout: "?? notes.txt\n" } } }, /untracked files/],
+  ["a git status that fails", { answers: { "git status --porcelain": { code: 128 } } }, /git status failed/],
+  ["a non-local Postgres admin URL", { env: { INFEROPS_PG_ADMIN_URL: "postgres://u:pw@db.example.com/postgres" } }, /only against localhost/],
+  ["a host= override on a localhost URL", { env: { INFEROPS_PG_ADMIN_URL: "postgres://postgres:postgres@localhost/postgres?host=db.example.com" } }, /override localhost/],
+  ["a stack already running", { answers: { "pnpm -s local status --json": { stdout: '{"stack":"running"}' } } }, /stop it first/],
+  ["a credential in the shell", { env: { CLOUDFLARE_API_TOKEN: "tok" } }, /CLOUDFLARE_API_TOKEN/],
+];
+for (const [why, over, reason] of refusals) {
+  test(`${why}: refused, and no command but the guards' reads runs (no up, start, stop, seed, pg_dump, restore)`, async () => {
+    const { io, commands } = spyIo(over);
+    const report = await rehearse(io);
+    assert.equal(report.ok, false);
+    assert.match(String(report.failure), reason);
+    assert.deepEqual(commands.filter(c => !READS.includes(c)), [], commands.join("\n"));
+    assert.deepEqual((report.stopped as { startedStack: boolean; startedBackend: boolean }), { stack: "not started", backend: "not started", startedStack: false, startedBackend: false, bothStopped: true });
+  });
+}
+
+test("when the guards pass, the first command that could touch a database is inferops up, after every read", async () => {
+  const { io, commands } = spyIo({ answers: { "pnpm -s local inferops up --json": { code: 1, stdout: '{"ok":false}' } } });
+  const report = await rehearse(io);
+  assert.equal(report.ok, false);
+  const first = commands.findIndex(c => WRITES.test(c));
+  assert.equal(commands[first], "pnpm -s local inferops up --json");
+  for (const read of READS) assert.ok(commands.indexOf(read) < first, read);
+});
+
+test("a backend that reports any database but its own inferos_<port> is refused right after up: nothing reads or writes it", async () => {
+  const { io, commands } = spyIo({ answers: { "pnpm -s local inferops up --json": { stdout: '{"ok":true,"database":"inferlab"}' } } });
+  const report = await rehearse(io);
+  assert.match(String(report.failure), /only a backend's own/);
+  const after = commands.slice(commands.indexOf("pnpm -s local inferops up --json") + 1);
+  assert.deepEqual(after.filter(c => /local start|seed|pg_dump|pg_restore|psql|tar /.test(c)), [], after.join("\n"));
+  assert.ok(after.includes("pnpm -s local inferops down"), "it stops the backend it started");
 });

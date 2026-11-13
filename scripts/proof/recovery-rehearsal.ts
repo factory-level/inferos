@@ -9,11 +9,15 @@
 //
 // Local and disposable only. It refuses (`rehearsalRefusal`, each with a test):
 //   - a target that isn't a worktree under this repository's .worktrees/, or is the main checkout;
-//   - a target with uncommitted changes;
+//   - a target with uncommitted changes, untracked files included;
 //   - a target whose stack or backend is already running (it must be this run's own);
 //   - a shell holding cloud, deploy or model-provider credentials (`forbiddenCredentials`);
-//   - a Postgres host other than localhost, or any database but the backend's own `inferos_<port>`
-//     that this run started.
+//   - a Postgres admin URL whose host isn't localhost, or that carries a `host=`/`hostaddr=` override;
+//   - any database but the backend's own `inferos_<port>` that this run started.
+// Every guard but the last runs before any command that could touch a database or start a stack:
+// before it, only `pnpm local status`, `pnpm local inferops status` and `git status` run. The last
+// needs the database `inferops up` reports, so it runs after `up` and before anything else
+// (`rehearse`, whose commands are injected so the tests show this with a spy).
 // In a `finally`, it always stops the stack and the backend it started, and the report says
 // whether they stopped. It drops no database: the backend's own is left restored to the rehearsal's
 // last state, and the next `pnpm local inferops up` reuses it.
@@ -55,8 +59,10 @@ export type TargetFacts = {
   realPath: string | null;
   /** This repository's real root. */
   repoRoot: string;
-  /** `git status --porcelain --untracked-files=no` in the target, or null when git failed. */
-  trackedChanges: string | null;
+  /** `git status --porcelain` in the target, untracked files included, or null when git failed. */
+  changes: string | null;
+  /** The Postgres admin URL the rehearsal would use (`INFEROPS_PG_ADMIN_URL`, else the local default). */
+  adminUrl: string;
   /** `pnpm local status`'s `stack` value. */
   stack: string;
   /** `pnpm local inferops status`'s `backend` value. */
@@ -83,8 +89,10 @@ export function rehearsalRefusal(target: string, facts: TargetFacts): string | n
   if (!facts.realPath.startsWith(worktrees) || relative(worktrees, facts.realPath).includes(sep)) {
     return `${target} is not a worktree directly under ${worktrees} (make one with pnpm wt new)`;
   }
-  if (facts.trackedChanges === null) return `git status failed in ${target}`;
-  if (facts.trackedChanges !== "") return `${target} has uncommitted changes:\n${facts.trackedChanges}`;
+  if (facts.changes === null) return `git status failed in ${target}`;
+  if (facts.changes !== "") return `${target} has uncommitted changes or untracked files:\n${facts.changes}`;
+  const admin = adminUrlRefusal(facts.adminUrl);
+  if (admin) return admin;
   if (facts.stack !== "not-running") return `${target}'s stack is ${facts.stack}; stop it first, so the one this rehearsal stops is its own`;
   if (facts.backend !== "not-running") return `${target}'s InferOps backend is ${facts.backend}; run pnpm local inferops down first`;
   const credentials = forbiddenCredentials(facts.env as NodeJS.ProcessEnv);
@@ -118,15 +126,28 @@ export function envFileVariables(text: string): Record<string, string> {
   return out;
 }
 
-/** Why `adminUrl` or `database` must not be touched, or null: localhost, and only `expected`. */
-export function databaseRefusal(adminUrl: string, database: string, expected: string): string | null {
-  let host: string;
+/**
+ * Why the Postgres admin URL must not be used, or null: it parses, its host is localhost, and no
+ * `host=` or `hostaddr=` query parameter (which libpq honours over the URL's host) overrides it.
+ * Names the host or the parameter, never the URL (it may hold a password).
+ */
+export function adminUrlRefusal(adminUrl: string): string | null {
+  let url: URL;
   try {
-    host = new URL(adminUrl).hostname;
+    url = new URL(adminUrl);
   } catch {
     return "the Postgres admin URL does not parse";
   }
-  if (!LOCAL_HOSTS.has(host)) return `the Postgres host is ${host}; the rehearsal runs only against localhost`;
+  if (!LOCAL_HOSTS.has(url.hostname)) return `the Postgres host is ${url.hostname}; the rehearsal runs only against localhost`;
+  const override = [...url.searchParams.keys()].find(key => /^host(?:addr)?$/i.test(key));
+  if (override) return `the Postgres admin URL sets ${override}=, which would override localhost; remove it`;
+  return null;
+}
+
+/** Why `adminUrl` or `database` must not be touched, or null: a local admin URL, and only `expected`. */
+export function databaseRefusal(adminUrl: string, database: string, expected: string): string | null {
+  const admin = adminUrlRefusal(adminUrl);
+  if (admin) return admin;
   if (!/^inferos_\d{1,5}$/.test(database)) return `refusing database ${database}: only a backend's own inferos_<port>`;
   if (database !== expected) return `refusing database ${database}: this run's backend uses ${expected}`;
   return null;
@@ -155,23 +176,33 @@ type Step = { step: string; ok: boolean; detail?: unknown };
 
 class RehearsalFailed extends Error {}
 
-async function main(): Promise<number> {
-  const { values } = parseArgs({ options: { worktree: { type: "string" }, report: { type: "string" } } });
-  const work = mkdtempSync(join(tmpdir(), "fac141-rehearsal-"));
-  const reportPath = values.report ?? join(work, "rehearsal-report.json");
-  mkdirSync(dirname(resolve(reportPath)), { recursive: true });
+/** A command's result. */
+export type RunResult = { code: number; stdout: string; stderr: string };
+
+/** Every command the rehearsal runs goes through this, injected so the tests can spy on it. */
+export type RehearsalIo = {
+  /** The `--worktree` argument. */
+  target: string;
+  env: Record<string, string | undefined>;
+  /** This repository's main checkout, real path. */
+  repoRoot: string;
+  /** A fresh directory for the archives and the stack logs. */
+  work: string;
+  /** Runs `argv` in the target and waits for it. */
+  run(argv: string[], opts?: { extraEnv?: Record<string, string> }): RunResult;
+  /** Starts `argv` in the target, detached, its output appended to `log`. */
+  spawnDetached(argv: string[], log: string): void;
+  wait(ms: number): Promise<void>;
+};
+
+/** The rehearsal: the guards, then the six steps, then stopping what it started. Returns the report. */
+export async function rehearse(io: RehearsalIo): Promise<Record<string, unknown>> {
+  const { target, env, work, run } = io;
   const steps: Step[] = [];
   const report: Record<string, unknown> = { proof: "recovery-rehearsal", startedAt: new Date().toISOString(), steps };
   let failure: string | null = null;
   let startedStack = false;
   let startedBackend = false;
-  const target = values.worktree ?? "";
-  const env = { ...process.env };
-
-  const run = (argv: string[], opts: { input?: string; extraEnv?: Record<string, string> } = {}) => {
-    const r = spawnSync(argv[0]!, argv.slice(1), { cwd: target, env: { ...env, ...opts.extraEnv }, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-    return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
-  };
   const json = (argv: string[]) => {
     const r = run(argv);
     try {
@@ -196,15 +227,14 @@ async function main(): Promise<number> {
   };
 
   try {
-    // Guards, before anything starts.
+    // Guards, before anything starts: only reads run until they pass.
     const stack = json(["pnpm", "-s", "local", "status", "--json"]);
     const backend = json(["pnpm", "-s", "local", "inferops", "status", "--json"]);
     const refusal = rehearsalRefusal(target, {
       realPath: existsSync(target) ? realpathSync(target) : null,
-      // The repository's main checkout, from git's common dir, so the guard holds whether this script
-      // runs from the main checkout or from another worktree.
-      repoRoot: repositoryRoot(),
-      trackedChanges: target && existsSync(target) ? run(["git", "status", "--porcelain", "--untracked-files=no"]).stdout.trim() : null,
+      repoRoot: io.repoRoot,
+      changes: target && existsSync(target) ? gitChanges(run(["git", "status", "--porcelain"])) : null,
+      adminUrl: env.INFEROPS_PG_ADMIN_URL || DEFAULT_PG_ADMIN_URL,
       stack: String(stack.report?.stack ?? "unknown"),
       backend: String(backend.report?.backend ?? "unknown"),
       env,
@@ -215,7 +245,7 @@ async function main(): Promise<number> {
     });
     report.worktree = target;
     if (refusal) record(`guards: ${refusal}`, false);
-    record("guards: dedicated clean worktree, nothing running, no credentials", true);
+    record("guards: dedicated clean worktree, nothing running, no credentials, a local Postgres", true);
     const head = run(["git", "rev-parse", "HEAD"]).stdout.trim();
     const stateDir = join(target, ".wrangler", "state");
     report.inferosRevision = head;
@@ -251,13 +281,10 @@ async function main(): Promise<number> {
     };
 
     const startStack = async () => {
-      const log = openSync(join(work, `stack-${steps.length}.log`), "a");
-      const child = spawn("pnpm", ["local", "start", "--inferops", "--stopgap", "--", "--no-ui-watchers"],
-        { cwd: target, env, stdio: ["ignore", log, log], detached: true });
-      child.unref();
+      io.spawnDetached(["pnpm", "local", "start", "--inferops", "--stopgap", "--", "--no-ui-watchers"], join(work, `stack-${steps.length}.log`));
       startedStack = true;
       for (let i = 0; i < 120; i++) {
-        await new Promise(ok => setTimeout(ok, 2_000));
+        await io.wait(2_000);
         const s = json(["pnpm", "-s", "local", "status", "--json"]);
         if (s.report?.stack === "running" && s.report?.ok === true) return;
       }
@@ -372,12 +399,42 @@ async function main(): Promise<number> {
     report.ok = failure === null;
     report.failure = failure;
     report.archives = work;
-    writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
-    console.log(JSON.stringify(report, null, 2));
     // The archives are copies of seeded local data; keep them only for a failing run's inspection.
     if (failure === null) for (const name of readdirSync(work)) if (/\.(dump|tgz)$/.test(name)) rmSync(join(work, name));
   }
-  return failure === null ? 0 : 1;
+  return report;
+}
+
+/** `git status --porcelain`'s output, trimmed, or null when git failed (a failure is never "clean"). */
+function gitChanges(r: RunResult): string | null {
+  return r.code === 0 ? r.stdout.trim() : null;
+}
+
+async function main(): Promise<number> {
+  const { values } = parseArgs({ options: { worktree: { type: "string" }, report: { type: "string" } } });
+  const work = mkdtempSync(join(tmpdir(), "fac141-rehearsal-"));
+  const reportPath = values.report ?? join(work, "rehearsal-report.json");
+  mkdirSync(dirname(resolve(reportPath)), { recursive: true });
+  const target = values.worktree ?? "";
+  const env = { ...process.env };
+  const report = await rehearse({
+    target, env, work,
+    // The repository's main checkout, from git's common dir, so the guard holds whether this script
+    // runs from the main checkout or from another worktree.
+    repoRoot: repositoryRoot(),
+    run: (argv, opts = {}) => {
+      const r = spawnSync(argv[0]!, argv.slice(1), { cwd: target, env: { ...env, ...opts.extraEnv }, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+      return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+    },
+    spawnDetached: (argv, logPath) => {
+      const log = openSync(logPath, "a");
+      spawn(argv[0]!, argv.slice(1), { cwd: target, env, stdio: ["ignore", log, log], detached: true }).unref();
+    },
+    wait: ms => new Promise(ok => setTimeout(ok, ms)),
+  });
+  writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+  console.log(JSON.stringify(report, null, 2));
+  return report.ok === true ? 0 : 1;
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
