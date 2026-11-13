@@ -12,6 +12,7 @@ import type {
 } from "@gadgets/workshop-shared/gatekeeper";
 import { dotBindingOver } from "../src/inferops.js";
 import { openHttpInferOpsClient } from "../src/http-inferops.js";
+import { OTHER_COMPANY } from "../src/deployment-company.js";
 import {
   InferOpsAccountGatekeeper, InferOpsCredentials as BaseInferOpsCredentials, InferOpsDispatchGatekeeper, InferOpsDotGatekeeper, InferOpsMembersGatekeeper,
   InferOpsProjectGatekeeper, InferOpsTableGatekeeper, InferOpsWikiGatekeeper, InferOpsWorkflowPolicyGatekeeper,
@@ -443,6 +444,20 @@ export type DotScript = {
   decline?: { status: number; code: string; settlesAs?: string };
   /** How recording a run outcome answers (FAC-134): recorded (the default), or a refusal. */
   runOutcome?: { status: number; code: string };
+  /**
+   * FAC-135: what a confirm or decline answers as `resumed`, the proposing run it resumed; absent,
+   * the answer has no `resumed` (an InferOps from before FAC-135).
+   */
+  resumed?: { runId: string; status: string } | null;
+  /** FAC-135: the run status InferOps holds on a proposal once it is decided, confirmed or refused. */
+  runStatusAfter?: string;
+  /** FAC-135: how `chatbot.proposal_list` answers: listed (the default), or a refusal (a dead sign-in). */
+  list?: { status: number; code: string };
+  /**
+   * FAC-135: the person's connection belongs to another company: the confirm is refused before it is
+   * sent, as the account client restates the credential's refusal (stage `unsent`).
+   */
+  otherCompany?: boolean;
 };
 
 /** A Dot binding's props, as the vendor mints them. */
@@ -491,7 +506,10 @@ class FakeDot {
       }), { headers: { "content-type": "text/event-stream" } });
     }
     if (method === "POST" && /\/runs\/[0-9a-f-]+\/cancel$/.test(path)) return Response.json({ ok: true });
-    if (method === "GET" && path === `${base}/proposals`) return Response.json({ proposals: this.script.proposals });
+    if (method === "GET" && path === `${base}/proposals`) {
+      if (this.script.list) return refuse(this.script.list.status, this.script.list.code);
+      return Response.json({ proposals: this.script.proposals });
+    }
     const ran = /\/proposals\/([0-9a-f-]+)\/run-outcome$/.exec(path);
     if (method === "POST" && ran) {
       const proposal = this.script.proposals.find(p => p.id === ran[1]);
@@ -503,6 +521,10 @@ class FakeDot {
     if (method === "POST" && decided) {
       const proposal = this.script.proposals.find(p => p.id === decided[1]);
       if (!proposal) return refuse(404, "PROPOSAL_NOT_FOUND");
+      // InferOps resumes the proposing run with the decision, confirmed, declined or refused (FAC-135).
+      if (this.script.runStatusAfter !== undefined) Object.assign(proposal, { runStatus: this.script.runStatusAfter });
+      const answer = (body: { proposal: unknown }) =>
+        Response.json(this.script.resumed === undefined ? body : { ...body, resumed: this.script.resumed });
       if (decided[2] === "decline") {
         const decline = this.script.decline;
         if (decline) {
@@ -510,7 +532,7 @@ class FakeDot {
           return refuse(decline.status, decline.code);
         }
         Object.assign(proposal, { status: "declined", decidedAt: "2026-11-10T12:01:00.000Z" });
-        return Response.json({ proposal });
+        return answer({ proposal });
       }
       const confirm = this.script.confirm;
       if ("status" in confirm) {
@@ -518,7 +540,7 @@ class FakeDot {
         return refuse(confirm.status, confirm.code);
       }
       Object.assign(proposal, { status: "confirmed", outcome: confirm.outcome, decidedAt: "2026-11-10T12:01:00.000Z" });
-      return Response.json({ proposal });
+      return answer({ proposal });
     }
     return refuse(404, "NOT_FOUND");
   };
@@ -1337,9 +1359,13 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
       baseUrl: "https://ops.example/api", host: "acme.operations", token: "iex_test-dot-token",
       workspaceId: "90000000-0000-4000-8000-000000000001", workspaceSlug: "operations",
     }, this.#dot.fetch as typeof fetch);
+    const used = this.#dot.script.otherCompany ? {
+      ...client,
+      confirmDotProposal: async () => { throw new InferOpsError("OTHER_COMPANY", OTHER_COMPANY, { stage: "unsent" }); },
+    } : client;
     return dotBindingOver(
       { accountId: "dot-account", connected: true, host: "acme.operations", workspaceId: "90000000-0000-4000-8000-000000000001" },
-      this.ctx.storage.kv, client);
+      this.ctx.storage.kv, used);
   }
 
   /** What the fake InferOps answers from now on. */
@@ -1355,6 +1381,16 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
 
   async startDotSession(): Promise<InferOpsDotSession> {
     return this.#dotBinding().startSession(new RpcStub(new TestDotQueue(this.#log)) as never);
+  }
+
+  /** A Dot action's record as the facet keeps it (FAC-135: its resumed run and run status). */
+  async dotRecord(actionId: number): Promise<Record<string, unknown> | null> {
+    return (this.#dotBinding().record(actionId) as Record<string, unknown> | undefined) ?? null;
+  }
+
+  /** When the Dot's session start found the person's sign-in gone (FAC-135), or null. */
+  async dotWaitsForReconnect(): Promise<string | null> {
+    return this.#dotBinding().waitsForReconnect();
   }
 
   /** Each time the kernel's approved effects were asked to start the declared run (FAC-120). */

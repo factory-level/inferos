@@ -51,6 +51,15 @@ describe("classifying an attempt", () => {
     expect(canPass("NOT_FOUND", false)).toBe(false);
     expect(canPass(null, false)).toBe(false);
   });
+
+  it("ends another company's connection: a refusal that stands, before anything was sent (FAC-135)", () => {
+    expect(canPass("OTHER_COMPANY", false)).toBe(false);
+    expect(failureKind("OTHER_COMPANY", false)).toBe("permission");
+    const refused = { code: "OTHER_COMPANY", stage: "unsent" as const, policy: false };
+    expect(classifyAttempt(refused, false, BOARD_WRITES)).toEqual({ outcome: "notApplied", retryable: false });
+    // Its code survives RPC in the message, as every InferOps code does.
+    expect(inferOpsErrorCode(new Error("OTHER_COMPANY: another company"))).toBe("OTHER_COMPANY");
+  });
 });
 
 // As #settle reads it from the error InferOps answered with.

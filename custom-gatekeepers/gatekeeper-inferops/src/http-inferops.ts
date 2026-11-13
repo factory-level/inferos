@@ -59,9 +59,9 @@ import {
   type WikiSearchRecord, type WikiSectionRecord, type WikiStructureRecord, type WikiProposalApproval, type WikiProposalRead,
   type WikiProposalRecord, type WikiProposalState, PROPOSAL_APPROVE_REFUSED,
   ActivityWindow, type HistoryEntryRecord,
-  type DotConversationWire, type DotEvent, type DotProposalWire, type DotRunOutcomeWire, type DotRunEnd, type DotRunRequest,
+  type DotConversationWire, type DotDecisionWire, type DotEvent, type DotProposalWire, type DotRunOutcomeWire, type DotRunEnd, type DotRunRequest,
 } from "./inferops-client";
-import { DOT_RELAY_LIMITS, DotMalformed, parseDotConversation, parseDotProposal, relayDotStream } from "./dot-relay";
+import { DOT_RELAY_LIMITS, DotMalformed, parseDotConversation, parseDotDecision, parseDotProposal, relayDotStream } from "./dot-relay";
 import { membersNotFound } from "./members";
 import { readWorkflowPolicyAnswer, workflowPolicyNotFound, type WorkflowHeadRecord } from "./workflow-policy";
 import { isSlug } from "./resources";
@@ -884,6 +884,8 @@ const FAILURE_DETAIL: Record<InferOpsErrorCode, string> = {
   // Never mapped from a response: the gatekeeper raises it itself (enablement.ts).
   DISABLED: "InferOps is turned off for this deployment.",
   EXPIRED: "This proposal expired before it was decided. Ask the Dot again.",
+  // Never mapped from a response: the person's credential refuses it before sending (FAC-135).
+  OTHER_COMPANY: "This InferOS belongs to another company. In InferLab, choose the company this InferOS is for, then sign in again.",
 };
 
 /** The Dot's own refusals (FAC-133), each in one fixed sentence: never InferOps' words. */
@@ -1743,14 +1745,14 @@ export function openHttpInferOpsClient(
 
     async confirmDotProposal(
       conversationId: string, proposalId: string, idempotencyKey: string, opts?: { runId?: string },
-    ): Promise<DotProposalWire> {
+    ): Promise<DotDecisionWire> {
       await beforeSending(async () => dotIds(conversationId, proposalId));
       const body = await dot("chatbot.proposal_confirm", {
         method: "POST", path: `/chatbot/conversations/${conversationId}/proposals/${proposalId}/confirm`,
         body: opts?.runId !== undefined ? { runId: opts.runId } : {},
         idempotencyKey,
       });
-      return dotParsed("chatbot.proposal_confirm", body, raw => onlyProposal(raw, proposalId));
+      return dotParsed("chatbot.proposal_confirm", body, raw => parseDotDecision(raw, proposalId));
     },
 
     async recordDotRunOutcome(conversationId: string, proposalId: string, run: DotRunOutcomeWire): Promise<DotProposalWire> {
@@ -1765,12 +1767,12 @@ export function openHttpInferOpsClient(
       return dotParsed("chatbot.proposal_run_outcome", body, raw => onlyProposal(raw, proposalId));
     },
 
-    async declineDotProposal(conversationId: string, proposalId: string): Promise<DotProposalWire> {
+    async declineDotProposal(conversationId: string, proposalId: string): Promise<DotDecisionWire> {
       await beforeSending(async () => dotIds(conversationId, proposalId));
       const body = await dot("chatbot.proposal_decline", {
         method: "POST", path: `/chatbot/conversations/${conversationId}/proposals/${proposalId}/decline`, body: {},
       });
-      return dotParsed("chatbot.proposal_decline", body, raw => onlyProposal(raw, proposalId));
+      return dotParsed("chatbot.proposal_decline", body, raw => parseDotDecision(raw, proposalId));
     },
 
     async commentIssue(projectKey, issueId, comment, expectedRevision, idempotencyKey) {

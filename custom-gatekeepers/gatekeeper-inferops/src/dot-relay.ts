@@ -7,7 +7,10 @@
 // answers, so a field InferOps didn't send is never read as one it did.
 import { EventSchema } from "@ag-ui/core/schemas";
 import type { WorkflowRunFailure, WorkflowRunUncertainty } from "@gadgets/workshop-shared/workflow-definition";
-import { DOT_PROPOSAL_STATUSES, type DotConversationWire, type DotEvent, type DotMessageWire, type DotProposalWire, type DotRunEnd } from "./inferops-client";
+import {
+  DOT_PROPOSAL_STATUSES, DOT_RESUMED_STATUSES, DOT_RUN_STATUSES, type DotConversationWire, type DotDecisionWire, type DotEvent,
+  type DotMessageWire, type DotProposalWire, type DotRunEnd, type DotRunStatusWire,
+} from "./inferops-client";
 
 /** The relay's bounds: InferOps aborts a run at 125 s and sends a heartbeat every 15 s. */
 export const DOT_RELAY_LIMITS = {
@@ -125,6 +128,8 @@ export class DotMalformed extends Error {}
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const PROPOSAL_STATUSES: ReadonlySet<string> = new Set(DOT_PROPOSAL_STATUSES);
+const RUN_STATUSES: ReadonlySet<string> = new Set(DOT_RUN_STATUSES);
+const RESUMED_STATUSES: ReadonlySet<string> = new Set(DOT_RESUMED_STATUSES);
 const MESSAGE_STATUSES = new Set(["running", "complete", "error", "interrupted"]);
 
 function obj(value: unknown, what: string): Record<string, unknown> {
@@ -203,7 +208,30 @@ export function parseDotProposal(raw: unknown): DotProposalWire {
     createdAt: str(p.createdAt, "proposal.createdAt"),
     expiresAt: str(p.expiresAt, "proposal.expiresAt"),
     decidedAt: nullable(p.decidedAt, v => str(v, "proposal.decidedAt")),
+    // FAC-135; absent on an InferOps that doesn't report it, read as null.
+    runStatus: p.runStatus === undefined ? null : nullable(p.runStatus, v => {
+      const runStatus = str(v, "proposal.runStatus");
+      if (!RUN_STATUSES.has(runStatus)) throw new DotMalformed("proposal.runStatus is not one InferOps names");
+      return runStatus as DotRunStatusWire;
+    }),
   };
+}
+
+/**
+ * A confirm's or decline's answer (FAC-135): `{proposal, resumed}`, the proposal naming exactly
+ * `proposalId`. An InferOps that doesn't resume answers `{proposal}`, read as nothing resumed.
+ */
+export function parseDotDecision(raw: unknown, proposalId: string): DotDecisionWire {
+  const body = obj(raw, "decision");
+  const proposal = parseDotProposal(body.proposal);
+  if (proposal.id !== proposalId.toLowerCase()) throw new DotMalformed("another proposal was returned");
+  const resumed = body.resumed === undefined ? null : nullable(body.resumed, v => {
+    const r = obj(v, "resumed");
+    const status = str(r.status, "resumed.status");
+    if (!RESUMED_STATUSES.has(status)) throw new DotMalformed("resumed.status is not one InferOps names");
+    return { runId: id(r.runId, "resumed.runId"), status: status as NonNullable<DotDecisionWire["resumed"]>["status"] };
+  });
+  return { proposal, resumed };
 }
 
 function parseDotMessage(raw: unknown): DotMessageWire {

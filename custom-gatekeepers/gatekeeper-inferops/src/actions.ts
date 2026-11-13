@@ -238,6 +238,24 @@ export type DotConfirmAction = ActionBase & {
    * delivers at least once, so a repeat changes nothing), and what InferOps answered recording it.
    */
   reportedRuns?: DotReportedRun[];
+  /**
+   * FAC-135: the proposing Dot run this decision resumed, as InferOps answered the confirm or
+   * decline: its own id (never a new run), and `running` while the resume runs detached. Null when
+   * the answer resumed nothing. Neither `running` nor null is final: the run's end is read from
+   * `runStatus`. Absent until decided here.
+   */
+  resumed?: { runId: string; status: "running" | "complete" | "awaiting_decision" | "error" | "interrupted" } | null;
+  /**
+   * FAC-135: the proposing run's status as InferOps last reported it on the proposal, after a
+   * decision here (including a refused confirm, after which InferOps resumes the run with the
+   * refusal). Null when InferOps reports none.
+   */
+  runStatus?: "running" | "complete" | "interrupted" | "error" | "awaiting_decision" | "refused" | null;
+  /**
+   * FAC-135: set while the decision is still pending after its last confirm met a dead sign-in
+   * (when, ISO): it waits for the person to reconnect InferOps. Cleared by any other answer.
+   */
+  signInRefusedAt?: string;
 };
 
 /** One run outcome a Dot workflow-run action was told (FAC-134), as recorded here and in InferOps. */

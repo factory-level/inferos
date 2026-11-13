@@ -100,7 +100,7 @@ import { GovernedRequestError, listGoverned, parseGovernedListRequest } from "@g
 // connection for a URL naming the stopgap's workspace slug.
 
 import { DurableObject, RpcStub, RpcTarget, WorkerEntrypoint } from "cloudflare:workers";
-import { COMPANY_MISCONFIGURED, companyAdmits, deploymentCompany } from "./deployment-company";
+import { COMPANY_MISCONFIGURED, OTHER_COMPANY, companyAdmits, deploymentCompany } from "./deployment-company";
 import { skipRpcValidation, validateRpc } from "capnweb-validate";
 import { buildDescription, plainInline, sanitizeTitle } from "@gadgets/gatekeeper-kit/action-description";
 import { ObserverTracker, asVerifier, isObservationRefused } from "@gadgets/gatekeeper-kit/observers";
@@ -127,7 +127,7 @@ import {
   InferOpsError, atStage, inferOpsErrorCode, isPolicyRefusal, writeStage, type InferOpsClient,
   type ProjectSummary, type RunRecord, type TableRead, type WikiDocumentHead, type WikiProposalRead,
   type WikiProposalRecord, type WikiStructureRecord, type WriteStage,
-  type DotConversationWire, type DotProposalWire,
+  type DotConversationWire, type DotDecisionWire, type DotProposalWire,
 } from "./inferops-client";
 import {
   BOARD_WRITES, CheckRefused, KernelRefused, PROPOSAL_APPROVE, RECONCILE_ONLY, canPass, classifyAttempt, failureKind, type ApplyPolicy,
@@ -434,6 +434,11 @@ function accountClient(
         }
         if (isCredentialsChanged(error)) {
           throw new InferOpsError("UNAVAILABLE", "This InferOps connection changed. Try again.");
+        }
+        // Another company's connection (FAC-135) is refused before any token is handed over, so it
+        // proves nothing was sent; the stage doesn't cross RPC, so it is restated here.
+        if (!sent && inferOpsErrorCode(error) === "OTHER_COMPANY") {
+          throw new InferOpsError("OTHER_COMPANY", OTHER_COMPANY, { stage: "unsent" });
         }
         throw error;
       }
@@ -4176,28 +4181,143 @@ class DotBinding extends ActionBinding {
     }
     return undefined;
   }
+
+  /**
+   * The conversations whose proposals the next session start stages (FAC-135): each one a turn ran
+   * in here, kept until nothing in it waits for a decision or for its run's end. Ids only, never a
+   * message: InferOps stays authoritative.
+   */
+  watched(): string[] {
+    return this.kv.get<string[]>(DOT_WATCHED_KEY) ?? [];
+  }
+
+  /** Watch `conversationId`, most recent last, at most `DOT_WATCHED_MAX` (the oldest dropped). */
+  watch(conversationId: string): void {
+    const watched = this.watched().filter(id => id !== conversationId);
+    watched.push(conversationId);
+    this.kv.put(DOT_WATCHED_KEY, watched.slice(-DOT_WATCHED_MAX));
+  }
+
+  unwatch(conversationId: string): void {
+    this.kv.put(DOT_WATCHED_KEY, this.watched().filter(id => id !== conversationId));
+  }
+
+  /**
+   * Keeps InferOps' latest run status on each decision recorded here (FAC-135): a confirm that
+   * resumed nothing in its answer (`resumed: null`) is never final, so its run's end is learned from
+   * a later read of the proposal.
+   */
+  noteRunStatus(proposals: readonly DotProposalWire[]): void {
+    for (const proposal of proposals) {
+      const record = this.recordFor(proposal.id);
+      if (!record || record.status === "pending" || record.runStatus === proposal.runStatus) continue;
+      if (proposal.runStatus === null && record.runStatus === undefined) continue;
+      this.putAction({ ...record, runStatus: proposal.runStatus });
+    }
+  }
+}
+
+/** Where the Dot facet keeps the conversations it watches (FAC-135), and how many at most. */
+const DOT_WATCHED_KEY = "dot:watched";
+const DOT_WATCHED_MAX = 32;
+
+/** Set while the person's InferOps sign-in is gone (FAC-135): the session start waits for reconnect. */
+const DOT_RECONNECT_KEY = "dot:waitsForReconnect";
+
+/** A run status after which nothing more happens to the run (FAC-135). */
+const DOT_RUN_ENDED: ReadonlySet<string> = new Set(["complete", "error", "interrupted", "refused"]);
+
+/**
+ * Whether anything in a watched conversation still waits (FAC-135): a proposal not yet decided and
+ * not expired, a decision staged here and not yet made, or a decision whose run hasn't ended yet,
+ * while its proposal hasn't expired.
+ */
+function stillWaiting(binding: DotBinding, proposals: readonly DotProposalWire[], now: number): boolean {
+  return proposals.some(proposal => {
+    if (Date.parse(proposal.expiresAt) <= now) return false;
+    if (proposal.status === "proposed") return true;
+    const record = binding.recordFor(proposal.id);
+    if (record?.status === "pending") return true;
+    // Resumed `running` (detached) or nothing resumed yet: its end is learned from `runStatus` only.
+    const unsettled = record?.resumed === null || record?.resumed?.status === "running";
+    return record !== undefined && unsettled && !DOT_RUN_ENDED.has(record.runStatus ?? "");
+  });
+}
+
+/**
+ * At the start of a session on the person's own Dot (FAC-135), stage every proposal a watched
+ * conversation still holds undecided: one a turn left when its stream was cut (the browser closed
+ * mid-turn), or a turn run elsewhere. It reads with the person's own credential only, through the
+ * same once-per-proposal staging a conversation read uses, so a proposal is staged once whatever
+ * starts the session. It also keeps each recorded decision's run status current.
+ *
+ * It runs when a session starts, that is when the Dot gadget next runs (its page, or a canvas or
+ * console tile holding it); nothing stages while InferOS is closed. When the person's sign-in is
+ * gone, it stops, stages nothing, and says once that the Dot waits for them to reconnect; it says
+ * so again only after a sweep has succeeded since. It never fails the session it precedes.
+ */
+async function stageLeftProposals(binding: DotBinding, queue: RpcStub<ApprovalQueue>): Promise<void> {
+  for (const conversationId of binding.watched()) {
+    let proposals: DotProposalWire[];
+    try {
+      proposals = await binding.client.listDotProposals(conversationId);
+    } catch (error) {
+      const code = inferOpsErrorCode(error);
+      if (code === "UNAUTHORIZED") {
+        if (!binding.kv.get(DOT_RECONNECT_KEY)) {
+          binding.kv.put(DOT_RECONNECT_KEY, new Date().toISOString());
+          logger.warn("dot waits for reconnect", { event: "dot.stage_left.waits_for_reconnect", host: binding.host });
+        }
+        return;
+      }
+      // Not the person's (or no longer there), or the connection belongs to another company: nothing to stage.
+      if (code === "NOT_FOUND" || code === "OTHER_COMPANY") {
+        binding.unwatch(conversationId);
+        continue;
+      }
+      logger.warn("dot stage left proposals failed", { event: "dot.stage_left.failed", host: binding.host, code: code ?? "UNKNOWN" });
+      continue;
+    }
+    binding.kv.delete(DOT_RECONNECT_KEY);
+    binding.noteRunStatus(proposals);
+    await new DotConversationImpl(binding, queue, conversationId).stageAll(proposals);
+    if (!stillWaiting(binding, proposals, Date.now())) binding.unwatch(conversationId);
+  }
+}
+
+/** The person's Dot session, after staging what watched conversations left undecided (FAC-135). */
+async function openDotSession(binding: DotBinding, queue: RpcStub<ApprovalQueue>): Promise<InferOpsDotSession> {
+  try {
+    await stageLeftProposals(binding, queue);
+  } catch (error) {
+    logger.warn("dot stage left proposals failed", {
+      event: "dot.stage_left.failed", host: binding.host, code: inferOpsErrorCode(error) ?? "UNKNOWN",
+    });
+  }
+  return new DotSessionImpl(binding, queue);
 }
 
 /** One proposal as the caller sees it: InferOps' status in FAC-97's words, and its receipt if held. */
-function shownProposal(proposal: DotProposalWire, receipt: Receipt | null): DotProposal {
+function shownProposal(proposal: DotProposalWire, receipt: Receipt | null, record?: DotConfirmAction): DotProposal {
   return {
+    waitsForReconnect: record?.status === "pending" && record.signInRefusedAt !== undefined,
     id: proposal.id, tool: proposal.tool, input: JSON.stringify(proposal.input), status: dotProposalStatus(proposal),
     receipt,
     run: proposal.run
       ? { kind: proposal.run.kind, runId: proposal.run.runId, outcome: proposal.run.outcome, ranAs: proposal.run.ranAs,
           ...(proposal.run.reasonCode ? { reasonCode: proposal.run.reasonCode } : {}) }
       : null,
-    createdAt: proposal.createdAt, expiresAt: proposal.expiresAt,
+    createdAt: proposal.createdAt, expiresAt: proposal.expiresAt, runStatus: proposal.runStatus,
   };
 }
 
 /** A conversation as the caller sees it: InferOps' messages and proposals, nothing kept here. */
-function shownConversation(read: DotConversationWire, receipts: ReadonlyMap<string, Receipt>): DotConversation {
+function shownConversation(read: DotConversationWire, receipts: ReadonlyMap<string, Receipt>, binding: DotBinding): DotConversation {
   return {
     id: read.id, title: read.title,
     messages: read.messages.map(({ id, role, content, status, createdAt }) => ({ id, role, content, status, createdAt })),
     nextCursor: read.nextCursor, running: read.activeRunId !== null,
-    proposals: read.proposals.map(p => shownProposal(p, receipts.get(p.id) ?? null)),
+    proposals: read.proposals.map(p => shownProposal(p, receipts.get(p.id) ?? null, binding.recordFor(p.id))),
   };
 }
 
@@ -4238,7 +4358,7 @@ export class InferOpsDotGatekeeper
   /** Only a person's own sign-in has a Dot: the stopgap connection is no one's. */
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsDotSession> {
     if (!this.ctx.props.connected) throw new InferOpsError("FORBIDDEN", DOT_NEEDS_OWN_SIGN_IN);
-    return new DotSessionImpl(this.#binding(), approvalQueue.dup());
+    return openDotSession(this.#binding(), approvalQueue.dup());
   }
 
   /** Strategy A: a Dot's conversations are the person's alone, so no collaborator may observe them. */
@@ -4286,6 +4406,28 @@ export class InferOpsDotGatekeeper
  */
 async function applyDotAction(binding: DotBinding, actionId: number, effects?: DotApprovedEffects):
     Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
+  const outcome = await applyDotDecision(binding, actionId, effects);
+  noteSignInRefusal(binding, actionId, outcome);
+  return outcome;
+}
+
+/**
+ * Marks a decision still pending after its confirm met a dead sign-in (FAC-135): it waits for the
+ * person to reconnect InferOps, then confirms on the next approval. Any other answer clears it.
+ */
+function noteSignInRefusal(binding: DotBinding, actionId: number,
+    outcome: void | { failed: ActionApplyFailure } | ActionApplied): void {
+  const record = binding.action(actionId);
+  if (!record || !isDotAction(record)) return;
+  const signIn = record.status === "pending" && outcome !== undefined && "failed" in outcome &&
+    outcome.failed.kind === "sign-in" && outcome.failed.retryable;
+  if (signIn === (record.signInRefusedAt !== undefined)) return;
+  const { signInRefusedAt: _cleared, ...rest } = record;
+  binding.putAction(signIn ? { ...record, signInRefusedAt: new Date().toISOString() } : rest);
+}
+
+async function applyDotDecision(binding: DotBinding, actionId: number, effects?: DotApprovedEffects):
+    Promise<void | { failed: ActionApplyFailure } | ActionApplied> {
   const record = binding.action(actionId);
   if (!record || !isDotAction(record)) throw new Error(`No such Dot action: ${actionId}.`);
   if (record.status === "applied") return { applied: { result: appliedResult(record) } };
@@ -4294,20 +4436,51 @@ async function applyDotAction(binding: DotBinding, actionId: number, effects?: D
   if (record.tool === DOT_CANVAS_COMPOSE_TOOL) return applyDotTemporaryCanvas(binding, record, fields, effects);
   if (record.tool === DOT_WORKFLOW_CREATE_TOOL) return applyDotWorkflowCreate(binding, record, fields, effects);
   if (record.tool === DOT_DELEGATE_TOOL) return applyDotDelegate(binding, record, fields, effects);
-  return binding.applyOnce(record, {
+  const failed = await binding.applyOnce(record, {
     policy: DOT_CONFIRM, fields,
     check: () => assertFingerprint(binding.scope, record, fields, { required: true }),
     send: async marked => {
-      let confirmed: DotProposalWire;
+      let decision: DotDecisionWire;
       try {
-        confirmed = await binding.client.confirmDotProposal(record.conversationId, record.proposalId, record.proposalId);
+        decision = await binding.client.confirmDotProposal(record.conversationId, record.proposalId, record.proposalId);
       } catch (error) {
+        // Another company's connection (FAC-135) stands: the proposal is declined there as any
+        // refusal that stands is (`refuseDotProposal`'s rule), which that connection can't reach
+        // either, so it then expires in InferOps on its own.
+        if (inferOpsErrorCode(error) === "OTHER_COMPANY") {
+          await binding.client.declineDotProposal(record.conversationId, record.proposalId).catch(() => undefined);
+        }
         if (inferOpsErrorCode(error) !== "CONFLICT") throw error;
-        confirmed = await settledProposal(binding, record, error);
+        // Already decided: settled to what InferOps holds; what resumed then is read later.
+        decision = { proposal: await settledProposal(binding, record, error), resumed: null };
       }
-      return { ...(marked as DotConfirmAction), status: "applied", confirmedOutcome: summarizeDotOutcome(confirmed.outcome) };
+      return { ...(marked as DotConfirmAction), status: "applied",
+        confirmedOutcome: summarizeDotOutcome(decision.proposal.outcome), ...decided(decision) };
     },
   });
+  if (failed && "failed" in failed) await recordRefusedRun(binding, record);
+  return failed;
+}
+
+/**
+ * What a confirm's or decline's answer records on the action (FAC-135): the proposing run it
+ * resumed, or null (nothing resumed in this answer, which is never final), and the run's status.
+ */
+function decided(decision: DotDecisionWire): Pick<DotConfirmAction, "resumed" | "runStatus"> {
+  return { resumed: decision.resumed, runStatus: decision.proposal.runStatus };
+}
+
+/**
+ * After a refused confirm (FAC-135, inferops PR 2), InferOps resumes the proposing run with the
+ * refusal; its status is read back and kept on the failed action, for the person to see how the run
+ * ended. Best effort: when InferOps can't be read, nothing more is recorded.
+ */
+async function recordRefusedRun(binding: DotBinding, record: DotConfirmAction): Promise<void> {
+  const proposal = (await binding.client.listDotProposals(record.conversationId).catch(() => []))
+    .find(p => p.id === record.proposalId);
+  const now = binding.action(record.actionId);
+  if (!proposal || !now || !isDotAction(now) || now.status !== "failed") return;
+  binding.putAction({ ...now, runStatus: proposal.runStatus });
 }
 
 /** The kernel's approved effects this facet uses: a workflow run (FAC-120) and a temporary canvas (FAC-137). */
@@ -4469,19 +4642,20 @@ async function applyDotWorkflowRun(binding: DotBinding, record: DotConfirmAction
       if (run.status === "refused") {
         return await refuseDotProposal(binding, record, run.kind, run.reason);
       }
+      let decision: DotDecisionWire | null = null;
       let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true };
       try {
         // Names the run it started, so InferOps accepts that run's outcome only (FAC-134).
-        const confirmed = await binding.client.confirmDotProposal(
+        decision = await binding.client.confirmDotProposal(
           record.conversationId, record.proposalId, record.proposalId, { runId: run.runId },
         );
-        confirmedOutcome = { ...summarizeDotOutcome(confirmed.outcome), handedOff: true };
+        confirmedOutcome = { ...summarizeDotOutcome(decision.proposal.outcome), handedOff: true };
       } catch (error) {
         logger.warn("dot workflow run started; its InferOps confirm unanswered", {
           event: "dot-confirm.workflow.confirm_unanswered", ...fields, code: inferOpsErrorCode(error) ?? "UNKNOWN",
         });
       }
-      return { ...(marked as DotConfirmAction), status: "applied", runId: run.runId, confirmedOutcome };
+      return { ...(marked as DotConfirmAction), status: "applied", runId: run.runId, confirmedOutcome, ...(decision ? decided(decision) : {}) };
     },
   });
 }
@@ -4511,16 +4685,17 @@ async function applyDotTemporaryCanvas(binding: DotBinding, record: DotConfirmAc
         await binding.client.declineDotProposal(record.conversationId, record.proposalId).catch(() => undefined);
         throw new KernelRefused(RUN_REFUSAL_CODES[canvas.kind] ?? "UNAVAILABLE", canvas.reason, canvas.kind);
       }
+      let decision: DotDecisionWire | null = null;
       let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true, canvasId: canvas.canvasId };
       try {
-        const confirmed = await binding.client.confirmDotProposal(record.conversationId, record.proposalId, record.proposalId);
-        confirmedOutcome = { ...summarizeDotOutcome(confirmed.outcome), handedOff: true, canvasId: canvas.canvasId };
+        decision = await binding.client.confirmDotProposal(record.conversationId, record.proposalId, record.proposalId);
+        confirmedOutcome = { ...summarizeDotOutcome(decision.proposal.outcome), handedOff: true, canvasId: canvas.canvasId };
       } catch (error) {
         logger.warn("dot temporary canvas created; its InferOps confirm unanswered", {
           event: "dot-confirm.canvas.confirm_unanswered", ...fields, code: inferOpsErrorCode(error) ?? "UNKNOWN",
         });
       }
-      return { ...(marked as DotConfirmAction), status: "applied", confirmedOutcome };
+      return { ...(marked as DotConfirmAction), status: "applied", confirmedOutcome, ...(decision ? decided(decision) : {}) };
     },
   });
 }
@@ -4554,16 +4729,17 @@ async function applyDotWorkflowCreate(binding: DotBinding, record: DotConfirmAct
         ? personalWorkflowRef({ company: where.company, workspace: where.workspace,
             sessionWorkspaceId: created.sessionWorkspaceId, personalWorkflowId: created.personalWorkflowId })
         : "";
+      let decision: DotDecisionWire | null = null;
       let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true };
       try {
-        const confirmed = await binding.client.confirmDotProposal(record.conversationId, record.proposalId, record.proposalId);
-        confirmedOutcome = { ...summarizeDotOutcome(confirmed.outcome), handedOff: true };
+        decision = await binding.client.confirmDotProposal(record.conversationId, record.proposalId, record.proposalId);
+        confirmedOutcome = { ...summarizeDotOutcome(decision.proposal.outcome), handedOff: true };
       } catch (error) {
         logger.warn("dot personal workflow created; its InferOps confirm unanswered", {
           event: "dot-confirm.workflow_create.confirm_unanswered", ...fields, code: inferOpsErrorCode(error) ?? "UNKNOWN",
         });
       }
-      return { ...(marked as DotConfirmAction), status: "applied", confirmedOutcome,
+      return { ...(marked as DotConfirmAction), status: "applied", confirmedOutcome, ...(decision ? decided(decision) : {}),
         personalWorkflow: { id: created.personalWorkflowId, reference, expiresAt: created.expiresAt } };
     },
   });
@@ -4592,18 +4768,19 @@ async function applyDotDelegate(binding: DotBinding, record: DotConfirmAction, f
       if (launched.status === "refused") {
         return await refuseDotProposal(binding, record, launched.kind, launched.reason);
       }
+      let decision: DotDecisionWire | null = null;
       let confirmedOutcome: Record<string, string | number | boolean | null> = { handedOff: true };
       try {
-        const confirmed = await binding.client.confirmDotProposal(
+        decision = await binding.client.confirmDotProposal(
           record.conversationId, record.proposalId, record.proposalId, { runId: launched.runId },
         );
-        confirmedOutcome = { ...summarizeDotOutcome(confirmed.outcome), handedOff: true };
+        confirmedOutcome = { ...summarizeDotOutcome(decision.proposal.outcome), handedOff: true };
       } catch (error) {
         logger.warn("dot delegate launched; its InferOps confirm unanswered", {
           event: "dot-confirm.delegate.confirm_unanswered", ...fields, code: inferOpsErrorCode(error) ?? "UNKNOWN",
         });
       }
-      return { ...(marked as DotConfirmAction), status: "applied", runId: launched.runId, confirmedOutcome,
+      return { ...(marked as DotConfirmAction), status: "applied", runId: launched.runId, confirmedOutcome, ...(decision ? decided(decision) : {}),
         delegate: { id: launched.delegateId } };
     },
   });
@@ -4640,8 +4817,14 @@ async function rejectDotAction(binding: DotBinding, actionId: number): Promise<v
     binding.putAction({ ...record, status: "failed", attempts: { failure: { outcome: "notApplied", message } } });
   let refusal: unknown;
   try {
-    const declined = await binding.client.declineDotProposal(record.conversationId, record.proposalId);
-    if (declined.status === "declined") return settle("Declined.");
+    const decision = await binding.client.declineDotProposal(record.conversationId, record.proposalId);
+    if (decision.proposal.status === "declined") {
+      settle("Declined.");
+      // What the decline resumed (FAC-135): the proposing run, told it was declined.
+      const now = binding.action(actionId);
+      if (now && isDotAction(now)) binding.putAction({ ...now, ...decided(decision) });
+      return;
+    }
     refusal = new InferOpsError("CONFLICT", "InferOps answered the decline with another status.");
   } catch (error) {
     const code = inferOpsErrorCode(error);
@@ -4690,10 +4873,14 @@ async function rejectDotAction(binding: DotBinding, actionId: number): Promise<v
 export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, client: InferOpsClient) {
   const binding = new DotBinding(props, { store: new ActionStore(kv), client, observers: () => [] });
   return {
-    startSession: (queue: RpcStub<ApprovalQueue>): InferOpsDotSession => new DotSessionImpl(binding, queue.dup()),
+    startSession: (queue: RpcStub<ApprovalQueue>): Promise<InferOpsDotSession> => openDotSession(binding, queue.dup()),
     applyAction: (actionId: number, effects?: DotApprovedEffects) => applyDotAction(binding, actionId, effects),
     rejectAction: (actionId: number) => rejectDotAction(binding, actionId),
     workflowRunOutcome: (actionId: number, outcome: ApprovedRunOutcome) => recordDotRunOutcome(binding, actionId, outcome),
+    /** The record of action `actionId` as kept here, for tests: its decision, resumed run and run status. */
+    record: (actionId: number) => binding.action(actionId),
+    /** When the session start found the person's sign-in gone (FAC-135), or null. */
+    waitsForReconnect: (): string | null => binding.kv.get<string>(DOT_RECONNECT_KEY) ?? null,
   };
 }
 
@@ -4798,12 +4985,13 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
     // A proposal a turn made but no relay staged (a cut stream, a turn run elsewhere) is staged
     // now, so every one is decided where the person decides every other change.
     for (const proposal of read.proposals) await this.#stage(proposal);
+    this.binding.noteRunStatus(read.proposals);
     await this.binding.observe(this.queue, {
       title: "Read your Dot conversation",
       description: `Read your Dot conversation "${plainInline(read.title, 80)}" in ${this.binding.host}: ` +
         `${read.messages.length} messages, ${read.proposals.length} proposed changes.`,
     });
-    return shownConversation(read, this.#receipts);
+    return shownConversation(read, this.#receipts, this.binding);
   }
 
   async ask(prompt: string, options?: DotAskOptions): Promise<DotTurn> {
@@ -4823,6 +5011,9 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
     const onProgress = options?.onProgress;
     const runId = crypto.randomUUID();
     this.#running = runId;
+    // Watched from before the turn starts (FAC-135): if the browser closes mid-turn, whatever the
+    // turn proposes is staged at the next session start, with no read of the conversation.
+    this.binding.watch(this.conversationId);
     // Progress is delivered in the stream's order, a proposal at its place once it is staged, and
     // a caller that went away stops nothing.
     let delivered = Promise.resolve();
@@ -4912,12 +5103,17 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
     });
   }
 
+  /** Stage each of `proposals` still waiting for a decision (FAC-135's session start). */
+  async stageAll(proposals: readonly DotProposalWire[]): Promise<void> {
+    for (const proposal of proposals) await this.#stage(proposal);
+  }
+
   /** Stage the proposal a turn named, read back from InferOps for its tool, arguments and expiry. */
   async #stageById(proposalId: string): Promise<DotProposal | null> {
     const proposal = (await this.binding.client.listDotProposals(this.conversationId)).find(p => p.id === proposalId);
     if (!proposal) return null;
     await this.#stage(proposal);
-    return shownProposal(proposal, this.#receipts.get(proposal.id) ?? null);
+    return shownProposal(proposal, this.#receipts.get(proposal.id) ?? null, this.binding.recordFor(proposal.id));
   }
 
   /**
