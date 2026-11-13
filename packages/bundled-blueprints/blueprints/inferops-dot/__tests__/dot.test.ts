@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, expect, it } from "vitest";
 import {
-  DECIDE_WHERE, RUN_TOOLS, WORKFLOW_RUN_TOOL, classify, failureWords, knowledgeWrite, proposalHeading, proposalWords, shownProgress, shownProposal,
+  DECIDE_WHERE, RECONNECT_WORDS, RUN_TOOLS, WORKFLOW_RUN_TOOL, classify, decisionWords, failureWords, knowledgeWrite, proposalHeading, proposalWords, shownProgress, shownProposal,
   stepWords, workflowRunWords,
 } from "../files/lib/dot.ts";
 
@@ -184,5 +184,47 @@ describe("a workflow-run proposal's words", () => {
       run: { ...run("failed", { reasonCode: "runtime-error" }), extra: "x" } as never,
     }).run;
     expect(shownRun).toEqual({ runId: "run-1", outcome: "failed", reasonCode: "runtime-error", ranAs: "gadget_bindings" });
+  });
+});
+
+describe("a background decision's words (FAC-135)", () => {
+  const waiting = { outcome: "waiting" } as const;
+  const proposal = (extra: Record<string, unknown> = {}) => ({
+    id: "p1", tool: "issue_create", input: "{}", status: { outcome: "succeeded" as const }, receipt: null,
+    createdAt: "", expiresAt: "", ...extra,
+  });
+
+  it("reads waiting for your decision as before, with nothing more while the run waits", () => {
+    expect(decisionWords({ status: waiting })).toEqual({});
+    expect(decisionWords({ status: waiting, runStatus: "awaiting_decision" })).toEqual({});
+    expect(proposalWords(waiting).label).toBe("Waiting for your decision");
+  });
+
+  it("says it waits for you to reconnect when your sign-in has ended, and nothing is made meanwhile", () => {
+    expect(decisionWords({ status: waiting, runStatus: "awaiting_decision", waitsForReconnect: true })).toEqual(RECONNECT_WORDS);
+    expect(RECONNECT_WORDS.detail).toContain("Nothing is made meanwhile");
+    // Only the gatekeeper's flag says so: a waiting status alone, whatever its code, is waiting for the decision.
+    expect(decisionWords({ status: { outcome: "waiting", code: "FORBIDDEN" } })).toEqual({});
+    expect(shownProposal(proposal({ status: waiting, waitsForReconnect: true })).waitsForReconnect).toBe(true);
+    expect(shownProposal(proposal({ status: waiting, waitsForReconnect: false })).waitsForReconnect).toBeUndefined();
+  });
+
+  it("says what the Dot did after the decision, and that it ended refused when nothing was decided in time", () => {
+    expect(decisionWords({ status: { outcome: "succeeded" }, runStatus: "complete" }).resume)
+      .toBe("Your Dot picked up your decision and answered below.");
+    expect(decisionWords({ status: { outcome: "rejected" }, runStatus: "running" }).resume)
+      .toBe("Your Dot is answering after your decision.");
+    expect(decisionWords({ status: { outcome: "failed", code: "EXPIRED" }, runStatus: "refused" }).resume)
+      .toContain("Ended: nothing was decided in time");
+    for (const runStatus of ["error", "interrupted"] as const) {
+      expect(decisionWords({ status: { outcome: "failed" }, runStatus }).resume, runStatus).toContain("after your decision");
+    }
+  });
+
+  it("shows the client a run status it knows, and never another", () => {
+    expect(shownProposal(proposal({ runStatus: "awaiting_decision" })).runStatus).toBe("awaiting_decision");
+    expect(shownProposal(proposal({ runStatus: "refused" })).runStatus).toBe("refused");
+    expect(shownProposal(proposal({ runStatus: "paused" }) as never).runStatus).toBeUndefined();
+    expect(shownProposal(proposal()).runStatus).toBeUndefined();
   });
 });

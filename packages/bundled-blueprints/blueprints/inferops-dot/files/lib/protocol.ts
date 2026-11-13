@@ -21,6 +21,9 @@ export interface DotProposalRun {
   ranAs: "gadget_bindings" | "service_account" | "person";
 }
 
+/** A Dot run's stored status (FAC-135, inferops#2657's `RUN_STATUSES`). */
+export type DotRunStatus = "running" | "complete" | "interrupted" | "error" | "awaiting_decision" | "refused";
+
 /** A change the Dot proposed, as the gatekeeper reports it. */
 export interface DotProposal {
   id: string;
@@ -30,6 +33,17 @@ export interface DotProposal {
   receipt: unknown;
   /** For a workflow run it handed to InferOS, how that run came out; null until then (FAC-134). */
   run?: DotProposalRun | null;
+  /**
+   * The status of the Dot run that proposed it (FAC-135, inferops#2657's `Proposal.runStatus`):
+   * `awaiting_decision` while it waits for the person, then how its resume ended. Absent from an
+   * older gatekeeper or InferOps.
+   */
+  runStatus?: DotRunStatus | null;
+  /**
+   * True while its decision waits here because its last confirm met a dead sign-in (FAC-135): it
+   * waits for the person to reconnect InferOps. Absent from an older gatekeeper.
+   */
+  waitsForReconnect?: boolean;
   createdAt: string;
   expiresAt: string;
 }
@@ -100,6 +114,10 @@ export interface ShownProposal {
   knowledge?: KnowledgeWrite;
   /** Set for a workflow run handed to InferOS (FAC-134): its run, once that run has an outcome. */
   run?: DotProposalRun;
+  /** The status of the Dot run that proposed it (FAC-135), when the gatekeeper reports one. */
+  runStatus?: DotRunStatus;
+  /** Set when its decision waits for the person to reconnect InferOps (FAC-135). */
+  waitsForReconnect?: true;
 }
 
 export interface ShownMessage {

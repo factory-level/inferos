@@ -841,6 +841,13 @@ FAC-133 (inferos [ADR 0013](../adr/0013-dot-runtime.md) decision 3). A seventh r
   - **Its outcome** is recorded only as `kind: "delegate"` with `ranAs: "person"`, for a delegate proposal. No other proposal's outcome may claim the person (`recordDotRunOutcome`, and `parseDotRun` on InferOps' answer).
   - **In the Dot,** a delegate's proposal uses the run words (`RUN_TOOLS`): *Delegate finished* (with *Check what it changed in your operate session.*), *Delegate failed* or *Delegate uncertain*, each with *It ran as you, with at most what you approved.* and *Reported, not verified*. `requester-revoked` and `cancelled` have a delegate's own words.
   - **Tests:** `dot.test.ts`, "deciding a delegate proposal", and the blueprint's `dot.test.ts`.
+- **Background decisions on the Dot page (FAC-135, inferops#2657):** each proposal also reads its Dot run's `runStatus` (from InferOps' `Proposal.runStatus`). `shownProposal` keeps only a status the page knows. `decisionWords` gives the four states:
+  - **waiting for your decision:** as before, with nothing more while the run waits (`awaiting_decision`);
+  - **waiting for you to reconnect:** the gatekeeper sets the proposal's `waitsForReconnect` while its decision is pending because its last confirm met a dead sign-in. A proposal's status alone can't tell: its receipt maps a dead sign-in to `FORBIDDEN`. It reads *Waiting for you to reconnect InferOps*, and says nothing is made meanwhile. It waits for the person only, never anyone else (ADR 0011 U3);
+  - **resumed:** once decided, a line saying what the run did after: *Your Dot picked up your decision and answered below.*, *…is answering after your decision.*, *…couldn't finish…* or *…was cut off*;
+  - **ended refused:** *Ended: nothing was decided in time, so your Dot stopped waiting.*
+
+  These are fixed words, never the run's own: those are in the conversation. Tests: the blueprint's `dot.test.ts`, "a background decision's words".
 - **Receipts** (`dotProposalStatus`), in FAC-97's words from InferOps' own status, read when asked:
 
   | InferOps | Receipt |
