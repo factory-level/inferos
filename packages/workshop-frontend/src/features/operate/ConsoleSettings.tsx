@@ -8,7 +8,6 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
 import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
 import { invalidateWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
-import { buildReturnHref } from './operateMode'
 import { consoleContentForSave, type ConsoleEntry } from './consoles'
 import { ConsoleBoundViewRegistry } from './ConsoleBoundViewRegistry'
 import { ConsoleHostBoardRegistry } from './ConsoleHostBoardRegistry'
@@ -27,10 +26,12 @@ const options = [
 ] as const
 
 /** Console policy and widgets are saved through the existing build capability, with revision conflict checks. */
-export const ConsoleSettings = ({ entry, onClose, onEdit }: {
+export const ConsoleSettings = ({ entry, onClose, onEdit, onOpenBuild }: {
   entry: ConsoleEntry
   onClose: () => void
   onEdit: () => void
+  /** Leaves Operate for the configuration workspace (Build). */
+  onOpenBuild: () => void
 }) => {
   const { authenticatedApi } = useAuthenticatedApi()
   const { overseer, metadata, error: accessError } = useWorkspaceOpen({ id: entry.workspace.id, authenticatedApi,
@@ -124,7 +125,7 @@ export const ConsoleSettings = ({ entry, onClose, onEdit }: {
       <Button variant="primary" disabled={saving} onClick={() => void save()}>{saving ? 'Saving…' : 'Save settings'}</Button>
       <div className="flex flex-wrap items-center gap-3 border-t border-kumo-line pt-5">
         <Button disabled={saving} onClick={onEdit}>Edit pages and starting screen</Button>
-        <a href={buildReturnHref()} className="rounded-md text-sm text-kumo-subtle underline focus-visible:ring-2 focus-visible:ring-kumo-ring">Open configuration workspace</a>
+        <button type="button" onClick={onOpenBuild} className="cursor-pointer rounded-md text-sm text-kumo-subtle underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-kumo-ring">Open configuration workspace</button>
       </div>
     </>}
   </section>

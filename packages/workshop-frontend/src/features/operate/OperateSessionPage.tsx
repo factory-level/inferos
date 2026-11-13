@@ -20,6 +20,7 @@ import { ConsoleMosaic } from './ConsoleMosaic'
 import { ConsolePage } from './ConsolePage'
 import { ConsoleBuilder } from './ConsoleBuilder'
 import { ConsoleSettings } from './ConsoleSettings'
+import { buildReturnHref } from './operateMode'
 import { ConsoleWorkspaceShell } from './ConsoleWorkspaceShell'
 import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
 import { ConsolePublishDialog } from './ConsolePublishDialog'
@@ -228,7 +229,8 @@ export const OperateSessionPage = () => {
           ? <p role="status" className="p-6 text-sm text-kumo-subtle">A view is open. Close it to return to this page.</p>
           : settings
           ? settingsEntry ? <ConsoleSettings key={`${settingsEntry.console.id}/${settingsEntry.console.revision}`} entry={settingsEntry}
-              onClose={() => void navigate({ to: '/inferops-canvas', search: {} })} onEdit={() => edit(settingsEntry)} />
+              onClose={() => void navigate({ to: '/inferops-canvas', search: {} })} onEdit={() => edit(settingsEntry)}
+              onOpenBuild={() => void navigate({ to: '.', href: buildReturnHref() })} />
             : <p role="status" className="p-6 text-sm text-kumo-subtle">{screens.status === 'loading' ? 'Loading settings…' : 'This console is unavailable.'}</p>
           : setup
           ? screens.status !== 'ready'
