@@ -463,6 +463,8 @@ export type DotScript = {
    * back (a timeout); a later confirm under the same key answers with what it stored.
    */
   confirmLost?: number;
+  /** FAC-135: a confirm answers 200 with the proposal stored as this status (a replay of a decided one). */
+  replayAs?: string;
   /** FAC-135 (r1 on #493): `chatbot.proposal_list` answers only after this many ms (a slow InferOps). */
   listDelayMs?: number;
   /** FAC-135: the session start's staging deadline, in ms (the facet's own by default). */
@@ -549,6 +551,10 @@ class FakeDot {
       if ("status" in confirm) {
         if (confirm.settlesAs) Object.assign(proposal, { status: confirm.settlesAs, decidedAt: "2026-11-10T12:01:00.000Z" });
         return refuse(confirm.status, confirm.code);
+      }
+      if (this.script.replayAs) {
+        Object.assign(proposal, { status: this.script.replayAs, decidedAt: "2026-11-10T12:01:00.000Z" });
+        return answer({ proposal });
       }
       Object.assign(proposal, { status: "confirmed", outcome: confirm.outcome, decidedAt: "2026-11-10T12:01:00.000Z" });
       if (this.script.confirmLost) {

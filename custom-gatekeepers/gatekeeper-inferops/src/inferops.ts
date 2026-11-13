@@ -4493,6 +4493,9 @@ async function applyDotDecision(binding: DotBinding, actionId: number, effects?:
         // Already decided: settled to what InferOps holds; what resumed then is read later.
         decision = { proposal: await settledProposal(binding, record, error), resumed: null };
       }
+      // A replayed confirm (PR 2, flag on) answers 200 with the proposal as stored, whatever the first
+      // decision was: only a made one is applied here (r1/lead on #493).
+      assertMade(decision.proposal);
       // A run still resuming, or not yet (FAC-135): its end is learned at a later session start.
       if (decision.resumed === null || decision.resumed.status === "running") binding.watch(record.conversationId);
       return { ...(marked as DotConfirmAction), status: "applied",
@@ -4501,6 +4504,19 @@ async function applyDotDecision(binding: DotBinding, actionId: number, effects?:
   });
   if (failed && "failed" in failed) await recordRefusedRun(binding, record);
   return failed;
+}
+
+/**
+ * A confirm's answer that isn't a made decision (FAC-135): InferOps replays a decided proposal's
+ * confirm with 200 and the proposal as stored. Declined, failed or expired is a refusal that stands
+ * (proven by InferOps' answer); anything not settled is uncertain. Confirmed or handed off is made.
+ */
+function assertMade(proposal: DotProposalWire): void {
+  if (proposal.status === "confirmed" || proposal.status === "handed-off") return;
+  if (proposal.status === "declined" || proposal.status === "failed" || proposal.status === "expired") {
+    throw new InferOpsError("CONFLICT", "InferOps already decided this proposal, and didn't make it.", { stage: "refused" });
+  }
+  throw new InferOpsError("UNAVAILABLE", "InferOps hasn't settled this proposal yet.");
 }
 
 /**

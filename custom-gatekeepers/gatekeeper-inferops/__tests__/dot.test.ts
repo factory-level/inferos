@@ -981,6 +981,26 @@ describe("a decision the Dot waits for (FAC-135)", () => {
     expect(await hooks.dotRecord(actionId)).toMatchObject({ runStatus: "complete" });
   });
 
+  it("reads a replay InferOps answers 409 (its flag off) after a lost answer as the made decision", async () => {
+    const waiting = proposal({ expiresAt: "2099-11-10T12:00:00.000Z" });
+    const { hooks, actionId } = await staged(script({ proposals: [waiting], confirmLost: 1 }));
+    expect((await hooks.applyDot(actionId)).failure).toMatchObject({ outcome: "unknown", retryable: true });
+    // The first confirm made it; the retry is a replay, refused as already decided.
+    await hooks.dotScript(script({ proposals: [{ ...waiting, status: "confirmed" }], confirm: { status: 409, code: "PROPOSAL_DECIDED" } }));
+    expect((await hooks.applyDot(actionId)).failure).toBeNull();
+    expect(await hooks.dotRecord(actionId)).toMatchObject({ status: "applied", resumed: null });
+  });
+
+  it("never applies a 200 replay of a proposal InferOps didn't make: it stands refused", async () => {
+    for (const stored of ["failed", "declined", "expired"]) {
+      const { hooks, actionId } = await staged(script({ proposals: [proposal()], replayAs: stored }));
+      expect((await hooks.applyDot(actionId)).failure, stored).toMatchObject({ outcome: "notApplied", retryable: false, code: "CONFLICT" });
+      expect(await hooks.dotRecord(actionId), stored).toMatchObject({ status: "failed" });
+    }
+    const { hooks, actionId } = await staged(script({ proposals: [proposal()], replayAs: "confirming" }));
+    expect((await hooks.applyDot(actionId)).failure).toMatchObject({ outcome: "unknown" });
+  });
+
   it("stops watching a conversation once its proposals have expired", async () => {
     const { hooks, conversation } = await setup(cut({ proposals: [proposal({ expiresAt: "2020-01-01T00:00:00.000Z" })] }));
     await conversation.ask("File it");
