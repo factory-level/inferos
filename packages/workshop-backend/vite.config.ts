@@ -6,7 +6,12 @@ import {
 
 /** The `test` task below, before its `cache.env` gains `BACKEND_TEST_WORKERS`. */
 const unitTask = vitestTask([
-  { command: 'vitest run', idleSeconds: 120 },
+  // Keep the restart-isolated workers in their own process. In CI the backend project finishes
+  // near the 900s per-command watchdog; Vitest then starts backend-restart and backend-sign-in in
+  // later project groups, so one invocation can time out while those later groups are still
+  // running. Each invocation retains Vitest's project ordering within its own group.
+  { command: 'vitest run --project unit-node --project workerd-light --project backend', idleSeconds: 120 },
+  { command: 'vitest run --project backend-restart --project backend-sign-in', idleSeconds: 120 },
   { command: 'vitest run --config vitest.integration.config.ts', idleSeconds: 180 },
 ])
 

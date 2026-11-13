@@ -481,18 +481,42 @@ function sameLoopback(a: string, b: string): boolean {
 }
 
 /**
+ * The origin the recorded sandbox's InferOS answers as for a loopback or emulated stage (the Access
+ * emulator's for an emulated one), or null when nothing is recorded.
+ */
+function recordedFront(stage: StageTarget, root: string): string | null {
+  const services = readState(root)?.services;
+  const inferos = services?.inferos;
+  if (!inferos?.url) return null;
+  // An emulated stage is the Access emulator fronting that InferOS.
+  const front = stage.kind === "emulated" ? services?.access?.upstream === inferos.url && services.access.url : inferos.url;
+  return front ? new URL(front).origin : null;
+}
+
+/**
  * The InferOps a loopback stage is connected to: `FACTORY_INFEROPS_URL` when set, else the origin
  * the recorded sandbox's InferOS was started against with `--inferops-connect`, if that InferOS is
- * the stage.
+ * the stage: the same origin, not just the same port (see `stageOriginProblem`).
  */
 export function stageInferopsUrl(stage: StageTarget, root: string, env: NodeJS.ProcessEnv): string | null {
   if (env.FACTORY_INFEROPS_URL) return new URL(env.FACTORY_INFEROPS_URL).origin;
-  const services = readState(root)?.services;
-  const inferos = services?.inferos;
+  const inferos = readState(root)?.services?.inferos;
   if (!inferos?.url || inferos.inferops !== "connected" || !inferos.inferopsUrl) return null;
-  // An emulated stage is the Access emulator fronting that InferOS.
-  const front = stage.kind === "emulated" ? services?.access?.upstream === inferos.url && services.access.url : inferos.url;
-  return front && sameLoopback(front, stage.origin) ? inferos.inferopsUrl : null;
+  return recordedFront(stage, root) === stage.origin ? inferos.inferopsUrl : null;
+}
+
+/**
+ * Why a loopback or emulated stage can't be signed in to, when it names the recorded InferOS by
+ * another loopback host (`127.0.0.1` for `localhost`, or the reverse), or null. The same server
+ * answers both, but sign-in can't finish: the browser keeps the sign-in's nonce in the popup's
+ * storage for the stage's origin, and InferOS sends the popup back to its own origin, whose
+ * storage holds none, so its handoff page says the link isn't valid and the stage's tab waits
+ * for a token that never comes (FAC-145).
+ */
+export function stageOriginProblem(stage: StageTarget, root: string): string | null {
+  const front = recordedFront(stage, root);
+  if (!front || front === stage.origin || !sameLoopback(front, stage.origin)) return null;
+  return `the stage is ${stage.origin}, but InferOS answers as ${front}, and sign-in returns there, so it can't finish from ${stage.origin}; set FACTORY_STAGE_URL=${front}`;
 }
 
 /**
@@ -518,6 +542,13 @@ async function stageChecks(config: FactoryConfig, deps: FactoryDeps): Promise<{ 
     detail: root.status === null ? `${target.origin}/ did not answer: ${String(root.body)}` : `${target.origin}/ answered ${root.status}`,
   });
   if (root.status === null) return { target, authMode: null, checks };
+  if (target.kind !== "remote") {
+    const problem = stageOriginProblem(target, deps.root);
+    if (problem) {
+      checks.push({ name: "stage:origin", status: "FAIL", detail: problem });
+      return { target, authMode: null, checks };
+    }
+  }
   if (target.kind !== "loopback") checks.push(await accessCheck(target, root.status, deps));
   // A stage behind Access (remote or emulated) is reached the way the smoke reaches it: with the service token.
   const token = { "CF-Access-Client-Id": deps.env.CF_ACCESS_CLIENT_ID ?? "", "CF-Access-Client-Secret": deps.env.CF_ACCESS_CLIENT_SECRET ?? "" };

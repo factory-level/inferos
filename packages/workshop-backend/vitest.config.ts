@@ -124,11 +124,11 @@ const compatibilityFlags = ['experimental', 'nodejs_compat', 'allow_irrevocable_
 
 /**
  * The `backend` project's pool workers: `BACKEND_TEST_WORKERS` when set (a positive integer, or the
- * config refuses to load), otherwise four, or one fewer than the cores when there are fewer.
+ * config refuses to load), otherwise four, or the available cores when there are fewer.
  */
 function backendWorkers(): number {
   let value = process.env.BACKEND_TEST_WORKERS
-  if (value === undefined || value === '') return Math.max(1, Math.min(4, availableParallelism() - 1))
+  if (value === undefined || value === '') return Math.max(1, Math.min(4, availableParallelism()))
   if (!/^[1-9][0-9]*$/.test(value)) {
     throw new Error(`BACKEND_TEST_WORKERS must be a positive integer, not ${JSON.stringify(value)}`)
   }
@@ -265,13 +265,12 @@ export default defineConfig({
         plugins: backendPlugins(),
         test: {
           // Files that restart every Durable Object (`abortAllDurableObjects()`), which in the
-          // shared `backend` runtime would restart other files' objects too. Each file here gets its
+          // shared `backend` runtime would also restart other files' objects. Each file here gets its
           // own Miniflare (the default `isolate`), after `backend` has finished.
           name: 'backend-restart',
           include: tests(BACKEND_RESTART),
-          // One file at a time: a file's restart must reach no other file's objects.
-          maxWorkers: 1,
-          fileParallelism: false,
+          // Workers use separate Miniflare instances, so concurrent files cannot restart one another's objects.
+          maxWorkers: 2,
           sequence: { groupOrder: 2 },
           unstubGlobals: true,
           restoreMocks: true,

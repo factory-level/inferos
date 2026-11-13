@@ -20,11 +20,66 @@ export interface WikiSnapshot extends WikiPageText { id: string; version: number
 
 /** The structured apply result recorded in Workshop action history. */
 export interface KnowledgeWriteOutcome {
+  id?: number;
   state?: string;
   historyKind?: string;
+  /** Stable action-kind tag only; labels and descriptions are deliberately omitted. */
+  actionKind?: string;
   /** Semantic policy of the attempted operation, not the generic action-history type. */
   applyKind?: string;
-  lastAttempt?: { code?: string; outcome?: string };
+  lastAttempt?: { code?: string; outcome?: string; retryable?: boolean; failureKind?: string };
+}
+
+/** Poll the authoritative board and the action log under one deadline. Action state is diagnostic;
+ * the board predicate alone decides success, so a pending read can never shorten the board wait. */
+export async function waitForBoardWrite<T, E>(steps: {
+  readBoard(): Promise<T>;
+  boardApplied(value: T): boolean;
+  readAction(): Promise<E | undefined>;
+  actionFinished(value: E): boolean;
+}, timeoutMs = 60_000, pollIntervalMs = 250): Promise<{ board: T; applied: boolean; action?: E }> {
+  const deadline = Date.now() + timeoutMs;
+  let board!: T;
+  let action: E | undefined;
+  let actionFinished = false;
+  while (true) {
+    const [nextBoard, nextAction] = await Promise.all([
+      steps.readBoard(),
+      actionFinished ? Promise.resolve(undefined) : steps.readAction(),
+    ]);
+    board = nextBoard;
+    if (nextAction !== undefined) {
+      action = nextAction;
+      actionFinished = steps.actionFinished(nextAction);
+    }
+    if (steps.boardApplied(board)) return { board, applied: true };
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { board, applied: false, action };
+    await new Promise(resolve => setTimeout(resolve, Math.min(pollIntervalMs, remaining)));
+  }
+}
+
+/** Project only bounded action evidence; never copy provider messages or action descriptions. */
+export function stageSmokeActionEvidence(entry: {
+  id: number;
+  state?: string;
+  type?: string;
+  description?: { actionKind?: { tag?: string }; title?: string };
+  lastAttempt?: { code?: string; outcome?: string; retryable?: boolean; kind?: string; message?: string };
+}, applyKind: string): KnowledgeWriteOutcome {
+  return {
+    id: entry.id,
+    state: entry.state,
+    historyKind: entry.type,
+    actionKind: entry.description?.actionKind?.tag,
+    applyKind,
+    lastAttempt: entry.lastAttempt && {
+      code: entry.lastAttempt.code,
+      outcome: entry.lastAttempt.outcome,
+      retryable: entry.lastAttempt.retryable,
+      failureKind: entry.lastAttempt.kind,
+    },
+  };
 }
 
 /** Run an operation and restore the observed state even when later evidence collection throws. */

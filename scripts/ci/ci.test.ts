@@ -12,7 +12,7 @@ import { summarizeArtillery } from "./perf.ts";
 import { NODES, runPipeline, type PipelineDeps, type PipelineNode, type PipelineState } from "./pipeline.ts";
 import { smokeContainer, smokePreconditions, stageInferlab } from "./stage-smoke.ts";
 import { DEFAULT_WIKI, missingWikiText, wikiDisagreement, wikiExpectedText } from "./stage-smoke-wiki.ts";
-import { checkKnowledgeWrite, forbiddenProposal, knowledgeWriteRefused, sameWikiSnapshot, smokeOraclesPass, STAGE_SMOKE_ORACLES, WIKI_BODY_APPLY_KIND, withStateRestoration, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
+import { checkKnowledgeWrite, forbiddenProposal, knowledgeWriteRefused, sameWikiSnapshot, smokeOraclesPass, stageSmokeActionEvidence, STAGE_SMOKE_ORACLES, waitForBoardWrite, WIKI_BODY_APPLY_KIND, withStateRestoration, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
 import { cvssSeverity, dedupe, newFindings, parseGitleaks, parseOsv, parseSemgrep, parseTrivy, type Baseline } from "./security.ts";
 import { VERIFY_PARTS } from "./verify.ts";
 
@@ -246,6 +246,87 @@ test("stage-smoke rejects obsolete, swapped and privileged negative-test persona
 });
 
 const KNOWLEDGE_PAGE: WikiSnapshot = { id: "page-1", version: 7, slug: "handbook", title: "QA handbook", body: "Original body", sections: ["Original section"] };
+
+test("stage smoke action evidence keeps failure codes and omits untrusted action text", () => {
+  const evidence = stageSmokeActionEvidence({
+    id: 73,
+    state: "failed",
+    type: "action",
+    description: { actionKind: { tag: "issue.move" }, title: "private action description" },
+    lastAttempt: {
+      code: "SHARED_CONFIGURATION_REFUSED",
+      outcome: "notApplied",
+      retryable: false,
+      kind: "permission",
+      message: "fake-token-secret; owner@example.test",
+    },
+  }, "BOARD_MUTATION");
+
+  assert.deepEqual(evidence, {
+    id: 73,
+    state: "failed",
+    historyKind: "action",
+    actionKind: "issue.move",
+    applyKind: "BOARD_MUTATION",
+    lastAttempt: {
+      code: "SHARED_CONFIGURATION_REFUSED",
+      outcome: "notApplied",
+      retryable: false,
+      failureKind: "permission",
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(evidence), /fake-token-secret|owner@example\.test|private action description/);
+});
+
+test("board approval waits through a pending action and passes when the board eventually applies", async () => {
+  const started = Date.now();
+  let state = "from";
+  let actionState = "pending";
+  const finish = setTimeout(() => { state = "to"; actionState = "approved"; }, 2_000);
+  try {
+    const result = await waitForBoardWrite({
+      readBoard: async () => ({ state }),
+      boardApplied: board => board.state === "to",
+      readAction: async () => ({ id: 101, state: actionState }),
+      actionFinished: action => action.state !== "pending",
+    }, 4_000, 20);
+    assert.equal(result.applied, true);
+    assert.deepEqual(result.board, { state: "to" });
+    assert.ok(Date.now() - started >= 1_900, "the pending action must not shorten the board wait");
+    assert.equal(result.action, undefined, "successful board oracles do not retain diagnostic action evidence");
+  } finally {
+    clearTimeout(finish);
+  }
+});
+
+test("board timeout retains action evidence, and the same wait applies to restore", async () => {
+  let actionReads = 0;
+  const failed = await waitForBoardWrite({
+    readBoard: async () => ({ state: "not-applied" }),
+    boardApplied: board => board.state === "applied",
+    readAction: async () => { actionReads++; return { id: 102, state: "pending", lastAttempt: { code: "IN_PROGRESS" } }; },
+    actionFinished: action => action.state !== "pending",
+  }, 60, 5);
+  assert.equal(failed.applied, false);
+  assert.ok(actionReads > 1, "action state is polled through the shared deadline");
+  assert.deepEqual(failed.action, { id: 102, state: "pending", lastAttempt: { code: "IN_PROGRESS" } });
+
+  let restored = false;
+  let restoreReads = 0;
+  const restoreTimer = setTimeout(() => { restored = true; }, 80);
+  try {
+    const restore = await waitForBoardWrite({
+      readBoard: async () => { restoreReads++; return { state: restored ? "original" : "moved" }; },
+      boardApplied: board => board.state === "original",
+      readAction: async () => ({ id: 103, state: restored ? "approved" : "pending" }),
+      actionFinished: action => action.state !== "pending",
+    }, 500, 10);
+    assert.equal(restore.applied, true);
+    assert.ok(restoreReads > 1, "restore also waits on the board oracle");
+  } finally {
+    clearTimeout(restoreTimer);
+  }
+});
 
 test("stage smoke gates on every current persona oracle, not an old or incomplete green summary", () => {
   const pass = STAGE_SMOKE_ORACLES.map(name => ({ name, ok: true }));
