@@ -60,13 +60,14 @@ export function knowledgeWrite(tool: string, input: string): KnowledgeWrite | un
 }
 
 /** A change as the client may see it: its id, tool and status, and a knowledge write's target. */
-export function shownProposal({ id, tool, status, input, run, runStatus, waitsForReconnect }: DotProposal): ShownProposal {
+export function shownProposal({ id, tool, status, input, run, runStatus, waitsForReconnect, resumed }: DotProposal): ShownProposal {
   const knowledge = knowledgeWrite(tool, input);
   return {
     id, tool, status, ...(knowledge ? { knowledge } : {}),
     // Only a status the page knows: anything else is left out, never shown raw.
     ...(runStatus && RUN_STATUS_WORDS[runStatus] !== undefined ? { runStatus } : {}),
     ...(waitsForReconnect === true ? { waitsForReconnect: true as const } : {}),
+    ...(resumed === true ? { resumed: true as const } : {}),
     // Its fixed fields only: never more of what InferOS reported than the page draws.
     ...(run ? { run: { ...(run.kind ? { kind: run.kind } : {}), runId: run.runId, outcome: run.outcome, ranAs: run.ranAs,
       ...(run.reasonCode ? { reasonCode: run.reasonCode } : {}) } } : {}),
@@ -254,13 +255,19 @@ const RUN_STATUS_WORDS: Record<string, string | null> = {
  * - **waiting for you to reconnect:** its approval's confirm met a dead sign-in
  *   (`waitsForReconnect`, from the gatekeeper), so it waits for them (ADR 0011 U3), never for
  *   anyone else;
- * - **resumed:** once decided, what the run did after (`runStatus`), beside the decision's own words;
+ * - **resumed:** only once this change is decided **and** its own decision resumed the run
+ *   (`resumed`, recorded by the gatekeeper from InferOps' answer), what the run did after
+ *   (`runStatus`). `runStatus` alone never says so: an undecided change's run may be running or
+ *   complete, and with background resume off every run ends complete (r1 on #494);
  * - **ended refused:** the run stopped waiting because nothing was decided in time.
  * While a run waits for other decisions, nothing extra is said. Fixed words only.
  */
-export function decisionWords(proposal: Pick<ShownProposal, "status" | "runStatus" | "waitsForReconnect">): { label?: string; detail?: string; resume?: string } {
+export function decisionWords(proposal: Pick<ShownProposal, "status" | "runStatus" | "waitsForReconnect" | "resumed">): { label?: string; detail?: string; resume?: string } {
   if (proposal.waitsForReconnect === true) return { ...RECONNECT_WORDS };
-  const resume = proposal.runStatus ? RUN_STATUS_WORDS[proposal.runStatus] : null;
+  if (proposal.runStatus === "refused") return { resume: RUN_STATUS_WORDS.refused as string };
+  const decided = proposal.status.outcome !== "waiting" && proposal.status.outcome !== "running";
+  if (!decided || proposal.resumed !== true || !proposal.runStatus) return {};
+  const resume = RUN_STATUS_WORDS[proposal.runStatus];
   return resume ? { resume } : {};
 }
 

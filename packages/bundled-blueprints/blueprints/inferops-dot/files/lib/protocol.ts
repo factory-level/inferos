@@ -44,6 +44,12 @@ export interface DotProposal {
    * waits for the person to reconnect InferOps. Absent from an older gatekeeper.
    */
   waitsForReconnect?: boolean;
+  /**
+   * True once its own decision resumed its Dot run (FAC-135): the gatekeeper recorded a `resumed`
+   * run in InferOps' answer to its confirm or decline. Absent or false otherwise, including with
+   * background resume off, so `runStatus` alone never says the run resumed.
+   */
+  resumed?: boolean;
   createdAt: string;
   expiresAt: string;
 }
@@ -118,6 +124,8 @@ export interface ShownProposal {
   runStatus?: DotRunStatus;
   /** Set when its decision waits for the person to reconnect InferOps (FAC-135). */
   waitsForReconnect?: true;
+  /** Set once its own decision resumed its Dot run (FAC-135), as the gatekeeper recorded it. */
+  resumed?: true;
 }
 
 export interface ShownMessage {

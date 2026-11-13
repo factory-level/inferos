@@ -209,16 +209,32 @@ describe("a background decision's words (FAC-135)", () => {
     expect(shownProposal(proposal({ status: waiting, waitsForReconnect: false })).waitsForReconnect).toBeUndefined();
   });
 
-  it("says what the Dot did after the decision, and that it ended refused when nothing was decided in time", () => {
-    expect(decisionWords({ status: { outcome: "succeeded" }, runStatus: "complete" }).resume)
+  it("says what the Dot did after the decision, only once that decision resumed it, and that it ended refused when nothing was decided in time", () => {
+    expect(decisionWords({ status: { outcome: "succeeded" }, runStatus: "complete", resumed: true }).resume)
       .toBe("Your Dot picked up your decision and answered below.");
-    expect(decisionWords({ status: { outcome: "rejected" }, runStatus: "running" }).resume)
+    expect(decisionWords({ status: { outcome: "rejected" }, runStatus: "running", resumed: true }).resume)
       .toBe("Your Dot is answering after your decision.");
     expect(decisionWords({ status: { outcome: "failed", code: "EXPIRED" }, runStatus: "refused" }).resume)
       .toContain("Ended: nothing was decided in time");
     for (const runStatus of ["error", "interrupted"] as const) {
-      expect(decisionWords({ status: { outcome: "failed" }, runStatus }).resume, runStatus).toContain("after your decision");
+      expect(decisionWords({ status: { outcome: "failed" }, runStatus, resumed: true }).resume, runStatus).toContain("after your decision");
     }
+  });
+
+  it("never says the Dot resumed from its run's status alone (r1 on #494)", () => {
+    // An undecided change, whatever its run is doing: nothing about a resume.
+    for (const runStatus of ["running", "complete", "error", "interrupted", "awaiting_decision"] as const) {
+      expect(decisionWords({ status: waiting, runStatus }), runStatus).toEqual({});
+      expect(decisionWords({ status: waiting, runStatus, resumed: true }), runStatus).toEqual({});
+      expect(decisionWords({ status: { outcome: "running" }, runStatus, resumed: true }), runStatus).toEqual({});
+    }
+    // Background resume off: every run ends complete, and a decided change's decision resumed nothing.
+    expect(decisionWords({ status: { outcome: "succeeded" }, runStatus: "complete" })).toEqual({});
+    expect(decisionWords({ status: { outcome: "rejected" }, runStatus: "complete" })).toEqual({});
+    // Only the gatekeeper's recorded `resumed` reaches the page, and only as true.
+    expect(shownProposal(proposal({ status: { outcome: "succeeded" }, resumed: true })).resumed).toBe(true);
+    expect(shownProposal(proposal({ status: { outcome: "succeeded" }, resumed: false })).resumed).toBeUndefined();
+    expect(shownProposal(proposal({ status: { outcome: "succeeded" } })).resumed).toBeUndefined();
   });
 
   it("shows the client a run status it knows, and never another", () => {
