@@ -20,11 +20,37 @@ export interface WikiSnapshot extends WikiPageText { id: string; version: number
 
 /** The structured apply result recorded in Workshop action history. */
 export interface KnowledgeWriteOutcome {
+  id?: number;
   state?: string;
   historyKind?: string;
+  /** Stable action-kind tag only; labels and descriptions are deliberately omitted. */
+  actionKind?: string;
   /** Semantic policy of the attempted operation, not the generic action-history type. */
   applyKind?: string;
-  lastAttempt?: { code?: string; outcome?: string };
+  lastAttempt?: { code?: string; outcome?: string; retryable?: boolean; failureKind?: string };
+}
+
+/** Project only bounded action evidence; never copy provider messages or action descriptions. */
+export function stageSmokeActionEvidence(entry: {
+  id: number;
+  state?: string;
+  type?: string;
+  description?: { actionKind?: { tag?: string }; title?: string };
+  lastAttempt?: { code?: string; outcome?: string; retryable?: boolean; kind?: string; message?: string };
+}, applyKind: string): KnowledgeWriteOutcome {
+  return {
+    id: entry.id,
+    state: entry.state,
+    historyKind: entry.type,
+    actionKind: entry.description?.actionKind?.tag,
+    applyKind,
+    lastAttempt: entry.lastAttempt && {
+      code: entry.lastAttempt.code,
+      outcome: entry.lastAttempt.outcome,
+      retryable: entry.lastAttempt.retryable,
+      failureKind: entry.lastAttempt.kind,
+    },
+  };
 }
 
 /** Run an operation and restore the observed state even when later evidence collection throws. */

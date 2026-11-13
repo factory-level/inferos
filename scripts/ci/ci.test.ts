@@ -12,7 +12,7 @@ import { summarizeArtillery } from "./perf.ts";
 import { NODES, runPipeline, type PipelineDeps, type PipelineNode, type PipelineState } from "./pipeline.ts";
 import { smokeContainer, smokePreconditions, stageInferlab } from "./stage-smoke.ts";
 import { DEFAULT_WIKI, missingWikiText, wikiDisagreement, wikiExpectedText } from "./stage-smoke-wiki.ts";
-import { checkKnowledgeWrite, forbiddenProposal, knowledgeWriteRefused, sameWikiSnapshot, smokeOraclesPass, STAGE_SMOKE_ORACLES, WIKI_BODY_APPLY_KIND, withStateRestoration, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
+import { checkKnowledgeWrite, forbiddenProposal, knowledgeWriteRefused, sameWikiSnapshot, smokeOraclesPass, stageSmokeActionEvidence, STAGE_SMOKE_ORACLES, WIKI_BODY_APPLY_KIND, withStateRestoration, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
 import { cvssSeverity, dedupe, newFindings, parseGitleaks, parseOsv, parseSemgrep, parseTrivy, type Baseline } from "./security.ts";
 import { VERIFY_PARTS } from "./verify.ts";
 
@@ -246,6 +246,37 @@ test("stage-smoke rejects obsolete, swapped and privileged negative-test persona
 });
 
 const KNOWLEDGE_PAGE: WikiSnapshot = { id: "page-1", version: 7, slug: "handbook", title: "QA handbook", body: "Original body", sections: ["Original section"] };
+
+test("stage smoke action evidence keeps failure codes and omits untrusted action text", () => {
+  const evidence = stageSmokeActionEvidence({
+    id: 73,
+    state: "failed",
+    type: "action",
+    description: { actionKind: { tag: "issue.move" }, title: "private action description" },
+    lastAttempt: {
+      code: "SHARED_CONFIGURATION_REFUSED",
+      outcome: "notApplied",
+      retryable: false,
+      kind: "permission",
+      message: "fake-token-secret; owner@example.test",
+    },
+  }, "BOARD_MUTATION");
+
+  assert.deepEqual(evidence, {
+    id: 73,
+    state: "failed",
+    historyKind: "action",
+    actionKind: "issue.move",
+    applyKind: "BOARD_MUTATION",
+    lastAttempt: {
+      code: "SHARED_CONFIGURATION_REFUSED",
+      outcome: "notApplied",
+      retryable: false,
+      failureKind: "permission",
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(evidence), /fake-token-secret|owner@example\.test|private action description/);
+});
 
 test("stage smoke gates on every current persona oracle, not an old or incomplete green summary", () => {
   const pass = STAGE_SMOKE_ORACLES.map(name => ({ name, ok: true }));

@@ -32,7 +32,7 @@
 // The move is proposed through the gatekeeper's issue session (the API the board widget calls),
 // and approved by clicking Approve in the workspace's Activity panel.
 
-import { checkKnowledgeWrite, smokeOraclesPass, smokePersonaProblem, STAGE_SMOKE_ORACLES, WIKI_BODY_APPLY_KIND, withStateRestoration, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
+import { checkKnowledgeWrite, smokeOraclesPass, smokePersonaProblem, stageSmokeActionEvidence, STAGE_SMOKE_ORACLES, WIKI_BODY_APPLY_KIND, withStateRestoration, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -251,9 +251,13 @@ async function ensureWorkspace(user: Any, title: string): Promise<Any> {
 }
 
 /** A workspace bound to the board: its connection, an open session and a canvas showing it. */
-async function bindBoard(user: Any, accountId: number, title: string): Promise<{ overseer: Any; workspaceId: string; connectionId: number; session: Any; screenId: string }> {
+async function bindBoard(user: Any, accountId: number, title: string): Promise<{ overseer: Any; workspaceId: string; connectionId: number; session: Any; screenId: string; sharing: { collaborators: number; shareLinks: number } }> {
   const overseer = await ensureWorkspace(user, title);
   const workspaceId = (await overseer.getMetadata()).id as string;
+  // Stages can require a separate shared-configuration authority at approval time. Record only
+  // counts, never collaborator identities, link ids or notes.
+  const [collaborators, shareLinks] = await Promise.all([overseer.listCollaborators(), overseer.listShareLinks()]);
+  const sharing = { collaborators: collaborators.length, shareLinks: shareLinks.length };
   const connection = await overseer.getGatekeeperByResourceUrl(boardUrl) ?? await overseer.newGatekeeper(accountId, boardUrl);
   if (!connection) throw new Error(`the InferOps account cannot open ${boardUrl}`);
   const connectionId = await connection.getId() as number;
@@ -268,7 +272,7 @@ async function bindBoard(user: Any, accountId: number, title: string): Promise<{
     title: screenTitle,
     sections: [{ id: "main", title: screenTitle, columns: 2, widgets: [{ id: "board", kind: "inferops.project-board", version: 1, targetRef: boardUrl, size: "full", params: { workflow: "software", showCompleted: true } }] }],
   });
-  return { overseer, workspaceId, connectionId, session, screenId: screen.id };
+  return { overseer, workspaceId, connectionId, session, screenId: screen.id, sharing };
 }
 
 /** The pending action this connection just queued. */
@@ -281,9 +285,9 @@ async function pendingFor(overseer: Any, connectionId: number): Promise<{ id: nu
 async function actionState(overseer: Any, id: number, applyKind: typeof WIKI_BODY_APPLY_KIND): Promise<KnowledgeWriteOutcome> {
   let beforeId: number | undefined;
   for (let page = 0; page < 10; page++) {
-    const { entries, nextBeforeId } = await overseer.listActions({ beforeId, filter: "action" }) as { entries: { id: number; state?: string; lastAttempt?: { message?: string; code?: string; outcome?: string } }[]; nextBeforeId?: number };
+    const { entries, nextBeforeId } = await overseer.listActions({ beforeId, filter: "action" }) as { entries: { id: number; state?: string; type?: string; description?: { actionKind?: { tag?: string } }; lastAttempt?: { message?: string; code?: string; outcome?: string; retryable?: boolean; kind?: string } }[]; nextBeforeId?: number };
     const found = entries.find(entry => entry.id === id);
-    if (found) return { state: found.state, historyKind: "action", applyKind, lastAttempt: found.lastAttempt && { code: found.lastAttempt.code, outcome: found.lastAttempt.outcome } };
+    if (found) return stageSmokeActionEvidence(found, applyKind);
     if (nextBeforeId === undefined) break;
     beforeId = nextBeforeId;
   }
@@ -291,7 +295,7 @@ async function actionState(overseer: Any, id: number, applyKind: typeof WIKI_BOD
 }
 
 /** Approve the one waiting request in the workspace's Activity panel, as a person would. */
-async function approveInBrowser(page: Any, workspaceId: string, shot: string): Promise<void> {
+async function approveInBrowser(page: Any, workspaceId: string, shot: string): Promise<string[]> {
   await page.goto(new URL(`/workspace/${workspaceId}`, stage).toString());
   const approve = page.getByRole("button", { name: /^Approve$/ }).first();
   try {
@@ -305,6 +309,28 @@ async function approveInBrowser(page: Any, workspaceId: string, shot: string): P
   await page.waitForTimeout(500); // the review popover fades in
   await page.screenshot({ path: join(out, shot) });
   await approve.click();
+  // Capture the UI immediately after the decision. The hook intentionally shows generic safe
+  // copy for an apply failure and the kernel's own bounded shared-configuration refusal.
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: join(out, shot.replace(/\.png$/, "-after-click.png")) });
+  const safeToastText = [
+    "Failed to approve action",
+    "It wasn't applied. The action shows why.",
+    "You don't have permission to share or publish configuration other people use.",
+  ];
+  const toastText: string[] = [];
+  for (const text of safeToastText) {
+    if (await page.getByText(text, { exact: true }).count()) toastText.push(text);
+  }
+  return toastText;
+}
+
+async function screenshotActivityHistory(page: Any, workspaceId: string, path: string): Promise<void> {
+  await page.goto(new URL(`/workspace/${workspaceId}`, stage).toString());
+  await page.getByRole("button", { name: /^Activity(?: — \d+ requests? needs? review)?$/ }).click({ timeout: 30_000 });
+  await page.getByRole("button", { name: "History", exact: true }).click({ timeout: 30_000 });
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: join(out, path) });
 }
 
 /**
@@ -382,6 +408,8 @@ async function ownerFlow(browser: Any): Promise<void> {
     // The Wiki read is independent of the board flow, so a board failure does not hide it.
     await wikiReads("owner", page, user, account!.id, persona, inferops).catch((error: Error) => record("owner.wikiReads", false, error.message.split("\n")[0]!));
     const bound = await bindBoard(user, account!.id, "Stage smoke (owner)");
+    notes.ownerWorkspaceSharing = bound.sharing;
+    console.log(`[stage-smoke] INFO owner workspace sharing: collaborators=${bound.sharing.collaborators} shareLinks=${bound.sharing.shareLinks}`);
     const board = await bound.session.readBoard() as Board;
     const identifiers = board.columns.flatMap(c => c.issues.map(i => i.identifier));
     await page.goto(new URL(`/workspace/${bound.workspaceId}/inferops-canvas?view=${bound.screenId}`, stage).toString());
@@ -442,16 +470,42 @@ async function ownerFlow(browser: Any): Promise<void> {
       } else if (!pending) {
         record("owner.restored", false, "the move back queued no action"); return;
       }
-      await approveInBrowser(page, bound.workspaceId, `owner-0${step === "apply" ? 6 : 8}-approve-${step}.png`);
-      const after = await until(() => api2.issue(move.issueId), value => value.stateId === to);
+      const approveShot = `owner-0${step === "apply" ? 6 : 8}-approve-${step}.png`;
+      const toastText = await approveInBrowser(page, bound.workspaceId, approveShot);
+      let actionEvidence: KnowledgeWriteOutcome | undefined;
+      if (step === "apply" && pending) {
+        actionEvidence = await actionState(bound.overseer, pending.id, WIKI_BODY_APPLY_KIND);
+        // A successful action can be visible in the action log shortly before the board API;
+        // failed or gate-refused actions are recorded immediately and must not time out here.
+        if (actionEvidence.state === "approved") {
+          await until(() => api2.issue(move.issueId), value => value.stateId === to, 60_000);
+        }
+      }
+      const after = await api2.issue(move.issueId);
       const applied = after.stateId === to && BigInt(after.revision) > BigInt(before.revision);
       const fresh = await bound.session.readBoard() as Board;
       if (step === "apply") {
-        notes.applied = { revisionBefore: before.revision, revisionAfter: after.revision, boardRevision: revisionOf(fresh, move.issueId) };
-        await page.goto(new URL(`/workspace/${bound.workspaceId}/inferops-canvas?view=${bound.screenId}`, stage).toString());
-        await page.getByText(move.identifier).first().waitFor({ timeout: 30_000 }).catch(() => undefined);
-        await page.screenshot({ path: join(out, "owner-07-after-approve.png") });
-        if (!record("owner.applied", applied, `InferOps API: ${move.identifier} ${after.stateId === to ? `now in ${toName}` : "NOT moved"}, revision ${before.revision} -> ${after.revision}`)) return;
+        const activityScreenshot = "owner-08-activity-history.png";
+        let activityScreenshotError: string | undefined;
+        try {
+          await screenshotActivityHistory(page, bound.workspaceId, activityScreenshot);
+        } catch (error) {
+          activityScreenshotError = (error as Error).message.split("\n")[0];
+        }
+        notes.applied = {
+          revisionBefore: before.revision,
+          revisionAfter: after.revision,
+          boardRevision: revisionOf(fresh, move.issueId),
+          action: actionEvidence ?? { id: pending?.id, state: "missing" },
+          approvalToast: toastText,
+          afterApproveScreenshot: approveShot.replace(/\.png$/, "-after-click.png"),
+          activityHistoryScreenshot: activityScreenshotError ? null : activityScreenshot,
+          activityScreenshotError,
+        };
+        const actionDetail = JSON.stringify(actionEvidence ?? { id: pending?.id, state: "missing" });
+        const activityDetail = activityScreenshotError ? `; Activity screenshot failed: ${activityScreenshotError}` : `; Activity history screenshot=${activityScreenshot}`;
+        if (!record("owner.applied", applied,
+          `InferOps API: ${move.identifier} ${after.stateId === to ? `now in ${toName}` : "NOT moved"}, revision ${before.revision} -> ${after.revision}; action evidence=${actionDetail}; toast=${JSON.stringify(toastText)}${activityDetail}`)) return;
       } else {
         notes.restored = { revisionBefore: before.revision, revisionAfter: after.revision };
         record("owner.restored", applied, `InferOps API: ${move.identifier} ${after.stateId === to ? `back in ${toName}` : "NOT moved back"}, revision ${before.revision} -> ${after.revision}`);
