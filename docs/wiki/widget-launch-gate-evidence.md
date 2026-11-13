@@ -118,8 +118,36 @@ The plan's S2 part 3 wrote no new tests. What exists today, and what stays unpro
 
 These steps aren't run, and need the Cloudflare Access service token (`CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`):
 1. **E-3:** dev-os sets neither `AUTHORED_WIDGET_BUILD_ENABLED` nor `CONSOLE_TOOLS` (`scripts/stage/stage-config.ts`). Authored builds and console tools are off there until the manager turns them on and redeploys.
-2. **The stage smoke:** FAC-145's `scripts/ci/stage-smoke.ts` (nine oracles) is in progress. Until it lands, the deployed smoke is pending FAC-145.
+2. **The stage smoke:** FAC-145's `scripts/ci/stage-smoke.ts` (nine oracles) has passed locally against the pinned InferOps revision recorded in the QA evidence. The deployed dev-os smoke remains pending and is manager-only.
 3. **A GrokBot run on dev-os** (operate@grokbot, in a test company): publish a Refine widget, find it, place it, and have the operate agent request its command and wait for a decider.
+
+### Manager-only deployed command and expected result
+
+Only the manager runs this against dev-os, after confirming the seed and Access service token. Start
+a clean shell with the `PATH`, `HOME`, `USER`, `LANG` and `TERM` values it needs; source the mode-600
+vars file without printing it, and set the non-secret stage and persona values:
+
+```sh
+set -a
+. .stage-dev-os.vars
+set +a
+export FACTORY_STAGE_URL=https://dev-os.factorylevel.dev
+export GROKBOT_PERSONA_USER=grokbot-owner
+export GROKBOT_OPERATE_USER=grokbot-operate
+pnpm local factory doctor stage-probe
+```
+
+Proceed only when every probe line says `READY`, then run:
+
+```sh
+pnpm local factory stage-smoke
+```
+
+Expected: exit status 0, exactly one `PASS` for each of `owner.signIn`, `owner.wikiReads`,
+`owner.boardRenders`, `owner.simulated`, `owner.applied`, `owner.restored`, `operate.signIn`,
+`operate.wikiReads` and `operate.knowledgeWriteRefused`, followed by a successful sign-in probe
+and its Artillery `Checks:` section. A missing oracle or probe check fails the run. The local run is
+not a substitute for this deployed result. Never point these commands at production.
 
 ## Known gaps
 

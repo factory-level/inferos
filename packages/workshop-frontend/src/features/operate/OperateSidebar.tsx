@@ -9,11 +9,15 @@ import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceScreens } from '../../pages/inferops-canvas/useWorkspaceScreens'
 import { useServerConfig } from '../../ServerConfigContext'
 import { findConsole } from './consoles'
+import { ModeToggle } from './ModeToggle'
 import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
 import { useOperateSession } from './OperateSessionContext'
 import { refusalMessage } from './sessionRefusal'
 
-/** A console's own page hierarchy, independent of the configuration application's sidebar. */
+/**
+ * A console's own page hierarchy, independent of the configuration application's sidebar. The mode
+ * toggle is the one control the two share, so Build is always one click away.
+ */
 export const OperateSidebar = ({ collapsed, onToggleCollapsed, onOpenWidget, onNavigate }: {
   collapsed: boolean
   onToggleCollapsed: () => void
@@ -55,6 +59,8 @@ export const OperateSidebar = ({ collapsed, onToggleCollapsed, onOpenWidget, onN
           <RailButton label="Expand sidebar" collapsed icon={<SidebarSimpleIcon size={15} className="rotate-180" aria-hidden />} onClick={onToggleCollapsed} />
         </div>
       )}
+
+      <ModeToggle mode="operate" collapsed={collapsed} />
 
       <nav aria-label="Console" className="sidebar-scroll flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-2 pt-2">
         <MenuButton label="All consoles" icon={<SquaresFourIcon size={14} aria-hidden />} collapsed={collapsed}

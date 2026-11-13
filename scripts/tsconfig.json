@@ -30,7 +30,9 @@
     "../packages/workshop-backend/scripts/dev-setup.ts",
     "../packages/workshop-backend/scripts/dev-verify.ts",
     "../packages/workshop-backend/scripts/dev-workshop.ts",
-    "../packages/workshop-backend/scripts/upload-consumer-skills.ts"
+    "../packages/workshop-backend/scripts/upload-consumer-skills.ts",
+    // The recovery rehearsal's operator signs in through dev-workshop.ts, and its test imports it.
+    "proof/rehearsal-operator.ts"
   ],
   "include": [
     "**/*.ts",

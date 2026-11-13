@@ -1104,16 +1104,23 @@ async function stageSmoke(config: FactoryConfig, deps: FactoryDeps, timeoutMs: n
     return doctor;
   }
   const env = { ...asStringEnv(deps.env), FACTORY_STAGE_URL: config.stageUrl!, ...(config.stageAccess ? { FACTORY_STAGE_ACCESS: config.stageAccess } : {}) };
-  const script = join(deps.root, "scripts", "preview", "smoke.ts");
-  if (!existsSync(script)) return { exitCode: 1, report: { ok: false, command: "factory stage-smoke", error: `the stage smoke (${script}) is not in this checkout` },
-    headline: "factory stage-smoke: scripts/preview/smoke.ts is not in this checkout" };
-  const smoke = deps.runIn([process.execPath, script, config.stageUrl!, "--gatekeeper", "inferops"], env, deps.root, timeoutMs);
+  const script = join(deps.root, "scripts", "ci", "stage-smoke.ts");
+  if (!existsSync(script)) return { exitCode: 1, report: { ok: false, command: "factory stage-smoke", error: `the scripted stage smoke (${script}) is not in this checkout` },
+    headline: "factory stage-smoke: scripts/ci/stage-smoke.ts is not in this checkout" };
+  // The CI node prints a human-readable status line; its structured result is the artifact beside
+  // the logs. Give this child a unique id so the wrapper can read exactly the run it launched.
+  const runId = `factory-stage-smoke-${deps.now()}-${randomBytes(4).toString("hex")}`;
+  const smoke = deps.runIn([process.execPath, script, "--run-id", runId], env, deps.root, timeoutMs);
   let smokeReport: unknown;
-  try { smokeReport = JSON.parse(smoke.stdout); } catch { smokeReport = { ok: false, error: "stage smoke did not return a JSON report" }; }
-  const ok = smoke.exitCode === 0;
+  let reportError: string | undefined;
+  const resultPath = join(deps.root, ".factory", "runs", runId, "stage-smoke", "result.json");
+  try { smokeReport = JSON.parse(readFileSync(resultPath, "utf8")); }
+  catch { reportError = `stage smoke result is missing or invalid at ${resultPath}`; }
+  const resultOk = typeof smokeReport === "object" && smokeReport !== null && "ok" in smokeReport && smokeReport.ok === true;
+  const ok = smoke.exitCode === 0 && resultOk;
   return {
     exitCode: ok ? 0 : 1,
-    report: { ...doctor.report, ok, command: "factory stage-smoke", smoke: { exitCode: smoke.exitCode, report: smokeReport } },
+    report: { ...doctor.report, ok, command: "factory stage-smoke", smoke: { exitCode: smoke.exitCode, report: smokeReport, ...(reportError ? { error: reportError } : {}) } },
     headline: `${doctor.headline}\nstage smoke: ${ok ? "PASS" : `FAIL (exit ${smoke.exitCode})`}`,
   };
 }

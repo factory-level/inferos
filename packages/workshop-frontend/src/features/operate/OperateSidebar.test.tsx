@@ -9,7 +9,10 @@ import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
 import { INITIAL_OPERATE_PAGE } from '@gadgets/workshop-shared/operate-session'
 
 const harness = vi.hoisted(() => ({ api: {} as unknown, toasts: [] as string[] }))
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => () => {} }))
+vi.mock('@tanstack/react-router', () => ({
+  useNavigate: () => () => {},
+  useRouterState: ({ select }: { select: (state: { location: { pathname: string } }) => unknown }) => select({ location: { pathname: '/inferops-canvas' } }),
+}))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: harness.api }) }))
 vi.mock('../../ServerConfigContext', () => ({ useServerConfig: () => ({ canvasFeatures: { durableViews: true } }) }))
 vi.mock('@cloudflare/kumo', async importOriginal => ({
