@@ -237,6 +237,19 @@ describe("a background decision's words (FAC-135)", () => {
     expect(shownProposal(proposal({ status: { outcome: "succeeded" } })).resumed).toBeUndefined();
   });
 
+  it("reads the gatekeeper's own resumed field: the words for a resumed decision, none for one that resumed nothing", () => {
+    // Shaped as gatekeeper-inferops' `shownProposal` sends it (#493): `resumed` and
+    // `waitsForReconnect` always present as booleans, `input` as JSON text.
+    const fromGatekeeper = (resumed: boolean) => ({
+      id: "p-1", tool: "issue_create", input: "{}", status: { outcome: "succeeded" as const },
+      receipt: null, runStatus: "complete" as const, waitsForReconnect: false, resumed,
+      createdAt: "2026-11-13T00:00:00.000Z", expiresAt: "2026-11-20T00:00:00.000Z",
+    });
+    expect(decisionWords(shownProposal(fromGatekeeper(true) as never)).resume)
+      .toBe("Your Dot picked up your decision and answered below.");
+    expect(decisionWords(shownProposal(fromGatekeeper(false) as never))).toEqual({});
+  });
+
   it("shows the client a run status it knows, and never another", () => {
     expect(shownProposal(proposal({ runStatus: "awaiting_decision" })).runStatus).toBe("awaiting_decision");
     expect(shownProposal(proposal({ runStatus: "refused" })).runStatus).toBe("refused");
