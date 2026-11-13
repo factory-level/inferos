@@ -4256,13 +4256,24 @@ function stillWaiting(binding: DotBinding, proposals: readonly DotProposalWire[]
  * gone, it stops, stages nothing, and says once that the Dot waits for them to reconnect; it says
  * so again only after a sweep has succeeded since. It never fails the session it precedes.
  */
-async function stageLeftProposals(binding: DotBinding, queue: RpcStub<ApprovalQueue>): Promise<void> {
+async function stageLeftProposals(binding: DotBinding, queue: RpcStub<ApprovalQueue>, deadline: number): Promise<void> {
   for (const conversationId of binding.watched()) {
     let proposals: DotProposalWire[];
     try {
-      proposals = await binding.client.listDotProposals(conversationId);
+      const left = deadline - Date.now();
+      if (left <= 0) throw new DotSweepDeadline();
+      proposals = await withinDeadline(binding.client.listDotProposals(conversationId), left);
     } catch (error) {
+      // InferOps slow, down or off (r1 on #493): stop at once; the next session start tries again.
+      if (error instanceof DotSweepDeadline) {
+        logger.warn("dot stage left proposals stopped at its deadline", { event: "dot.stage_left.deadline", host: binding.host });
+        return;
+      }
       const code = inferOpsErrorCode(error);
+      if (code === "UNAVAILABLE" || code === "DISABLED") {
+        logger.warn("dot stage left proposals stopped", { event: "dot.stage_left.stopped", host: binding.host, code });
+        return;
+      }
       if (code === "UNAUTHORIZED") {
         if (!binding.kv.get(DOT_RECONNECT_KEY)) {
           binding.kv.put(DOT_RECONNECT_KEY, new Date().toISOString());
@@ -4285,15 +4296,43 @@ async function stageLeftProposals(binding: DotBinding, queue: RpcStub<ApprovalQu
   }
 }
 
-/** The person's Dot session, after staging what watched conversations left undecided (FAC-135). */
-async function openDotSession(binding: DotBinding, queue: RpcStub<ApprovalQueue>): Promise<InferOpsDotSession> {
+/** How long one session start's staging may take in all (r1 on #493): it then stops, to try again next time. */
+const DOT_SWEEP_DEADLINE_MS = 10_000;
+
+/** The staging sweep ran out of time. */
+class DotSweepDeadline extends Error {}
+
+/** `promise`, or a `DotSweepDeadline` after `ms`: a listing that doesn't answer in time isn't waited for. */
+async function withinDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await stageLeftProposals(binding, queue);
-  } catch (error) {
-    logger.warn("dot stage left proposals failed", {
-      event: "dot.stage_left.failed", host: binding.host, code: inferOpsErrorCode(error) ?? "UNKNOWN",
-    });
+    return await Promise.race([promise, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new DotSweepDeadline()), ms);
+    })]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+/**
+ * The person's Dot session, returned at once (r1 on #493): the staging of what watched conversations
+ * left undecided (FAC-135) runs in the background (`background`, the facet's `waitUntil`), on its own
+ * hold of the approval queue, within `deadlineMs` in all, and never delays or fails the session.
+ */
+function openDotSession(binding: DotBinding, queue: RpcStub<ApprovalQueue>, background: (work: Promise<void>) => void,
+    deadlineMs = DOT_SWEEP_DEADLINE_MS): InferOpsDotSession {
+  const sweepQueue = queue.dup();
+  background((async () => {
+    try {
+      await stageLeftProposals(binding, sweepQueue, Date.now() + deadlineMs);
+    } catch (error) {
+      logger.warn("dot stage left proposals failed", {
+        event: "dot.stage_left.failed", host: binding.host, code: inferOpsErrorCode(error) ?? "UNKNOWN",
+      });
+    } finally {
+      sweepQueue[Symbol.dispose]();
+    }
+  })());
   return new DotSessionImpl(binding, queue);
 }
 
@@ -4358,7 +4397,7 @@ export class InferOpsDotGatekeeper
   /** Only a person's own sign-in has a Dot: the stopgap connection is no one's. */
   async startSession(approvalQueue: RpcStub<ApprovalQueue>): Promise<InferOpsDotSession> {
     if (!this.ctx.props.connected) throw new InferOpsError("FORBIDDEN", DOT_NEEDS_OWN_SIGN_IN);
-    return openDotSession(this.#binding(), approvalQueue.dup());
+    return openDotSession(this.#binding(), approvalQueue.dup(), work => this.ctx.waitUntil(work));
   }
 
   /** Strategy A: a Dot's conversations are the person's alone, so no collaborator may observe them. */
@@ -4870,10 +4909,14 @@ async function rejectDotAction(binding: DotBinding, actionId: number): Promise<v
  * the session, apply and reject a facet runs, against a data source the suite chose. Reaches nothing
  * the caller didn't pass; not an entrypoint.
  */
-export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, client: InferOpsClient) {
+export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, client: InferOpsClient,
+    options: { background?: (work: Promise<void>) => void; sweepDeadlineMs?: number } = {}) {
   const binding = new DotBinding(props, { store: new ActionStore(kv), client, observers: () => [] });
   return {
-    startSession: (queue: RpcStub<ApprovalQueue>): Promise<InferOpsDotSession> => openDotSession(binding, queue.dup()),
+    startSession: (queue: RpcStub<ApprovalQueue>): InferOpsDotSession =>
+      openDotSession(binding, queue.dup(), options.background ?? (work => void work), options.sweepDeadlineMs),
+    /** Watch `conversationId` as a turn would (FAC-135), for tests. */
+    watch: (conversationId: string) => binding.watch(conversationId),
     applyAction: (actionId: number, effects?: DotApprovedEffects) => applyDotAction(binding, actionId, effects),
     rejectAction: (actionId: number) => rejectDotAction(binding, actionId),
     workflowRunOutcome: (actionId: number, outcome: ApprovedRunOutcome) => recordDotRunOutcome(binding, actionId, outcome),

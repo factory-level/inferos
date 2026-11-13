@@ -458,6 +458,10 @@ export type DotScript = {
    * sent, as the account client restates the credential's refusal (stage `unsent`).
    */
   otherCompany?: boolean;
+  /** FAC-135 (r1 on #493): `chatbot.proposal_list` answers only after this many ms (a slow InferOps). */
+  listDelayMs?: number;
+  /** FAC-135: the session start's staging deadline, in ms (the facet's own by default). */
+  sweepDeadlineMs?: number;
 };
 
 /** A Dot binding's props, as the vendor mints them. */
@@ -506,8 +510,10 @@ class FakeDot {
       }), { headers: { "content-type": "text/event-stream" } });
     }
     if (method === "POST" && /\/runs\/[0-9a-f-]+\/cancel$/.test(path)) return Response.json({ ok: true });
-    if (method === "GET" && path === `${base}/proposals`) {
+    if (method === "GET" && /^\/chatbot\/conversations\/[0-9a-f-]+\/proposals$/.test(path)) {
+      if (this.script.listDelayMs) await new Promise(resolve => setTimeout(resolve, this.script.listDelayMs));
       if (this.script.list) return refuse(this.script.list.status, this.script.list.code);
+      if (path !== `${base}/proposals`) return refuse(404, "CONVERSATION_NOT_FOUND");
       return Response.json({ proposals: this.script.proposals });
     }
     const ran = /\/proposals\/([0-9a-f-]+)\/run-outcome$/.exec(path);
@@ -890,6 +896,14 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   }
 
   /** A workflow-policy session over a binding `bindAccount` made under `name`. */
+  /** A Dot session over a Dot binding `bindAccount` made under `name`, entering the facet's own `startSession` (FAC-135). */
+  async startBoundDotSession(name: string): Promise<InferOpsDotSession> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsDotGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    return this.ctx.facets.get<InferOpsDotGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+      .startSession(new RpcStub(new TestDotQueue(this.#log)) as never);
+  }
+
   async startBoundWorkflowPolicySession(name: string): Promise<InferOpsWorkflowPolicySession> {
     const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsWorkflowPolicyGatekeeper>;
     if (!cls) throw new Error(`No binding named ${name}.`);
@@ -1352,6 +1366,8 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   // --- The Dot (FAC-133): the facet's own session, apply and reject, over the real HTTP client
   // and a scripted fake InferOps.
   #dot: FakeDot | null = null;
+  /** The staging each Dot session start began in the background (FAC-135). */
+  #sweeps: Promise<void>[] = [];
 
   #dotBinding() {
     if (!this.#dot) throw new Error("dotScript() first");
@@ -1365,7 +1381,8 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
     } : client;
     return dotBindingOver(
       { accountId: "dot-account", connected: true, host: "acme.operations", workspaceId: "90000000-0000-4000-8000-000000000001" },
-      this.ctx.storage.kv, used);
+      this.ctx.storage.kv, used,
+      { background: work => { this.#sweeps.push(work); }, sweepDeadlineMs: this.#dot.script.sweepDeadlineMs });
   }
 
   /** What the fake InferOps answers from now on. */
@@ -1381,6 +1398,16 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
 
   async startDotSession(): Promise<InferOpsDotSession> {
     return this.#dotBinding().startSession(new RpcStub(new TestDotQueue(this.#log)) as never);
+  }
+
+  /** Waits for the staging every Dot session start so far began in the background (FAC-135). */
+  async dotSweepSettled(): Promise<void> {
+    await Promise.all(this.#sweeps);
+  }
+
+  /** Watches a conversation as a turn would (FAC-135). */
+  async dotWatch(conversationId: string): Promise<void> {
+    this.#dotBinding().watch(conversationId);
   }
 
   /** A Dot action's record as the facet keeps it (FAC-135: its resumed run and run status). */
