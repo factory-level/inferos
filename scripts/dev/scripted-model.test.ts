@@ -1,8 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  logLine, MOCK_LABEL, nextDelegateReply, nextOperateReadReply, nextReply, parseOptions, SCRIPTED_BOARD_URL, SCRIPTED_MODEL_ID,
-  startServer, streamReply,
+  LIFECYCLE_DEFAULTS, LIFECYCLE_LABEL, LIFECYCLE_WRITE_MARKER, type LifecycleState, logLine, MOCK_LABEL, nextDelegateReply,
+  nextLifecycleReply, nextOperateReadReply, nextReply, parseOptions, SCRIPTED_BOARD_URL, SCRIPTED_MODEL_ID, startServer,
+  streamReply, UnscriptedRequest,
 } from "./scripted-model.ts";
 
 const tools = [{ type: "function", function: { name: "listCanvases" } }];
@@ -75,9 +76,11 @@ test("streams a tool call as an OpenAI-compatible event stream", () => {
 });
 
 test("keeps the Kanban flow as the default scenario and refuses an unknown one", () => {
-  assert.deepEqual(parseOptions([]), { port: 11434, scenario: "kanban" });
-  assert.deepEqual(parseOptions(["--port", "11534", "--scenario", "operate-read"]), { port: 11534, scenario: "operate-read" });
-  assert.throws(() => parseOptions(["--scenario", "operate-write"]), /Unknown scenario "operate-write"; choose one of kanban, operate-read, delegate\./);
+  assert.deepEqual(parseOptions([]), { port: 11434, scenario: "kanban", lifecycle: LIFECYCLE_DEFAULTS });
+  assert.deepEqual(parseOptions(["--port", "11534", "--scenario", "operate-read"]),
+    { port: 11534, scenario: "operate-read", lifecycle: LIFECYCLE_DEFAULTS });
+  assert.throws(() => parseOptions(["--scenario", "operate-write"]),
+    /Unknown scenario "operate-write"; choose one of kanban, operate-read, delegate, delegate-lifecycle\./);
   assert.throws(() => parseOptions(["--scenario"]), /Unknown scenario ""/);
   assert.throws(() => parseOptions(["--verbose"]), /Usage: scripted-model\.ts/);
   assert.throws(() => parseOptions(["--port", "x"]), /Usage: scripted-model\.ts/);
@@ -184,5 +187,106 @@ test("serves each scenario over loopback HTTP with the same model id, logging bo
     } finally {
       await new Promise(resolve => server.close(resolve));
     }
+  }
+});
+
+// FAC-147: the delegate's lifecycle. Its prompt names its InferOps binding; it writes once, reads, finishes.
+const lifecycleTools = ["executeCode", "describeBinding", "grep"].map(name => ({ type: "function", function: { name } }));
+const delegatePrompt = { role: "system", content: "Your bindings: env.INFEROPS_7 (the DEMO board)." };
+const task = { role: "user", content: "Make the agreed change, then check the board." };
+/** The assistant's `name` call with `args`, then the Workshop's result for it. */
+const called = (name: string, args: Record<string, unknown>, result: unknown) => {
+  const callId = `call_${++id}`;
+  return [
+    { role: "assistant", tool_calls: [{ id: callId, type: "function", function: { name, arguments: JSON.stringify(args) } }] },
+    { role: "tool", tool_call_id: callId, content: typeof result === "string" ? result : JSON.stringify(result) },
+  ];
+};
+const lifecycle = (messages: unknown[], options = { ...LIFECYCLE_DEFAULTS, reads: 2 }) =>
+  nextLifecycleReply({ messages: [delegatePrompt, task, ...messages] as never, tools: lifecycleTools }, options);
+const writeCall = () => {
+  const { reply } = lifecycle([]);
+  assert.ok("toolCall" in reply);
+  return reply.toolCall.arguments;
+};
+
+test("delegate-lifecycle writes once through its own InferOps binding, then reads, then finishes", () => {
+  const first = lifecycle([]);
+  assert.equal(first.step, "write");
+  assert.ok("toolCall" in first.reply && first.reply.toolCall.name === "executeCode");
+  const code = String(writeCall().code);
+  assert.match(code, /^export default async function\(self, env\) \{/);
+  assert.ok(code.includes(LIFECYCLE_WRITE_MARKER));
+  assert.ok(code.includes(`env.INFEROPS_7.createIssue({ title: ${JSON.stringify(LIFECYCLE_DEFAULTS.issueTitle)} })`));
+  // After the write answers (a receipt, queued for the person's approval): reads, then the end.
+  const wrote = called("executeCode", writeCall(), { receipt: { status: "pending" } });
+  assert.deepEqual(lifecycle(wrote), { reply: { toolCall: { name: "describeBinding", arguments: { name: "INFEROPS_7" } } }, step: "read" });
+  const read = () => called("describeBinding", { name: "INFEROPS_7" }, "createIssue(issue): Promise<WriteReceipt | null>");
+  assert.equal(lifecycle([...wrote, ...read()]).step, "read");
+  const done = lifecycle([...wrote, ...read(), ...read()]);
+  assert.equal(done.step, "finished");
+  assert.deepEqual(done.reply, { text: `${LIFECYCLE_LABEL} Proposed "${LIFECYCLE_DEFAULTS.issueTitle}" and finished.` });
+});
+
+test("delegate-lifecycle never writes twice: a written conversation only reads, and a refusal ends it", () => {
+  const wrote = called("executeCode", writeCall(), { receipt: { status: "pending" } });
+  for (let reads = 0; reads <= 2; reads++) {
+    const messages = [...wrote, ...Array.from({ length: reads }, () => called("describeBinding", { name: "INFEROPS_7" }, "ok")).flat()];
+    const { reply } = lifecycle(messages);
+    assert.ok(!("toolCall" in reply) || reply.toolCall.name !== "executeCode", `after ${reads} reads`);
+  }
+  // A write that answered an error, or a read refused after it (a revoked grant): ended, in words.
+  assert.deepEqual(lifecycle(called("executeCode", writeCall(), { error: "FORBIDDEN" })),
+    { reply: { text: `${LIFECYCLE_LABEL} The change was not proposed.` }, step: "finished" });
+  assert.deepEqual(lifecycle([...wrote, ...called("describeBinding", { name: "INFEROPS_7" }, "Error: A delegate may not call this.")]),
+    { reply: { text: `${LIFECYCLE_LABEL} Stopped: a read after the change was refused.` }, step: "finished" });
+  // A write still unanswered (its turn cut off before a result) is asked for again: one call, one proposal.
+  const cut = [{ role: "assistant", tool_calls: [{ id: "call_cut", type: "function", function: { name: "executeCode", arguments: JSON.stringify(writeCall()) } }] }];
+  assert.equal(lifecycle(cut).step, "write");
+});
+
+test("delegate-lifecycle refuses what it doesn't script, loudly", () => {
+  assert.throws(() => nextLifecycleReply({ messages: [task] as never, tools: lifecycleTools }), UnscriptedRequest);
+  assert.throws(() => nextLifecycleReply({ messages: [delegatePrompt, task] as never, tools: delegateTools }),
+    /isn't offered executeCode/);
+  assert.deepEqual(nextLifecycleReply({ messages: [task] as never }), { reply: { text: "Delegate run" }, step: "finished" });
+});
+
+test("delegate-lifecycle's options parse only with it, and are bounded", () => {
+  assert.deepEqual(parseOptions(["--scenario", "delegate-lifecycle", "--hold-before-write", "--reads", "5", "--read-ms", "0", "--issue-title", "Count me"]),
+    { port: 11434, scenario: "delegate-lifecycle", lifecycle: { holdBeforeWrite: true, reads: 5, readMs: 0, issueTitle: "Count me" } });
+  assert.throws(() => parseOptions(["--hold-before-write"]), /delegate-lifecycle's only/);
+  assert.throws(() => parseOptions(["--scenario", "delegate-lifecycle", "--reads", "-1"]), /Usage: scripted-model\.ts/);
+  assert.throws(() => parseOptions(["--scenario", "delegate-lifecycle", "--issue-title", " "]), /Usage: scripted-model\.ts/);
+  assert.throws(() => parseOptions(["--scenario", "delegate-lifecycle", "--reads"]), /Usage: scripted-model\.ts/);
+});
+
+test("delegate-lifecycle holds its write until released, says so at /scenario/state, and answers an unscripted request with an error", async () => {
+  const lines: string[] = [];
+  const server = await startServer({ port: 0, scenario: "delegate-lifecycle", log: line => lines.push(line),
+    lifecycle: { ...LIFECYCLE_DEFAULTS, holdBeforeWrite: true, reads: 1, readMs: 0 } });
+  try {
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const state = async () => await (await fetch(`${base}/scenario/state`)).json() as LifecycleState;
+    assert.deepEqual(await state(), { scenario: "delegate-lifecycle", holdArmed: true, waitingAtHold: 0, replies: { write: 0, read: 0, finished: 0 } });
+    let answered = false;
+    const held = complete(base, { messages: [delegatePrompt, task], tools: lifecycleTools }).then(delta => { answered = true; return delta; });
+    for (let i = 0; i < 100 && (await state()).waitingAtHold === 0; i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal((await state()).waitingAtHold, 1);
+    assert.equal(answered, false);
+    assert.equal((await fetch(`${base}/scenario/release`, { method: "POST" })).status, 204);
+    const delta = await held;
+    assert.equal(delta.tool_calls[0].function.name, "executeCode");
+    assert.deepEqual(await state(), { scenario: "delegate-lifecycle", holdArmed: false, waitingAtHold: 0, replies: { write: 1, read: 0, finished: 0 } });
+    // Released for good: a write asked for again (after a restart) isn't held.
+    assert.equal((await complete(base, { messages: [delegatePrompt, task], tools: lifecycleTools })).tool_calls[0].function.name, "executeCode");
+    const unscripted = await fetch(`${base}/v1/chat/completions`, { method: "POST", body: JSON.stringify({ messages: [task], tools: lifecycleTools }) });
+    assert.equal(unscripted.status, 500);
+    assert.match(((await unscripted.json()) as { error: { message: string } }).error.message, /unscripted request, the delegate holds no InferOps binding/);
+    assert.ok(lines.some(line => line.endsWith(" delegate-lifecycle held before the write")));
+    assert.ok(lines.some(line => line.endsWith(" delegate-lifecycle could not answer: unscripted request, the delegate holds no InferOps binding")));
+    assert.ok(lines.every(line => !line.includes("INFEROPS_7") && !line.includes("agreed change")));
+  } finally {
+    await new Promise(resolve => server.close(resolve));
   }
 });
