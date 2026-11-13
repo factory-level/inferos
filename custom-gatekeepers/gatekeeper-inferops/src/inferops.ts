@@ -4191,15 +4191,36 @@ class DotBinding extends ActionBinding {
     return this.kv.get<string[]>(DOT_WATCHED_KEY) ?? [];
   }
 
-  /** Watch `conversationId`, most recent last, at most `DOT_WATCHED_MAX` (the oldest dropped). */
+  /**
+   * Watch `conversationId`, most recent last, at most `DOT_WATCHED_MAX`. Past that the oldest is no
+   * longer checked at session start (r2 on #493): never silently, it is recorded (`evicted`) and said
+   * (`DOT_WATCH_EVICTED`), and it is checked again when the person opens that conversation.
+   */
   watch(conversationId: string): void {
     const watched = this.watched().filter(id => id !== conversationId);
     watched.push(conversationId);
+    const dropped = watched.slice(0, Math.max(0, watched.length - DOT_WATCHED_MAX));
+    if (dropped.length > 0) {
+      this.kv.put(DOT_EVICTED_KEY, [...this.evicted().filter(id => !dropped.includes(id)), ...dropped].slice(-DOT_WATCHED_MAX));
+      logger.warn(DOT_WATCH_EVICTED, { event: "dot.watch.evicted", host: this.host });
+    }
     this.kv.put(DOT_WATCHED_KEY, watched.slice(-DOT_WATCHED_MAX));
+    this.kv.put(DOT_EVICTED_KEY, this.evicted().filter(id => id !== conversationId));
   }
 
   unwatch(conversationId: string): void {
     this.kv.put(DOT_WATCHED_KEY, this.watched().filter(id => id !== conversationId));
+  }
+
+  /** Conversations no longer checked at session start because more than `DOT_WATCHED_MAX` waited. */
+  evicted(): string[] {
+    return this.kv.get<string[]>(DOT_EVICTED_KEY) ?? [];
+  }
+
+  /** The person opened `conversationId` and its proposals were read: an eviction of it is over. */
+  checked(conversationId: string): void {
+    const evicted = this.evicted();
+    if (evicted.includes(conversationId)) this.kv.put(DOT_EVICTED_KEY, evicted.filter(id => id !== conversationId));
   }
 
   /**
@@ -4220,6 +4241,13 @@ class DotBinding extends ActionBinding {
 /** Where the Dot facet keeps the conversations it watches (FAC-135), and how many at most. */
 const DOT_WATCHED_KEY = "dot:watched";
 const DOT_WATCHED_MAX = 32;
+
+/** Where the conversations evicted from the watch are recorded (r2 on #493). */
+const DOT_EVICTED_KEY = "dot:watchEvicted";
+
+/** Said when a watch is evicted: the session start no longer checks it, the conversation's own read does. */
+const DOT_WATCH_EVICTED =
+  `More than ${DOT_WATCHED_MAX} conversations wait for a decision: the oldest is checked when you open it.`;
 
 /** Set while the person's InferOps sign-in is gone (FAC-135): the session start waits for reconnect. */
 const DOT_RECONNECT_KEY = "dot:waitsForReconnect";
@@ -4340,6 +4368,8 @@ function openDotSession(binding: DotBinding, queue: RpcStub<ApprovalQueue>, back
 function shownProposal(proposal: DotProposalWire, receipt: Receipt | null, record?: DotConfirmAction): DotProposal {
   return {
     waitsForReconnect: record?.status === "pending" && record.signInRefusedAt !== undefined,
+    // Only this proposal's own decision resuming its run (an answer that named it), never a run's end alone.
+    resumed: record?.resumed !== undefined && record.resumed !== null,
     id: proposal.id, tool: proposal.tool, input: JSON.stringify(proposal.input), status: dotProposalStatus(proposal),
     receipt,
     run: proposal.run
@@ -4936,6 +4966,8 @@ export function dotBindingOver(props: DotGatekeeperProps, kv: SyncKvStorage, cli
       openDotSession(binding, queue.dup(), options.background ?? (work => void work), options.sweepDeadlineMs),
     /** Watch `conversationId` as a turn would (FAC-135), for tests. */
     watch: (conversationId: string) => binding.watch(conversationId),
+    /** The watch as kept, and the conversations evicted from it (r2 on #493), for tests. */
+    watched: () => ({ watched: binding.watched(), evicted: binding.evicted() }),
     applyAction: (actionId: number, effects?: DotApprovedEffects) => applyDotAction(binding, actionId, effects),
     rejectAction: (actionId: number) => rejectDotAction(binding, actionId),
     workflowRunOutcome: (actionId: number, outcome: ApprovedRunOutcome) => recordDotRunOutcome(binding, actionId, outcome),
@@ -5048,6 +5080,7 @@ class DotConversationImpl extends RpcTarget implements DotConversationSession {
     // now, so every one is decided where the person decides every other change.
     for (const proposal of read.proposals) await this.#stage(proposal);
     this.binding.noteRunStatus(read.proposals);
+    this.binding.checked(this.conversationId);
     await this.binding.observe(this.queue, {
       title: "Read your Dot conversation",
       description: `Read your Dot conversation "${plainInline(read.title, 80)}" in ${this.binding.host}: ` +

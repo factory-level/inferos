@@ -2264,9 +2264,50 @@ describe("system credentials (FAC-102)", () => {
 // next session start stages it in the background with the person's own token, never delaying the
 // session, with no read of the conversation.
 describe("the Dot's session start (FAC-135)", () => {
-  const vars = env as unknown as { INFEROPS_DOT_ENABLED?: string };
+  const vars = env as unknown as { INFEROPS_DOT_ENABLED?: string; INFEROPS_COMPANY?: string };
   beforeEach(() => { vars.INFEROPS_DOT_ENABLED = "true"; });
-  afterEach(() => { delete vars.INFEROPS_DOT_ENABLED; });
+  afterEach(() => { delete vars.INFEROPS_DOT_ENABLED; delete vars.INFEROPS_COMPANY; });
+  const PROPOSAL = {
+    id: "72000000-0000-4000-8000-000000000001", tool: "issue_create", input: { projectId: "p1", title: "Fix the gate" },
+    status: "proposed", outcome: null, run: null, createdAt: "2026-11-10T12:00:00.000Z",
+    expiresAt: "2099-11-10T12:00:00.000Z", decidedAt: null, runStatus: "awaiting_decision",
+  };
+
+  it("refuses the shared connection and the demo through its own startSession, sending nothing (QA on #493)", async () => {
+    const before = inferlab.apiCalls.length;
+    const shared = await hooks().dotRefusal({ accountId: "dot-shared", connected: false, host: "acme.operations", workspaceId: OPS });
+    expect(shared).toContain("needs your own InferLab sign-in");
+    const demo = await hooks().dotRefusal({ accountId: "dot-demo", connected: true, host: "demo.local", workspaceId: OPS });
+    expect(demo).toContain("needs your own InferLab sign-in");
+    expect(inferlab.apiCalls.slice(before)).toEqual([]);
+  });
+
+  it("ends a decision as final, refused before sending, when the connection belongs to another company (QA on #493)", async () => {
+    const companyA = "a0000000-0000-4000-8000-00000000000a";
+    const companyB = "b0000000-0000-4000-8000-00000000000b";
+    inferlab.tenantId = companyA;
+    vars.INFEROPS_COMPANY = companyA;
+    const account = await connect("dot-other-company");
+    expect(await hooks().bindAccount("dot-co", account, "inferops://acme.operations/chatbot/dot")).toBeNull();
+    inferlab.dotProposals = [{ ...PROPOSAL }];
+    const staged = (await hooks().log()).actions.length;
+    const session = await hooks().startBoundDotSession("dot-co");
+    await (await session.openConversation(DOT_CONVERSATION_ID)).read();
+    const actions = (await hooks().log()).actions;
+    expect(actions).toHaveLength(staged + 1);
+    const actionId = actions.at(-1)!.id;
+
+    // The deployment now names another company: the person's credential refuses before sending.
+    vars.INFEROPS_COMPANY = companyB;
+    const before = inferlab.apiCalls.length;
+    const failure = await hooks().applyBoundDot("dot-co", actionId);
+    expect(failure).toMatchObject({ outcome: "notApplied", retryable: false, code: "OTHER_COMPANY", kind: "permission" });
+    // Declined by the rule for a refusal that stands, which that connection can't reach either: nothing was sent.
+    expect(inferlab.apiCalls.slice(before)).toEqual([]);
+    // Final: approving again sends nothing and answers the same.
+    expect(await hooks().applyBoundDot("dot-co", actionId)).toMatchObject({ outcome: "notApplied", retryable: false });
+    expect(inferlab.apiCalls.slice(before)).toEqual([]);
+  });
 
   it("stages a proposal a cut turn left, in the background of the next session start, as the person", async () => {
     const account = await connect("dot-session-start");

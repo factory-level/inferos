@@ -911,6 +911,32 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   }
 
   /** A workflow-policy session over a binding `bindAccount` made under `name`. */
+  /**
+   * The refusal a Dot facet with these props gives through its own `startSession` and first call
+   * (FAC-135, QA on #493), or null when it gives none.
+   */
+  async dotRefusal(props: DotProps): Promise<string | null> {
+    const exports = this.ctx.exports as unknown as TestExports;
+    const facet = this.ctx.facets.get<InferOpsDotGatekeeper>(`refusal/${props.accountId}/${props.host}`,
+      () => ({ class: exports.InferOpsDotGatekeeper({ props }) }));
+    try {
+      const session = await facet.startSession(new RpcStub(new TestDotQueue(this.#log)) as never);
+      await session.startConversation();
+      return null;
+    } catch (error) {
+      return messageOf(error);
+    }
+  }
+
+  /** Applies action `actionId` on the Dot binding `bindAccount` made under `name` (FAC-135), as a person's approval with no effects. */
+  async applyBoundDot(name: string, actionId: number): Promise<ActionApplyFailure | null> {
+    const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsDotGatekeeper>;
+    if (!cls) throw new Error(`No binding named ${name}.`);
+    const outcome = await this.ctx.facets.get<InferOpsDotGatekeeper>(`minted/${name}`, () => ({ class: cls }))
+      .applyAction(actionId, new RpcStub(new TestGitCache()));
+    return outcome && "failed" in outcome ? outcome.failed : null;
+  }
+
   /** A Dot session over a Dot binding `bindAccount` made under `name`, entering the facet's own `startSession` (FAC-135). */
   async startBoundDotSession(name: string): Promise<InferOpsDotSession> {
     const cls = this.#minted.get(name) as unknown as DurableObjectClass<InferOpsDotGatekeeper>;
@@ -1418,6 +1444,11 @@ export class TestHooks extends DurableObject<Cloudflare.Env> {
   /** Waits for the staging every Dot session start so far began in the background (FAC-135). */
   async dotSweepSettled(): Promise<void> {
     await Promise.all(this.#sweeps);
+  }
+
+  /** The Dot facet's watch and the conversations evicted from it (r2 on #493). */
+  async dotWatched(): Promise<{ watched: string[]; evicted: string[] }> {
+    return this.#dotBinding().watched();
   }
 
   /** Watches a conversation as a turn would (FAC-135). */
