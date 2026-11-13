@@ -32,6 +32,7 @@ import { createLogger } from "@gadgets/observability/logger";
 import type { GatekeeperConnectCallback } from "@gadgets/workshop-shared/gatekeeper";
 import type { InferOpsAuthority } from "./http-inferops";
 import { inferLabFetch } from "./edge-header";
+import { InferOpsError } from "./inferops-client";
 import { COMPANY_MISCONFIGURED, OTHER_COMPANY, companyAdmits, deploymentCompany } from "./deployment-company";
 
 const VENDOR_ID = "inferops";
@@ -326,7 +327,9 @@ export class InferOpsCredentials extends DurableObject<Cloudflare.Env> {
     const identity = this.ctx.storage.kv.get<InferOpsIdentity>(IDENTITY_KEY);
     const company = deploymentCompany(this.env);
     if (!company) throw new Error(COMPANY_MISCONFIGURED);
-    if (identity && !companyAdmits(company, identity.tenantId)) throw new Error(OTHER_COMPANY);
+    // Coded (FAC-135), so it reaches the facet across RPC as a refusal that stands, never as a
+    // transient failure to retry: the facet then declines what it was deciding.
+    if (identity && !companyAdmits(company, identity.tenantId)) throw new InferOpsError("OTHER_COMPANY", OTHER_COMPANY);
   }
 
   #membership(workspaceId: string): InferOpsWorkspace {

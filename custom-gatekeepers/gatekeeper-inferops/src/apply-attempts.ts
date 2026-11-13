@@ -63,6 +63,8 @@ export type AttemptFailure = {
 export function failureKind(code: string | null, policy: boolean): ActionFailureKind {
   if (code === "FORBIDDEN") return policy ? "policy" : "permission";
   switch (code) {
+    // Another company's connection (FAC-135): a permission this deployment can't grant, so it stands.
+    case "OTHER_COMPANY": return "permission";
     case "UNAUTHORIZED": return "sign-in";
     case "STALE_REVISION": case "CONFLICT": case "IDEMPOTENCY_CONFLICT": case "RUN_ACTIVE": case "WORKFLOW_MISMATCH":
       return "conflict";
