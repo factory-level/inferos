@@ -79,3 +79,5 @@ jobs:
         uses: ./.github/actions/verify
         with:
           part: test
+        env:
+          GADGET_BROWSER_TESTS_REQUIRED: "1"

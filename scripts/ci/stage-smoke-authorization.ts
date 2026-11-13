@@ -6,6 +6,9 @@ export const STAGE_SMOKE_ORACLES = [
   "operate.signIn", "operate.wikiReads", "operate.knowledgeWriteRefused",
 ] as const;
 
+/** The stage writes Wiki bodies; pin their current policy so `unknown` is never accepted by guesswork. */
+export const WIKI_BODY_APPLY_KIND = "RECONCILE_ONLY" as const;
+
 /** Fail closed on incomplete, duplicate or failed oracle evidence, even when its summary says ok. */
 export function smokeOraclesPass(oracles: readonly { name: string; ok: boolean }[]): boolean {
   return oracles.every(oracle => oracle.ok === true)
@@ -22,6 +25,15 @@ export interface KnowledgeWriteOutcome {
   /** Semantic policy of the attempted operation, not the generic action-history type. */
   applyKind?: string;
   lastAttempt?: { code?: string; outcome?: string };
+}
+
+/** Run an operation and restore the observed state even when later evidence collection throws. */
+export async function withStateRestoration<T>(readState: () => Promise<string>, originalState: string, restore: () => Promise<void>, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } finally {
+    if (await readState() !== originalState) await restore();
+  }
 }
 
 /** Fail closed: an unavailable, missing, stale or unauthenticated write is not an authorization proof. */

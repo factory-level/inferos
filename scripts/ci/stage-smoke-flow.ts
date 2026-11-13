@@ -32,7 +32,7 @@
 // The move is proposed through the gatekeeper's issue session (the API the board widget calls),
 // and approved by clicking Approve in the workspace's Activity panel.
 
-import { checkKnowledgeWrite, smokeOraclesPass, smokePersonaProblem, STAGE_SMOKE_ORACLES, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
+import { checkKnowledgeWrite, smokeOraclesPass, smokePersonaProblem, STAGE_SMOKE_ORACLES, WIKI_BODY_APPLY_KIND, withStateRestoration, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -278,7 +278,7 @@ async function pendingFor(overseer: Any, connectionId: number): Promise<{ id: nu
 }
 
 /** An action's state, found in the workspace's history. */
-async function actionState(overseer: Any, id: number, applyKind: "RECONCILE_ONLY"): Promise<KnowledgeWriteOutcome> {
+async function actionState(overseer: Any, id: number, applyKind: typeof WIKI_BODY_APPLY_KIND): Promise<KnowledgeWriteOutcome> {
   let beforeId: number | undefined;
   for (let page = 0; page < 10; page++) {
     const { entries, nextBeforeId } = await overseer.listActions({ beforeId, filter: "action" }) as { entries: { id: number; state?: string; lastAttempt?: { message?: string; code?: string; outcome?: string } }[]; nextBeforeId?: number };
@@ -402,6 +402,29 @@ async function ownerFlow(browser: Any): Promise<void> {
     if (!move) { record("owner.simulated", false, "no issue on the board has a next state to move to"); return; }
     notes.move = { issue: move.identifier, from: move.fromName, to: move.toName };
 
+    await withStateRestoration(
+      async () => (await api2.issue(move.issueId)).stateId,
+      move.from,
+      async () => {
+        try {
+          const current = await api2.issue(move.issueId);
+          const issue = await bound.session.openIssue(move.issueId);
+          await issue.transition(move.from, current.revision);
+          const pending = await pendingFor(bound.overseer, bound.connectionId);
+          if (!pending) throw new Error("the restoration move queued no action");
+          await approveInBrowser(page, bound.workspaceId, "owner-08-approve-restore-finally.png");
+          const after = await until(() => api2.issue(move.issueId), value => value.stateId === move.from);
+          const restored = after.stateId === move.from && BigInt(after.revision) > BigInt(current.revision);
+          record("owner.restored", restored, `finally restore: InferOps API ${move.identifier} ${restored ? `back in ${move.fromName}` : "NOT restored"}, revision ${current.revision} -> ${after.revision}`);
+          if (!restored) throw new Error("the finally restoration did not return the issue to its original state");
+        } catch (error) {
+          if (!oracles.some(oracle => oracle.name === "owner.restored")) {
+            record("owner.restored", false, `finally restoration failed: ${(error as Error).message.split("\n")[0]}`);
+          }
+          throw error;
+        }
+      },
+      async () => {
     for (const [step, from, to, toName] of [["apply", move.from, move.to, move.toName], ["restore", move.to, move.from, move.fromName]] as const) {
       const before = await api2.issue(move.issueId);
       if (before.stateId !== from) { record(step === "apply" ? "owner.simulated" : "owner.restored", false, `${move.identifier} is not in the expected state in InferOps`); return; }
@@ -434,6 +457,8 @@ async function ownerFlow(browser: Any): Promise<void> {
         record("owner.restored", applied, `InferOps API: ${move.identifier} ${after.stateId === to ? `back in ${toName}` : "NOT moved back"}, revision ${before.revision} -> ${after.revision}`);
       }
     }
+      },
+    );
   } finally {
     close();
   }
@@ -480,7 +505,7 @@ async function operateFlow(browser: Any): Promise<void> {
         pending: async () => (await pendingFor(overseer, connectionId))?.id,
         approve: async (id) => {
           await approveInBrowser(page, workspaceId, "operate-04-approve-knowledge-attempt.png");
-          return until(() => actionState(overseer, id, "RECONCILE_ONLY"),
+          return until(() => actionState(overseer, id, WIKI_BODY_APPLY_KIND),
             value => (value.state !== undefined && value.state !== "pending") || value.lastAttempt !== undefined, 30_000);
         },
         reject: async (id) => { await overseer.rejectAction(id); },

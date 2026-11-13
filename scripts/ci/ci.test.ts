@@ -12,7 +12,7 @@ import { summarizeArtillery } from "./perf.ts";
 import { NODES, runPipeline, type PipelineDeps, type PipelineNode, type PipelineState } from "./pipeline.ts";
 import { smokeContainer, smokePreconditions, stageInferlab } from "./stage-smoke.ts";
 import { DEFAULT_WIKI, missingWikiText, wikiDisagreement, wikiExpectedText } from "./stage-smoke-wiki.ts";
-import { checkKnowledgeWrite, forbiddenProposal, knowledgeWriteRefused, sameWikiSnapshot, smokeOraclesPass, STAGE_SMOKE_ORACLES, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
+import { checkKnowledgeWrite, forbiddenProposal, knowledgeWriteRefused, sameWikiSnapshot, smokeOraclesPass, STAGE_SMOKE_ORACLES, WIKI_BODY_APPLY_KIND, withStateRestoration, type KnowledgeWriteOutcome, type WikiSnapshot } from "./stage-smoke-authorization.ts";
 import { cvssSeverity, dedupe, newFindings, parseGitleaks, parseOsv, parseSemgrep, parseTrivy, type Baseline } from "./security.ts";
 import { VERIFY_PARTS } from "./verify.ts";
 
@@ -105,12 +105,15 @@ test("ci.yml calls the reusable _verify.yml, whose jobs are setup + one scripts/
   assert.ok(verify.on.workflow_call);
   assert.equal(verify.jobs.lint.name, "Lint");
   assert.equal(verify.jobs.test.name, "Build and test");
-  for (const job of Object.values(verify.jobs) as { steps: { uses?: string; with?: Record<string, string> }[] }[]) {
+  for (const job of Object.values(verify.jobs) as { steps: { name?: string; uses?: string; with?: Record<string, string>; env?: Record<string, string> }[] }[]) {
     assert.equal(job.steps[0]!.with?.["persist-credentials"], false);
     const parts = job.steps.filter(step => step.uses === "./.github/actions/verify").map(step => step.with?.part);
     assert.ok(parts.length > 0);
     for (const part of parts) assert.ok(VERIFY_PARTS[part!], String(part));
   }
+  const testSteps = verify.jobs.test.steps as { name?: string; env?: Record<string, string> }[];
+  const testStep = testSteps.find(step => step.name === "Test");
+  assert.equal(testStep?.env?.GADGET_BROWSER_TESTS_REQUIRED, "1");
   const action = parse(readFileSync(join(REPO, ".github/actions/verify/action.yml"), "utf8"));
   assert.match(action.runs.steps[0].run, /^node scripts\/ci\/verify\.ts /);
   // The input reaches the shell as an environment variable, never interpolated into the script.
@@ -210,6 +213,9 @@ test("stage-smoke: a loopback stage needs the persona names, a remote one the Ac
   assert.match(String(smokePreconditions(emulated).problem), /emulated stage, missing \(names only\): CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET$/);
   assert.deepEqual(smokePreconditions({ ...emulated, CF_ACCESS_CLIENT_ID: "i", CF_ACCESS_CLIENT_SECRET: "s" }), { target: { origin: "http://127.0.0.1:8789", kind: "emulated" }, problem: null });
   assert.match(String(smokePreconditions({ ...emulated, FACTORY_STAGE_URL: "https://dev-os.example.test" }).problem), /loopback stage only/);
+  const prod = { ...remote, FACTORY_STAGE_URL: "https://os.factorylevel.dev" };
+  assert.match(String(smokePreconditions(prod, "stub").problem), /refusing production stage/);
+  assert.deepEqual(smokePreconditions(prod, "stub", true), { target: { origin: "https://os.factorylevel.dev", kind: "remote" }, problem: null });
 });
 
 test("stage-smoke resolves a remote stage's InferOps API from stages.ts and reads its auth mode", async () => {
@@ -255,6 +261,7 @@ test("stage smoke gates on every current persona oracle, not an old or incomplet
 });
 
 test("knowledge refusal requires FORBIDDEN and only accepts unknown for RECONCILE_ONLY Wiki edits", () => {
+  assert.equal(WIKI_BODY_APPLY_KIND, "RECONCILE_ONLY");
   for (const state of ["pending", "failed"]) {
     assert.equal(knowledgeWriteRefused({ state, lastAttempt: { code: "FORBIDDEN", outcome: "notApplied" } }), true);
     for (const code of [undefined, "UNAUTHORIZED", "CONFLICT", "STALE_REVISION", "NOT_FOUND", "UNAVAILABLE", "INVALID_REQUEST", "DISABLED"]) {
@@ -266,6 +273,7 @@ test("knowledge refusal requires FORBIDDEN and only accepts unknown for RECONCIL
   }
   assert.equal(knowledgeWriteRefused({ state: "pending", applyKind: "RECONCILE_ONLY", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } }), true);
   assert.equal(knowledgeWriteRefused({ state: "failed", applyKind: "RECONCILE_ONLY", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } }), true);
+  assert.equal(knowledgeWriteRefused({ state: "applied", applyKind: "RECONCILE_ONLY", lastAttempt: { code: "FORBIDDEN", outcome: "notApplied" } }), false);
   assert.equal(knowledgeWriteRefused({ state: "pending", applyKind: "PROPOSAL_APPROVE", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } }), false);
   assert.equal(knowledgeWriteRefused({ state: "pending", lastAttempt: { code: "FORBIDDEN", outcome: "unknown" } }), false);
   assert.equal(forbiddenProposal(new Error("FORBIDDEN: knowledge:write is required")), true);
@@ -273,6 +281,17 @@ test("knowledge refusal requires FORBIDDEN and only accepts unknown for RECONCIL
   for (const error of [new Error("UNAUTHORIZED: expired"), new Error("request failed"), new Error("upstream mentioned FORBIDDEN"), { code: "CONFLICT", message: "FORBIDDEN: quoted" }]) {
     assert.equal(forbiddenProposal(error), false);
   }
+});
+
+test("an approved state change is restored even when later evidence collection throws", async () => {
+  let state = "from";
+  await assert.rejects(withStateRestoration(
+    async () => state,
+    "from",
+    async () => { state = "from"; },
+    async () => { state = "to"; throw new Error("evidence collection failed after apply"); },
+  ), /evidence collection failed after apply/);
+  assert.equal(state, "from");
 });
 
 test("the knowledge oracle detects content, identity and version-only mutations", () => {

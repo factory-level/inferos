@@ -3,7 +3,7 @@
 // grokbot personas. Run from the `stage-probe` sandbox (`pnpm local factory stage-smoke`, which
 // runs `doctor stage-probe` first), or directly:
 //
-//   FACTORY_STAGE_URL=<origin> node scripts/ci/stage-smoke.ts [--run-id ID] [--part all|flow|probe]
+//   FACTORY_STAGE_URL=<origin> node scripts/ci/stage-smoke.ts [--run-id ID] [--part all|flow|probe] [--allow-prod]
 //
 // `flow` (scripts/ci/stage-smoke-flow.ts) runs in the artilleryio/artillery container with its
 // bundled Playwright and Chromium, this checkout mounted read-only at its own path (so `capnweb`
@@ -30,6 +30,7 @@ import { smokeOraclesPass, smokePersonaProblem } from "./stage-smoke-authorizati
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { forbiddenCredentials, inferlabAuthMode, remoteStageInferopsUrl, requiredSmokeCredentials, STAGE_SMOKE_IMAGE, stageInferopsUrl, stageTarget, type StageTarget } from "../local/factory.ts";
+import { STAGES } from "../stage/stages.ts";
 import { summarizeArtillery } from "./perf.ts";
 import { dockerRun, exec, finish, nodeContext, runAsMain, type CommandRecord, type NodeContext } from "./lib.ts";
 
@@ -41,13 +42,16 @@ const PASSED_VARS = ["FACTORY_STAGE_URL", "FACTORY_INFEROPS_URL", "FACTORY_STAGE
  * credentials. `authMode` is the stage's InferLab sign-in mode (`stageInferlab`); a remote stage
  * whose mode is not `stub` needs the persona password too.
  */
-export function smokePreconditions(env: NodeJS.ProcessEnv, authMode: string | null = null): { target: StageTarget | null; problem: string | null } {
+export function smokePreconditions(env: NodeJS.ProcessEnv, authMode: string | null = null, allowProd = false): { target: StageTarget | null; problem: string | null } {
   if (!env.FACTORY_STAGE_URL) return { target: null, problem: "FACTORY_STAGE_URL names no stage" };
   let target: StageTarget;
   try {
     target = stageTarget(env.FACTORY_STAGE_URL, env.FACTORY_STAGE_ACCESS);
   } catch (error) {
     return { target: null, problem: (error as Error).message };
+  }
+  if (new URL(target.origin).hostname === STAGES.prod.hostname && !allowProd) {
+    return { target, problem: `refusing production stage ${target.origin}; pass --allow-prod explicitly to override` };
   }
   const forbidden = forbiddenCredentials(env, "stage-probe");
   if (forbidden.length) return { target, problem: `cloud/provider/prod credentials present (names only): ${forbidden.join(", ")}` };
@@ -84,13 +88,14 @@ export function smokeContainer(ctx: Pick<NodeContext, "root" | "dir" | "env">, t
 }
 
 export async function main(argv: string[]): Promise<number> {
-  const ctx = nodeContext("stage-smoke", argv);
+  const allowProd = argv.includes("--allow-prod");
+  const ctx = nodeContext("stage-smoke", argv.filter(arg => arg !== "--allow-prod"));
   const part = ctx.part ?? "all";
   if (!["all", "flow", "probe"].includes(part)) throw new Error("--part must be all, flow or probe");
   const inferlab = await stageInferlab(ctx.env, ctx.root);
   // The flow's InferOps API oracles read this origin (by name into the container), not the sign-in popup's.
   if (inferlab) ctx.env.FACTORY_INFEROPS_URL = inferlab.url;
-  const { target, problem } = smokePreconditions(ctx.env, inferlab?.authMode ?? null);
+  const { target, problem } = smokePreconditions(ctx.env, inferlab?.authMode ?? null, allowProd);
   const gate = "node 10: as each persona the grokbot.knowledge Wiki page InferOps' knowledge API answers renders in the canvas Wiki widget; as the owner persona the board renders and a simulate -> approve transition is visible in InferOps' API (then reverted); the operate persona is refused a knowledge write with its document content and version unchanged; the light Artillery Playwright probe's ensure holds";
   if (problem || !target) return finish(ctx, { node: "stage-smoke", ok: false, gate, commands: [], details: { refused: problem } });
   const records: CommandRecord[] = [];
