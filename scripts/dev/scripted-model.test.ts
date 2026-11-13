@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  logLine, MOCK_LABEL, nextOperateReadReply, nextReply, parseOptions, SCRIPTED_BOARD_URL, SCRIPTED_MODEL_ID,
+  logLine, MOCK_LABEL, nextDelegateReply, nextOperateReadReply, nextReply, parseOptions, SCRIPTED_BOARD_URL, SCRIPTED_MODEL_ID,
   startServer, streamReply,
 } from "./scripted-model.ts";
 
@@ -77,13 +77,14 @@ test("streams a tool call as an OpenAI-compatible event stream", () => {
 test("keeps the Kanban flow as the default scenario and refuses an unknown one", () => {
   assert.deepEqual(parseOptions([]), { port: 11434, scenario: "kanban" });
   assert.deepEqual(parseOptions(["--port", "11534", "--scenario", "operate-read"]), { port: 11534, scenario: "operate-read" });
-  assert.throws(() => parseOptions(["--scenario", "operate-write"]), /Unknown scenario "operate-write"; choose one of kanban, operate-read\./);
+  assert.throws(() => parseOptions(["--scenario", "operate-write"]), /Unknown scenario "operate-write"; choose one of kanban, operate-read, delegate\./);
   assert.throws(() => parseOptions(["--scenario"]), /Unknown scenario ""/);
   assert.throws(() => parseOptions(["--verbose"]), /Usage: scripted-model\.ts/);
   assert.throws(() => parseOptions(["--port", "x"]), /Usage: scripted-model\.ts/);
 });
 
 const operateTools = [{ type: "function", function: { name: "operatePage" } }, { type: "function", function: { name: "executeCode" } }];
+const delegateTools = [{ type: "function", function: { name: "findWidgets" } }];
 const page = (boardRef: string | null) => ({ chatOpen: true, console: null, board: boardRef ? { workspaceId: "w", boardRef } : null });
 const question = (content: string) => ({ role: "user", content });
 
@@ -123,6 +124,24 @@ test("operate-read answers outside an Operate chat and quick-model prompts with 
   assert.deepEqual(nextOperateReadReply({ messages: [question("Generate a brief, descriptive title")] }), { text: "Page read" });
 });
 
+test("delegate uses only its offered findWidgets tool and bases the answer on the returned result", () => {
+  const ask = question("Find the service workflow widget");
+  assert.deepEqual(nextDelegateReply({ messages: [ask], tools: delegateTools }),
+    { toolCall: { name: "findWidgets", arguments: { query: "service workflow" } } });
+  assert.deepEqual(nextDelegateReply({ messages: [ask, ...step("findWidgets", {
+    status: "searched", definitions: [{ id: "service.workflow" }],
+  })], tools: delegateTools }),
+  { text: "[mock delegate] I found a service widget available in this session." });
+  assert.deepEqual(nextDelegateReply({ messages: [ask, ...step("findWidgets", {
+    status: "searched", definitions: [],
+  })], tools: delegateTools }),
+  { text: "[mock delegate] I found no service widget available in this session." });
+  assert.deepEqual(nextDelegateReply({ messages: [ask, ...step("findWidgets", { status: "unavailable" })], tools: delegateTools }),
+    { text: "[mock delegate] The service widget search was unavailable." });
+  assert.deepEqual(nextDelegateReply({ messages: [ask], tools: operateTools }),
+    { text: "[mock delegate] Widget search is not available." });
+});
+
 test("logs only the scenario and the reply's kind, never its text or arguments", () => {
   const at = new Date("2026-10-12T00:00:00.000Z");
   assert.equal(logLine("operate-read", { text: `${MOCK_LABEL} secret-board-name` }, at), "2026-10-12T00:00:00.000Z operate-read text reply");
@@ -140,7 +159,7 @@ async function complete(base: string, body: unknown) {
 }
 
 test("serves each scenario over loopback HTTP with the same model id, logging bounded lines", async () => {
-  for (const scenario of ["kanban", "operate-read"] as const) {
+  for (const scenario of ["kanban", "operate-read", "delegate"] as const) {
     const lines: string[] = [];
     const server = await startServer({ port: 0, scenario, log: line => lines.push(line) });
     try {
@@ -151,12 +170,15 @@ test("serves each scenario over loopback HTTP with the same model id, logging bo
       assert.deepEqual(tags.models.map(model => model.name), [SCRIPTED_MODEL_ID]);
       const delta = scenario === "kanban"
         ? await complete(base, { messages: [user], tools })
-        : await complete(base, { messages: [question("What is on my page?"), ...step("operatePage", page("inferops://demo.local/project/board/DEMO"))], tools: operateTools });
+        : scenario === "operate-read"
+          ? await complete(base, { messages: [question("What is on my page?"), ...step("operatePage", page("inferops://demo.local/project/board/DEMO"))], tools: operateTools })
+          : await complete(base, { messages: [question("Find a service workflow")], tools: delegateTools });
       if (scenario === "kanban") assert.equal(delta.tool_calls[0].function.name, "listCanvases");
-      else assert.equal(delta.content, `${MOCK_LABEL} Your page shows the DEMO board.`);
+      else if (scenario === "operate-read") assert.equal(delta.content, `${MOCK_LABEL} Your page shows the DEMO board.`);
+      else assert.equal(delta.tool_calls[0].function.name, "findWidgets");
       assert.equal((await fetch(`${base}/v1/chat/completions`, { method: "POST", body: "not json" })).status, 500);
       assert.equal(lines.length, 2);
-      assert.match(lines[0], new RegExp(` ${scenario} (text reply|tool call listCanvases)$`));
+      assert.match(lines[0], new RegExp(` ${scenario} (text reply|tool call (listCanvases|findWidgets))$`));
       assert.match(lines[1], new RegExp(` ${scenario} could not answer$`));
       assert.ok(lines.every(line => !line.includes("DEMO") && !line.includes("not json")));
     } finally {

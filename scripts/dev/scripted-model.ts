@@ -3,7 +3,7 @@
 // Workshop reaches it as an "Ollama" model (`pnpm dev:setup --mock-model` adds one). It listens on
 // 127.0.0.1 only and makes no request of its own.
 //
-// Two scripted scenarios, chosen with `--scenario`:
+// Three scripted scenarios, chosen with `--scenario`:
 // - `kanban` (the default) plays the agent's part of "add an InferOps Kanban to this canvas": list
 //   canvases, create the gadget from the `inferops.kanban` blueprint, request the DEMO board
 //   connection, bind it into the gadget as `board`, and place the gadget on the canvas. Each reply is
@@ -11,9 +11,11 @@
 //   approval resumes where it left off.
 // - `operate-read` plays an Operate chat that reads the user's page: each question gets one
 //   `operatePage` read, then a reply, labelled "[mock model]", naming the board that read returned.
+// - `delegate` plays the restricted first turn of a FAC-147 delegate: it searches for a service
+//   widget using the delegate's real `findWidgets` tool, then reports only after that tool returns.
 // Everything it triggers runs through the real Workshop; only the model's decisions are scripted.
 //
-// Usage: node scripts/dev/scripted-model.ts [--port 11434] [--scenario kanban|operate-read]
+// Usage: node scripts/dev/scripted-model.ts [--port 11434] [--scenario kanban|operate-read|delegate]
 
 import { createServer, type Server } from "node:http";
 import { realpathSync } from "node:fs";
@@ -117,7 +119,35 @@ export function streamReply(reply: ScriptedReply): string {
 }
 
 /** The scenarios `--scenario` selects; the first is the default. */
-export const SCRIPTED_SCENARIOS = ["kanban", "operate-read"] as const;
+/**
+ * A bounded scripted delegate turn for the FAC-147 lifecycle proof. It uses only `findWidgets`, a
+ * tool in the delegate's fixed read-only ceiling, and bases its final reply on that tool's result.
+ * No second tool call or provider fallback is possible in this scenario.
+ */
+export function nextDelegateReply(body: { messages?: Message[]; tools?: unknown[] }): ScriptedReply {
+  const messages = body.messages ?? [];
+  if (!body.tools?.length) return { text: "Delegate task received." };
+  const offered = (body.tools as { function?: { name?: string } }[]).map(tool => tool.function?.name);
+  if (!offered.includes("findWidgets")) return { text: "[mock delegate] Widget search is not available." };
+
+  const searches = new Set<string>();
+  messages.forEach(message => {
+    for (const toolCall of message.tool_calls ?? []) {
+      if (toolCall.function.name === "findWidgets") searches.add(toolCall.id);
+    }
+  });
+  const result = messages.findLast(message => message.role === "tool" && searches.has(message.tool_call_id ?? ""));
+  if (!result) return call("findWidgets", { query: "service workflow" });
+
+  const found = parse(text(result.content));
+  if (found?.status !== "searched") return { text: "[mock delegate] The service widget search was unavailable." };
+  const definitions = Array.isArray(found.definitions) ? found.definitions : [];
+  return definitions.length > 0
+    ? { text: "[mock delegate] I found a service widget available in this session." }
+    : { text: "[mock delegate] I found no service widget available in this session." };
+}
+
+export const SCRIPTED_SCENARIOS = ["kanban", "operate-read", "delegate"] as const;
 
 /** One of {@link SCRIPTED_SCENARIOS}. */
 export type ScriptedScenario = typeof SCRIPTED_SCENARIOS[number];
@@ -181,7 +211,8 @@ export function parseOptions(argv: readonly string[]): { port: number; scenario:
 /** Serve `scenario` on 127.0.0.1:`port` (0 picks a free port); resolves once it listens. */
 export function startServer(options: { port: number; scenario: ScriptedScenario; log?: (line: string) => void }): Promise<Server> {
   const log = options.log ?? (line => console.log(line));
-  const next = options.scenario === "operate-read" ? nextOperateReadReply : nextReply;
+  const next = options.scenario === "operate-read" ? nextOperateReadReply
+    : options.scenario === "delegate" ? nextDelegateReply : nextReply;
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && (url.pathname === "/api/tags" || url.pathname === "/v1/models")) {
