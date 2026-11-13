@@ -111,3 +111,10 @@ From a shell that holds only `PATH`, `HOME`, `USER`, `LANG` and `TERM` plus
 (sourced from a mode-600 vars file, never printed), run `pnpm local factory doctor stage-probe`.
 Once every line is READY, run `pnpm local factory stage-smoke`. The `factory-sandboxes` skill
 (`.agents/skills/factory-sandboxes/SKILL.md`) has the full procedure.
+
+This deployed smoke command is run only by the manager after confirming the dev-os seed and the
+scoped Access variables. Expected result: the command exits 0 and records exactly one PASS for each
+of `owner.signIn`, `owner.wikiReads`, `owner.boardRenders`, `owner.simulated`, `owner.applied`,
+`owner.restored`, `operate.signIn`, `operate.wikiReads`, and `operate.knowledgeWriteRefused`, followed
+by a successful sign-in probe with its Artillery `Checks:` section. Any missing oracle or probe
+check is a failure; local or emulated evidence does not substitute for this deployed run.

@@ -20,6 +20,7 @@ import { ConsoleMosaic } from './ConsoleMosaic'
 import { ConsolePage } from './ConsolePage'
 import { ConsoleBuilder } from './ConsoleBuilder'
 import { ConsoleSettings } from './ConsoleSettings'
+import { buildReturnHref } from './operateMode'
 import { ConsoleWorkspaceShell } from './ConsoleWorkspaceShell'
 import type { ConsoleWidgetTarget } from './ConsoleWidgetActions'
 import { ConsolePublishDialog } from './ConsolePublishDialog'
@@ -31,6 +32,7 @@ import { consoleEntries, findConsole, openConsoleEvent, type ConsoleEntry } from
 import { FlowPage } from './FlowPage'
 import { HandoverInbox } from './HandoverInbox'
 import { PersonalWorkflows } from './PersonalWorkflows'
+import { TemporaryCanvases } from './TemporaryCanvases'
 import { Delegates } from './Delegates'
 import { OperateChatPanel } from './OperateChatPanel'
 import { SessionApprovals } from './SessionApprovals'
@@ -227,7 +229,8 @@ export const OperateSessionPage = () => {
           ? <p role="status" className="p-6 text-sm text-kumo-subtle">A view is open. Close it to return to this page.</p>
           : settings
           ? settingsEntry ? <ConsoleSettings key={`${settingsEntry.console.id}/${settingsEntry.console.revision}`} entry={settingsEntry}
-              onClose={() => void navigate({ to: '/inferops-canvas', search: {} })} onEdit={() => edit(settingsEntry)} />
+              onClose={() => void navigate({ to: '/inferops-canvas', search: {} })} onEdit={() => edit(settingsEntry)}
+              onOpenBuild={() => void navigate({ to: '.', href: buildReturnHref() })} />
             : <p role="status" className="p-6 text-sm text-kumo-subtle">{screens.status === 'loading' ? 'Loading settings…' : 'This console is unavailable.'}</p>
           : setup
           ? screens.status !== 'ready'
@@ -238,10 +241,12 @@ export const OperateSessionPage = () => {
                   onCancel={() => void showHome()} onSaved={saved => { setSavedEntry(saved); void showHome() }} />
           : tools ? <InferOpsCanvasHome />
           : canvas ? operate.session
-            ? <div className="mx-auto w-full max-w-6xl px-5 pb-6 pt-4 sm:px-8">
+            ? <div className="mx-auto w-full max-w-6xl space-y-8 px-5 pb-6 pt-4 sm:px-8">
                 <PersonalCanvas api={authenticatedApi} viewer={accountKey ?? null} session={operate.session.stub}
                   sessionWorkspace={sessionWorkspace?.stub ?? null} recentEvents={operate.recentEvents} screens={screens}
                   currentBoard={state.board?.boardRef ?? null} focusedPlacement={search.placement} />
+                <TemporaryCanvases session={operate.session.stub} api={authenticatedApi} viewer={accountKey ?? null}
+                  sessionWorkspace={sessionWorkspace?.stub ?? null} />
               </div>
             : <p role="status" className="p-6 text-sm text-kumo-subtle">Opening your canvas…</p>
           : state.flow ? <FlowPage flow={state.flow} chatOpen={state.chatOpen} onEvent={operate.dispatch}

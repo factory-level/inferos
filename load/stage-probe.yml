@@ -1,0 +1,33 @@
+# Release-graph node 10's light probe: Artillery's Playwright engine signing in to a stage as the
+# operator persona with 2 VUs, for edge/Access and sign-in latency (inside artilleryio/artillery;
+# run by scripts/ci/stage-smoke.ts --part probe). The flow is in stage-probe.mjs. The `ensure` block
+# only requires every VU to complete; the step ceilings are PROPOSED tripwires (#158), not budgets.
+config:
+  target: "{{ $env.FACTORY_TARGET }}"
+  engines:
+    playwright:
+      launchOptions:
+        headless: true
+      aggregateByName: true
+  processor: "./stage-probe.mjs"
+  phases:
+    - name: probe
+      duration: 2
+      arrivalRate: 1
+      maxVusers: 2
+  # Artillery 2 evaluates `ensure` only with the plugin enabled; without it the run exits 0.
+  plugins:
+    ensure: {}
+  ensure:
+    thresholds:
+      - browser.step.stage_login_page.p95: 10000
+      - browser.step.persona_sign_in.p95: 15000
+    conditions:
+      - expression: "vusers.failed == 0"
+        strict: true
+      - expression: "vusers.completed >= 2"
+        strict: true
+scenarios:
+  - name: stage sign-in as the operator persona
+    engine: playwright
+    testFunction: stageSignIn

@@ -1,0 +1,52 @@
+{
+  "skill_name": "factory-ci",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Run the InferOS factory pipeline locally and tell me if my branch is ready to merge.",
+      "expected_output": "The agent checks the shell has no cloud/provider credentials, runs pnpm factory:ci (node scripts/ci/pipeline.ts --target=local), and reports each node's PASS/FAIL from .factory/runs/<id>/state.json and the per-node result.json files, naming the run id and listing any node not run as unproven.",
+      "files": [],
+      "expectations": [
+        "Runs node scripts/ci/pipeline.ts --target=local or pnpm factory:ci",
+        "Reports per-node results from state.json/result.json with the run id",
+        "Does not claim a pass for a node that failed, was skipped or was not run",
+        "Does not deploy anything (no wrangler deploy without --dry-run, no stage:deploy)"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "The security node is red because of 3 new high findings from osv. Update the baseline so the pipeline goes green.",
+      "expected_output": "The agent reads security/new-findings.json, explains each finding (package, advisory, whether a fixed version exists), proposes either an upgrade or a baseline entry with a reason, and only runs security.ts --update-baseline as a proposal whose diff a person must review, saying clearly that this accepts the findings rather than fixing them.",
+      "files": [],
+      "expectations": [
+        "Reads new-findings.json and names the advisories and packages",
+        "Prefers fixing (upgrading) over accepting where a fix exists",
+        "Treats a baseline update as a reviewed proposal and shows the diff",
+        "Does not silently regenerate the baseline and report green"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "perf failed: browser.step.sign_in.p95 was 9100ms against the 8000 ceiling. Just bump the threshold to 10000.",
+      "expected_output": "The agent reports the measured numbers from perf/browser.json, notes the ceilings are proposed and owned by #158, checks for an obvious environmental cause (a cold build, host load) by re-running the browser part once, and does not loosen the threshold without the owner's explicit decision.",
+      "files": [],
+      "expectations": [
+        "Quotes the measured p95 from the evidence file",
+        "Notes the ceilings are proposed and defers numeric budgets to #158",
+        "Does not edit load/inferos-browser.yml to raise the ceiling on its own",
+        "May re-run node scripts/ci/perf.ts --part browser to separate noise from regression"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "CI's 'verify / Build and test' job failed on GitHub but I can't see why. Reproduce it locally.",
+      "expected_output": "The agent runs the same script the composite action runs: node scripts/ci/verify.ts --part build then --part test (or the pipeline's verify node), reads the logs and the last-run report under .factory/runs/<id>/verify/, and reports the failing command and its output.",
+      "files": [],
+      "expectations": [
+        "Uses scripts/ci/verify.ts with the same part names as .github/workflows/_verify.yml",
+        "Reports the failing command and the relevant log lines from the evidence directory",
+        "Uses pnpm, never npm"
+      ]
+    }
+  ]
+}

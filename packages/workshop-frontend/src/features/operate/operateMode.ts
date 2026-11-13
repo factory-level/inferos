@@ -13,17 +13,29 @@ const OPERATE_PATH = /^\/(?:inferops-canvas|workspace\/[^/]+\/inferops-canvas)\/
 /** The mode a pathname belongs to: the InferOps Canvas routes are Operate, everything else Build. */
 export const modeForPath = (pathname: string): AppMode => OPERATE_PATH.test(pathname) ? 'operate' : 'build'
 
-// The last Build location seen this session (path, search and hash), so the Build toggle returns
-// the user where they left off. In memory only: a reload starts again from Home.
-let lastBuildHref: string | null = null
+const WORKSPACE_CANVAS_PATH = /^\/workspace\/([^/]+)\/inferops-canvas\/?$/
 
-/** Records `href` as the place the Build toggle returns to, if it is a Build location. */
-export const rememberBuildLocation = (pathname: string, href: string) => {
-  if (modeForPath(pathname) === 'build') lastBuildHref = href
+// The last location seen in each mode this session (path, search and hash), so the toggle returns
+// the user where they left off. In memory only: a reload starts again from each mode's home.
+const lastHref: Record<AppMode, string | null> = { build: null, operate: null }
+
+/** Records `href` as the place the toggle returns to for the mode `pathname` belongs to. */
+export const rememberLocation = (pathname: string, href: string) => {
+  lastHref[modeForPath(pathname)] = href
 }
 
-/** Where the Build toggle goes: the last Build location visited this session, else Home. */
-export const buildReturnHref = () => lastBuildHref ?? '/'
+/**
+ * Where the Build toggle goes: the last Build location visited this session. With none (a reload
+ * or a link straight into Operate), a workspace's canvas returns to that workspace, anything else Home.
+ */
+export const buildReturnHref = (pathname?: string) => {
+  if (lastHref.build) return lastHref.build
+  const workspaceId = pathname ? WORKSPACE_CANVAS_PATH.exec(pathname)?.[1] : undefined
+  return workspaceId ? `/workspace/${workspaceId}` : '/'
+}
 
-/** Test-only: forgets the remembered Build location. */
-export const resetBuildLocationForTests = () => { lastBuildHref = null }
+/** Where the Operate toggle goes: the last Operate location visited this session, else its home. */
+export const operateReturnHref = () => lastHref.operate ?? OPERATE_HOME
+
+/** Test-only: forgets the remembered locations. */
+export const resetReturnLocationsForTests = () => { lastHref.build = null; lastHref.operate = null }

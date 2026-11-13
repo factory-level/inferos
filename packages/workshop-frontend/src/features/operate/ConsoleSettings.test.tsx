@@ -36,15 +36,23 @@ let container: HTMLDivElement
 let root: Root
 const close = vi.fn<() => void>()
 const edit = vi.fn<() => void>()
+const openBuild = vi.fn<() => void>()
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('PointerEvent', MouseEvent)
   container = document.createElement('div'); document.body.append(container); root = createRoot(container)
-  state.denied = false; state.hostBoards = false; state.boundViews = false; state.workpieces = new Map(); state.getPage.mockReset().mockResolvedValue(null); state.replace.mockReset().mockResolvedValue(); state.invalidate.mockClear(); close.mockClear(); edit.mockClear()
+  state.denied = false; state.hostBoards = false; state.boundViews = false; state.workpieces = new Map(); state.getPage.mockReset().mockResolvedValue(null); state.replace.mockReset().mockResolvedValue(); state.invalidate.mockClear(); close.mockClear(); edit.mockClear(); openBuild.mockClear()
 })
 afterEach(() => { act(() => root.unmount()); container.remove(); vi.unstubAllGlobals() })
-const render = () => act(() => root.render(<ConsoleSettings entry={entry} onClose={close} onEdit={edit} />))
+const render = () => act(() => root.render(<ConsoleSettings entry={entry} onClose={close} onEdit={edit} onOpenBuild={openBuild} />))
 const save = () => [...container.querySelectorAll('button')].find(button => button.textContent === 'Save settings')!
+
+it('opens the configuration workspace through its callback, without a page load', () => {
+  render()
+  const open = [...container.querySelectorAll('button')].find(button => button.textContent === 'Open configuration workspace')!
+  act(() => open.click())
+  expect(openBuild).toHaveBeenCalledTimes(1)
+})
 
 it('defaults old consoles to opt-out and persists four independent flags without copying pages', async () => {
   render()
@@ -84,7 +92,7 @@ it('does not offer policy or configuration writes to use-role viewers', () => {
 
 it('keeps the console\'s widget registry when saving its settings', async () => {
   const widgets = [{ gadgetId: 3, blueprintId: 'bp', version: 2, label: 'Status', state: 'resettable' as const }]
-  act(() => root.render(<ConsoleSettings entry={{ ...entry, console: { ...entry.console, widgets } }} onClose={close} onEdit={edit} />))
+  act(() => root.render(<ConsoleSettings entry={{ ...entry, console: { ...entry.console, widgets } }} onClose={close} onEdit={edit} onOpenBuild={openBuild} />))
   await act(async () => save().click())
   expect(state.replace).toHaveBeenCalledWith('c1', '3', expect.objectContaining({ widgets }))
 })
@@ -101,7 +109,7 @@ const type = (element: HTMLInputElement, value: string) => act(() => {
 })
 
 it('shows no boards while host boards are off, and saving leaves the saved boards to the kernel to keep', async () => {
-  act(() => root.render(<ConsoleSettings entry={withBoard} onClose={close} onEdit={edit} />))
+  act(() => root.render(<ConsoleSettings entry={withBoard} onClose={close} onEdit={edit} onOpenBuild={openBuild} />))
   expect(container.querySelector('#console-host-boards-heading')).toBeNull()
   expect(container.textContent).not.toContain('Team board')
   await act(async () => save().click())
@@ -110,7 +118,7 @@ it('shows no boards while host boards are off, and saving leaves the saved board
 
 it('keeps saved boards untouched when they are not edited, with host boards on', async () => {
   state.hostBoards = true
-  act(() => root.render(<ConsoleSettings entry={withBoard} onClose={close} onEdit={edit} />))
+  act(() => root.render(<ConsoleSettings entry={withBoard} onClose={close} onEdit={edit} onOpenBuild={openBuild} />))
   expect(container.querySelector('[aria-label="Registered boards"]')?.textContent).toContain('Team board')
   await act(async () => save().click())
   expect(lastContent()).not.toHaveProperty('hostBoards')
@@ -118,7 +126,7 @@ it('keeps saved boards untouched when they are not edited, with host boards on',
 
 it('sends an edited board list in full: a removal as an empty list, an addition without an id', async () => {
   state.hostBoards = true
-  act(() => root.render(<ConsoleSettings entry={withBoard} onClose={close} onEdit={edit} />))
+  act(() => root.render(<ConsoleSettings entry={withBoard} onClose={close} onEdit={edit} onOpenBuild={openBuild} />))
   act(() => container.querySelector<HTMLButtonElement>('[aria-label="Remove Team board"]')!.click())
   await act(async () => save().click())
   expect(lastContent().hostBoards).toEqual([])
@@ -133,7 +141,7 @@ it('sends an edited board list in full: a removal as an empty list, an addition 
 
 it('marks boards unavailable and offers none to add on a console that shows only Assistant', () => {
   state.hostBoards = true
-  act(() => root.render(<ConsoleSettings entry={{ ...withBoard, console: { ...withBoard.console, fullChat: 'only' } }} onClose={close} onEdit={edit} />))
+  act(() => root.render(<ConsoleSettings entry={{ ...withBoard, console: { ...withBoard.console, fullChat: 'only' } }} onClose={close} onEdit={edit} onOpenBuild={openBuild} />))
   const section = container.querySelector('[aria-labelledby="console-host-boards-heading"]')!
   expect(section.textContent).toContain('This console shows only Assistant, so operators can\'t open boards on it.')
   expect(section.querySelector('[aria-label="Registered boards"]')?.textContent).toContain('Unavailable on an Assistant-only console')
@@ -148,7 +156,7 @@ it.each([
   ['host boards are off', { hostBoards: false, boundViews: true }],
 ])('shows no views while %s, and saving leaves the saved views to the kernel to keep', async (_, flags) => {
   Object.assign(state, flags)
-  act(() => root.render(<ConsoleSettings entry={withView} onClose={close} onEdit={edit} />))
+  act(() => root.render(<ConsoleSettings entry={withView} onClose={close} onEdit={edit} onOpenBuild={openBuild} />))
   expect(container.querySelector('#console-bound-views-heading')).toBeNull()
   expect(container.textContent).not.toContain('Triage view')
   await act(async () => save().click())
@@ -157,7 +165,7 @@ it.each([
 
 it('keeps saved views untouched when not edited, and sends an edited list in full', async () => {
   state.hostBoards = true; state.boundViews = true
-  act(() => root.render(<ConsoleSettings entry={withView} onClose={close} onEdit={edit} />))
+  act(() => root.render(<ConsoleSettings entry={withView} onClose={close} onEdit={edit} onOpenBuild={openBuild} />))
   expect(container.querySelector('[aria-label="Registered views"]')?.textContent).toContain('Triage view')
   await act(async () => save().click())
   expect(lastContent()).not.toHaveProperty('boundViews')
@@ -180,7 +188,7 @@ it('tells the builder to publish again when a console published before apps were
   const legacy: ConsoleEntry = { ...entry, publishedScreens: [{ schemaVersion: 1, id: 's1', revision: '5', title: 'Board', sections: [] }],
     console: { ...entry.console, published: { revision: '3', publishedAt: '2026-11-01T00:00:00.000Z', content: {
       title: 'Operations', fullChat: 'default', views: entry.console.views } } } }
-  await act(async () => root.render(<ConsoleSettings entry={legacy} onClose={close} onEdit={edit} />))
+  await act(async () => root.render(<ConsoleSettings entry={legacy} onClose={close} onEdit={edit} onOpenBuild={openBuild} />))
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
   expect(state.getPage).toHaveBeenCalledWith('c1', 's1', 'published')
   expect(container.textContent).toContain("Operators can't open Counter until you publish Operations again")

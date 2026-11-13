@@ -112,11 +112,14 @@ export const PersonalCanvas = ({ api, viewer, session, sessionWorkspace, recentE
                 '--row': `${placement.layout.y + 1} / span ${placement.layout.h}`,
               } as CSSProperties}>
               <PlacedWidget placement={placement} api={api} viewer={viewer} session={session} sessionWorkspace={sessionWorkspace}
-                busy={busy} focused={placement.placementId === focusedPlacement}
-                canChange={layoutChange => changedLayout(placement.layout, layoutChange, othersOf(placements, placement.placementId)) !== null}
-                onChange={layoutChange => change(placement, layoutChange)}
-                onFilters={filters => void act(() => save({ placementId: placement.placementId, ref: placement.ref, layout: placement.layout, filters }))}
-                onRemove={() => void act(() => remove(placement.placementId))} />
+                focused={placement.placementId === focusedPlacement}
+                edit={{
+                  busy,
+                  canChange: layoutChange => changedLayout(placement.layout, layoutChange, othersOf(placements, placement.placementId)) !== null,
+                  onChange: layoutChange => change(placement, layoutChange),
+                  onFilters: filters => void act(() => save({ placementId: placement.placementId, ref: placement.ref, layout: placement.layout, filters })),
+                  onRemove: () => void act(() => remove(placement.placementId)),
+                }} />
             </div>
           ))}
         </div>
