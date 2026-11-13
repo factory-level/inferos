@@ -1,6 +1,6 @@
 ---
 title: Deploy a persistent stage
-updated: 2026-11-05
+updated: 2026-11-12
 ---
 
 # Deploy a persistent stage
@@ -64,7 +64,7 @@ Dev InferLab's WAF lets the stage through only when the InferOps side and this s
 
 1. Open `https://dev-os.factorylevel.dev`. **Cloudflare Access** asks for an email: use the address its Allow policy names for this tester. A one-time code goes to that mailbox.
 2. Choose **Sign in with InferLab**. The persona page (`auth.dev-os.factorylevel.dev`) lists the reserved test seats. Pick one: `owner@grokbot.inferlab.dev`, `power@grokbot.inferlab.dev` or `operate@grokbot.inferlab.dev`. No password or secret is involved.
-3. **Your InferOS account is that email.** A different seat, or a seat whose address changed, is a different account, with its own empty list of workspaces, not lost ones. Check `/profile` to see which you're in. To switch seats, sign out of InferOS, open `https://auth.dev-os.factorylevel.dev/logout?return=/`, then sign in again.
+3. **Your InferOS account is that email.** A different seat, or a seat whose address changed, is a different account, with its own empty list of workspaces, not lost ones. Check `/profile` to see which you're in. To switch seats, sign out of InferOS and sign in again: the persona page is shown every time. Do not open `https://auth.dev-os.factorylevel.dev/logout`, which also ends the session behind every connected InferOps account.
 
 When the day's turns are used up, the chat says so and when they reset. Nothing else changes.
 
