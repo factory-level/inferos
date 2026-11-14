@@ -93,6 +93,11 @@ declare global {
       // no gatekeeper sign-in (password / CF Access only).
       AUTH_GATEKEEPERS?: string;
 
+      // For each allowlisted gatekeeper that declares providesSubject, the one issuer it may sign
+      // people in for: comma-separated `<vendor id>=<origin>` pairs, e.g.
+      // "inferlab=https://auth.inferops.io". A vendor with no entry can't sign anyone in by subject.
+      AUTH_GATEKEEPER_ISSUERS?: string;
+
       // Set to "true" to disable username/password login + signup (gatekeeper sign-in only). Only
       // takes effect when at least one auth gatekeeper is allowlisted (otherwise password auth stays
       // on to avoid locking everyone out).

@@ -17,6 +17,25 @@ export function getAuthGatekeeperAllowlist(env: Cloudflare.Env): string[] {
   return raw.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
 }
 
+/**
+ * The issuer a `providesSubject` gatekeeper may sign people in for, from AUTH_GATEKEEPER_ISSUERS
+ * (comma-separated `<vendor id>=<origin>` pairs, e.g. `inferlab=https://auth.inferops.io`). The
+ * kernel refuses a subject whose issuer isn't this one, so a gatekeeper can't mint subjects for
+ * another provider's people. Null when the vendor has no entry, which refuses every subject
+ * sign-in through it.
+ */
+export function getAuthGatekeeperIssuer(env: Cloudflare.Env, vendorId: string): string | null {
+  const raw = (env as { AUTH_GATEKEEPER_ISSUERS?: string }).AUTH_GATEKEEPER_ISSUERS;
+  if (!raw) return null;
+  for (const pair of raw.split(",")) {
+    const at = pair.indexOf("=");
+    if (at > 0 && pair.slice(0, at).trim().toLowerCase() === vendorId) {
+      return pair.slice(at + 1).trim() || null;
+    }
+  }
+  return null;
+}
+
 /** Whether the deployment has opted any gatekeeper into sign-in. */
 export function hasAuthGatekeepers(env: Cloudflare.Env): boolean {
   return getAuthGatekeeperAllowlist(env).length > 0;

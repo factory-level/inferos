@@ -35,7 +35,6 @@ export type AvatarImage = {
   url: string;
 }
 
-/** Describes a connected GatekeeperVendor, for display purposes. */
 /**
  * A provider's stable id for a person: the provider deployment that issued it, as an origin, and
  * that deployment's own id for them. Two sign-ins are the same person only when both are equal.
@@ -47,6 +46,7 @@ export type GatekeeperSubject = {
   subject: string;
 };
 
+/** Describes a connected GatekeeperVendor, for display purposes. */
 export type VendorDescription = {
   /** Human-readable name of the service, e.g. "Google", "GitHub", etc. */
   displayName: string;

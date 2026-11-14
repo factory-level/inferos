@@ -39,6 +39,7 @@ import { ConnectHandoff, GatekeeperConnectCallback, GatekeeperUser } from "@gadg
 import { createWorkshopLogger } from "../observability";
 import { CLOUDFLARE_VENDOR_ID, type UserDurableObject } from "../user.js";
 import { isValidSubject, subjectAccountName } from "../account-subject.js";
+import { getAuthGatekeeperIssuer } from "./config.js";
 import { readAdminConfig } from "../admin-config.js";
 import {
   CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken,
@@ -278,6 +279,14 @@ export class LoginConnectCallbackImpl
         event: "gatekeeper.login.finished", outcome: "no_subject",
       });
       await pending.fail("This account has no stable identity, so it can't be used to sign in.");
+      return;
+    }
+    // The deployment, not the gatekeeper, says whose people a vendor may sign in.
+    if (subject.issuer !== getAuthGatekeeperIssuer(this.env, this.ctx.props.vendorId)) {
+      loginLogger.warn("gatekeeper login refused an untrusted issuer", {
+        event: "gatekeeper.login.finished", outcome: "untrusted_issuer",
+      });
+      await pending.fail("This sign-in came from an identity provider this deployment doesn't trust.");
       return;
     }
     const name = subjectAccountName(subject);

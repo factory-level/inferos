@@ -72,13 +72,19 @@ export class TestConnectCallback extends GatekeeperConnectCallbackImpl {}
 export class TestLoginCallback extends LoginConnectCallbackImpl {}
 
 /**
- * The login callback with an empty admin config, for a sign-in test: a sign-in reads the config for
- * `signupsEnabled`, and the shared test config binds no `BLUEPRINTS` (binding one changes other
- * suites). Only this entrypoint sees the stand-in.
+ * The login callback with an empty admin config and a configured issuer, for a sign-in test: a
+ * sign-in reads the config for `signupsEnabled` and AUTH_GATEKEEPER_ISSUERS for the vendor's issuer,
+ * and the shared test config binds neither (binding `BLUEPRINTS` changes other suites). Only this
+ * entrypoint sees the stand-ins.
  */
 export class TestSubjectLoginCallback extends LoginConnectCallbackImpl {
   constructor(ctx: ExecutionContext, env: Cloudflare.Env) {
-    super(ctx, { ...env, BLUEPRINTS: { get: async () => null } } as unknown as Cloudflare.Env);
+    super(ctx, {
+      ...env,
+      BLUEPRINTS: { get: async () => null },
+      // The one issuer the test vendor `inferlab` may sign people in for (subject-login.test.ts).
+      AUTH_GATEKEEPER_ISSUERS: "inferlab=http://localhost:23380, other=https://other.example.test",
+    } as unknown as Cloudflare.Env);
   }
 }
 /**

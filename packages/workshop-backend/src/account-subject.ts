@@ -4,28 +4,33 @@
 // so a changed email keeps the account and two subjects that share an email stay two accounts.
 import type { GatekeeperSubject } from "@gadgets/workshop-shared/gatekeeper";
 
-/** OpenID Connect's rule for `sub`, which the contract adopts: 1 to 255 printable ASCII characters. */
-const SUBJECT = /^[\x21-\x7e]{1,255}$/;
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 /**
- * Whether `issuer` is an origin a subject may come from: exactly `URL.origin` form, https, or http on
- * a loopback host for local development.
+ * The InferLab contract's `inferlab.stable-subject` v1 rules, mirrored exactly (inferops
+ * `lib/ts/contracts/shared/origin.ts` and `identity.ts`; the pinned schema is
+ * `scripts/inferlab-contracts/schemas/inferlab.stable-subject.v1.schema.json`, and a test compares
+ * these with it). The issuer is an origin in `URL.origin` form, https or loopback http, at most 255
+ * characters; the subject is OpenID Connect's `sub`: 1 to 255 printable ASCII characters.
  */
+export const ISSUER_PATTERN =
+  /^(?:https:\/\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?|http:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?)$/;
+/** The longest issuer the contract accepts. */
+export const ISSUER_MAX_LENGTH = 255;
+/** The contract's subject rule. */
+export const SUBJECT_PATTERN = /^[\x21-\x7e]{1,255}$/;
+
+/** Whether `issuer` is an origin a subject may come from, under the contract's rule. */
 function isIssuerOrigin(issuer: string): boolean {
-  let url: URL;
+  if (issuer.length > ISSUER_MAX_LENGTH || !ISSUER_PATTERN.test(issuer)) return false;
   try {
-    url = new URL(issuer);
+    return new URL(issuer).origin === issuer;
   } catch {
     return false;
   }
-  if (url.origin !== issuer) return false;
-  return url.protocol === "https:" || (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname));
 }
 
 /** Whether a vendor-reported subject is well formed; a sign-in with any other one is refused. */
 export function isValidSubject(subject: GatekeeperSubject): boolean {
-  return isIssuerOrigin(subject.issuer) && SUBJECT.test(subject.subject);
+  return isIssuerOrigin(subject.issuer) && SUBJECT_PATTERN.test(subject.subject);
 }
 
 /**

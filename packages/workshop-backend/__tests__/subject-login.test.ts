@@ -6,11 +6,14 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import type { LoginConnectCallbackImpl, PendingLogin } from "../src/auth/login-flow.js";
 import type { UserDurableObject } from "../src/user.js";
-import { isValidSubject, subjectAccountName } from "../src/account-subject.js";
+import {
+  ISSUER_MAX_LENGTH, ISSUER_PATTERN, isValidSubject, subjectAccountName,
+} from "../src/account-subject.js";
 import type { FakeSignInAccount } from "./test-worker.js";
 // The InferLab cross-product contract fixtures, pinned from inferops (scripts/inferlab-contracts).
 import subjectFixtures from "../../../scripts/inferlab-contracts/fixtures/inferlab.stable-subject.v1.json";
 import itemFixtures from "../../../scripts/inferlab-contracts/fixtures/inferlab.attention-item.v1.json";
+import issuerSchema from "../../../scripts/inferlab-contracts/schemas/inferlab.stable-subject.v1.schema.json";
 
 declare module "cloudflare:workers" {
   interface ProvidedEnv {
@@ -33,7 +36,8 @@ let counter = 0;
  * Runs one sign-in through the real callback, as startGatekeeperLogin() wires it for a
  * `providesSubject` vendor, and answers the session token's account name, or the failure.
  */
-async function signIn(props: { email?: string; issuer?: string; subject?: string }): Promise<string> {
+async function signIn(props: { email?: string; issuer?: string; subject?: string },
+                      vendorId = "inferlab"): Promise<string> {
   const pending = env.TEST_PENDING_LOGIN.getByName(`subject-login-${++counter}`);
   await pending.begin();
   // A callback entrypoint is reachable from a test only through a DO's ctx.exports.
@@ -41,7 +45,7 @@ async function signIn(props: { email?: string; issuer?: string; subject?: string
   const ticket = await runInDurableObject(host, async (instance: UserDurableObject) => {
     const exports = (instance as unknown as { ctx: { exports: Exports } }).ctx.exports;
     const callback = exports.TestSubjectLoginCallback({
-      props: { pendingId: pending.id.toString(), vendorId: "inferlab", subject: true },
+      props: { pendingId: pending.id.toString(), vendorId, subject: true },
     });
     const handoff = await callback.complete(exports.FakeSignInAccount({ props }));
     return handoff.ticket;
@@ -59,6 +63,9 @@ const profileOf = (name: string) =>
   runInDurableObject(env.TEST_USER.getByName(name), async (instance: UserDurableObject) =>
     (instance as unknown as { storage: { profile: { get(): { id: string; name: string } } } })
       .storage.profile.get());
+
+/** An https origin exactly `length` characters long. */
+const originOfLength = (length: number) => `https://${"a".repeat(length - "https://".length)}`;
 
 describe("sign-in by stable subject", () => {
   it("keys the account on the issuer and subject, never the email", async () => {
@@ -83,10 +90,18 @@ describe("sign-in by stable subject", () => {
     expect(one.startsWith("subject~") && two.startsWith("subject~")).toBe(true);
   });
 
-  it("treats the same subject from another issuer as another person", async () => {
-    const local = await signIn({ issuer: ISSUER, subject: "principal-d" });
-    const other = await signIn({ issuer: "https://auth.example.test", subject: "principal-d" });
-    expect(local).not.toBe(other);
+  it("refuses a subject from an issuer the deployment doesn't trust for this vendor", async () => {
+    // A gatekeeper reporting another provider's issuer can't sign in that provider's people,
+    // even with a well-formed subject. `other`'s issuer is configured, but not for `inferlab`.
+    for (const issuer of ["https://other.example.test", "https://auth.example.test", "http://localhost:9999"]) {
+      expect(await signIn({ issuer, subject: "principal-d" }), issuer).toBe(
+        "error:This sign-in came from an identity provider this deployment doesn't trust.");
+    }
+  });
+
+  it("refuses every subject through a vendor with no configured issuer", async () => {
+    expect(await signIn({ issuer: ISSUER, subject: "principal-g" }, "unconfigured")).toBe(
+      "error:This sign-in came from an identity provider this deployment doesn't trust.");
   });
 
   it("signs in without an email, naming the person generically", async () => {
@@ -138,6 +153,22 @@ describe("subjectAccountName", () => {
     const name = subjectAccountName({ issuer: "https://a.test", subject: "u:v@w" });
     expect(name).not.toMatch(/[:@]/);
     expect(name).not.toMatch(/^[a-z][a-z0-9_]*$/);
+  });
+
+  it("applies the contract's issuer rule exactly: the pattern is the pinned schema's, and 255 is the cap", () => {
+    const schema = issuerSchema as { properties: { issuer: { pattern: string; maxLength: number } } };
+    expect(ISSUER_PATTERN.source).toBe(schema.properties.issuer.pattern);
+    expect(ISSUER_MAX_LENGTH).toBe(schema.properties.issuer.maxLength);
+    expect(originOfLength(255)).toHaveLength(255);
+    expect(isValidSubject({ issuer: originOfLength(255), subject: "x" })).toBe(true);
+    expect(isValidSubject({ issuer: originOfLength(256), subject: "x" })).toBe(false);
+    expect(isValidSubject({ issuer: "https://auth.example.", subject: "x" })).toBe(false);
+    expect(isValidSubject({ issuer: "https://auth.example.test.", subject: "x" })).toBe(false);
+    expect(isValidSubject({ issuer: "https://-auth.example.test", subject: "x" })).toBe(false);
+    expect(isValidSubject({ issuer: "https://Auth.example.test", subject: "x" })).toBe(false);
+    expect(isValidSubject({ issuer: "https://auth.example.test:443", subject: "x" })).toBe(false);
+    expect(isValidSubject({ issuer: "http://127.0.0.1:8080", subject: "x" })).toBe(true);
+    expect(isValidSubject({ issuer: "http://[::1]:8080", subject: "x" })).toBe(true);
   });
 
   it("accepts only well-formed subjects", () => {
