@@ -33,7 +33,10 @@ subjects that share an address stay two accounts. A missing or malformed subject
 isn't a bare https origin, or http on loopback; a subject outside 1 to 255 printable ASCII
 characters) fails the sign-in; it never falls back to the email. The issuer must also be the one
 `AUTH_GATEKEEPER_ISSUERS` names for that vendor (`<vendor id>=<origin>` pairs), so a gatekeeper can
-only sign in people of the provider the deployment trusts it for. The session token is
+only sign in people of the provider the deployment trusts it for. That setting is parsed strictly:
+an empty item, a missing `=`, a bad vendor id, whitespace in an origin, an origin outside the
+contract's issuer rule, or a vendor named twice invalidates all of it, so no vendor signs anyone in
+by subject until it is fixed. The session token is
 `"<subject account name>:<secret>"`. `ADMINS` lists these account names, never an email, for
 such accounts. The name matches the InferLab contract's `subjectKey`
 (`scripts/inferlab-contracts`, inferops ADR 0020).
@@ -191,11 +194,19 @@ client `inferos`: one `SignInAttempt` Durable Object per attempt holds the Works
 kit's single-use initiation and OAuth nonces (`connect-handshake`) and the PKCE verifier; the
 redirect URI is exactly `<BASE_URL>/oauth`; `/authorize` carries `prompt=select_account`, InferLab's
 account chooser. The code is exchanged server-side, the InferLab session is ended at once, and a
-session in another company than `INFEROPS_COMPANY` is refused. It needs
-`AUTH_GATEKEEPERS=inferlab`, `AUTH_GATEKEEPER_ISSUERS=inferlab=<issuer>`, `INFERLAB_AUTH_ORIGIN`
-(the issuer), `INFEROPS_COMPANY` (a tenant id) and `BASE_URL` (ending in `/gatekeeper/inferlab`,
-so the redirect is the `/gatekeeper/inferlab/oauth` InferOps registers); without a valid value for
-any of them, every attempt fails with a message naming the setting, with no default or fallback. Business access through InferOps is a separate connection (FAC-235). The
+session in another company than `INFEROPS_COMPANY` is refused. It needs five settings, with no default or fallback for any of them:
+
+| Setting | Where | If missing or invalid |
+| --- | --- | --- |
+| `AUTH_GATEKEEPERS` including `inferlab` | backend | No "Continue with InferLab"; starting one is refused with `Sign-in via "inferlab" is not enabled on this deployment.` |
+| `AUTH_GATEKEEPER_ISSUERS` with `inferlab=<issuer>` | backend | Starting a sign-in is refused, and a callback that still arrives fails, with `Sign-in is off: ` and the parser's reason: `AUTH_GATEKEEPER_ISSUERS has no entry for "inferlab"…`, or `AUTH_GATEKEEPER_ISSUERS entry <n> (…) …` for a malformed or duplicate entry, which turns off every subject vendor |
+| `INFERLAB_AUTH_ORIGIN` (the issuer) | gatekeeper | `InferLab sign-in is off: INFERLAB_AUTH_ORIGIN is missing or isn't an https origin…` |
+| `INFEROPS_COMPANY` (a tenant id) | gatekeeper | `InferLab sign-in is off: INFEROPS_COMPANY is missing or isn't a tenant id.` |
+| `BASE_URL` ending in `/gatekeeper/inferlab` | gatekeeper | `InferLab sign-in is off: BASE_URL is missing, isn't https (or http on a loopback host), or doesn't end in /gatekeeper/inferlab.` |
+
+The redirect is then `<origin>/gatekeeper/inferlab/oauth`, the path InferOps registers. An issuer
+that is configured but differs from the subject's fails with `This sign-in came from an identity
+provider this deployment doesn't trust.` Messages name settings and entry positions, never values. Business access through InferOps is a separate connection (FAC-235). The
 package README holds the ledger of what was ported from the archived fork.
 
 ## Code layout
