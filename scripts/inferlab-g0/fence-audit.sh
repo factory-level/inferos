@@ -5,14 +5,17 @@
 #
 #   import:  tracked file paths and tracked source text (git ls-files / git grep)
 #   build:   what `pnpm build` produced (packages/*/dist, packages/*/.wrangler/validate)
-#   runtime: the generated worker configs (wrangler.jsonc): bound classes and Durable Object
-#            migrations
+#   runtime: every wrangler*.json[c] under the tree, tracked or not: the committed configs and the
+#            untracked wrangler.dev.jsonc files a dev-server run writes (root, workshop-backend,
+#            each gatekeeper). Parsed, not grepped: bindings, classes, migrations, services, vars
 #
 # The identifiers are the fork's own names (inferOS archive/main-2026-11-14), not plain words:
 # "console" and "canvas" alone are everywhere in upstream code (console.log, the HTML canvas).
 # Run from the repository root:  bash scripts/inferlab-g0/fence-audit.sh
+# FENCE_ROOT=<a git checkout> audits that tree instead, with this script's helpers (positive controls).
 set -u
-cd "$(git rev-parse --show-toplevel)"
+LIB="$(cd "$(dirname "$0")" && pwd)/fence-lib.mjs"
+cd "${FENCE_ROOT:-$(git rev-parse --show-toplevel)}"
 
 # Paths only the fork had.
 PATH_PATTERN='features/(operate|operate-publish|canvas|workspace-kind)/|pages/inferops-canvas|canvas-model|temporary-canvas|workspace-kind|operate-session|custom-gatekeepers/|gatekeeper-inferops|blueprints/inferops-|scripts/consumer/|scripts/local/|inferos\.canvas\.json|dot-relay|/dot(\.|-)'
@@ -22,11 +25,11 @@ CONTENT_PATTERN='OperateSession|operate-session|operateSession|OperateMode|opera
 
 # This file and the G0 report quote the patterns themselves.
 SELF=':!scripts/inferlab-g0/' ; REPORT=':!docs/inferlab-g0.md'
-# Provenance, not code: gatekeeper-inferlab's README holds the port ledger (what was taken from the
-# fork and what was left behind), and its sources say where each file was ported from. Excluded by
-# file and by that exact phrase only, so a real reference elsewhere still counts.
+# Provenance, not code. gatekeeper-inferlab's README is the port ledger (what was taken from the fork
+# and what was left behind): excluded by file. Its two "Ported from the archived fork" source comments
+# (and their build copies) are excluded as exact whole lines by fence-lib.mjs, so anything else on
+# such a line still counts.
 LEDGER=':!packages/gatekeeper-inferlab/README.md'
-PROVENANCE='[Pp]orted from the archived fork'
 
 hits=0
 section() { printf '\n## %s\n' "$1"; }
@@ -45,7 +48,7 @@ section "import: tracked paths"
 report "tracked paths" < <(git ls-files | grep -E "$PATH_PATTERN")
 
 section "import: tracked source text"
-report "tracked source text" < <(git grep -nE "$CONTENT_PATTERN" -- . "$SELF" "$REPORT" "$LEDGER" | grep -vE "$PROVENANCE")
+report "tracked source text" < <(git grep -nE "$CONTENT_PATTERN" -- . "$SELF" "$REPORT" "$LEDGER" | node "$LIB" filter)
 
 section "build: pnpm build output"
 build_dirs=$(ls -d packages/*/dist packages/*/.wrangler/validate 2>/dev/null)
@@ -56,11 +59,14 @@ else
   echo "checked: $(printf '%s\n' $build_dirs | wc -l | tr -d ' ') output directories"
   # shellcheck disable=SC2086
   # Line by line, with the same provenance exclusion as the source check: a build copies comments.
-  report "build output lines" < <(grep -rnE "$CONTENT_PATTERN" $build_dirs 2>/dev/null | grep -vE "$PROVENANCE")
+  report "build output lines" < <(grep -rnE "$CONTENT_PATTERN" $build_dirs 2>/dev/null | node "$LIB" filter)
 fi
 
-section "runtime: generated worker configs"
-report "worker configs" < <(git ls-files '*wrangler.jsonc' | xargs grep -nE "$CONTENT_PATTERN|\"(class_name|className)\": \"[^\"]*(Operate|Canvas|Dot|Console)[^\"]*\"|new_sqlite_classes[^]]*(Operate|Canvas|Dot|Console)" 2>/dev/null)
+section "runtime: every worker config, generated ones included"
+config_scan="$(node "$LIB" configs .)"; config_status=$?
+printf '%s\n' "$config_scan" | grep -E '^#'
+report "runtime names" < <(printf '%s\n' "$config_scan" | grep -E '^HIT ')
+[ "$config_status" -le 1 ] || { echo "-> runtime: scanner failed"; hits=$((hits + 1)); }
 
 printf '\n%s\n' "$( [ "$hits" -eq 0 ] && echo 'RESULT: clean (0 levels with hits)' || echo "RESULT: $hits level(s) with hits")"
 [ "$hits" -eq 0 ]
