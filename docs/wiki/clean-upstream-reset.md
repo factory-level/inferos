@@ -5,8 +5,9 @@ updated: 2026-11-14
 
 # Archive main and start a clean upstream baseline
 
-This runbook keeps an immutable recovery point for this fork's `main` and starts a new InferOS line
-from real upstream Cloudflare OS, not from a partly stripped fork. It belongs to FAC-213 (BOS-02) in
+This runbook keeps a protected, checksummed recovery point for this fork's `main` and starts a new
+InferOS line from real upstream Cloudflare OS, not from a partly stripped fork. Step 3b says exactly
+what protects the recovery point and what doesn't. It belongs to FAC-213 (BOS-02) in
 the Linear project "InferLab — Local Business OS Demo". FAC-214 then ports only InferLab sign-in onto
 the clean branch, and FAC-215 proves gate G0 on it with the checks AUTH-01 to AUTH-17.
 
@@ -18,7 +19,8 @@ never deploys anything. The execution record of the first run, on 2026-11-14, is
 
 - **Archive before anything new.** The archive branch, the annotated tag and the bundle exist and are verified before the clean branch is created or anything else is pushed.
 - **Never move main.** `main`, every existing branch and every tag stay as they are. There is no force push, `--force-with-lease` or `git push --delete`.
-- **Never change the default branch.** That is the owner's decision. Write it as a proposal on the ticket instead.
+- **Never change the default branch.** That is the owner's decision. Write it as a proposal on the ticket instead. The manager decided on 2026-11-14 that it stays `main`.
+- **Protect what you archive.** The archive refs are put under rulesets that refuse deletion and any update (step 3b), and the bundle files are made read-only with a second copy. A ref or file is only as immutable as the control actually enforced on it, so the record says which controls are in place.
 - **No deploy and no shared namespace.** No `pnpm stage:deploy`, `wrangler deploy` or preview deploy. The native baseline runs locally on Miniflare only. A stage's `workerPrefix` (`inferos-dev-`, `inferos-prod-`) is never reused, because Durable Objects belong to the worker name.
 - **Keep old state separate.** The old fork's local runtime state (`.wrangler/state`, `~/.config/inferos/worktrees.json`, the deploy checkouts' `.stage-*.vars`) is never copied into the clean worktree. Archive any state you have to remove, outside every worktree.
 - **Mock mode for the baseline.** The clean worktree gets no `.env` or `.dev.vars` with provider keys, and commands run from a clean shell, so no live model is reached.
@@ -74,8 +76,52 @@ git ls-remote origin refs/heads/main refs/heads/archive/main-<date> \
                      refs/tags/main-archive-<date> 'refs/tags/main-archive-<date>^{}'
 ```
 
-`archive/main-<date>`, the peeled tag and `main` must all print `S`. The push is two new refs; if
-either already exists the push fails rather than moving it.
+`archive/main-<date>`, the peeled tag and `main` must all print `S`. Step 1's emptiness check is what
+keeps this push from moving anything. A tag push fails when the tag exists, but a non-force push of an
+existing **branch** succeeds when it is a fast-forward, so it would move a branch already sitting at an
+ancestor. Re-run the step 1 check right before this push if any time has passed.
+
+### 3b. Protect the archive
+
+**Refs.** Two repository rulesets, with enforcement active and no bypass actors. A ruleset has a single
+target type, so branches and tags each need their own:
+
+```bash
+gh api -X POST repos/factory-level/inferos/rulesets --input - <<'JSON'
+{"name":"archive-immutable-branches","target":"branch","enforcement":"active","bypass_actors":[],
+ "conditions":{"ref_name":{"include":["refs/heads/archive/**"],"exclude":[]}},
+ "rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"update"}]}
+JSON
+gh api -X POST repos/factory-level/inferos/rulesets --input - <<'JSON'
+{"name":"archive-immutable-tags","target":"tag","enforcement":"active","bypass_actors":[],
+ "conditions":{"ref_name":{"include":["refs/tags/main-archive-*"],"exclude":[]}},
+ "rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"update"}]}
+JSON
+```
+
+Prove both rulesets against throwaway probe refs under the same patterns. The rules don't include
+`creation`, so the probes can be created after the rulesets. **Never test against the real archive
+refs.**
+
+```bash
+git push origin <S>:refs/heads/archive/ruleset-probe-<date>
+git push origin <S>:refs/tags/main-archive-ruleset-probe-<date>   # a lightweight tag is enough
+# then, with both rulesets active:
+git push origin --delete archive/ruleset-probe-<date>                       # must be refused
+git push origin <child of S>:refs/heads/archive/ruleset-probe-<date>        # a fast-forward: must be refused
+git push origin --delete refs/tags/main-archive-ruleset-probe-<date>        # must be refused
+```
+
+The probes stay as evidence. Afterwards, `gh api repos/factory-level/inferos/rulesets` lists both
+rulesets with `bypass_actors: []`. A repository admin can still edit or delete a ruleset, so the
+rulesets stop accidents and every writer without admin, not an admin acting on purpose. Each
+ruleset change shows in the repository's rule history.
+
+**Bundle.** `chmod 0444` the bundle, its `.sha256` and the ref list, `chmod 0555` the directory, and
+keep a second copy on another path. A local file can still be changed by this user (who can `chmod`
+it back) or by root, so read-only modes stop accidents, not tampering. **The integrity check is the
+sha256:** it is recorded in the pull request and in the ticket's closure, so compare any copy against
+that recorded value, never against a `.sha256` file stored beside it.
 
 ### 4. Inspect deployment triggers
 
@@ -88,11 +134,20 @@ clean branch carries upstream's workflow files, not this fork's. Confirm all thr
 
 Also check that nothing outside Actions deploys on push. `gh api repos/<repo>/hooks` should list no webhooks, the commit's check runs should list only `github-actions`, and `gh api repos/<repo>/environments` should list no environments. The persistent stages deploy only from a workstation with `pnpm stage:deploy` ([Deploy a persistent stage](stage-deploy.md)).
 
-**Do not open a pull request from the clean branch.** A `pull_request` run uses the workflow files
-from the pull request's merge commit, so it would run upstream's workflows with this repository's
-secrets. Its preview deploy is owner-guarded and its CI uses no secrets, but `bonk-pr.yml` carries the
-AI Gateway secrets. Any review of the clean branch happens without a pull request, or after a person
-decides how its workflows should run.
+**Pull requests on the clean line.** A `pull_request` run uses the workflow files from the pull
+request's merge commit. A pull request **from** the clean branch, or one whose **base** is a
+`clean/*` branch (FAC-214's path), therefore runs upstream's workflows with whatever secrets reach
+this repository. What makes that safe today, checked on 2026-11-14:
+
+- **Disabled workflows.** `Bonk`, `Bonk PR Review` and `CLA Assistant` are `disabled_manually` in this repository (`gh workflow list --all`). The disabled state is per workflow file, so it holds on every branch.
+- **Secrets.** The repository has 0 Actions secrets of its own (`gh api repos/factory-level/inferos/actions/secrets`). Three organization secrets reach it (`gh api …/actions/organization-secrets`): `ACTIONS_PAT`, `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN`.
+- **The only exposure.** Of those three, upstream's workflows reference only `CLOUDFLARE_API_TOKEN`, and only in `preview.yml`'s deploy, delete and sweep jobs, which require `github.repository_owner == 'cloudflare'`. The AI Gateway secrets that Bonk and the eval workflows read do not exist here, and the eval jobs depend on an owner-guarded `plan` job.
+
+So today the Cloudflare token is kept out of an upstream-workflow run by one `if:` guard. Re-enabling
+a disabled workflow, or adding a secret, changes this. **The manager's decision (2026-11-14):** FAC-214
+starts with a pull request on the clean branch that neutralizes upstream's secret-bearing and deploy
+workflows for this repository. That is the first pull request whose base is `clean/*`; nothing else
+opens one first. Review of the clean branch itself happens without a pull request.
 
 ### 5. Pin upstream and create the clean branch
 
@@ -144,12 +199,13 @@ Stop the server once the smoke is recorded. Its state stays in the clean worktre
 ### 7. Push the clean branch
 
 ```bash
+git ls-remote origin refs/heads/clean/upstream-<date>       # must print nothing, checked right before the push
 git push origin clean/upstream-<date>:refs/heads/clean/upstream-<date>
 git ls-remote origin refs/heads/clean/upstream-<date>       # must print U
 ```
 
-This is a new branch name, so the push fails rather than moving anything. Check `gh run list`
-afterwards: no run should have started.
+The emptiness check is what makes this push create a branch rather than move one: a fast-forward push
+to an existing branch would succeed. Check `gh run list` afterwards: no run should have started.
 
 ## Rollback
 
@@ -183,6 +239,8 @@ Then each was removed with `pnpm wt rm <name> --force`.
 | 2. Archive made locally | Branch `archive/main-2026-11-14` → `24f5d885`. Annotated tag `main-archive-2026-11-14` (tag object `06e59960b8a6b8027070b7fe7e39bcd9e295c5cb`) → `24f5d885`. |
 | 2. Bundle | `~/backups/inferos-fac-213/inferos-main-24f5d8852a22-2026-11-14.bundle`, 18,697,922 bytes. sha256 `b938b601176e85260797f761a00348c43325798f0a923bcdcaca0178ca7b4fd1`, stored beside it in the `.sha256` file. `git bundle verify`: "The bundle records a complete history"; heads are the branch and the tag. Restore test: a bare clone resolves both to `24f5d885`, `git fsck` exits 0, and history holds 1338 commits. |
 | 3. Archive pushed | Two new refs and no force. `ls-remote` shows `refs/heads/archive/main-2026-11-14` = `refs/heads/main` = `refs/tags/main-archive-2026-11-14^{}` = `24f5d885`. `gh run list` shows no run started by the push. |
+| 3b. Ref rulesets | **Not applied yet.** The account has admin on the repository (`permissions.admin: true`), but the build seat's request to create the two rulesets above was refused by its session's permission policy. A person applies them, with the commands in step 3b, and records the ruleset ids and the probe refusals here. Until then the archive refs are protected by nothing beyond ordinary write access: the one active ruleset, 26395522, targets only the default branch. |
+| 3b. Bundle (14:00Z) | `chmod 0444` on the bundle, its `.sha256`, the ref list and the two state tarballs, and `chmod 0555` on `~/backups/inferos-fac-213/`. Second copy on another path: `~/Documents/inferos-archive-2026-11-14/` (bundle, `.sha256`, ref list), with the same modes. Hashing the copy directly gives `b938b601…7b4fd1`, and `cmp` finds it identical. Both copies are on the host's only disk, so this guards against an accidental change or deletion of one path, not against losing the disk. No off-host copy was made, because that would send the archive outside the team. The recorded sha256 is the integrity check. |
 | 4. Triggers | As described in step 4, checked at `24f5d885` and at upstream `9e8acadb`: push triggers are `main`-only, the preview jobs are owner-guarded (`skipped` on `main`'s check runs), there are no webhooks, the only check-run app is `github-actions`, and there are no environments. No workflow was edited. |
 | 5. Upstream pin | `U = 9e8acadb79dd3aa9671199f3f10aea307d7e5300` (cloudflare/cloudflare-os `main`, committed 2026-11-13T18:53:15-06:00, #1122). |
 | 5. Clean branch | `clean/upstream-2026-11-14`, tip `9e8acadb`. `git diff 9e8acadb HEAD` is 0 lines. Worktree `.worktrees/fac-213-clean-baseline` on ports 8870–8879. The linked `.env` was removed, there is no `.dev.vars`, and `.env.worktree` holds only port and concurrency names. |
@@ -191,18 +249,24 @@ Then each was removed with `pnpm wt rm <name> --force`.
 | 6. `pnpm test`, the rest | Re-run as `node scripts/vp/run.ts --filter=!cloudflare-os --filter=!@gadgets/api-cli --cache test`: 78 of 80 tasks. Every test task was a real run (cache miss) apart from 9 that replayed this worktree's own first-run passes. `integration-tests`, `workshop-frontend`, `mcp-shared` and every gatekeeper's tests passed. Two failed, both from the run environment, not the code: (a) `workshop-evals#test`. Headless Chromium crashed at launch because vp's file-system spy (`fspy_preload_unix`, which `vp run` injects for caching) panicked with `ESRCH`. Run directly (`vitest run --config vitest.config.ts --maxWorkers=2`), it passes 143 of 143. (b) `workshop-backend#test`, stopped (137) after (a). Run directly (`pnpm run test:run`), it gives 2644 of 2645. The one failure is a fast-check property in `__tests__/unread-state.test.ts` interrupted by its 90 s time limit after 57 cases, under host load, with no counterexample. Run alone, that file passes 59 of 59. Then `vitest.integration.config.ts` gives 3 passed and 4 skipped, and `vitest.native.config.ts` gives 5 of 5. |
 | 6. `pnpm run-local --port 8870` | Ready in about 50 s. `GET /` returned 200, `<title>Cloudflare OS</title>`. Mock mode: no `.env` or `.dev.vars`, a clean shell, and no Workers AI binding flag. |
 | 6. Native Gadget smoke (`pnpm cf-os api --url http://localhost:8870`) | `create-account` and `whoami` both succeed. `new-workspace set-title "Baseline smoke"` creates a workspace. `open-workspace <id> create-gadget "Smoke gadget" get-export-formats` exits 0, and `subscribe-to-workpieces` then lists `{"type":"gadget","title":"Smoke gadget","commitId":"135be5b6…"}`. `list-featured-blueprints` lists 9 entries, and `new-workspace-from-blueprint format.document '{}' get-metadata` creates "Workspace Docs" with `defaultGadgetId: 0` and role `build`. `list-workspaces` returns `[]`, because it hides provisional workspaces. The accounts and password were throwaway and local. The server was stopped afterwards; nothing was left listening on 8870–8879 and the stack lock was released. |
-| 7. Clean branch pushed, 13:50Z | A new branch, no force. `ls-remote` shows `refs/heads/clean/upstream-2026-11-14` = `9e8acadb`, while `main` and `archive/main-2026-11-14` stay at `24f5d885`. `gh run list` shows no run started by the push. |
+| 7. Clean branch pushed, 13:50Z | `ls-remote origin refs/heads/clean/upstream-2026-11-14` printed nothing immediately before the push. A new branch, no force. `ls-remote` shows `refs/heads/clean/upstream-2026-11-14` = `9e8acadb`, while `main` and `archive/main-2026-11-14` stay at `24f5d885`. `gh run list` shows no run started by the push. |
+
+**Decisions recorded (the manager, 2026-11-14):**
+
+- **Default branch.** It stays `main`.
+- **api-cli test.** Its Node difference is recorded, not patched. The clean branch is not edited to make the `api-cli` TLS-message test pass on this host.
+- **FAC-214's first step.** It opens a pull request on the clean branch that neutralizes upstream's secret-bearing and deploy workflows, before any other pull request with a `clean/*` base (step 4).
 
 **What the clean baseline needs next:**
 
-- The `api-cli` TLS-message test fails on this host's Node. Either pin the host to upstream's Node 24.19.0 or report it upstream; the clean branch must not be edited to make it pass.
-- Run a heavy browser suite outside `vp run`, or with `vp`'s file spy off, when it fails at Chromium launch. Note it rather than counting it as a code failure.
-- Default branch: unchanged. Whether `clean/upstream-2026-11-14` (or its successor once FAC-214 lands) becomes the default is an owner decision, not part of this runbook.
+- A person applies the step 3b rulesets and records their ids and the probe refusals here.
+- When a heavy browser suite fails at Chromium launch, run it outside `vp run`, or with `vp`'s file spy off. Note it as an environment failure, not a code failure.
 
 **Not done:**
 
 - no deploy of any kind;
 - no change to the default branch or to any workflow;
-- no pull request from the clean branch;
+- no pull request from, or onto, the clean branch;
+- the archive rulesets (see 3b);
 - no live model or provider, so this is mock mode only;
 - no browser walkthrough, since the smoke used upstream's API client.
