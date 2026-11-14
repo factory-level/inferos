@@ -4,7 +4,11 @@
 import { env } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../src/worker.js";
-import { NOT_CONFIGURED, readConfig } from "../src/config.js";
+import {
+  ISSUER_MAX_LENGTH, ISSUER_PATTERN, NOT_CONFIGURED, SIGN_IN_CALLBACK_PATH, parseOrigin, readConfig,
+} from "../src/config.js";
+// The InferLab contract, pinned from inferops (scripts/inferlab-contracts).
+import subjectSchema from "../../../scripts/inferlab-contracts/schemas/inferlab.stable-subject.v1.schema.json";
 
 const ISSUER = "http://localhost:23380";
 const BASE = "http://localhost:8787/gatekeeper/inferlab";
@@ -160,6 +164,13 @@ describe("bad config fails closed and loud", () => {
     ["no company", { INFEROPS_COMPANY: "" }, NOT_CONFIGURED.company],
     ["a company that isn't a tenant id", { INFEROPS_COMPANY: "acme" }, NOT_CONFIGURED.company],
     ["the old 'internal' company setting", { INFEROPS_COMPANY: "internal" }, NOT_CONFIGURED.company],
+    ["an issuer with a trailing-dot host", { INFERLAB_AUTH_ORIGIN: "https://auth.example." }, NOT_CONFIGURED.issuer],
+    ["an issuer over 255 characters", { INFERLAB_AUTH_ORIGIN: `https://${"a".repeat(248)}` }, NOT_CONFIGURED.issuer],
+    ["no base URL", { BASE_URL: "" }, NOT_CONFIGURED.baseUrl],
+    ["a base URL over plain http off loopback", { BASE_URL: "http://os.example.test/gatekeeper/inferlab" }, NOT_CONFIGURED.baseUrl],
+    ["a base URL at another gatekeeper's route", { BASE_URL: "http://localhost:8787/gatekeeper/inferops" }, NOT_CONFIGURED.baseUrl],
+    ["a base URL below the route", { BASE_URL: "http://localhost:8787/gatekeeper/inferlab/x" }, NOT_CONFIGURED.baseUrl],
+    ["a base URL with a query", { BASE_URL: "http://localhost:8787/gatekeeper/inferlab?x=1" }, NOT_CONFIGURED.baseUrl],
   ])("with %s, sign-in can't start, the browser leg says why, and nothing reaches InferLab", async (_why, bad, message) => {
     expect(readConfig({ ...env, ...bad } as Env)).toEqual({ off: message });
     expect((await hooks().vendor("auth", bad)).connect).toBe(message);
@@ -177,6 +188,33 @@ describe("bad config fails closed and loud", () => {
     const page = await get(`${REDIRECT_URI}?code=c&state=${state}`, { INFEROPS_COMPANY: "" });
     expect(page.status).toBe(503);
     expect(await hooks().received(attempt.label)).toBeNull();
+  });
+});
+
+/** An https origin exactly `length` characters long. */
+const originOfLength = (length: number) => `https://${"a".repeat(length - "https://".length)}`;
+
+describe("the callback InferOps registers, and the contract's issuer rule", () => {
+  it("builds exactly <BASE_URL>/oauth, at the path InferOps registers for the inferos client", async () => {
+    const { auth } = await signIn();
+    expect(auth.searchParams.get("redirect_uri")).toBe("http://localhost:8787/gatekeeper/inferlab/oauth");
+    // inferops `INFEROS_SIGN_IN_CALLBACK_PATH` (domain/ts/portal/shared/sso.dto.ts), added by
+    // factory-level/inferops#2678 (head 34d0ee56e068b2f20ce0d75d779d50523a39751e). Its central-auth
+    // accepts the `inferos` client only at that exact path, so a change on either side is a
+    // cross-repo contract change and must change this literal too.
+    expect(SIGN_IN_CALLBACK_PATH).toBe("/gatekeeper/inferlab/oauth");
+    expect(new URL(auth.searchParams.get("redirect_uri")!).pathname).toBe(SIGN_IN_CALLBACK_PATH);
+  });
+
+  it("applies the pinned contract's issuer pattern and length cap, byte for byte", () => {
+    expect(ISSUER_PATTERN.source).toBe(subjectSchema.properties.issuer.pattern);
+    expect(ISSUER_MAX_LENGTH).toBe(subjectSchema.properties.issuer.maxLength);
+    expect(parseOrigin(originOfLength(255))).toBe(originOfLength(255));
+    expect(parseOrigin(originOfLength(256))).toBeNull();
+    expect(parseOrigin("https://auth.example.")).toBeNull();
+    expect(parseOrigin("https://auth.example.test:443")).toBeNull();
+    expect(parseOrigin("https://Auth.example.test")).toBeNull();
+    expect(parseOrigin("http://[::1]:23380")).toBe("http://[::1]:23380");
   });
 });
 

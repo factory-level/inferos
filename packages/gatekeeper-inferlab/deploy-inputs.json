@@ -1,0 +1,19 @@
+[
+  {
+    "name": "INFERLAB_AUTH_ORIGIN",
+    "kind": "var",
+    "label": "InferLab sign-in origin",
+    "help": "The origin of the InferLab central-auth deployment people sign in through, for example https://auth.inferops.io. It is also the issuer accounts are keyed on, so it must match the backend's AUTH_GATEKEEPER_ISSUERS entry for inferlab. InferLab sign-in is a public client: there is no client secret.",
+    "setupSteps": [
+      "In InferOps, register this deployment's origin for the inferos client (auth.sso.inferosOrigins) and name its company (auth.sso.inferosCompanies).",
+      "InferOps accepts the redirect URI below exactly."
+    ],
+    "redirectUriTemplate": "{PUBLIC_BASE_URL}/gatekeeper/inferlab/oauth"
+  },
+  {
+    "name": "INFEROPS_COMPANY",
+    "kind": "var",
+    "label": "InferOps company (tenant id)",
+    "help": "The tenant id of the one company this deployment serves. A sign-in from any other company is refused."
+  }
+]
