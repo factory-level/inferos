@@ -1,0 +1,63 @@
+{
+  "valid": [
+    {
+      "name": "request",
+      "value": {
+        "v": 1,
+        "location": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "expectedRevision": "42",
+        "idempotencyKey": "review-LOC001-0001"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "no-revision",
+      "why": "the write is guarded by a revision",
+      "value": {
+        "v": 1,
+        "location": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "idempotencyKey": "review-LOC001-0001"
+      }
+    },
+    {
+      "name": "no-key",
+      "why": "one logical action, one key",
+      "value": {
+        "v": 1,
+        "location": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "expectedRevision": "42"
+      }
+    },
+    {
+      "name": "short-key",
+      "why": "keys are 8 to 128 characters",
+      "value": {
+        "v": 1,
+        "location": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "expectedRevision": "42",
+        "idempotencyKey": "k1"
+      }
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "valid": [
+    {
+      "name": "unreviewed",
+      "value": {
+        "v": 1,
+        "ref": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "project": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/project",
+          "id": "00000000-0000-4000-8000-0000000002a1"
+        },
+        "name": "LOC-001 Main yard",
+        "review": {
+          "status": "none"
+        },
+        "revision": "42"
+      }
+    },
+    {
+      "name": "requested",
+      "value": {
+        "v": 1,
+        "ref": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "project": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/project",
+          "id": "00000000-0000-4000-8000-0000000002a1"
+        },
+        "name": "LOC-001 Main yard",
+        "review": {
+          "status": "requested"
+        },
+        "revision": "42"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown-status",
+      "why": "review states are a closed set",
+      "value": {
+        "v": 1,
+        "ref": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "project": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/project",
+          "id": "00000000-0000-4000-8000-0000000002a1"
+        },
+        "name": "LOC-001 Main yard",
+        "review": {
+          "status": "approved"
+        },
+        "revision": "42"
+      }
+    },
+    {
+      "name": "project-as-location",
+      "why": "kind must match",
+      "value": {
+        "v": 1,
+        "ref": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/project",
+          "id": "00000000-0000-4000-8000-0000000002a1"
+        },
+        "project": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/project",
+          "id": "00000000-0000-4000-8000-0000000002a1"
+        },
+        "name": "LOC-001 Main yard",
+        "review": {
+          "status": "none"
+        },
+        "revision": "42"
+      }
+    }
+  ]
+}

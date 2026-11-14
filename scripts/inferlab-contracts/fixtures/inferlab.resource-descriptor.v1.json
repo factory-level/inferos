@@ -1,0 +1,67 @@
+{
+  "valid": [
+    {
+      "name": "location",
+      "value": {
+        "v": 1,
+        "ref": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "label": "Main yard",
+        "revision": "42",
+        "destinations": ["page", "embed"]
+      }
+    },
+    {
+      "name": "no-revision",
+      "value": {
+        "v": 1,
+        "ref": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "label": "Main yard",
+        "destinations": ["page", "embed"]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "numeric-revision",
+      "why": "revisions are decimal strings",
+      "value": {
+        "v": 1,
+        "ref": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "label": "Main yard",
+        "revision": 42,
+        "destinations": ["page", "embed"]
+      }
+    },
+    {
+      "name": "unknown-destination",
+      "why": "destinations are a closed set",
+      "value": {
+        "v": 1,
+        "ref": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "label": "Main yard",
+        "revision": "42",
+        "destinations": ["redirect"]
+      }
+    }
+  ]
+}

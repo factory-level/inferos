@@ -1,0 +1,75 @@
+{
+  "valid": [
+    {
+      "name": "local-issuer",
+      "value": {
+        "issuer": "http://localhost:8080",
+        "subject": "00000000-0000-4000-8000-000000000101"
+      }
+    },
+    {
+      "name": "https-issuer",
+      "value": {
+        "issuer": "https://auth.inferops.io",
+        "subject": "p-123"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "issuer-with-path",
+      "why": "an issuer is an origin",
+      "value": {
+        "issuer": "https://auth.inferops.io/login",
+        "subject": "p"
+      }
+    },
+    {
+      "name": "http-non-loopback",
+      "why": "plain http only on loopback",
+      "value": {
+        "issuer": "http://auth.inferops.io",
+        "subject": "p"
+      }
+    },
+    {
+      "name": "userinfo",
+      "why": "no credentials in an origin",
+      "value": {
+        "issuer": "https://user:pw@auth.inferops.io",
+        "subject": "p"
+      }
+    },
+    {
+      "name": "email-only",
+      "why": "email is not identity",
+      "value": {
+        "email": "owner@acme.test"
+      }
+    },
+    {
+      "name": "empty-subject",
+      "why": "subject is required",
+      "value": {
+        "issuer": "http://localhost:8080",
+        "subject": ""
+      }
+    },
+    {
+      "name": "non-ascii-subject",
+      "why": "subjects are printable ASCII, as OIDC requires",
+      "value": {
+        "issuer": "http://localhost:8080",
+        "subject": "p\u00e9rson"
+      }
+    },
+    {
+      "name": "subject-with-space",
+      "why": "subjects are printable ASCII without spaces",
+      "value": {
+        "issuer": "http://localhost:8080",
+        "subject": "a b"
+      }
+    }
+  ]
+}

@@ -1,0 +1,130 @@
+{
+  "valid": [
+    {
+      "name": "review-requested",
+      "value": {
+        "v": 1,
+        "eventId": "6f1c2a8e-4b1d-4c55-9a3e-2f6d8b1e0a01",
+        "type": "project.location.review_requested",
+        "occurredAt": "2026-11-14T13:00:00Z",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "resource": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "resourceRevision": "43",
+        "actor": {
+          "type": "user",
+          "subject": {
+            "issuer": "http://localhost:8080",
+            "subject": "00000000-0000-4000-8000-000000000101"
+          }
+        },
+        "causationKey": "review-LOC001-0001"
+      }
+    },
+    {
+      "name": "system-actor",
+      "value": {
+        "v": 1,
+        "eventId": "6f1c2a8e-4b1d-4c55-9a3e-2f6d8b1e0a01",
+        "type": "project.location.review_requested",
+        "occurredAt": "2026-11-14T13:00:00Z",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "resource": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "resourceRevision": "43",
+        "actor": {
+          "type": "system"
+        },
+        "causationKey": "review-LOC001-0001"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "analytics-type",
+      "why": "only committed business events",
+      "value": {
+        "v": 1,
+        "eventId": "6f1c2a8e-4b1d-4c55-9a3e-2f6d8b1e0a01",
+        "type": "project.issue.viewed",
+        "occurredAt": "2026-11-14T13:00:00Z",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "resource": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "resourceRevision": "43",
+        "actor": {
+          "type": "user",
+          "subject": {
+            "issuer": "http://localhost:8080",
+            "subject": "00000000-0000-4000-8000-000000000101"
+          }
+        },
+        "causationKey": "review-LOC001-0001"
+      }
+    },
+    {
+      "name": "no-revision",
+      "why": "events carry the revision they produced",
+      "value": {
+        "v": 1,
+        "eventId": "6f1c2a8e-4b1d-4c55-9a3e-2f6d8b1e0a01",
+        "type": "project.location.review_requested",
+        "occurredAt": "2026-11-14T13:00:00Z",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "resource": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "actor": {
+          "type": "user",
+          "subject": {
+            "issuer": "http://localhost:8080",
+            "subject": "00000000-0000-4000-8000-000000000101"
+          }
+        },
+        "causationKey": "review-LOC001-0001"
+      }
+    },
+    {
+      "name": "user-without-subject",
+      "why": "a user actor names its subject",
+      "value": {
+        "v": 1,
+        "eventId": "6f1c2a8e-4b1d-4c55-9a3e-2f6d8b1e0a01",
+        "type": "project.location.review_requested",
+        "occurredAt": "2026-11-14T13:00:00Z",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "resource": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "resourceRevision": "43",
+        "actor": {
+          "type": "user"
+        },
+        "causationKey": "review-LOC001-0001"
+      }
+    }
+  ]
+}

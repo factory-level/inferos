@@ -1,0 +1,83 @@
+{
+  "valid": [
+    {
+      "name": "reviewers",
+      "value": {
+        "v": 1,
+        "sourceEventId": "6f1c2a8e-4b1d-4c55-9a3e-2f6d8b1e0a01",
+        "reason": "review_requested",
+        "target": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "audience": {
+          "kind": "permission-holders",
+          "workspaceId": "00000000-0000-4000-8000-000000000011",
+          "permission": "location:review"
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "named-users",
+      "why": "a Gadget cannot name recipients",
+      "value": {
+        "v": 1,
+        "sourceEventId": "6f1c2a8e-4b1d-4c55-9a3e-2f6d8b1e0a01",
+        "reason": "review_requested",
+        "target": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "audience": {
+          "kind": "subjects",
+          "subjects": [
+            {
+              "issuer": "http://localhost:8080",
+              "subject": "00000000-0000-4000-8000-000000000102"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "url-target",
+      "why": "targets are references, not URLs",
+      "value": {
+        "v": 1,
+        "sourceEventId": "6f1c2a8e-4b1d-4c55-9a3e-2f6d8b1e0a01",
+        "reason": "review_requested",
+        "target": "https://evil.test",
+        "audience": {
+          "kind": "permission-holders",
+          "workspaceId": "00000000-0000-4000-8000-000000000011",
+          "permission": "location:review"
+        }
+      }
+    },
+    {
+      "name": "no-event",
+      "why": "attention follows a committed event",
+      "value": {
+        "v": 1,
+        "reason": "review_requested",
+        "target": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "audience": {
+          "kind": "permission-holders",
+          "workspaceId": "00000000-0000-4000-8000-000000000011",
+          "permission": "location:review"
+        }
+      }
+    }
+  ]
+}

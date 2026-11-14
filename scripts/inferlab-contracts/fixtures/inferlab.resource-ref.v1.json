@@ -1,0 +1,53 @@
+{
+  "valid": [
+    {
+      "name": "location",
+      "value": {
+        "v": 1,
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "kind": "project/location",
+        "id": "00000000-0000-4000-8000-0000000002b1"
+      }
+    },
+    {
+      "name": "project",
+      "value": {
+        "v": 1,
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "kind": "project/project",
+        "id": "00000000-0000-4000-8000-0000000002a1"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown-kind",
+      "why": "kinds are a closed set; no widget kinds",
+      "value": {
+        "v": 1,
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "kind": "project/board",
+        "id": "00000000-0000-4000-8000-0000000002b1"
+      }
+    },
+    {
+      "name": "key-with-space",
+      "why": "ids are stable ids, not labels",
+      "value": {
+        "v": 1,
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "kind": "project/location",
+        "id": "Main yard"
+      }
+    },
+    {
+      "name": "no-tenant",
+      "why": "refs are company-qualified",
+      "value": {
+        "v": 1,
+        "kind": "project/location",
+        "id": "00000000-0000-4000-8000-0000000002b1"
+      }
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "$id": "https://contracts.inferlab.dev/inferlab.resource-descriptor.v1.schema.json",
+  "title": "inferlab.resource-descriptor v1",
+  "description": "What a reader may know about a record. Owner: lib/ts/contracts.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "ref": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "tenantId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "project/project",
+            "project/location",
+            "knowledge/page",
+            "inferos/gadget",
+            "inferos/blueprint"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "required": [
+        "v",
+        "tenantId",
+        "kind",
+        "id"
+      ]
+    },
+    "label": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^\\d+$"
+    },
+    "destinations": {
+      "maxItems": 4,
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "page",
+          "embed",
+          "gadget",
+          "blueprint"
+        ]
+      }
+    }
+  },
+  "required": [
+    "v",
+    "ref",
+    "label",
+    "destinations"
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "valid": [
+    {
+      "name": "first-page",
+      "value": {
+        "v": 1,
+        "project": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/project",
+          "id": "00000000-0000-4000-8000-0000000002a1"
+        }
+      }
+    },
+    {
+      "name": "next-page",
+      "value": {
+        "v": 1,
+        "project": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/project",
+          "id": "00000000-0000-4000-8000-0000000002a1"
+        },
+        "cursor": "c1",
+        "limit": 20
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "limit-too-big",
+      "why": "at most 100",
+      "value": {
+        "v": 1,
+        "project": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/project",
+          "id": "00000000-0000-4000-8000-0000000002a1"
+        },
+        "limit": 1000
+      }
+    }
+  ]
+}

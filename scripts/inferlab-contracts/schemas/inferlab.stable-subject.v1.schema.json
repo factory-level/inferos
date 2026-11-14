@@ -1,0 +1,22 @@
+{
+  "$id": "https://contracts.inferlab.dev/inferlab.stable-subject.v1.schema.json",
+  "title": "inferlab.stable-subject v1",
+  "description": "A person by issuer and subject, never email. Owner: domain/ts/portal.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "issuer": {
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^(?:https:\\/\\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?(?::\\d{1,5})?|http:\\/\\/(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::\\d{1,5})?)$"
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^[\\x21-\\x7e]{1,255}$"
+    }
+  },
+  "required": [
+    "issuer",
+    "subject"
+  ]
+}

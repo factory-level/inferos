@@ -1,0 +1,37 @@
+{
+  "valid": [
+    {
+      "name": "local",
+      "value": {
+        "v": 1,
+        "origins": {
+          "inferops": "http://localhost:3000",
+          "inferwork": "http://localhost:3003",
+          "inferos": "https://os.inferops.io"
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "origin-with-path",
+      "why": "origins have no path",
+      "value": {
+        "v": 1,
+        "origins": {
+          "inferwork": "http://localhost:3003/app"
+        }
+      }
+    },
+    {
+      "name": "javascript",
+      "why": "only http(s) origins",
+      "value": {
+        "v": 1,
+        "origins": {
+          "inferwork": "javascript:alert(1)"
+        }
+      }
+    }
+  ]
+}

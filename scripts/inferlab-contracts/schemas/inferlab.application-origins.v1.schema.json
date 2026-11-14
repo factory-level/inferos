@@ -1,0 +1,34 @@
+{
+  "$id": "https://contracts.inferlab.dev/inferlab.application-origins.v1.schema.json",
+  "title": "inferlab.application-origins v1",
+  "description": "Trusted origins of each application. Owner: lib/ts/contracts.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "origins": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "enum": [
+          "inferops",
+          "infermind",
+          "inferwork",
+          "inferos"
+        ]
+      },
+      "additionalProperties": {
+        "type": "string",
+        "maxLength": 255,
+        "pattern": "^(?:https:\\/\\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?(?::\\d{1,5})?|http:\\/\\/(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::\\d{1,5})?)$"
+      }
+    }
+  },
+  "required": [
+    "v",
+    "origins"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "valid": [
+    {
+      "name": "not-found",
+      "value": {
+        "v": 1,
+        "code": "not_found",
+        "message": "Nothing was found at that address.",
+        "retryable": false
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown-code",
+      "why": "codes are a closed set",
+      "value": {
+        "v": 1,
+        "code": "teapot",
+        "message": "x",
+        "retryable": false
+      }
+    },
+    {
+      "name": "v2",
+      "why": "unknown major",
+      "value": {
+        "v": 2,
+        "code": "not_found",
+        "message": "x",
+        "retryable": false
+      }
+    },
+    {
+      "name": "retryable-not-found",
+      "why": "retryable is bound to the code",
+      "value": {
+        "v": 1,
+        "code": "not_found",
+        "message": "x",
+        "retryable": true
+      }
+    },
+    {
+      "name": "unavailable-not-retryable",
+      "why": "retryable is bound to the code",
+      "value": {
+        "v": 1,
+        "code": "unavailable",
+        "message": "x",
+        "retryable": false
+      }
+    }
+  ]
+}

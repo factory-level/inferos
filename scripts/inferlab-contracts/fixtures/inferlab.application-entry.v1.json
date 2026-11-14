@@ -1,0 +1,67 @@
+{
+  "valid": [
+    {
+      "name": "inferwork",
+      "value": {
+        "v": 1,
+        "subject": {
+          "issuer": "http://localhost:8080",
+          "subject": "00000000-0000-4000-8000-000000000101"
+        },
+        "application": "inferwork",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "display": {
+          "email": "owner@acme.test",
+          "name": "Acme Owner"
+        }
+      }
+    },
+    {
+      "name": "no-display",
+      "value": {
+        "v": 1,
+        "subject": {
+          "issuer": "http://localhost:8080",
+          "subject": "00000000-0000-4000-8000-000000000101"
+        },
+        "application": "inferwork",
+        "tenantId": "00000000-0000-4000-8000-000000000001"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown-app",
+      "why": "applications are a closed set",
+      "value": {
+        "v": 1,
+        "subject": {
+          "issuer": "http://localhost:8080",
+          "subject": "00000000-0000-4000-8000-000000000101"
+        },
+        "application": "console",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "display": {
+          "email": "owner@acme.test",
+          "name": "Acme Owner"
+        }
+      }
+    },
+    {
+      "name": "no-tenant",
+      "why": "entry is for one company",
+      "value": {
+        "v": 1,
+        "subject": {
+          "issuer": "http://localhost:8080",
+          "subject": "00000000-0000-4000-8000-000000000101"
+        },
+        "application": "inferwork",
+        "display": {
+          "email": "owner@acme.test",
+          "name": "Acme Owner"
+        }
+      }
+    }
+  ]
+}

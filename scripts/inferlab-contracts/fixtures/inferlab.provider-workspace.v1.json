@@ -1,0 +1,41 @@
+{
+  "valid": [
+    {
+      "name": "acme-operations",
+      "value": {
+        "v": 1,
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "tenantSlug": "acme",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "workspaceSlug": "operations",
+        "product": "inferops"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "app-as-product",
+      "why": "inferwork owns no workspaces",
+      "value": {
+        "v": 1,
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "tenantSlug": "acme",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "workspaceSlug": "operations",
+        "product": "inferwork"
+      }
+    },
+    {
+      "name": "uppercase-slug",
+      "why": "slugs are lowercase",
+      "value": {
+        "v": 1,
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "tenantSlug": "acme",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "workspaceSlug": "Operations",
+        "product": "inferops"
+      }
+    }
+  ]
+}

@@ -1,0 +1,260 @@
+{
+  "$id": "https://contracts.inferlab.dev/inferlab.contract-error.v1.schema.json",
+  "title": "inferlab.contract-error v1",
+  "description": "The error every contract answers with. Owner: lib/ts/contracts.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "code": {
+          "type": "string",
+          "const": "invalid_input"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "required": [
+        "v",
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "code": {
+          "type": "string",
+          "const": "unauthenticated"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "required": [
+        "v",
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "code": {
+          "type": "string",
+          "const": "not_found"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "required": [
+        "v",
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "code": {
+          "type": "string",
+          "const": "forbidden"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "required": [
+        "v",
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "code": {
+          "type": "string",
+          "const": "stale_revision"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "required": [
+        "v",
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "code": {
+          "type": "string",
+          "const": "idempotency_conflict"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "required": [
+        "v",
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "code": {
+          "type": "string",
+          "const": "unsupported_version"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": false
+        }
+      },
+      "required": [
+        "v",
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "code": {
+          "type": "string",
+          "const": "unavailable"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "v",
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "code": {
+          "type": "string",
+          "const": "unknown_outcome"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "v",
+        "code",
+        "message",
+        "retryable"
+      ]
+    }
+  ]
+}
