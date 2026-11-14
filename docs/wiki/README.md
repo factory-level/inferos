@@ -13,6 +13,7 @@ Create documents from [`_template.md`](_template.md).
 | [Local development and Cloudflare parity](local-cloud-parity.md) | Wrapper commands, the `pnpm local` lifecycle of the in-repo stack, and the limits of emulation. |
 | [Back up and restore one company's state](backup-and-recovery.md) | FAC-141's recovery rehearsal: InferOps Postgres and InferOS state restored together, each skew direction, and its refusals. |
 | [Deploy a persistent stage](stage-deploy.md) | `pnpm stage:deploy <stage>`: account, Access applications, InferLab registration, secrets and rollback. |
+| [Archive main and start a clean upstream baseline](clean-upstream-reset.md) | FAC-213: the archive (branch, annotated tag, verified bundle), the deploy-trigger check, the upstream pin, the clean branch and its native baseline, rollback, and the 2026-11-14 execution record. |
 | [Set up the grokbot tenant for dev-os](grokbot-dev-os.md) | The reserved grokbot personas on dev InferLab: seeding, Access policies, sign-in and persona switching, GROK board and Wiki data, smoke. |
 | [Configuration ownership and required settings](configuration-reference.md) | A starting settings inventory for the setup skills, grounded in current code. |
 | [ChatGPT subscription feasibility findings](chatgpt-feasibility.md) | Official protocol evidence and the unresolved personal Cloudflare deployment question. |
