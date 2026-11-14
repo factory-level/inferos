@@ -1,0 +1,80 @@
+{
+  "valid": [
+    {
+      "name": "local-loopback",
+      "value": {
+        "v": 1,
+        "key": "inferos-local",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "url": "http://127.0.0.1:8887/inferlab/events"
+      }
+    },
+    {
+      "name": "deployed",
+      "value": {
+        "v": 1,
+        "key": "inferos-dev",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "url": "https://os.inferops.io/inferlab/events"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "http-remote",
+      "why": "plain http only to loopback",
+      "value": {
+        "v": 1,
+        "key": "inferos-local",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "url": "http://os.inferops.io/hook"
+      }
+    },
+    {
+      "name": "query",
+      "why": "no query: it could carry a credential",
+      "value": {
+        "v": 1,
+        "key": "inferos-local",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "url": "https://os.inferops.io/hook?token=abc"
+      }
+    },
+    {
+      "name": "userinfo",
+      "why": "no credentials in the URL",
+      "value": {
+        "v": 1,
+        "key": "inferos-local",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "url": "https://u:p@os.inferops.io/hook"
+      }
+    },
+    {
+      "name": "no-workspace",
+      "why": "a destination is bound to one workspace",
+      "value": {
+        "v": 1,
+        "key": "inferos-local",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "url": "http://127.0.0.1:8887/inferlab/events"
+      }
+    },
+    {
+      "name": "file-scheme",
+      "why": "http(s) only",
+      "value": {
+        "v": 1,
+        "key": "inferos-local",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "url": "file:///etc/passwd"
+      }
+    }
+  ]
+}

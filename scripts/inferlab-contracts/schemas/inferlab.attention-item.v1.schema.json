@@ -1,0 +1,104 @@
+{
+  "$id": "https://contracts.inferlab.dev/inferlab.attention-item.v1.schema.json",
+  "title": "inferlab.attention-item v1",
+  "description": "One person's Home attention entry. Owner: inferos host (FAC-237).",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "itemKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1593
+    },
+    "recipient": {
+      "type": "object",
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^(?:https:\\/\\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?(?::\\d{1,5})?|http:\\/\\/(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::\\d{1,5})?)$"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,255}$"
+        }
+      },
+      "required": [
+        "issuer",
+        "subject"
+      ]
+    },
+    "sourceEventId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "review_requested"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "tenantId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "project/project",
+            "project/location",
+            "knowledge/page",
+            "inferos/gadget",
+            "inferos/blueprint"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "required": [
+        "v",
+        "tenantId",
+        "kind",
+        "id"
+      ]
+    },
+    "personal": {
+      "type": "string",
+      "enum": [
+        "unread",
+        "read",
+        "dismissed"
+      ]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+    }
+  },
+  "required": [
+    "v",
+    "itemKey",
+    "recipient",
+    "sourceEventId",
+    "reason",
+    "target",
+    "personal",
+    "createdAt"
+  ]
+}

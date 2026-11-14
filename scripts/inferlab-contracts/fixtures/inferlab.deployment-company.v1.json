@@ -1,0 +1,24 @@
+{
+  "valid": [
+    {
+      "name": "acme-local",
+      "value": {
+        "v": 1,
+        "issuer": "http://localhost:8080",
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "tenantSlug": "acme"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "no-issuer",
+      "why": "the issuer is part of the binding",
+      "value": {
+        "v": 1,
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "tenantSlug": "acme"
+      }
+    }
+  ]
+}

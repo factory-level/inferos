@@ -1,0 +1,63 @@
+{
+  "valid": [
+    {
+      "name": "one",
+      "value": {
+        "v": 1,
+        "items": [
+          {
+            "v": 1,
+            "ref": {
+              "v": 1,
+              "tenantId": "00000000-0000-4000-8000-000000000001",
+              "kind": "project/location",
+              "id": "00000000-0000-4000-8000-0000000002b1"
+            },
+            "project": {
+              "v": 1,
+              "tenantId": "00000000-0000-4000-8000-000000000001",
+              "kind": "project/project",
+              "id": "00000000-0000-4000-8000-0000000002a1"
+            },
+            "name": "LOC-001 Main yard",
+            "review": {
+              "status": "none"
+            },
+            "revision": "42"
+          }
+        ],
+        "nextCursor": "c2"
+      }
+    },
+    {
+      "name": "empty",
+      "value": {
+        "v": 1,
+        "items": []
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "bad-item",
+      "why": "every item is a location view",
+      "value": {
+        "v": 1,
+        "items": [
+          {
+            "v": 1,
+            "ref": {
+              "v": 1,
+              "tenantId": "00000000-0000-4000-8000-000000000001",
+              "kind": "project/project",
+              "id": "00000000-0000-4000-8000-0000000002a1"
+            },
+            "key": "PROOF",
+            "name": "Proof project",
+            "revision": "7"
+          }
+        ]
+      }
+    }
+  ]
+}

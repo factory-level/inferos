@@ -1,0 +1,37 @@
+{
+  "valid": [
+    {
+      "name": "proof",
+      "value": {
+        "v": 1,
+        "ref": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/project",
+          "id": "00000000-0000-4000-8000-0000000002a1"
+        },
+        "key": "PROOF",
+        "name": "Proof project",
+        "revision": "7"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "location-ref",
+      "why": "a project view holds a project ref",
+      "value": {
+        "v": 1,
+        "ref": {
+          "v": 1,
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "kind": "project/location",
+          "id": "00000000-0000-4000-8000-0000000002b1"
+        },
+        "key": "PROOF",
+        "name": "Proof project",
+        "revision": "7"
+      }
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "$id": "https://contracts.inferlab.dev/inferlab.application-entry.v1.schema.json",
+  "title": "inferlab.application-entry v1",
+  "description": "Admission to one application; grants nothing. Owner: domain/ts/portal.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "subject": {
+      "type": "object",
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "maxLength": 255,
+          "pattern": "^(?:https:\\/\\/[a-z0-9]([a-z0-9.-]*[a-z0-9])?(?::\\d{1,5})?|http:\\/\\/(?:localhost|127\\.0\\.0\\.1|\\[::1\\])(?::\\d{1,5})?)$"
+        },
+        "subject": {
+          "type": "string",
+          "pattern": "^[\\x21-\\x7e]{1,255}$"
+        }
+      },
+      "required": [
+        "issuer",
+        "subject"
+      ]
+    },
+    "application": {
+      "type": "string",
+      "enum": [
+        "inferops",
+        "infermind",
+        "inferwork",
+        "inferos"
+      ]
+    },
+    "tenantId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "display": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "maxLength": 320,
+          "format": "email",
+          "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 200
+        }
+      }
+    }
+  },
+  "required": [
+    "v",
+    "subject",
+    "application",
+    "tenantId"
+  ]
+}

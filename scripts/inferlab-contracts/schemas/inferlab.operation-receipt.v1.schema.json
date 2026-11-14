@@ -1,0 +1,426 @@
+{
+  "$id": "https://contracts.inferlab.dev/inferlab.operation-receipt.v1.schema.json",
+  "title": "inferlab.operation-receipt v1",
+  "description": "A write receipt: acknowledgment vs completion. Owner: domain/ts/project.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "operation": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{2,63}$"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,128}$"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "status": {
+          "type": "string",
+          "const": "acknowledged"
+        }
+      },
+      "required": [
+        "v",
+        "operation",
+        "idempotencyKey",
+        "at",
+        "status"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "operation": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{2,63}$"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,128}$"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "status": {
+          "type": "string",
+          "const": "proposed"
+        },
+        "proposalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "v",
+        "operation",
+        "idempotencyKey",
+        "at",
+        "status",
+        "proposalId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "operation": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{2,63}$"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,128}$"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "status": {
+          "type": "string",
+          "const": "committed"
+        },
+        "resource": {
+          "type": "object",
+          "properties": {
+            "v": {
+              "type": "number",
+              "const": 1
+            },
+            "tenantId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "project/project",
+                "project/location",
+                "knowledge/page",
+                "inferos/gadget",
+                "inferos/blueprint"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+            }
+          },
+          "required": [
+            "v",
+            "tenantId",
+            "kind",
+            "id"
+          ]
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^\\d+$"
+        },
+        "eventId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        }
+      },
+      "required": [
+        "v",
+        "operation",
+        "idempotencyKey",
+        "at",
+        "status",
+        "resource",
+        "revision",
+        "eventId"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "operation": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{2,63}$"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,128}$"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "status": {
+          "type": "string",
+          "const": "refused"
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "number",
+                  "const": 1
+                },
+                "code": {
+                  "type": "string",
+                  "const": "invalid_input"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "v",
+                "code",
+                "message",
+                "retryable"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "number",
+                  "const": 1
+                },
+                "code": {
+                  "type": "string",
+                  "const": "unauthenticated"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "v",
+                "code",
+                "message",
+                "retryable"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "number",
+                  "const": 1
+                },
+                "code": {
+                  "type": "string",
+                  "const": "not_found"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "v",
+                "code",
+                "message",
+                "retryable"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "number",
+                  "const": 1
+                },
+                "code": {
+                  "type": "string",
+                  "const": "forbidden"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "v",
+                "code",
+                "message",
+                "retryable"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "number",
+                  "const": 1
+                },
+                "code": {
+                  "type": "string",
+                  "const": "stale_revision"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "v",
+                "code",
+                "message",
+                "retryable"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "number",
+                  "const": 1
+                },
+                "code": {
+                  "type": "string",
+                  "const": "idempotency_conflict"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "v",
+                "code",
+                "message",
+                "retryable"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "v": {
+                  "type": "number",
+                  "const": 1
+                },
+                "code": {
+                  "type": "string",
+                  "const": "unsupported_version"
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 500
+                },
+                "retryable": {
+                  "type": "boolean",
+                  "const": false
+                }
+              },
+              "required": [
+                "v",
+                "code",
+                "message",
+                "retryable"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "operation",
+        "idempotencyKey",
+        "at",
+        "status",
+        "error"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "operation": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{2,63}$"
+        },
+        "idempotencyKey": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{8,128}$"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "status": {
+          "type": "string",
+          "const": "unknown"
+        }
+      },
+      "required": [
+        "v",
+        "operation",
+        "idempotencyKey",
+        "at",
+        "status"
+      ]
+    }
+  ]
+}

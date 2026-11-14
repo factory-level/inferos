@@ -1,0 +1,88 @@
+{
+  "$id": "https://contracts.inferlab.dev/inferlab.attention-intent.v1.schema.json",
+  "title": "inferlab.attention-intent v1",
+  "description": "A Gadget asking for attention by rule. Owner: inferos host (FAC-237).",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "sourceEventId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+    },
+    "reason": {
+      "type": "string",
+      "enum": [
+        "review_requested"
+      ]
+    },
+    "target": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "type": "number",
+          "const": 1
+        },
+        "tenantId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "project/project",
+            "project/location",
+            "knowledge/page",
+            "inferos/gadget",
+            "inferos/blueprint"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        }
+      },
+      "required": [
+        "v",
+        "tenantId",
+        "kind",
+        "id"
+      ]
+    },
+    "audience": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "const": "permission-holders"
+        },
+        "workspaceId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "permission": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*:[a-z][a-z0-9_-]*$"
+        }
+      },
+      "required": [
+        "kind",
+        "workspaceId",
+        "permission"
+      ]
+    }
+  },
+  "required": [
+    "v",
+    "sourceEventId",
+    "reason",
+    "target",
+    "audience"
+  ]
+}

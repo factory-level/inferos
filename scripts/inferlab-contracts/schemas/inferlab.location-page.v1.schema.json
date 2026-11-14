@@ -1,0 +1,123 @@
+{
+  "$id": "https://contracts.inferlab.dev/inferlab.location-page.v1.schema.json",
+  "title": "inferlab.location-page v1",
+  "description": "project.locations.list answer. Owner: domain/ts/project.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "v": {
+      "type": "number",
+      "const": 1
+    },
+    "items": {
+      "maxItems": 100,
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "v": {
+            "type": "number",
+            "const": 1
+          },
+          "ref": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "number",
+                "const": 1
+              },
+              "tenantId": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "project/location"
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+              }
+            },
+            "required": [
+              "v",
+              "tenantId",
+              "kind",
+              "id"
+            ]
+          },
+          "project": {
+            "type": "object",
+            "properties": {
+              "v": {
+                "type": "number",
+                "const": 1
+              },
+              "tenantId": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+              },
+              "kind": {
+                "type": "string",
+                "const": "project/project"
+              },
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+              }
+            },
+            "required": [
+              "v",
+              "tenantId",
+              "kind",
+              "id"
+            ]
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "review": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "requested"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "revision": {
+            "type": "string",
+            "pattern": "^\\d+$"
+          }
+        },
+        "required": [
+          "v",
+          "ref",
+          "project",
+          "name",
+          "review",
+          "revision"
+        ]
+      }
+    },
+    "nextCursor": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    }
+  },
+  "required": [
+    "v",
+    "items"
+  ]
+}

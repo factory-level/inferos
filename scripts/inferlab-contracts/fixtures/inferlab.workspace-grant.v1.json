@@ -1,0 +1,63 @@
+{
+  "valid": [
+    {
+      "name": "member",
+      "value": {
+        "v": 1,
+        "subject": {
+          "issuer": "http://localhost:8080",
+          "subject": "00000000-0000-4000-8000-000000000101"
+        },
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "permissions": ["project:read", "location:review"],
+        "evaluatedAt": "2026-11-14T13:00:00Z"
+      }
+    },
+    {
+      "name": "no-permissions",
+      "value": {
+        "v": 1,
+        "subject": {
+          "issuer": "http://localhost:8080",
+          "subject": "00000000-0000-4000-8000-000000000101"
+        },
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "permissions": [],
+        "evaluatedAt": "2026-11-14T13:00:00Z"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "no-workspace",
+      "why": "a grant is per workspace",
+      "value": {
+        "v": 1,
+        "subject": {
+          "issuer": "http://localhost:8080",
+          "subject": "00000000-0000-4000-8000-000000000101"
+        },
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "permissions": ["project:read", "location:review"],
+        "evaluatedAt": "2026-11-14T13:00:00Z"
+      }
+    },
+    {
+      "name": "bad-permission",
+      "why": "resource:action only",
+      "value": {
+        "v": 1,
+        "subject": {
+          "issuer": "http://localhost:8080",
+          "subject": "00000000-0000-4000-8000-000000000101"
+        },
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "workspaceId": "00000000-0000-4000-8000-000000000011",
+        "permissions": ["everything"],
+        "evaluatedAt": "2026-11-14T13:00:00Z"
+      }
+    }
+  ]
+}
