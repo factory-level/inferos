@@ -27,7 +27,7 @@ const ALLOWED_DIR = /(^|\/)packages\/gatekeeper-inferlab\//;
 
 /** A runtime name is fenced when it names one of the fork's legacy frameworks. */
 const FENCED_NAME =
-  /(Operate|Canvas|Console|WidgetKind|WorkspaceKind|Dots?(?=[A-Z_\-]|$)|^dot[-_]|[-_]dot([-_]|$)|operate|canvas|console-widget|widget-kind|workspace-kind|gatekeeper-inferops|custom-gatekeepers|inferops-dot|mock-inferops|SHARED_CONFIGURATION_GATEKEEPER|GATEKEEPER_INFEROPS\b)/;
+  /(Operate|Canvas|Console|WidgetKind|WorkspaceKind|Dots?(?=[A-Z_-]|$)|^dot[-_]|[-_]dot([-_]|$)|operate|canvas|console-widget|widget-kind|workspace-kind|gatekeeper-inferops|custom-gatekeepers|inferops-dot|mock-inferops|SHARED_CONFIGURATION_GATEKEEPER|GATEKEEPER_INFEROPS\b)/;
 
 function filter() {
   const input = readFileSync(0, "utf8").split("\n").filter(Boolean);
