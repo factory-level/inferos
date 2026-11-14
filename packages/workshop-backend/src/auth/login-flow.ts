@@ -282,7 +282,15 @@ export class LoginConnectCallbackImpl
       return;
     }
     // The deployment, not the gatekeeper, says whose people a vendor may sign in.
-    if (subject.issuer !== getAuthGatekeeperIssuer(this.env, this.ctx.props.vendorId)) {
+    const trusted = getAuthGatekeeperIssuer(this.env, this.ctx.props.vendorId);
+    if ("error" in trusted) {
+      loginLogger.error("gatekeeper login refused: issuer setting invalid", {
+        event: "gatekeeper.login.finished", outcome: "issuer_not_configured",
+      });
+      await pending.fail(`Sign-in is off: ${trusted.error}`);
+      return;
+    }
+    if (subject.issuer !== trusted.issuer) {
       loginLogger.warn("gatekeeper login refused an untrusted issuer", {
         event: "gatekeeper.login.finished", outcome: "untrusted_issuer",
       });

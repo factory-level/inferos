@@ -19,7 +19,7 @@ export const ISSUER_MAX_LENGTH = 255;
 export const SUBJECT_PATTERN = /^[\x21-\x7e]{1,255}$/;
 
 /** Whether `issuer` is an origin a subject may come from, under the contract's rule. */
-function isIssuerOrigin(issuer: string): boolean {
+export function isIssuerOrigin(issuer: string): boolean {
   if (issuer.length > ISSUER_MAX_LENGTH || !ISSUER_PATTERN.test(issuer)) return false;
   try {
     return new URL(issuer).origin === issuer;

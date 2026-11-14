@@ -10,6 +10,7 @@ import {
   ISSUER_MAX_LENGTH, ISSUER_PATTERN, isValidSubject, subjectAccountName,
 } from "../src/account-subject.js";
 import type { FakeSignInAccount } from "./test-worker.js";
+import { getAuthGatekeeperIssuer, parseAuthGatekeeperIssuers } from "../src/auth/config.js";
 // The InferLab cross-product contract fixtures, pinned from inferops (scripts/inferlab-contracts).
 import subjectFixtures from "../../../scripts/inferlab-contracts/fixtures/inferlab.stable-subject.v1.json";
 import itemFixtures from "../../../scripts/inferlab-contracts/fixtures/inferlab.attention-item.v1.json";
@@ -101,7 +102,7 @@ describe("sign-in by stable subject", () => {
 
   it("refuses every subject through a vendor with no configured issuer", async () => {
     expect(await signIn({ issuer: ISSUER, subject: "principal-g" }, "unconfigured")).toBe(
-      "error:This sign-in came from an identity provider this deployment doesn't trust.");
+      'error:Sign-in is off: AUTH_GATEKEEPER_ISSUERS has no entry for "unconfigured", so it can\'t sign anyone in.');
   });
 
   it("signs in without an email, naming the person generically", async () => {
@@ -175,5 +176,48 @@ describe("subjectAccountName", () => {
     expect(isValidSubject({ issuer: "https://a.test", subject: "x" })).toBe(true);
     expect(isValidSubject({ issuer: "https://a.test/", subject: "x" })).toBe(false);
     expect(isValidSubject({ issuer: "https://a.test", subject: "x".repeat(256) })).toBe(false);
+  });
+});
+
+/** The parsed setting as a plain object, or its error. */
+function issuersOf(raw: string | undefined) {
+  const parsed = parseAuthGatekeeperIssuers(raw);
+  return "error" in parsed ? parsed : Object.fromEntries(parsed.issuers);
+}
+
+describe("AUTH_GATEKEEPER_ISSUERS", () => {
+
+  it("parses a valid list, trimming around each entry", () => {
+    expect(issuersOf("inferlab=https://auth.inferops.io, other=http://localhost:23380")).toEqual({
+      inferlab: "https://auth.inferops.io", other: "http://localhost:23380",
+    });
+    expect(issuersOf(undefined)).toEqual({});
+    expect(issuersOf("  ")).toEqual({});
+  });
+
+  it.each([
+    ["an empty item", "inferlab=https://a.test,", "AUTH_GATEKEEPER_ISSUERS entry 2 is empty."],
+    ["an empty item in the middle", "inferlab=https://a.test,,x=https://b.test", "AUTH_GATEKEEPER_ISSUERS entry 2 is empty."],
+    ["a missing =", "inferlab https://a.test", 'AUTH_GATEKEEPER_ISSUERS entry 1 has no "=" (expected <vendor id>=<origin>).'],
+    ["an empty vendor id", "=https://a.test", "AUTH_GATEKEEPER_ISSUERS entry 1 has no valid vendor id."],
+    ["a vendor id with a space", "infer lab=https://a.test", "AUTH_GATEKEEPER_ISSUERS entry 1 has no valid vendor id."],
+    ["whitespace inside the origin", "inferlab=https://a .test", 'AUTH_GATEKEEPER_ISSUERS entry 1 ("inferlab") has whitespace in its origin.'],
+    ["an origin with a path", "inferlab=https://a.test/x", 'AUTH_GATEKEEPER_ISSUERS entry 1 ("inferlab") isn\'t an https origin (or an http loopback origin) of at most 255 characters.'],
+    ["an origin with a trailing dot", "inferlab=https://a.test.", 'AUTH_GATEKEEPER_ISSUERS entry 1 ("inferlab") isn\'t an https origin (or an http loopback origin) of at most 255 characters.'],
+    ["plain http off loopback", "inferlab=http://a.test", 'AUTH_GATEKEEPER_ISSUERS entry 1 ("inferlab") isn\'t an https origin (or an http loopback origin) of at most 255 characters.'],
+    ["an origin over 255 characters", `inferlab=${originOfLength(256)}`, 'AUTH_GATEKEEPER_ISSUERS entry 1 ("inferlab") isn\'t an https origin (or an http loopback origin) of at most 255 characters.'],
+    ["an empty origin", "inferlab=", 'AUTH_GATEKEEPER_ISSUERS entry 1 ("inferlab") isn\'t an https origin (or an http loopback origin) of at most 255 characters.'],
+    ["a duplicate vendor, both origins valid", "inferlab=https://evil.example,inferlab=https://auth.inferops.io", 'AUTH_GATEKEEPER_ISSUERS entry 2 ("inferlab") names a vendor an earlier entry already names.'],
+    ["a duplicate vendor differing only in case", "inferlab=https://a.test,InferLab=https://a.test", 'AUTH_GATEKEEPER_ISSUERS entry 2 ("inferlab") names a vendor an earlier entry already names.'],
+  ])("refuses the whole setting for %s", (_why, raw, error) => {
+    expect(parseAuthGatekeeperIssuers(raw)).toEqual({ error });
+    // ...so every vendor is refused, the valid ones included.
+    expect(getAuthGatekeeperIssuer({ AUTH_GATEKEEPER_ISSUERS: raw } as unknown as Cloudflare.Env, "inferlab"))
+      .toEqual({ error });
+  });
+
+  it("never echoes an entry's value in its error", () => {
+    const parsed = parseAuthGatekeeperIssuers("inferlab=https://secret-host.example/x");
+    expect("error" in parsed && parsed.error).not.toContain("secret-host");
   });
 });

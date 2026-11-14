@@ -6,6 +6,8 @@
 // "Continue with ..." button alongside the normal username/password form (unless password auth is
 // disabled). All OFF by default.
 
+import { isIssuerOrigin } from "../account-subject.js";
+
 /**
  * Parse the AUTH_GATEKEEPERS allowlist into a list of gatekeeper vendor ids (lowercased). These are
  * the gatekeepers permitted to drive sign-in; a vendor must also actually advertise `providesAuth`
@@ -18,22 +20,54 @@ export function getAuthGatekeeperAllowlist(env: Cloudflare.Env): string[] {
 }
 
 /**
- * The issuer a `providesSubject` gatekeeper may sign people in for, from AUTH_GATEKEEPER_ISSUERS
- * (comma-separated `<vendor id>=<origin>` pairs, e.g. `inferlab=https://auth.inferops.io`). The
- * kernel refuses a subject whose issuer isn't this one, so a gatekeeper can't mint subjects for
- * another provider's people. Null when the vendor has no entry, which refuses every subject
- * sign-in through it.
+ * The issuer a `providesSubject` gatekeeper may sign people in for, or why there is none. Read
+ * from AUTH_GATEKEEPER_ISSUERS: comma-separated `<vendor id>=<origin>` pairs, e.g.
+ * `inferlab=https://auth.inferops.io`. The kernel refuses a subject whose issuer isn't this one, so a
+ * gatekeeper can't mint subjects for another provider's people.
+ *
+ * The setting is all or nothing: an empty item, a missing `=`, an empty or malformed vendor id,
+ * whitespace inside a value, an origin outside the InferLab contract's issuer rule, or a vendor
+ * named twice invalidates the whole setting, so no vendor signs anyone in by subject until it is
+ * fixed. `error` names the setting and the bad entry by position and vendor id, never its value.
  */
-export function getAuthGatekeeperIssuer(env: Cloudflare.Env, vendorId: string): string | null {
-  const raw = (env as { AUTH_GATEKEEPER_ISSUERS?: string }).AUTH_GATEKEEPER_ISSUERS;
-  if (!raw) return null;
-  for (const pair of raw.split(",")) {
-    const at = pair.indexOf("=");
-    if (at > 0 && pair.slice(0, at).trim().toLowerCase() === vendorId) {
-      return pair.slice(at + 1).trim() || null;
+export function getAuthGatekeeperIssuer(env: Cloudflare.Env, vendorId: string)
+    : { issuer: string } | { error: string } {
+  const parsed = parseAuthGatekeeperIssuers(
+      (env as { AUTH_GATEKEEPER_ISSUERS?: string }).AUTH_GATEKEEPER_ISSUERS);
+  if ("error" in parsed) return parsed;
+  const issuer = parsed.issuers.get(vendorId.toLowerCase());
+  return issuer !== undefined ? { issuer }
+    : { error: `AUTH_GATEKEEPER_ISSUERS has no entry for "${vendorId}", so it can't sign anyone in.` };
+}
+
+const VENDOR_ID = /^[a-z0-9][a-z0-9_-]*$/;
+
+/**
+ * Parses AUTH_GATEKEEPER_ISSUERS strictly (see getAuthGatekeeperIssuer). Unset or blank is an empty
+ * map; anything malformed is an error for the whole setting.
+ */
+export function parseAuthGatekeeperIssuers(raw: string | undefined)
+    : { issuers: Map<string, string> } | { error: string } {
+  const issuers = new Map<string, string>();
+  if (raw === undefined || raw.trim() === "") return { issuers };
+  const items = raw.split(",");
+  for (const [index, item] of items.entries()) {
+    const entry = `AUTH_GATEKEEPER_ISSUERS entry ${index + 1}`;
+    const at = item.indexOf("=");
+    if (item.trim() === "") return { error: `${entry} is empty.` };
+    if (at < 0) return { error: `${entry} has no "=" (expected <vendor id>=<origin>).` };
+    const vendor = item.slice(0, at).trim().toLowerCase();
+    const origin = item.slice(at + 1).trim();
+    if (!VENDOR_ID.test(vendor)) return { error: `${entry} has no valid vendor id.` };
+    const named = `${entry} ("${vendor}")`;
+    if (/\s/.test(origin)) return { error: `${named} has whitespace in its origin.` };
+    if (!isIssuerOrigin(origin)) {
+      return { error: `${named} isn't an https origin (or an http loopback origin) of at most 255 characters.` };
     }
+    if (issuers.has(vendor)) return { error: `${named} names a vendor an earlier entry already names.` };
+    issuers.set(vendor, origin);
   }
-  return null;
+  return { issuers };
 }
 
 /** Whether the deployment has opted any gatekeeper into sign-in. */
