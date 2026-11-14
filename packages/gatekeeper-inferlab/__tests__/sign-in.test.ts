@@ -199,7 +199,7 @@ describe("the callback InferOps registers, and the contract's issuer rule", () =
     const { auth } = await signIn();
     expect(auth.searchParams.get("redirect_uri")).toBe("http://localhost:8787/gatekeeper/inferlab/oauth");
     // inferops `INFEROS_SIGN_IN_CALLBACK_PATH` (domain/ts/portal/shared/sso.dto.ts), added by
-    // factory-level/inferops#2678 (head 34d0ee56e068b2f20ce0d75d779d50523a39751e). Its central-auth
+    // factory-level/inferops#2678, merged to develop as 6b8878bb56896aa6490798fb964d094b66c139c2. Its central-auth
     // accepts the `inferos` client only at that exact path, so a change on either side is a
     // cross-repo contract change and must change this literal too.
     expect(SIGN_IN_CALLBACK_PATH).toBe("/gatekeeper/inferlab/oauth");

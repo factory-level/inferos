@@ -16,7 +16,7 @@ export const ISSUER_MAX_LENGTH = 255;
 
 /**
  * The path InferOps central-auth registers for this sign-in: inferops `INFEROS_SIGN_IN_CALLBACK_PATH`
- * (`domain/ts/portal/shared/sso.dto.ts`, factory-level/inferops#2678). The Workshop routes a gatekeeper
+ * (`domain/ts/portal/shared/sso.dto.ts`, factory-level/inferops#2678, merged as 6b8878bb). The Workshop routes a gatekeeper
  * at `/gatekeeper/<name>`, so BASE_URL must end in this package's route for the redirect to be it.
  */
 export const GATEKEEPER_PATH = "/gatekeeper/inferlab";

@@ -15,7 +15,7 @@ How it fits the Workshop's sign-in: [docs/oauth-signin.md](../../docs/oauth-sign
 | `AUTH_GATEKEEPER_ISSUERS` (backend) | Must include `inferlab=<INFERLAB_AUTH_ORIGIN>`: the kernel refuses a subject whose issuer isn't the one named for the vendor |
 | `INFERLAB_AUTH_ORIGIN` | The InferLab central-auth origin, which is also the subjects' issuer, under the InferLab contract's issuer rule: `https:`, or `http:` on `localhost`, `127.0.0.1` or `[::1]` only; lowercase, no default port, no trailing dot, at most 255 characters; no path, query, fragment or user info |
 | `INFEROPS_COMPANY` | The tenant id of the one company this deployment serves. Any other company's session is refused |
-| `BASE_URL` | Required. This gatekeeper's public base URL, ending exactly in `/gatekeeper/inferlab`; `https:`, or `http:` on a loopback host only. The redirect URI is then `<origin>/gatekeeper/inferlab/oauth`, the path InferOps registers for the `inferos` client (`INFEROS_SIGN_IN_CALLBACK_PATH`, factory-level/inferops#2678) |
+| `BASE_URL` | Required. This gatekeeper's public base URL, ending exactly in `/gatekeeper/inferlab`; `https:`, or `http:` on a loopback host only. The redirect URI is then `<origin>/gatekeeper/inferlab/oauth`, the path InferOps registers for the `inferos` client (`INFEROS_SIGN_IN_CALLBACK_PATH`, factory-level/inferops#2678, merged as `6b8878bb`) |
 
 If `INFERLAB_AUTH_ORIGIN`, `INFEROPS_COMPANY` or `BASE_URL` is missing or malformed, sign-in is off. Every attempt then fails with a
 message naming the setting (the values are never shown). There's no default issuer, demo company,
