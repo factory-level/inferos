@@ -528,6 +528,9 @@ const PASSTHROUGH_GATEKEEPER_VARS: Record<string, string[]> = {
   // refuses to start, the most agents may do in SharePoint, Outlook and Calendar (unset: write, send
   // and schedule), and whether SharePoint asks for every site or only those granted to the app
   // (unset, every site).
+  // InferLab sign-in (FAC-214): the central-auth origin people sign in through, and the one company
+  // this instance serves. Unset, the gatekeeper refuses every sign-in and says which is missing.
+  "gatekeeper-inferlab": ["INFERLAB_AUTH_ORIGIN", "INFEROPS_COMPANY"],
   "gatekeeper-microsoft": ["MICROSOFT_TENANT_ID", "MICROSOFT_ALLOWED_TENANT_IDS", "MICROSOFT_SHAREPOINT_ACCESS", "MICROSOFT_SHAREPOINT_SITES", "MICROSOFT_OUTLOOK_ACCESS", "MICROSOFT_CALENDAR_ACCESS"],
 };
 
@@ -589,6 +592,8 @@ for (const gk of gatekeepers) {
   // without editing any config files.
   const OPTIONAL_FEATURE_VARS = [
     "DISABLE_PASSWORD_AUTH", "AUTH_GATEKEEPERS", "ENABLE_CLOUDFLARE_LIMITS", "PUBLIC_BASE_URL",
+    // The issuer each subject-keyed sign-in gatekeeper may sign people in for (FAC-214).
+    "AUTH_GATEKEEPER_ISSUERS",
     "DAILY_LLM_CALL_LIMIT", "MINIMUM_CLOUDFLARE_BALANCE",
     // Platform AI Gateway — makes the cross-provider model catalog available. CF_AI_GATEWAY
     // always needs CF_AI_GATEWAY_ACCOUNT_ID plus one transport: the WORKERS_AI binding
