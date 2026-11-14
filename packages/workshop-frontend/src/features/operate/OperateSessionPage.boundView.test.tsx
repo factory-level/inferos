@@ -14,6 +14,9 @@ const testState = vi.hoisted(() => ({
   config: { hostBoards: true, boundViews: true } as { hostBoards?: boolean; boundViews?: boolean },
 }))
 
+// The person's consoles that belong to no workspace: none here, unless a test lists some.
+const myConsoles = vi.hoisted(() => ({ state: { status: 'ready', consoles: [] } as import('./useMyConsoles').MyConsolesState }))
+vi.mock('./useMyConsoles', () => ({ useMyConsoles: () => myConsoles.state, invalidateMyConsoles: () => {} }))
 vi.mock('@tanstack/react-router', () => ({ useNavigate: () => () => {}, useSearch: () => testState.search }))
 vi.mock('./ConsoleWorkspaceShell', () => ({ ConsoleWorkspaceShell: ({ children }: { children: import('react').ReactNode }) => children }))
 vi.mock('@cloudflare/kumo', async importOriginal => ({

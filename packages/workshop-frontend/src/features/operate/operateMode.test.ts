@@ -10,7 +10,7 @@ describe('modeForPath', () => {
 
   it('puts every other route in Build', () => {
     for (const path of ['/', '/workspaces', '/blueprints', '/outputs', '/explore', '/workspace/abc123',
-      '/workspace/abc123/chat/1', '/gatekeepers/context', '/inferops-canvas-old', '/workspace/a/b/inferops-canvas']) {
+      '/workspace/abc123/chat/1', '/gatekeepers/context', '/consoles', '/consoles/abc123', '/inferops-canvas-old', '/workspace/a/b/inferops-canvas']) {
       expect(modeForPath(path)).toBe('build')
     }
   })

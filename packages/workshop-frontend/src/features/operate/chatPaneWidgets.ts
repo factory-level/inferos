@@ -1,3 +1,4 @@
+import { consoleWorkspaceId } from '@gadgets/workshop-shared/operate-session'
 import type { WorkspaceSettingValue } from '@gadgets/workshop-shared/workspace-settings'
 import type { OperateConsoleRun } from '@gadgets/workshop-shared/operate-session'
 import type { ConsoleEntry } from './consoles'
@@ -13,5 +14,5 @@ export type ResolvedChatWidgets = { key: string; value: WorkspaceSettingValue<'c
 export const chatWidgetsKey = (run: OperateConsoleRun, entry: ConsoleEntry | undefined): string => {
   const view = entry?.console.views.find(candidate => candidate.id === run.viewId)
   const screenId = run.screenId ?? (view?.type === 'screen' ? view.screen : null)
-  return JSON.stringify([run.workspaceId, run.consoleId, run.source, run.revision, screenId])
+  return JSON.stringify([consoleWorkspaceId(run), run.consoleId, run.source, run.revision, screenId])
 }

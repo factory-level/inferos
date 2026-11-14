@@ -5,7 +5,7 @@ import { Banner, Button } from '@cloudflare/kumo'
 import { ArrowLeftIcon } from '@phosphor-icons/react'
 import type { GadgetSummary, WorkpieceId } from '@gadgets/workshop-shared/api'
 import type { CanvasProjectBoardWidget } from '@gadgets/workshop-shared/canvas'
-import type { OperateBoardView, OperateConsoleRun, OperateEvent } from '@gadgets/workshop-shared/operate-session'
+import type { OperateBoardView, OperateEvent, WorkspaceConsoleRun } from '@gadgets/workshop-shared/operate-session'
 import { useAuthenticatedApi } from '../../AuthContext'
 import { useWorkspaceWorkpieces } from '../../hooks/useWorkspaceWorkpieces'
 import { useWorkspaceOpen } from '../../useWorkspaceOpen'
@@ -41,7 +41,7 @@ const ignore = () => {}
  * step. A previewed draft saved again is offered to reopen instead: its builder may be mid-edit.
  */
 export const ConsolePage = ({ run, entry, loading, board, sessionWorkspace, onEvent, onPublish, onChatPaneWidgets }: {
-  run: OperateConsoleRun
+  run: WorkspaceConsoleRun
   /** The latest saved revision of the kind the session opened, or undefined when it is gone (or not loaded yet). */
   entry: ConsoleEntry | undefined
   /** Whether the saved consoles are still loading. */

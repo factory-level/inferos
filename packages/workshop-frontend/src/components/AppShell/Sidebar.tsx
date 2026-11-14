@@ -5,6 +5,7 @@ import {
   Hexagon,
   House,
   Kanban,
+  Layout,
   MagnifyingGlass,
   Plug,
   SidebarSimple,
@@ -155,6 +156,14 @@ export default function Sidebar({
               icon={<Stack size={14} weight="regular" />}
               collapsed={collapsed}
             />
+            {composableViews && (
+              <SidebarItem
+                to="/consoles"
+                label="Consoles"
+                icon={<Layout size={14} weight="regular" />}
+                collapsed={collapsed}
+              />
+            )}
             {/* With Operate mode on, the mode toggle is the way into the InferOps Canvas. */}
             {composableViews && !operateAvailable && (
               <SidebarItem

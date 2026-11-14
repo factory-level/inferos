@@ -19,7 +19,7 @@ const STATUS = {
  * edit, a simulated preview of the draft (FAC-96: nothing live, nothing sent), the draft opened in
  * the builder's own Operate session with live data, and publish.
  */
-export const ConsoleMosaic = ({ screens, onOpen, onEdit, onPublish, onSimulate, highlighted }: {
+export const ConsoleMosaic = ({ screens, onOpen, onEdit, onPublish, onSimulate, highlighted, hideEmpty }: {
   screens: WorkspaceScreensState
   onOpen: (entry: ConsoleEntry, source: ConsoleSource) => void
   onEdit: (entry: ConsoleEntry) => void
@@ -27,11 +27,14 @@ export const ConsoleMosaic = ({ screens, onOpen, onEdit, onPublish, onSimulate, 
   /** Open the simulated preview of the entry's draft. */
   onSimulate: (entry: ConsoleEntry) => void
   highlighted?: string
+  /** Show nothing with no console here: the person's other consoles are already listed beside this. */
+  hideEmpty?: boolean
 }) => {
   const [requestedPage, setPage] = useState<number | null>(null)
   if (screens.status === 'loading') return <p role="status" className="py-10 text-sm text-kumo-subtle">Loading consoles…</p>
   if (screens.status === 'error') return <p role="alert" className="py-10 text-sm text-kumo-danger">Consoles could not be loaded. Reload to try again.</p>
   const entries = consoleEntries(screens.workspaces)
+  if (entries.length === 0 && hideEmpty) return null
   const pages = Math.max(1, Math.ceil(entries.length / PAGE_SIZE))
   const savedPage = Math.floor(Math.max(0, entries.findIndex(entry => entry.console.id === highlighted)) / PAGE_SIZE)
   const page = Math.min(requestedPage ?? savedPage, pages - 1)

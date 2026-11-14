@@ -16,7 +16,8 @@ import { readWorkspaceConfiguration } from "./workspace-configuration";
 import { HOST_BOARDS_OFF, hostBoardsEnabled } from "./host-boards";
 import type { GadgetRecord, OverseerStorage } from "./overseer";
 
-type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "canvasPages" | "consoleScreens" | "gadgets" | "flows" | "workspaceConfiguration" | "boundHooks">;
+/** The storage a console store reads and writes: a workspace's, or a console object's own. */
+export type ConsoleStorage = Pick<OverseerStorage, "consoles" | "canvases" | "canvasPages" | "consoleScreens" | "gadgets" | "flows" | "workspaceConfiguration" | "boundHooks">;
 
 /**
  * How publication creates and removes frozen installs (see `ConsoleWidgetEntry`). Both are called
@@ -67,6 +68,9 @@ export const CONSOLE_CHANGED =
 
 /** The message an offered-tool lookup refused by the console-tools switch carries. */
 export const CONSOLE_TOOLS_OFF = "Console tools are turned off for this installation.";
+
+/** What the operate agent is told of a console that belongs to no workspace (ADR 0021): it holds no widgets, so no tools. */
+export const CONSOLE_OFFERS_NO_TOOLS = "This console offers no tools.";
 
 /**
  * Whether console tools are on: `CONSOLE_TOOLS` exactly `"true"`; anything else, or unset, is off.

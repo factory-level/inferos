@@ -164,6 +164,9 @@ describe("authorization inputs", () => {
     // The other two views are the User DO's and AdminSettings' own storage.
     expect(allSitesOf(/\bcreateTypedStorage\(/)).toEqual([
       "admin-settings.ts:(module).makeAdminSettingsStorage",
+      // A console that belongs to no workspace (ADR 0021): its own collaborators and share keys,
+      // watched by `watchSharingAuthzInputs` over its own generation, and none of a workspace's.
+      "console-object.ts:(module).makeConsoleStorage",
       "overseer.ts:(module).makeOverseerStorage",
       "user.ts:(module).makeUserStorage",
     ]);

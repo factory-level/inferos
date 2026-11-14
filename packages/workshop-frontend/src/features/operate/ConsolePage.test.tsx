@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi, type Mock } from 'vitest'
 import type { CanvasDefinition } from '@gadgets/workshop-shared/canvas'
 import type { OperateConsole } from '@gadgets/workshop-shared/operate-console'
-import type { OperateConsoleRun, OperateEvent } from '@gadgets/workshop-shared/operate-session'
+import type { WorkspaceConsoleRun, OperateEvent } from '@gadgets/workshop-shared/operate-session'
 
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: {} }) }))
 vi.mock('../../useWorkspaceOpen', () => ({ useWorkspaceOpen: () => ({ overseer: consoleOpen.overseer, error: null }) }))
@@ -62,7 +62,7 @@ const SAVED: OperateConsole = {
   ],
 }
 const entry = { workspace: { id: 'w1' } as never, console: SAVED, screens: [screen('s1', 'Board screen')], publishedScreens: [] }
-const run = (extra: Partial<OperateConsoleRun> = {}): OperateConsoleRun =>
+const run = (extra: Partial<WorkspaceConsoleRun> = {}): WorkspaceConsoleRun =>
   ({ workspaceId: 'w1', consoleId: 'c1', title: 'Operations lead', source: 'published', revision: '0', fullChat: 'available', viewId: 'overview', screenId: null, ...extra })
 
 const SESSION: SessionWorkspace = { stub: { name: 'session' } as never, id: 'session-ws', restricted: false }

@@ -5,7 +5,7 @@ import { isOpenAiPluginEnabled, modelsSchema, stateSchema } from '@gadgets/assis
 import { localApiModels } from './local-api-models.js';
 import { modelNotOfferedMessage } from './model-allowlist.js';
 import { isCloudflareLimitsEnabled } from './ai-gateway-billing/config.js';
-import { GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, getOperateSessionErrorCode, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
+import { GadgetMetadataWithTimestamps, ConsoleSummary, AiChatAuthorInfo, AiModelConfig, RedactedAiModelConfig, SUGGESTED_MODELS, CollaboratorRole, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, GadgetMetadata, BlueprintMetadata, BlueprintLibrarySummary, BlueprintSource, BlueprintUserSummary, BLUEPRINT_SCREENSHOT_R2_PREFIX, GatekeeperVendorInfo, BlueprintOutput, OutputSummary, WorkpieceId, ListOutputsResult, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, validateCommitEmail, OperateSessionUpdate, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, getOperateSessionErrorCode, WorkspaceKind, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord } from '@gadgets/workshop-shared/api';
 import {
   WIDGET_STATE_ERROR_CODES, WidgetStateError, applyWidgetTransition, recoverWidgetState, widgetEventsFrom,
   type WidgetStateMachine, type WidgetStateSnapshot, widgetStateKeyPlacement,
@@ -18,7 +18,7 @@ import {
   AGENT_VIEW_LIMITS, parseAgentPlacementProposal, parseAgentWidgetView,
   type AgentPlacementProposal, type AgentViewOverlay, type AgentWidgetView,
 } from '@gadgets/workshop-shared/agent-widgets';
-import { applyOperateEvent, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
+import { applyOperateEvent, consoleWorkspaceId, INITIAL_OPERATE_PAGE, OperateEventError, operateEventSubject, type OperateEvent, type OperateEventActor, type OperateEventRecord, type OperateHandover, type OperateSessionSnapshot, type RunNavigationOutcome, type RunNavigationRequest } from '@gadgets/workshop-shared/operate-session';
 import { Gatekeeper, GatekeeperSubject, GatekeeperUser, GatekeeperUserVerifier, GatekeeperVendor, AccountDescription, VendorDescription, GatekeeperConnectCallback, ConnectHandoff, SupportedResource, ResourceConfiguratorFrame, AppUiContext, GatekeeperUiFrame, SharedConfigurationAction, SharedConfigurationAnswer, WidgetIndexEntry, WidgetIndexOutcome, WidgetIndexWorkspace, WidgetSearchAnswer, WidgetSearchUnavailableReason, mergeWidgetSearches } from "@gadgets/workshop-shared/gatekeeper";
 import { shouldAutoProvisionAccount, ambientGatekeeperMode } from "./provisioning-policy.js";
 import { CloudflareGatekeeperUser } from "@gadgets/workshop-shared/cloudflare-gatekeeper";
@@ -497,6 +497,9 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // person is taken out of each one's live presence (SubjectPresenceDurableObject.leaveAll)
       // before anything else is served, so its roster stops reaching them.
       retiredSubjectPresence: collection<{ boardRef: string; revoked: boolean }>()({ primaryKey: "boardRef" }),
+      // The consoles that belong to no workspace (console-object.ts) this person owns or was added
+      // to: a listing only, never the `gadgets` table, so none appears among their workspaces.
+      consoles: collection<ConsoleSummary>()({ primaryKey: "id" }),
     },
     singletons: {
       operateReadGeneration: "1",
@@ -555,6 +558,8 @@ function makeUserStorage(storage: DurableObjectStorage) {
       // The owner-only workspace behind this person's operate session, once claimed. Never listed
       // by listGadgets().
       operateSessionWorkspaceId: <string | null>null,
+      // The hidden workspace that hosts this person's console chat helpers (claimConsoleAssistantWorkspace).
+      consoleAssistantWorkspaceId: <string | null>null,
 
       // The operate session's page as of its latest event, with that event. Always the replay of
       // `operateEvents` (applyOperateEvent), maintained by dispatchOperateEvent().
@@ -1364,8 +1369,9 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   async listGadgets(): Promise<GadgetMetadataWithTimestamps[]> {
     let result: GadgetMetadataWithTimestamps[] = [];
     let operateSessionWorkspaceId = this.storage.operateSessionWorkspaceId.get();
+    let consoleAssistantWorkspaceId = this.storage.consoleAssistantWorkspaceId.get();
     for (let gadget of this.storage.gadgets.list()) {
-      if (isFullyCreated(gadget) && gadget.id !== operateSessionWorkspaceId) {
+      if (isFullyCreated(gadget) && gadget.id !== operateSessionWorkspaceId && gadget.id !== consoleAssistantWorkspaceId) {
         result.push(gadget);
       }
     }
@@ -1376,6 +1382,25 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
   //
   // Each method runs synchronously against storage, so concurrent calls (two tabs, or a tab and the
   // agent) are serialized by the Durable Object and never interleave.
+
+  /**
+   * Returns the id of the hidden workspace that hosts this person's console chat helpers (ADR
+   * 0021), registering `candidateId` (a fresh Overseer id the caller has not opened yet) if there is
+   * none. It holds chats only, is never listed among their workspaces, and no console names it. It
+   * is kept across a company change.
+   */
+  async claimConsoleAssistantWorkspace(candidateId: string): Promise<string> {
+    let existing = this.storage.consoleAssistantWorkspaceId.get();
+    if (existing && this.storage.gadgets.get(existing)) return existing;
+    this.storage.gadgets.put({ id: candidateId, title: "Console assistant", created: new Date() });
+    this.storage.consoleAssistantWorkspaceId.put(candidateId);
+    return candidateId;
+  }
+
+  /** The console chat helpers' workspace id as recorded, or null when there is none. */
+  async consoleAssistantWorkspaceId(): Promise<string | null> {
+    return this.storage.consoleAssistantWorkspaceId.get();
+  }
 
   /**
    * Returns the operate session's workspace id, registering `candidateId` (a fresh Overseer id the
@@ -1991,7 +2016,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
     let page = this.#operatePage();
     let run = page.state.console;
     if (page.seq !== request.pageSeq || page.state.flow || run?.source !== "published" ||
-        run.workspaceId !== request.workspaceId || run.consoleId !== request.consoleId || run.revision !== request.revision) {
+        consoleWorkspaceId(run) !== request.workspaceId || run.consoleId !== request.consoleId || run.revision !== request.revision) {
       return "refused";
     }
     try {
@@ -2023,10 +2048,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * revision, and must not supersede it. (A run from before revisions were recorded has "", read
    * as 0.)
    */
-  async noticeConsoleRevision(workspaceId: string, consoleId: string, revision: string | null): Promise<void> {
+  async noticeConsoleRevision(workspaceId: string | null, consoleId: string, revision: string | null): Promise<void> {
     let current = this.#operatePage();
     let run = current.state.console;
-    if (run?.workspaceId !== workspaceId || run.consoleId !== consoleId) return;
+    if (!run || consoleWorkspaceId(run) !== workspaceId || run.consoleId !== consoleId) return;
     if (revision !== null && BigInt(run.revision || "0") >= BigInt(revision)) return;
     for (let subscriber of this.#operateSubscribers) {
       subscriber.update({ ...current, consoleRevision: { workspaceId, consoleId, revision } });
@@ -2134,6 +2159,24 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   async getGadget(id: string): Promise<GadgetMetadata | null> {
     return this.storage.gadgets.get(id) || null;
+  }
+
+  /**
+   * Lists a console that belongs to no workspace for this person, or refreshes its listing. A
+   * listing grants nothing: the console checks access at every open (ConsoleDurableObject).
+   */
+  async recordConsole(summary: Omit<ConsoleSummary, "created">): Promise<void> {
+    this.storage.consoles.put({ ...summary, created: this.storage.consoles.get(summary.id)?.created ?? new Date() });
+  }
+
+  /** Stops listing a console for this person: it was deleted, or it no longer admits them. */
+  async forgetConsole(id: string): Promise<void> {
+    this.storage.consoles.delete(id);
+  }
+
+  /** See AuthenticatedApi.listMyConsoles(). */
+  async listConsoles(): Promise<ConsoleSummary[]> {
+    return Array.from(this.storage.consoles.list()).toSorted((a, b) => b.created.getTime() - a.created.getTime());
   }
 
   async newGadget(id: string, title: string): Promise<void> {

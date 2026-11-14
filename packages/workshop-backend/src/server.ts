@@ -18,12 +18,12 @@ import { validateRpc } from "capnweb-validate";
 import type { JWTPayload } from "jose";
 import { checkFlowDestination } from './flow-navigation.js';
 import { deliverHandover } from './handover-delivery.js';
-import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, BoundViewDescription, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload, WIDGET_SEARCH_LIMIT } from '@gadgets/workshop-shared/api';
+import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, RedactedAiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, UserDirectoryRecord, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError, ConnectFlowStart, ConsoleHostBoard, BoundViewDescription, OperateSession, OperateSessionUpdate, OperateSubjectAuditCursor, OperateSubjectAuditPage, OperateSubjectParticipant, PresenceSubscriber, WorkspaceKind, DEFAULT_WORKSPACE_KIND, OPERATE_SESSION_ERROR_CODES, createOperateSessionError, BlueprintInstallOptions, createPublicationError, PUBLICATION_ERROR_CODES, PublicationDestination, PublicationRecord, BlueprintScreenshotUpload, WIDGET_SEARCH_LIMIT, ConsoleSummary, ConsoleReading, ConsoleAuthoring } from '@gadgets/workshop-shared/api';
 import { consoleEventMismatch, consoleScreenMove, type ConsoleRef, type HostBoardEntry, type OperateConsole, type HostBoardReadAudit, type HostBoardSelection, type HostBoardSelectionUpdate, type HostBoardView } from '@gadgets/workshop-shared/operate-console';
 import { boundViewsEnabled, describeBoundView } from "./console-store.js";
 import { HOST_BOARDS_OFF, HostBoardSelectionRelay, hostBoardsEnabled, readByDeadline, type HostBoardContext, type HostBoardSelectionState } from "./host-boards.js";
 import type { OperateFlowContent } from '@gadgets/workshop-shared/operate-flow';
-import type { OperateBoardRef, OperateEvent, OperateEventRecord, OperateFlowPage, OperateHandover, OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
+import { consoleWorkspaceId, type OperateBoardRef, type OperateEvent, type OperateEventRecord, type OperateFlowPage, type OperateHandover, type OperateSessionSnapshot } from '@gadgets/workshop-shared/operate-session';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
 import {
@@ -87,6 +87,8 @@ export { LanguageModelGatekeeper, ArtifactPublisherGatekeeper };
 
 // Re-export entrypoint types from admin-settings.ts.
 export { AdminSettings };
+import { ConsoleDurableObject } from "./console-object.js";
+export { ConsoleDurableObject };
 
 // Re-export the deployment-wide user directory Durable Object.
 export { UserDirectoryDurableObject, SubjectPresenceDurableObject };
@@ -664,6 +666,71 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return new AdminApiImpl(this.adminSettings.getByName(""), adminUserId);
   }
 
+  // --- Consoles that belong to no workspace (console-object.ts) ---
+
+  async openConsoleAssistant(): Promise<RpcStub<Overseer>> {
+    let id = await this.#user.claimConsoleAssistantWorkspace(this.overseers.newUniqueId().toString());
+    // Opened once first so the workspace knows its owner, as a new workspace is, then marked.
+    (await this.#openGadgetInternal(id))[Symbol.dispose]();
+    await this.overseers.get(this.overseers.idFromString(id)).markConsoleAssistant(this.#userId.toString());
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
+    return this.#openGadgetInternal(id);
+  }
+
+  #console(id: string): DurableObjectStub<ConsoleDurableObject> {
+    let consoles = this.ctx.exports.ConsoleDurableObject;
+    try {
+      return consoles.get(consoles.idFromString(id));
+    } catch {
+      throw createOpenGadgetError(OPEN_GADGET_ERROR_CODES.workspaceNotFound);
+    }
+  }
+
+  // A denial proves the caller's listing is stale, as for a shared workspace (#openGadgetInternal).
+  async #openConsole<T>(id: string, open: (console: DurableObjectStub<ConsoleDurableObject>) => Promise<T>): Promise<T> {
+    try {
+      return await open(this.#console(id));
+    } catch (err) {
+      if (getOpenGadgetErrorCode(err) === OPEN_GADGET_ERROR_CODES.workspaceAccessDenied) {
+        await this.#user.forgetConsole(id);
+      }
+      throw err;
+    }
+  }
+
+  async newConsole(title: string): Promise<ConsoleSummary> {
+    if (this.env.COMPOSABLE_VIEWS !== "true" || this.env.DURABLE_VIEWS !== "true") {
+      throw new Error("Durable views are disabled for this installation");
+    }
+    let user = this.#user;
+    if (!await user.holdsSharedConfiguration("build")) {
+      throw new Error("You don't have permission to build shared configuration.");
+    }
+    let [profile, company] = await Promise.all([user.whoami(), user.currentPresentationCompany()]);
+    let consoles = this.ctx.exports.ConsoleDurableObject;
+    let id = consoles.newUniqueId();
+    let summary = await consoles.get(id).initialize({ userId: this.#userId.toString(), profile, company }, title);
+    await user.recordConsole(summary);
+    return (await user.listConsoles()).find(listed => listed.id === summary.id)!;
+  }
+
+  async listMyConsoles(): Promise<ConsoleSummary[]> {
+    return retryOnDoReset(() => this.#user.listConsoles());
+  }
+
+  async openConsoleReading(id: string): Promise<RpcStub<ConsoleReading>> {
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
+    return this.#openConsole(id, console => console.openReading(this.#userId.name!));
+  }
+
+  async openConsoleAuthoring(id: string): Promise<RpcStub<ConsoleAuthoring>> {
+    // @ts-expect-error Cap'n Web RPC stubs and native RPC stubs are compatible but the type
+    //     system doesn't know this.
+    return this.#openConsole(id, console => console.openAuthoring(this.#userId.toString(), this.#userId.name!));
+  }
+
   async getOperateSession(): Promise<RpcStub<OperateSession>> {
     let claim = () => this.#user.claimOperateSessionWorkspace(this.overseers.newUniqueId().toString());
     // @ts-expect-error Cap'n Web RPC stubs and native RPC targets are compatible but the type
@@ -671,6 +738,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
     return new OperateSessionImpl(() => this.#user, async () => {
       return this.#openGadgetInternal(await claim(), undefined, undefined, true);
     }, id => this.#openGadgetInternal(id),
+    id => this.#openConsole(id, console => console.openReading(this.#userId.name!)),
     userId => wrapDoStubForTelemetry(this.users.get(this.users.idFromName(userId))),
     boardRef => this.ctx.exports.SubjectPresenceDurableObject.getByName(boardRef), {
       enabled: () => hostBoardsEnabled(this.env),
@@ -752,6 +820,7 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   constructor(private user: () => DurableObjectStub<UserDurableObject>,
       private openWorkspace: () => Promise<NativeRpcStub<Overseer>>,
       private openConsoleWorkspace: (id: string) => Promise<NativeRpcStub<Overseer>>,
+      private openConsoleReading: (id: string) => Promise<NativeRpcStub<ConsoleReading>>,
       private otherUser: (userId: string) => DurableObjectStub<UserDurableObject>,
       private subjectPresence: (boardRef: string) => DurableObjectStub<SubjectPresenceDurableObject>,
       private hostBoards: HostBoardDeps) {
@@ -768,10 +837,13 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
           run.revision !== console.revision) {
         return null;
       }
-      using workspace = await this.openConsoleWorkspace(run.workspaceId);
+      // A console that belongs to no workspace has no host boards or bound views (ADR 0021).
+      let home = consoleWorkspaceId(run);
+      if (home === null) return null;
+      using workspace = await this.openConsoleWorkspace(home);
       let saved = await workspace.getConsole(console.consoleId, console.source);
       if (!saved || saved.revision !== console.revision) return null;
-      return { workspaceId: run.workspaceId, console: saved, sessionSeq: page.seq };
+      return { workspaceId: home, console: saved, sessionSeq: page.seq };
     } catch {
       return null;
     }
@@ -916,8 +988,16 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     if (!target) return;  // No console is open: the reducer refuses the event.
     let saved;
     try {
-      using workspace = await this.openConsoleWorkspace(target.workspaceId);
-      saved = await workspace.getConsole(target.consoleId, target.source);
+      // An event's home is as the reducer reads it: on its own, else the workspace it names.
+      let home = target.home === "console" ? null : target.workspaceId ?? "";
+      if (home === null) {
+        // Read through the caller's own access to the console itself; only its publication opens.
+        using reading = await this.openConsoleReading(target.consoleId);
+        saved = target.source === "published" ? await reading.getConsole() : undefined;
+      } else {
+        using workspace = await this.openConsoleWorkspace(home);
+        saved = await workspace.getConsole(target.consoleId, target.source);
+      }
     } catch {
       saved = undefined;
     }
@@ -939,9 +1019,9 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
     let run = page.state.console;
     await checkFlowStart(event, {
       published: async () => {
-        if (run?.source !== "published" || run.workspaceId !== event.workspaceId) return undefined;
+        if (run?.source !== "published" || consoleWorkspaceId(run) !== event.workspaceId) return undefined;
         try {
-          using workspace = await this.openConsoleWorkspace(run.workspaceId);
+          using workspace = await this.openConsoleWorkspace(event.workspaceId);
           let saved = await workspace.getConsole(run.consoleId, "published");
           if (!saved || saved.revision !== run.revision) return undefined;
           return saved.published?.flows?.find(flow => flow.id === event.flowId);
@@ -1173,13 +1253,13 @@ export class OperateSessionImpl extends RpcTarget implements OperateSession {
   async #wiredEffects(ref: OperateWidgetRef, event: string): Promise<{ navigation?: WidgetNavigation; prompt?: WidgetPrompt }> {
     let page = await this.user().getOperatePage();
     let run = page.state.console;
-    if (!run || page.state.flow || run.source !== "published" || run.workspaceId !== ref.workspaceId ||
+    if (!run || page.state.flow || run.source !== "published" || consoleWorkspaceId(run) !== ref.workspaceId ||
         run.consoleId !== ref.consoleId || run.revision !== ref.revision) {
       return {};
     }
     let saved, shown;
     try {
-      using workspace = await this.openConsoleWorkspace(run.workspaceId);
+      using workspace = await this.openConsoleWorkspace(ref.workspaceId);
       saved = await workspace.getConsole(run.consoleId, "published");
       let view = saved?.views.find(candidate => candidate.id === run.viewId);
       let screenId = run.screenId ?? (view?.type === "screen" ? view.screen : null);

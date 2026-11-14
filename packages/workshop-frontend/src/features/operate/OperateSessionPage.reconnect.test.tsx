@@ -27,6 +27,9 @@ const kernel = vi.hoisted(() => ({
   current: null as unknown as { api: object; account: object },
 }))
 
+// The person's consoles that belong to no workspace: none here, unless a test lists some.
+const myConsoles = vi.hoisted(() => ({ state: { status: 'ready', consoles: [] } as import('./useMyConsoles').MyConsolesState }))
+vi.mock('./useMyConsoles', () => ({ useMyConsoles: () => myConsoles.state, invalidateMyConsoles: () => {} }))
 vi.mock('../../AuthContext', () => ({ useAuthenticatedApi: () => ({ authenticatedApi: kernel.current.api, accountKey: kernel.current.account }) }))
 // The default flags as one mutable object, so a test can turn `operate-mode` on by default.
 vi.mock('@gadgets/workshop-shared/feature-flags', async importOriginal => {

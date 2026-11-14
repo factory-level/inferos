@@ -96,7 +96,7 @@ export const OperateSidebar = ({ collapsed, onToggleCollapsed, onOpenWidget, onN
         </>}
       </nav>
 
-      {run && <div className="border-t border-kumo-line p-2">
+      {run && run.home !== 'console' && <div className="border-t border-kumo-line p-2">
         <MenuButton label="Settings" icon={<GearIcon size={15} aria-hidden />} collapsed={collapsed} current={false}
           onClick={() => { void navigate({ to: '/inferops-canvas', search: { settings: run.consoleId, workspace: run.workspaceId } }); onNavigate?.() }} />
       </div>}

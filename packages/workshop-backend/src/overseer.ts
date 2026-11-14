@@ -6,7 +6,7 @@ import {
 import { actionProposal, approvalCorrelation, approvalExpired, approvalSnapshot, validateApprovalRequest } from "./operate-approval";
 import type { CanvasContent, CanvasDefinition, CanvasOperation } from "@gadgets/workshop-shared/canvas";
 import { canvasRunEffects, canvasRunEventsHeard, type CanvasPage, type CanvasPageOperation, type CanvasRunEvent } from "@gadgets/workshop-shared/canvas-model";
-import type { OperateConsoleRun, OperateEvent, OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
+import { consoleWorkspaceId, type OperateConsoleRun, type OperateEvent, type OperateSessionSnapshot } from "@gadgets/workshop-shared/operate-session";
 import { readCanvasCatalog } from "./canvas-catalog";
 import { getSharedConfigurationGatekeeper } from "./auth/config.js";
 import type {
@@ -63,7 +63,7 @@ import type { UserDirectoryDurableObject } from "./user-directory";
 import { WorkspaceCanvasStore, type StoredCanvasPage } from "./canvas-store";
 import { workspaceReadiness, type ReadinessInputs } from "./workspace-readiness";
 import { emptyWidgetIndexRecord, indexConsoleWidgets, OWED_RETRY_CAP, owedRetryDelay, owedWithdrawalKey, retryOwedWithdrawals, widgetIndexReport, type ConsoleWidgetIndexRecord, type OwedWithdrawal } from "./console-widget-index";
-import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
+import { BOUND_VIEWS_OFF, boundViewsEnabled, CONSOLE_OFFERS_NO_TOOLS, CONSOLE_TOOLS_OFF, consoleScreenKey, consoleToolsEnabled, publishConsoleRecord, WorkspaceConsoleStore, type ConsoleScreenSnapshot, type FrozenInstalls, type SourceCommit, type SourceCommits } from "./console-store";
 import { commandInputProblem, isReservedToolMethod, parseToolEnvelope, parseWidgetToolFile, plainJsonProblem, WIDGET_COMMANDS, WIDGET_TOOL_LIMITS, widgetToolValueProblem, type WidgetCommandName } from "@gadgets/workshop-shared/widget-tools";
 import { parseWorkflowTriggerRef } from "@gadgets/workshop-shared/workflow-trigger-ref";
 import { WIDGET_STATES_FILE, parseWidgetStates, widgetEventsFrom, widgetStateKey, type WidgetStateMachine } from "@gadgets/workshop-shared/widget-state";
@@ -2062,6 +2062,10 @@ export function makeOverseerStorage(storage: DurableObjectStorage) {
       // Set, never cleared, when the session first opens it; from then on every open is the
       // owner's, through OperateOverseerInterface, and its chats run with the operate tool set.
       operateSession: false,
+      // True once this workspace is its owner's console assistant (ADR 0021; see
+      // OverseerDurableObject.markConsoleAssistant): it hosts the chats that help author their
+      // consoles and nothing else, so a chat bound to no console is refused here.
+      consoleAssistant: false,
       // Whether its owner's company change retired this operate session workspace (FAC-88; see
       // retireOperateSession). Set, never cleared: from then on nothing opens it, every held
       // operate capability refuses, and no agent turn runs or resumes in it.
@@ -8089,7 +8093,7 @@ class OverseerImpl implements AgentHooks {
       let user = this.users.get(this.users.idFromName(invocation.requestedBy));
       let page = await user.getOperatePage();
       let open = page.state.console;
-      if (!open || page.state.flow || open.source !== "published" || open.workspaceId !== workspaceId) {
+      if (!open || page.state.flow || open.source !== "published" || consoleWorkspaceId(open) !== workspaceId) {
         return settle("undelivered", "not-shown");
       }
       let consoles = this.publishedConsoleForRun(open.consoleId);
@@ -9783,6 +9787,7 @@ class OverseerImpl implements AgentHooks {
     formats?: MessageFormatRef[],
     operateReadOnly = false,
     operateConsoleRead = false,
+    consoleId?: string,
   ): Promise<number> {
     if (responseTargetRegistration) {
       let decision = this.#prepareExternalMessageResponseTargetRegistration(responseTargetRegistration);
@@ -9815,6 +9820,8 @@ class OverseerImpl implements AgentHooks {
       this.storage.chatMeta.put(meta);
       if (operateReadOnly) this.storage.chatContext.put({chatId, operateReadOnly: true,
         ...(operateConsoleRead ? {operateConsoleRead: true as const} : {}), bindings: {}, alwaysAvailableCapsuleIds: []});
+      // Set here and nowhere else: the chat's console never changes (see AiChatAgentContext.consoleId).
+      if (consoleId !== undefined) this.storage.chatContext.put({chatId, consoleId, bindings: {}, alwaysAvailableCapsuleIds: []});
 
       let promptSequence = this.#commitPreparedChatMessage(
           chatId, timestamp, userMeta.profile, prepared, capsules, canonicalAttachments, formats);
@@ -12217,6 +12224,19 @@ class OverseerImpl implements AgentHooks {
     return this.storage.operateSession.get();
   }
 
+  /**
+   * Marks this workspace its owner's console assistant, once `ownerUserId`'s own record names it
+   * (UserDurableObject.claimConsoleAssistantWorkspace). Never unset.
+   */
+  async markConsoleAssistant(ownerUserId: string): Promise<void> {
+    if (this.storage.consoleAssistant.get()) return;
+    let owner = this.users.get(this.users.idFromString(ownerUserId));
+    if (await owner.consoleAssistantWorkspaceId() !== this.ctx.id.toString()) {
+      throw new Error("This workspace is not that person's console assistant.");
+    }
+    this.storage.consoleAssistant.put(true);
+  }
+
   /** Whether this operate session workspace was retired by its owner's company change (FAC-88). */
   isRetiredOperateSession(): boolean {
     return this.storage.operateSessionRetired.get();
@@ -12376,7 +12396,10 @@ class OverseerImpl implements AgentHooks {
     let page = await owner.getOperatePage();
     let run = page.state.console;
     if (!run || run.source !== "published") throw new Error("No published console is open on the user's page.");
-    let saved = await this.#workspaceStub(run.workspaceId)?.getPublishedConsoleFor(caller, run.consoleId)
+    // A console that belongs to no workspace offers the agent no navigation yet (ADR 0021).
+    let home = consoleWorkspaceId(run);
+    if (home === null) throw new Error(CONSOLE_OFFERS_NO_TOOLS);
+    let saved = await this.#workspaceStub(home)?.getPublishedConsoleFor(caller, run.consoleId)
         .catch(() => null);
     let mismatch = saved ? consoleEventMismatch(saved, run, event) : null;
     if (!saved || mismatch !== null) {
@@ -12625,7 +12648,28 @@ class OverseerImpl implements AgentHooks {
   // bindings the blueprint's code expects the agent to wire up, for instantiation as a new gadget
   // by the agent's createGadget tool. Blueprint ids are bearer capabilities (like blueprint share
   // links), so possession of the id is sufficient to read it. Throws agent-readable errors.
-  getCanvasAccess(): AgentCanvasAccess | null { return agentCanvasAccess(this); }
+  // A chat that helps author a console (ADR 0021) reaches that console's pages and draft, as the
+  // turn's initiator, whose role the console checks at every call; any other chat, this workspace's.
+  getCanvasAccess(chatId: number): AgentCanvasAccess | null {
+    let consoleId = this.storage.chatContext.get(chatId)?.consoleId;
+    if (consoleId === undefined) return agentCanvasAccess(this);
+    if (this.env.COMPOSABLE_VIEWS !== "true" || this.env.DURABLE_VIEWS !== "true") return null;
+    let consoles = this.ctx.exports.ConsoleDurableObject;
+    let console = consoles.get(consoles.idFromString(consoleId));
+    let catalog = readCanvasCatalog(this.env);
+    return {
+      catalog: { ...catalog, blueprints: [], widgetKinds: catalog.widgetKinds.filter(kind => kind !== "inferos.gadget") },
+      listPages: initiator => console.agentListPages(initiator.id),
+      create: (initiator, content) => console.agentCreatePage(initiator.id, content),
+      editPage: (initiator, id, expectedRevision, operations) =>
+        console.agentEditPage(initiator.id, id, expectedRevision, operations),
+      console: {
+        read: initiator => console.agentReadConsole(initiator.id),
+        replace: (initiator, expectedRevision, content) =>
+          console.agentReplaceConsole(initiator.id, expectedRevision, content),
+      },
+    };
+  }
 
   // Canvas writes, for the builder's controls: see the module-level `createCanvasAs` and siblings.
   canvasStore(): WorkspaceCanvasStore { return workspaceCanvasStore(this); }
@@ -13767,7 +13811,7 @@ class OverseerImpl implements AgentHooks {
   async consoleSessionCheck(user: DurableObjectStub<UserDurableObject>, consoleId: string,
       revision: string): Promise<OperateConsoleRun> {
     let open = (await user.getOperatePage()).state.console;
-    if (open?.workspaceId !== this.ctx.id.toString() || open.consoleId !== consoleId ||
+    if (!open || consoleWorkspaceId(open) !== this.ctx.id.toString() || open.consoleId !== consoleId ||
         open.source !== "published" || open.revision !== revision) {
       throw new ConsoleNotOpenError(`Console ${consoleId} at revision ${revision} is not open in your operate session.`);
     }
@@ -15205,10 +15249,12 @@ class OverseerImpl implements AgentHooks {
     if (!open || open.source !== "published") return {reason: "No published console is open in this operate session."};
     let caller = {userId: this.ownerId, profileId: await this.getOwnerProfileId(),
       sessionWorkspaceId: this.ctx.id.toString()};
+    let home = consoleWorkspaceId(open);
+    if (home === null) return {reason: CONSOLE_OFFERS_NO_TOOLS};
     let ns = this.ctx.exports.OverseerDurableObject;
     let workspace;
     try {
-      workspace = ns.get(ns.idFromString(open.workspaceId));
+      workspace = ns.get(ns.idFromString(home));
     } catch {
       return {reason: "The open console's workspace does not exist."};
     }
@@ -15219,7 +15265,7 @@ class OverseerImpl implements AgentHooks {
   async #sessionConsoleStillOpen(owner: DurableObjectStub<UserDurableObject>, was: OperateConsoleRun)
       : Promise<boolean> {
     let open = (await owner.getOperatePage()).state.console;
-    return open?.workspaceId === was.workspaceId && open.consoleId === was.consoleId &&
+    return !!open && consoleWorkspaceId(open) === consoleWorkspaceId(was) && open.consoleId === was.consoleId &&
         open.source === "published" && open.revision === was.revision &&
         open.viewId === was.viewId && open.screenId === was.screenId;
   }
@@ -15605,6 +15651,11 @@ export class OverseerDurableObject extends DurableObject<Cloudflare.Env> {
   /** See OverseerImpl.recheckRunNavigation (FAC-116); called by a person's user Durable Object. */
   async recheckRunNavigation(profileId: string, invocationId: string): Promise<boolean> {
     return this.impl.recheckRunNavigation(profileId, invocationId);
+  }
+
+  /** See OverseerImpl.markConsoleAssistant. Reached only from Worker code that authenticated the owner. */
+  async markConsoleAssistant(ownerUserId: string): Promise<void> {
+    await this.impl.markConsoleAssistant(ownerUserId);
   }
 
   async retireOperateSession(ownerId: string): Promise<boolean> {
@@ -19563,10 +19614,34 @@ class OverseerClientInterface extends RpcTarget implements Overseer {
   async newChat(initialMessage: string | SlashCommandRequest, chosenModelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[],
                 formats?: MessageFormatRef[]): Promise<number> {
+    // A console assistant hosts only chats bound to a console (newConsoleAssistantChat).
+    if (this.impl.storage.consoleAssistant.get()) {
+      throw new Error("Start a console's chat helper from that console's creator.");
+    }
     let userMeta = await retryOnDoReset(
         () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
     return this.impl.newChat(this.#clientUser, userMeta, initialMessage, capsules, attachments,
                              undefined, undefined, formats);
+  }
+
+  // Only in the caller's own console assistant workspace, as its owner, and only for a console the
+  // caller may author: the console itself is asked, through the same check its creator opens with.
+  async newConsoleAssistantChat(consoleId: string, message: string, chosenModelId: string | null): Promise<number> {
+    if (!this.isOwner || !this.impl.storage.consoleAssistant.get()) {
+      throw new Error("A console's chat helper runs only in your own console assistant.");
+    }
+    let consoles = this.impl.ctx.exports.ConsoleDurableObject;
+    let console;
+    try {
+      console = consoles.get(consoles.idFromString(consoleId));
+    } catch {
+      throw new Error("No such console.");
+    }
+    (await console.openAuthoring(this.clientUserId, this.clientProfileId))[Symbol.dispose]();
+    let userMeta = await retryOnDoReset(
+        () => this.#clientUser.getChatContext(chosenModelId), this.impl.logger);
+    return this.impl.newChat(this.#clientUser, userMeta, message, undefined, undefined,
+                             undefined, undefined, undefined, false, false, consoleId);
   }
 
   async sendChatMessage(
@@ -20562,6 +20637,7 @@ class UseOverseerInterface extends RpcTarget implements Overseer {
     this.#deny();
   }
   async newOperateReadChat(_message: string, _consoleRead?: boolean): Promise<number> { this.#deny(); }
+  async newConsoleAssistantChat(_consoleId: string, _message: string, _modelId: string | null): Promise<number> { this.#deny(); }
   async getReadConsole(_chatId: number): Promise<OperateConsoleRead | null> { this.#deny(); }
   async newChat(_initialMessage: string | SlashCommandRequest, _modelId: string | null,
                  _capsules?: CapsuleSpecifier[], _attachments?: ChatAttachmentHandle[]): Promise<number> {
@@ -20729,6 +20805,7 @@ class OperateOverseerInterface extends RpcTarget implements Overseer {
   async newOperateReadChat(message: string, consoleRead = false): Promise<number> {
     this.#live(); return this.owner.newOperateReadChat(message, consoleRead);
   }
+  async newConsoleAssistantChat(_consoleId: string, _message: string, _modelId: string | null): Promise<number> { this.#deny(); }
   async newChat(initialMessage: string | SlashCommandRequest, modelId: string | null,
                 capsules?: CapsuleSpecifier[], attachments?: ChatAttachmentHandle[])
       : Promise<number> {
