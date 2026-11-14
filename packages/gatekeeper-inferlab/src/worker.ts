@@ -249,6 +249,16 @@ function attemptFor(ctx: ExecutionContext, attemptId: string): DurableObjectStub
 
 const invalidLink = () => htmlResponse(INVALID_LINK_HTML, 400);
 
+/** The query parameters the OAuth callback reads; each may appear at most once. */
+const CALLBACK_PARAMS = ["state", "code", "error"] as const;
+
+/** A callback `state`, `<attempt id>.<oauth nonce>`, or null when it isn't one. */
+function parseState(state: string): { attemptId: string; oauthNonce: string } | null {
+  const [attemptId, oauthNonce, extra] = state.split(".");
+  if (extra !== undefined || !attemptId || !oauthNonce || !HEX_64.test(oauthNonce)) return null;
+  return { attemptId, oauthNonce };
+}
+
 export default {
   /**
    * The two browser legs under BASE_URL: `/<attempt>/<nonce>` sends the browser to InferLab's
@@ -286,18 +296,28 @@ export default {
     }
 
     if (segments.length === 1 && segments[0] === "oauth") {
-      const [attemptId, oauthNonce, extra] = (url.searchParams.get("state") ?? "").split(".");
-      const stub = extra === undefined && oauthNonce && HEX_64.test(oauthNonce)
-        ? attemptFor(ctx, attemptId ?? "") : null;
-      if (!stub) return invalidLink();
+      // Each parameter the callback reads must appear at most once. Otherwise which value wins is
+      // URLSearchParams' choice, not InferLab's: refuse, and end any attempt a state value names
+      // (abandon succeeds only with the attempt's real nonce, so a forged one ends nothing).
+      if (CALLBACK_PARAMS.some(name => url.searchParams.getAll(name).length > 1)) {
+        for (const state of url.searchParams.getAll("state")) {
+          const parsed = parseState(state);
+          if (parsed) await attemptFor(ctx, parsed.attemptId)?.abandon(parsed.oauthNonce);
+        }
+        return invalidLink();
+      }
+      const parsed = parseState(url.searchParams.get("state") ?? "");
+      const stub = parsed ? attemptFor(ctx, parsed.attemptId) : null;
+      if (!parsed || !stub) return invalidLink();
+      const { oauthNonce } = parsed;
       if (url.searchParams.has("error")) {
-        if (!await stub.abandon(oauthNonce!)) return invalidLink();
+        if (!await stub.abandon(oauthNonce)) return invalidLink();
         return htmlResponse(errorPageHtml("Sign-in was not completed",
           "InferLab did not complete the sign-in. Close this window and try again."), 400);
       }
       const code = url.searchParams.get("code");
       if (!code) return invalidLink();
-      const result = await stub.complete(code, oauthNonce!);
+      const result = await stub.complete(code, oauthNonce);
       if (!result) return invalidLink();
       if ("error" in result) return htmlResponse(errorPageHtml("Sign-in failed", result.error), 502);
       return htmlResponse(connectHandoffPageHtml(result.handoff));

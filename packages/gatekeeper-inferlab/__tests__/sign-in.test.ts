@@ -281,6 +281,33 @@ describe("PKCE, state and the exact callback", () => {
     expect(seen).toEqual([]);
   });
 
+  it.each([
+    ["a duplicate state, the valid one first", (state: string) => `code=c&state=${state}&state=${state.split(".")[0]}.${"0".repeat(64)}`],
+    ["a duplicate state, the valid one second", (state: string) => `code=c&state=${state.split(".")[0]}.${"0".repeat(64)}&state=${state}`],
+    ["the same state twice", (state: string) => `code=c&state=${state}&state=${state}`],
+    ["a duplicate code", (state: string) => `code=c&code=d&state=${state}`],
+    ["both doubled", (state: string) => `code=c&code=d&state=${state}&state=${state}`],
+    ["a duplicate error", (state: string) => `error=access_denied&error=x&state=${state}`],
+  ])("refuses a callback with %s, exchanges nothing, and ends the attempt", async (_why, query) => {
+    const attempt = await started();
+    const state = (await authorize(attempt.attemptId, attempt.nonce)).searchParams.get("state")!;
+    const page = await get(`${REDIRECT_URI}?${query(state)}`);
+    expect(page.status).toBe(400);
+    // The real state is spent: a clean callback with it afterwards is refused too.
+    expect((await get(`${REDIRECT_URI}?code=c&state=${state}`)).status).toBe(400);
+    expect(seen).toEqual([]);
+    expect(await hooks().received(attempt.label)).toBeNull();
+  });
+
+  it("treats an error with a code as an error: the attempt ends and the code is never exchanged", async () => {
+    const attempt = await started();
+    const state = (await authorize(attempt.attemptId, attempt.nonce)).searchParams.get("state")!;
+    expect((await get(`${REDIRECT_URI}?error=access_denied&code=c&state=${state}`)).status).toBe(400);
+    expect((await get(`${REDIRECT_URI}?code=c&state=${state}`)).status).toBe(400);
+    expect(seen).toEqual([]);
+    expect(await hooks().received(attempt.label)).toBeNull();
+  });
+
   it("answers only the two legs: any other path or method is not found", async () => {
     expect((await get(`${BASE}/oauth/extra`)).status).toBe(404);
     expect((await get(`${BASE}/elsewhere`)).status).toBe(404);
