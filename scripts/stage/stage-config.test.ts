@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { gatekeeperShortName, isGatekeeperPackage, readDeployablePackages } from "../release/manifest-lib.ts";
 import { ROOT, gatekeeperBindingName, type StagingConfig } from "../preview/staging-config.ts";
 import {
-  buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageBucketName,
+  FORBIDDEN_BACKEND_VARS, buildStageConfigs, destructiveMigrations, formatStagePlan, stageBackendSecrets, stageBucketName,
   stageHostnames, stageInferOpsGatekeeperSecrets, stageKvNamespaces, stagePackages, stageR2Buckets, stageTiers,
   stageWorkerHost, stageWorkerName, resolveStageAdmins,
 } from "./stage-config.ts";
@@ -205,6 +205,21 @@ test("the backend signs in with InferLab only and carries no secret in its vars"
     assert.equal(backend.vars?.[name], undefined, `${name} is a var`);
   }
   assert.equal(build("dev").get("workshop-backend")?.vars?.CANVAS_CATALOG, undefined);
+});
+
+test("a stage refuses the backend's local-stack-only variables: DEV and the temporary canvas TTL in seconds (FAC-147)", () => {
+  const backend = build("dev").get("workshop-backend") as StagingConfig;
+  for (const name of FORBIDDEN_BACKEND_VARS) assert.equal(backend.vars?.[name], undefined, `${name} is a var`);
+  const stage = STAGES.dev;
+  const kvIds = new Map(stageKvNamespaces(stage, ALL_PACKAGES).map((ns, i) => [ns.title, `kv-${i}`]));
+  for (const name of ["DEV", "OPERATE_TEMPORARY_CANVAS_TTL_SECONDS"]) {
+    // As if a wrangler.jsonc (or anything else feeding the stage) carried it.
+    const packages = ALL_PACKAGES.map((pkg) => pkg.name === "workshop-backend"
+      ? { ...pkg, config: { ...pkg.config, vars: { ...pkg.config.vars, [name]: name === "DEV" ? true : "60" } } }
+      : pkg);
+    assert.throws(() => buildStageConfigs({ stageName: "dev", stage, packages, accountId: ACCOUNT_ID, kvIds }),
+      new RegExp(`workshop-backend must not carry ${name} in a stage`));
+  }
 });
 
 test("dev offers one cheap model with a daily turn cap; prod has no model bounds", () => {

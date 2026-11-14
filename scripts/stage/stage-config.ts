@@ -188,6 +188,13 @@ const FORBIDDEN_GATEKEEPER_VARS = [
 ];
 
 /**
+ * The backend's local-stack-only variables, refused in a stage (FAC-147): `DEV` (only
+ * `scripts/run-dev-server.ts` sets it) and what it alone unlocks, the temporary canvas TTL in
+ * seconds. A deployment's temporary canvases expire by `OPERATE_TEMPORARY_CANVAS_TTL_HOURS` only.
+ */
+export const FORBIDDEN_BACKEND_VARS = ["DEV", "OPERATE_TEMPORARY_CANVAS_TTL_SECONDS"];
+
+/**
  * Build every config a stage deploys, keyed by package name. `kvIds` maps each
  * {@link stageKvTitle} to its namespace id; a namespace with no id is an error rather than a
  * binding Wrangler would provision afresh, because a fresh namespace is an empty instance.
@@ -261,6 +268,9 @@ export function buildStageConfigs({
       config.ai = { binding: "WORKERS_AI" };
       config.services = backendGatekeeperServices(gatekeepers, origin, workerName);
       config.vars = { ...config.vars, ...backendVars(stage, origin, canvasCatalog) };
+      for (const name of FORBIDDEN_BACKEND_VARS) {
+        if (config.vars[name] !== undefined) throw new Error(`${pkg.name} must not carry ${name} in a stage`);
+      }
     } else if (pkg.name === "router") {
       config.services = [
         { binding: "WORKSHOP_BACKEND", service: workerName("workshop-backend") },
