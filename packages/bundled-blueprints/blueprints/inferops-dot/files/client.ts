@@ -104,9 +104,11 @@ const statusEl = el("div", { class: "status", role: "status", "aria-live": "poli
 const startOverButton = el("button", { class: "btn", type: "button" }, "Start over");
 const main = el("main", { class: "content", "aria-label": "Conversation" });
 const prompt = el("textarea", { "aria-label": "Ask your Dot", placeholder: "Ask your Dot…", rows: "2" });
-const askButton = el("button", { class: "btn", type: "submit" }, "Ask");
+const askButton = el("button", { class: "btn", type: "button" }, "Ask");
 const stopButton = el("button", { class: "btn", type: "button", hidden: "" }, "Stop");
-const composer = el("form", { class: "composer" }, prompt, askButton, stopButton);
+// Not a form: the Gadget frame's sandbox has no `allow-forms` (and its CSP sets `form-action 'none'`),
+// so the browser refuses a submission before any submit event fires. Ask is a click or Enter.
+const composer = el("div", { class: "composer", role: "group", "aria-label": "Ask your Dot" }, prompt, askButton, stopButton);
 document.body.append(el("div", { class: "app" },
   el("header", { class: "bar" }, el("h1", {}, "Your Dot"), el("span", { class: "spacer" }), statusEl, startOverButton),
   main, composer));
@@ -261,18 +263,21 @@ async function ask(text: string): Promise<void> {
   prompt.focus();
 }
 
-composer.addEventListener("submit", event => {
-  event.preventDefault();
+/** Asks what the person typed, unless it is empty or a turn is already running. */
+function send(): void {
   const text = prompt.value.trim();
   if (!text || asking) return;
   prompt.value = "";
   void ask(text);
-});
+}
 
+askButton.addEventListener("click", send);
+
+// Enter asks; Shift+Enter, and Enter while an input method is composing, keep the new line.
 prompt.addEventListener("keydown", event => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    composer.requestSubmit();
+    send();
   }
 });
 

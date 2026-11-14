@@ -39,17 +39,36 @@ async function start(opened: OpenResult) {
 
 const main = () => document.querySelector("main")!;
 const prompt = () => document.querySelector("textarea")!;
+const askButton = () => [...document.querySelectorAll("button")].find(b => b.textContent === "Ask")!;
 const submit = (text: string) => {
   prompt().value = text;
-  document.querySelector("form")!.requestSubmit();
+  askButton().click();
 };
+const press = (key: string, init: KeyboardEventInit = {}) =>
+  prompt().dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init }));
+
+// The Gadget frame's sandbox has no `allow-forms` (and its CSP sets `form-action 'none'`), so the
+// browser refuses a form submission before any submit event fires. jsdom doesn't, so every test
+// stands in for that: a submit event never reaches the page, and asking a form to submit throws.
+const refuseFormSubmission = (event: Event) => {
+  event.preventDefault();
+  event.stopImmediatePropagation();
+};
+const realRequestSubmit = HTMLFormElement.prototype.requestSubmit;
+const realSubmit = HTMLFormElement.prototype.submit;
 
 beforeEach(() => {
   vi.resetModules();
   document.head.replaceChildren();
   document.body.replaceChildren();
+  window.addEventListener("submit", refuseFormSubmission, true);
+  HTMLFormElement.prototype.requestSubmit = () => { throw new Error("form submission is blocked in a sandboxed Gadget frame"); };
+  HTMLFormElement.prototype.submit = HTMLFormElement.prototype.requestSubmit;
 });
 afterEach(() => {
+  window.removeEventListener("submit", refuseFormSubmission, true);
+  HTMLFormElement.prototype.requestSubmit = realRequestSubmit;
+  HTMLFormElement.prototype.submit = realSubmit;
   delete (globalThis as { gadget?: unknown }).gadget;
   delete (globalThis as { RpcTarget?: unknown }).RpcTarget;
 });
@@ -145,6 +164,43 @@ describe("InferOps Dot client", () => {
     expect(document.querySelector('[role="alert"]')!.textContent).toContain("its own database");
     expect(main().querySelectorAll("li.message")).toHaveLength(2);
     expect(prompt().value).toBe("File it");
+  });
+
+  // FAC-147: inside the Gadget's sandbox a form can't submit, so Ask must not depend on one.
+  it("asks on a click of Ask and on Enter, with no form submission, in a sandboxed frame", async () => {
+    const { asked } = await start({ ok: true, conversation: null });
+    expect(document.querySelector("form")).toBeNull();
+    submit("  What changed today?  ");
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+    expect(asked[0]!.prompt).toBe("What changed today?");
+    expect(prompt().value).toBe("");
+    asked[0]!.resolve({ ok: true, status: "complete", conversation: conversation() });
+    await vi.waitFor(() => expect(prompt().disabled).toBe(false));
+
+    prompt().value = "And yesterday?";
+    expect(press("Enter")).toBe(false);
+    await vi.waitFor(() => expect(asked).toHaveLength(2));
+    expect(asked[1]!.prompt).toBe("And yesterday?");
+  });
+
+  it("keeps Shift+Enter and composing for a new line, and never asks empty or twice", async () => {
+    const { asked } = await start({ ok: true, conversation: null });
+    prompt().value = "Line one";
+    expect(press("Enter", { shiftKey: true })).toBe(true);
+    expect(press("Enter", { isComposing: true })).toBe(true);
+    submit("   ");
+    press("Enter");
+    await Promise.resolve();
+    expect(asked).toHaveLength(0);
+
+    submit("Once");
+    await vi.waitFor(() => expect(asked).toHaveLength(1));
+    expect(askButton().disabled).toBe(true);
+    prompt().value = "Again";
+    askButton().click();
+    press("Enter");
+    await Promise.resolve();
+    expect(asked).toHaveLength(1);
   });
 
   it("stops the running turn on Stop", async () => {
