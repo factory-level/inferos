@@ -1,10 +1,15 @@
 name: CI
 
+# InferOS clean baseline (FAC-214 step 0): build and test only, on the clean branches. Upstream's
+# other workflows (Bonk, evals, previews, CLA, contribution policy, labels, the GitHub contract) were
+# removed here because they read secrets, call AI services, deploy, or run as pull_request_target.
 on:
   push:
     branches:
-      - main
+      - "clean/**"
   pull_request:
+    branches:
+      - "clean/**"
 
 permissions:
   contents: read
