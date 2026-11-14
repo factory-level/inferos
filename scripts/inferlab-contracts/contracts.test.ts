@@ -126,10 +126,6 @@ describe("attention dedupe keys", () => {
   });
 });
 
-describe("account keying (FAC-214 restores account-subject.ts)", () => {
-  // Pending: the clean baseline has no `packages/workshop-backend/src/account-subject.ts`. FAC-214
-  // restores it, and these turn into real tests then: the account name must equal `subjectKey`, and
-  // email must play no part in it.
-  it.todo("subjectAccountName(subject) equals the contract's subjectKey on the fixture subjects");
-  it.todo("two subjects that share an email get two accounts; a changed email keeps the account");
-});
+// Account keying (FAC-214) is tested where the kernel's `subjectAccountName` can be imported:
+// packages/workshop-backend/__tests__/subject-login.test.ts checks it against these fixtures (it
+// equals the contract's subjectKey on every item fixture) and that email plays no part in it.

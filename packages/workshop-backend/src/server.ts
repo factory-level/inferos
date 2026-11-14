@@ -5,7 +5,9 @@ import { PublicApi, ROUTER_TAG_PROBE_PATH, VERSION_PATH, AuthenticatedApi, Overs
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import type { UnreadStateScope } from "@gadgets/workshop-shared/api";
 import { backendVersion, getServerConfig } from "./deployment-config.js";
-import { isDeploymentAdmin, isPasswordAuthEnabled, getAuthGatekeeperAllowlist } from "./auth/config.js";
+import {
+  isDeploymentAdmin, isPasswordAuthEnabled, getAuthGatekeeperAllowlist, getAuthGatekeeperIssuer,
+} from "./auth/config.js";
 import { getAuthVendorBinding } from "./auth/auth-vendors.js";
 import { getUsageInfo } from "./ai-gateway-billing/limits/usage-checker.js";
 import { listConnectedAccounts, selectAccount } from "./ai-gateway-billing/cloudflare/connection-service.js";
@@ -788,6 +790,12 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     if (!vendor) throw new Error(`No such auth gatekeeper: ${vendorId}`);
     const desc = await vendor.describe();
     if (!desc.providesAuth) throw new Error(`"${vendorId}" does not provide authentication.`);
+    // A subject vendor signs nobody in until the deployment names its issuer; say so before the
+    // popup opens rather than after the person has signed in at the provider.
+    if (desc.providesSubject) {
+      const trusted = getAuthGatekeeperIssuer(this.env, vendorId);
+      if ("error" in trusted) throw new Error(`Sign-in is off: ${trusted.error}`);
+    }
 
     // The PendingLogin DO is the rendezvous between this request, the (separate) OAuth-callback
     // invocation, and the popup's confirmLogin(). Its name is the hash of a secret only the popup
@@ -800,7 +808,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     // while it is still running instead of reporting it expired.
     await pending.begin();
     const callback = this.ctx.exports.LoginConnectCallbackImpl(
-        { props: { pendingId: pendingId.toString(), vendorId } });
+        { props: { pendingId: pendingId.toString(), vendorId, subject: desc.providesSubject === true } });
     // For most providers, sign-in needs only minimal scopes to verify the user's email (the grant is
     // transient); capability scopes are requested later via an explicit connectAccount. Cloudflare is
     // the exception: signing in with Cloudflare also links AI Gateway billing, so it requests and

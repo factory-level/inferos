@@ -566,6 +566,63 @@
         "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/homeassistant"
       }
     },
+    "gatekeeper-inferlab": {
+      "bindings": [],
+      "compatibilityDate": "2026-09-04",
+      "compatibilityFlags": [
+        "allow_irrevocable_stub_storage"
+      ],
+      "inputs": [
+        {
+          "help": "The origin of the InferLab central-auth deployment people sign in through, for example https://auth.inferops.io. It is also the issuer accounts are keyed on, so it must match the backend's AUTH_GATEKEEPER_ISSUERS entry for inferlab. InferLab sign-in is a public client: there is no client secret.",
+          "kind": "var",
+          "label": "InferLab sign-in origin",
+          "name": "INFERLAB_AUTH_ORIGIN",
+          "redirectUriTemplate": "{PUBLIC_BASE_URL}/gatekeeper/inferlab/oauth",
+          "setupSteps": [
+            "In InferOps, register this deployment's origin for the inferos client (auth.sso.inferosOrigins) and name its company (auth.sso.inferosCompanies).",
+            "InferOps accepts the redirect URI below exactly."
+          ]
+        },
+        {
+          "help": "The tenant id of the one company this deployment serves. A sign-in from any other company is refused.",
+          "kind": "var",
+          "label": "InferOps company (tenant id)",
+          "name": "INFEROPS_COMPANY"
+        }
+      ],
+      "installable": true,
+      "kind": "gatekeeper",
+      "mainModule": "inferlab.js",
+      "migrations": [
+        {
+          "new_sqlite_classes": [
+            "SignInAttempt"
+          ],
+          "tag": "v1"
+        }
+      ],
+      "modules": [
+        {
+          "name": "inferlab.js",
+          "r2Key": "blobs/modules/3a801f98f12d11f3efcaa3188f26868207d7e1cb7b346c12a5241c1dea53648b",
+          "sha256": "3a801f98f12d11f3efcaa3188f26868207d7e1cb7b346c12a5241c1dea53648b",
+          "size": 61,
+          "type": "esm"
+        }
+      ],
+      "observability": {
+        "enabled": true,
+        "head_sampling_rate": 1,
+        "logs": {
+          "invocation_logs": false
+        }
+      },
+      "shortName": "inferlab",
+      "vars": {
+        "BASE_URL": "$PUBLIC_BASE_URL/gatekeeper/inferlab"
+      }
+    },
     "gatekeeper-linear": {
       "bindings": [
         {

@@ -35,6 +35,17 @@ export type AvatarImage = {
   url: string;
 }
 
+/**
+ * A provider's stable id for a person: the provider deployment that issued it, as an origin, and
+ * that deployment's own id for them. Two sign-ins are the same person only when both are equal.
+ */
+export type GatekeeperSubject = {
+  /** The origin of the provider deployment that issued the subject. */
+  issuer: string;
+  /** The provider's stable id for the person; opaque, never parsed. */
+  subject: string;
+};
+
 /** Describes a connected GatekeeperVendor, for display purposes. */
 export type VendorDescription = {
   /** Human-readable name of the service, e.g. "Google", "GitHub", etc. */
@@ -69,6 +80,15 @@ export type VendorDescription = {
    * such a vendor as a login method, subject to its own auth allowlist. Defaults to false.
    */
   providesAuth?: boolean;
+
+  /**
+   * True if this vendor's sign-in names the person by a stable subject
+   * (GatekeeperUser.getAuthenticatedSubject()) rather than by email. The Workshop then keys the
+   * account on that subject alone: an email is display data, so a changed address keeps the account
+   * and two subjects that share one stay two accounts. Only meaningful with `providesAuth`.
+   * Defaults to false.
+   */
+  providesSubject?: boolean;
 
   /**
    * If set, this vendor can mint a connected account with no OAuth flow (see
@@ -924,6 +944,13 @@ export interface GatekeeperUser extends WorkerEntrypoint {
    * Returns null when the account has no verified email or the vendor does not support auth.
    */
   getAuthenticatedEmail(): Promise<string | null>;
+
+  /**
+   * For vendors that advertise `providesSubject`, the provider's stable id for the signed-in person
+   * (see GatekeeperSubject). The Workshop keys the account on it instead of the email. Returns null
+   * when the account has none, which fails the sign-in.
+   */
+  getAuthenticatedSubject?(): Promise<GatekeeperSubject | null>;
 
   /** Get a `GatekeeperUserVerifier` representing this user. */
   getVerifier(): Promise<Fetcher<GatekeeperUserVerifier>>;

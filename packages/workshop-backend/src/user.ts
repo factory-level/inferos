@@ -591,9 +591,10 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * Log in via an authentication gatekeeper, creating the account on first use. The user DO is keyed
-   * by the verified email (this DO's id derives from idFromName(email)), so `email` is also used as
-   * the profile id and the initial display name is the email's local-part — consistent with the
-   * Cloudflare Access flow. Password login is left disabled for these accounts. Returns the session
+   * by `name` (this DO's id derives from idFromName(name)), which is also the profile id: the
+   * verified email for most vendors, or the subject's account name (account-subject.ts) for a
+   * `providesSubject` vendor, whose vouched `email` then only seeds the display name. The initial
+   * display name is the email's local-part — consistent with the Cloudflare Access flow. Password login is left disabled for these accounts. Returns the session
    * secret to store client-side.
    *
    * The profile is written only on first sign-in. We intentionally do NOT refresh the display name
@@ -603,14 +604,15 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
    * When the account doesn't yet exist and `allowCreate` is false (deployment signups are closed),
    * returns null instead of creating one — existing users can still sign in.
    */
-  async loginOrCreateViaGatekeeper(email: string, allowCreate: boolean): Promise<string | null> {
+  async loginOrCreateViaGatekeeper(name: string, allowCreate: boolean,
+                                   email: string | null = name): Promise<string | null> {
     if (!this.storage.created.get()) {
       if (!allowCreate) return null;
       this.storage.created.put(true);
       this.storage.profile.put({
         type: "user",
-        name: email.split("@")[0],
-        id: email,
+        name: email?.split("@")[0] || "New user",
+        id: name,
       });
       recordAnalytics(this.ctx, this.env, {
         event_name: "account_created",
