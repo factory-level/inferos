@@ -5,14 +5,21 @@
 //                                    or not (the dev launcher writes untracked wrangler.dev.jsonc
 //                                    files), and prints each runtime name it read, then the hits
 //
+// Exit status: 0 = clean, 1 = hits found (configs only), 2 = scanner error. Every read, traversal or
+// parse failure (a missing root, an unreadable file, malformed JSONC, a config that isn't an object)
+// is an error with a named message on stderr, never a skipped file.
+//
 // The fenced names are the archived fork's legacy frameworks: Consoles, Dots, widget and workspace
 // kinds, Operate and canvas state.
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { parse } = require("jsonc-parser");
+const { parse, printParseErrorCode } = require("jsonc-parser");
+
+/** A failure that stops the scan; reported with exit status 2. */
+class ScanError extends Error {}
 
 /**
  * Lines that name the fork only as provenance. Each is matched as the WHOLE line, trimmed, and only
@@ -38,13 +45,24 @@ function filter() {
   }
 }
 
+const CONFIG_NAME = /^wrangler.*\.jsonc?$/;
+
+/**
+ * Every config file under `dir`, found by name. Symlinks are not followed (a broken one elsewhere in
+ * the tree mustn't abort the scan), but a symlink NAMED like a config is an error, so no config is
+ * silently left unread.
+ */
 function* walk(dir) {
   for (const entry of readdirSync(dir)) {
     if (entry === "node_modules" || entry === ".git") continue;
     const path = join(dir, entry);
-    const st = statSync(path);
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) {
+      if (CONFIG_NAME.test(entry)) throw new ScanError(`${path}: a config that is a symlink is not followed`);
+      continue;
+    }
     if (st.isDirectory()) yield* walk(path);
-    else if (/^wrangler.*\.jsonc?$/.test(entry)) yield path;
+    else if (CONFIG_NAME.test(entry)) yield path;
   }
 }
 
@@ -68,14 +86,28 @@ function runtimeNames(config) {
   return names;
 }
 
+/** Parses one config strictly: any JSONC error, or anything but an object, stops the scan. */
+function readConfig(path, rel) {
+  const errors = [];
+  const config = parse(readFileSync(path, "utf8"), errors, { allowTrailingComma: true });
+  if (errors.length) {
+    const e = errors[0];
+    throw new ScanError(`${rel}: malformed JSONC (${printParseErrorCode(e.error)} at offset ${e.offset})`);
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    throw new ScanError(`${rel}: not a config object`);
+  }
+  return config;
+}
+
 function configs(root) {
+  if (!statSync(root).isDirectory()) throw new ScanError(`${root}: not a directory`);
   let files = 0, scanned = 0;
   const hits = [];
   for (const path of walk(root)) {
-    const config = parse(readFileSync(path, "utf8"));
-    if (!config || typeof config !== "object") continue;
-    files++;
     const rel = relative(root, path);
+    const config = readConfig(path, rel);
+    files++;
     for (const [kind, value] of runtimeNames(config)) {
       scanned++;
       const fenced = FENCED_NAME.test(value);
@@ -88,6 +120,12 @@ function configs(root) {
 }
 
 const [command, arg] = process.argv.slice(2);
-if (command === "filter") filter();
-else if (command === "configs") configs(arg ?? ".");
-else { console.error("usage: fence-lib.mjs filter | configs <root>"); process.exit(2); }
+try {
+  if (command === "filter") filter();
+  else if (command === "configs") configs(arg ?? ".");
+  else throw new ScanError("usage: fence-lib.mjs filter | configs <root>");
+} catch (error) {
+  // Any failure, expected or not, is a scanner error: exit 2, never a clean result.
+  console.error(`SCANNER ERROR: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(2);
+}
