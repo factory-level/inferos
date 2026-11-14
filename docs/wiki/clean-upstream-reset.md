@@ -5,9 +5,11 @@ updated: 2026-11-14
 
 # Archive main and start a clean upstream baseline
 
-This runbook keeps a protected, checksummed recovery point for this fork's `main` and starts a new
-InferOS line from real upstream Cloudflare OS, not from a partly stripped fork. Step 3b says exactly
-what protects the recovery point and what doesn't. It belongs to FAC-213 (BOS-02) in
+This runbook keeps a checksummed recovery point for this fork's `main` and starts a new InferOS line
+from real upstream Cloudflare OS, not from a partly stripped fork. **Ref protection is pending:** on
+2026-11-14 the step 3b rulesets were not yet applied, so the archive refs have only ordinary write
+access, and both bundle copies are on the same host disk. Step 3b says what would protect them and
+what doesn't. It belongs to FAC-213 (BOS-02) in
 the Linear project "InferLab — Local Business OS Demo". FAC-214 then ports only InferLab sign-in onto
 the clean branch, and FAC-215 proves gate G0 on it with the checks AUTH-01 to AUTH-17.
 
@@ -20,7 +22,7 @@ never deploys anything. The execution record of the first run, on 2026-11-14, is
 - **Archive before anything new.** The archive branch, the annotated tag and the bundle exist and are verified before the clean branch is created or anything else is pushed.
 - **Never move main.** `main`, every existing branch and every tag stay as they are. There is no force push, `--force-with-lease` or `git push --delete`.
 - **Never change the default branch.** That is the owner's decision. Write it as a proposal on the ticket instead. The manager decided on 2026-11-14 that it stays `main`.
-- **Protect what you archive.** The archive refs are put under rulesets that refuse deletion and any update (step 3b), and the bundle files are made read-only with a second copy. A ref or file is only as immutable as the control actually enforced on it, so the record says which controls are in place.
+- **Protect what you archive.** The archive refs go under rulesets that refuse deletion and any update (step 3b), and the bundle files are made read-only with a second copy. A ref or file is only as immutable as the control actually enforced on it, so the record says which controls are in place. On 2026-11-14 the rulesets are pending and the second copy shares the host's disk.
 - **No deploy and no shared namespace.** No `pnpm stage:deploy`, `wrangler deploy` or preview deploy. The native baseline runs locally on Miniflare only. A stage's `workerPrefix` (`inferos-dev-`, `inferos-prod-`) is never reused, because Durable Objects belong to the worker name.
 - **Keep old state separate.** The old fork's local runtime state (`.wrangler/state`, `~/.config/inferos/worktrees.json`, the deploy checkouts' `.stage-*.vars`) is never copied into the clean worktree. Archive any state you have to remove, outside every worktree.
 - **Mock mode for the baseline.** The clean worktree gets no `.env` or `.dev.vars` with provider keys, and commands run from a clean shell, so no live model is reached.
@@ -186,12 +188,16 @@ Then make a Gadget, list it back, and instantiate a featured (bundled) Blueprint
 
 ```bash
 api="pnpm cf-os api --url http://localhost:<port> --username <user>"
-$api open-workspace <workspaceId> create-gadget "Smoke gadget"
+$api open-workspace <workspaceId> create-gadget "Smoke gadget" get-export-formats   # a chain must end on a value
 $api --timeout 5 open-workspace <workspaceId> subscribe-to-workpieces   # lists the gadget
 $api list-featured-blueprints
-$api new-workspace-from-blueprint <blueprintId> '{}'
-$api list-workspaces                                                    # both workspaces
+$api new-workspace-from-blueprint <blueprintId> '{}' get-metadata       # e.g. format.document → "Workspace Docs"
+$api list-workspaces                                                    # only the blueprint-created workspace
 ```
+
+`list-workspaces` hides provisional workspaces. The one `new-workspace` made, with a gadget but no
+other activity, is provisional, so it is omitted. Only the workspace created from the Blueprint
+("Workspace Docs") comes back. An account with no non-provisional workspace gets `[]`.
 
 Stop the server once the smoke is recorded. Its state stays in the clean worktree's own
 `.wrangler/state`.
