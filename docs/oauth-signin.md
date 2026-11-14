@@ -21,6 +21,21 @@ is addressed by `idFromName(email)` (the same scheme as Cloudflare Access). Each
 return an email the provider has verified (Google `email_verified`, a GitHub primary+verified email,
 the Cloudflare account email); otherwise it returns null and can't be used to sign in.
 
+### Keyed by stable subject (`providesSubject`)
+
+A gatekeeper that also declares `VendorDescription.providesSubject` (today only InferLab,
+`packages/gatekeeper-inferlab`) signs people in by the provider's **stable subject** instead:
+`GatekeeperUser.getAuthenticatedSubject()` answers `{ issuer, subject }`, and the account is
+`idFromName(subjectAccountName(subject))`, `subject~<issuer>~<subject>` with each part URI-encoded
+(`packages/workshop-backend/src/account-subject.ts`). The email is display data only: it seeds the
+display name on first sign-in and is never a key, so a changed address keeps the account and two
+subjects that share an address stay two accounts. A missing or malformed subject (an issuer that
+isn't a bare https origin, or http on loopback; a subject outside 1 to 255 printable ASCII
+characters) fails the sign-in; it never falls back to the email. The session token is
+`"<subject account name>:<secret>"`. `ADMINS` lists these account names, never an email, for
+such accounts. The name matches the InferLab contract's `subjectKey`
+(`scripts/inferlab-contracts`, inferops ADR 0020).
+
 ## Incremental scopes
 
 Sign-in requests only the **minimal scopes** needed to verify the user's email (e.g. GitHub
@@ -164,6 +179,21 @@ In local dev, `run-dev-server.ts` seeds each gatekeeper's `CLIENT_ID`/`CLIENT_SE
   attempt's nonce. Stores the delivered token under the ticket's hash until the pop-up's
   `confirmLogin()` confirms it and the login tab's `receive()` consumes it; an alarm wipes an
   unreceived result after two minutes.
+
+## InferLab
+
+`packages/gatekeeper-inferlab` is sign-in only: it refuses any `connectAccount` but
+`scopes: "auth"`, lists no resources, and its account refuses every request for access, so signing
+in grants nothing. It runs InferLab central-auth's authorization-code + PKCE flow as the public
+client `inferos`: one `SignInAttempt` Durable Object per attempt holds the Workshop's callback, the
+kit's single-use initiation and OAuth nonces (`connect-handshake`) and the PKCE verifier; the
+redirect URI is exactly `<BASE_URL>/oauth`; `/authorize` carries `prompt=select_account`, InferLab's
+account chooser. The code is exchanged server-side, the InferLab session is ended at once, and a
+session in another company than `INFEROPS_COMPANY` is refused. It needs
+`AUTH_GATEKEEPERS=inferlab`, `INFERLAB_AUTH_ORIGIN` (the issuer) and `INFEROPS_COMPANY` (a tenant
+id); without a valid value for either, every attempt fails with a message naming the setting, with
+no default or fallback. Business access through InferOps is a separate connection (FAC-235). The
+package README holds the ledger of what was ported from the archived fork.
 
 ## Code layout
 
