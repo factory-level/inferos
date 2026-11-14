@@ -38,6 +38,7 @@ import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { ConnectHandoff, GatekeeperConnectCallback, GatekeeperUser } from "@gadgets/workshop-shared/gatekeeper";
 import { createWorkshopLogger } from "../observability";
 import { CLOUDFLARE_VENDOR_ID, type UserDurableObject } from "../user.js";
+import { isValidSubject, subjectAccountName } from "../account-subject.js";
 import { readAdminConfig } from "../admin-config.js";
 import {
   CONNECT_FLOW_LIFETIME_MS, handoffTargetOrigin, hashPresentedSecret, newSecretToken,
@@ -174,7 +175,11 @@ export class PendingLogin extends DurableObject<Cloudflare.Env> {
   }
 }
 
-type LoginCallbackProps = { pendingId: string; vendorId: string };
+/**
+ * `subject` is set when the vendor declares `providesSubject`: the account is then keyed on the
+ * subject the account reports, and the email is display data only.
+ */
+type LoginCallbackProps = { pendingId: string; vendorId: string; subject?: boolean };
 
 export class LoginConnectCallbackImpl
     extends WorkerEntrypoint<Cloudflare.Env, LoginCallbackProps>
@@ -206,6 +211,10 @@ export class LoginConnectCallbackImpl
     // returns — no explicit disposal needed. We read the verified email to resolve/create the user.
     // The email's local-part seeds the initial display name, like the Cloudflare Access flow.
     try {
+      if (this.ctx.props.subject) {
+        await this.#deliverBySubject(account, ticketHash, loginLogger);
+        return;
+      }
       const email = await account.getAuthenticatedEmail();
       if (!email) {
         loginLogger.info("gatekeeper login finished", {
@@ -250,6 +259,44 @@ export class LoginConnectCallbackImpl
       });
       await pending.fail("Sign-in failed. Please try again.");
     }
+  }
+
+  /**
+   * The sign-in of a `providesSubject` vendor: the account is named by the subject alone
+   * (account-subject.ts). A missing or malformed subject fails the sign-in; the email, when the
+   * vendor vouches one, only seeds the display name.
+   */
+  async #deliverBySubject(account: Fetcher<GatekeeperUser>, ticketHash: string,
+                          loginLogger: ReturnType<typeof logger.with>): Promise<void> {
+    const pending = this.#pending();
+    // The vendor declared `providesSubject`, which obliges its accounts to implement this method; one
+    // that doesn't throws here and the sign-in fails.
+    const subjectAccount = account as Fetcher<GatekeeperUser & Required<Pick<GatekeeperUser, "getAuthenticatedSubject">>>;
+    const subject = await subjectAccount.getAuthenticatedSubject();
+    if (!subject || !isValidSubject(subject)) {
+      loginLogger.info("gatekeeper login finished", {
+        event: "gatekeeper.login.finished", outcome: "no_subject",
+      });
+      await pending.fail("This account has no stable identity, so it can't be used to sign in.");
+      return;
+    }
+    const name = subjectAccountName(subject);
+    const email = await account.getAuthenticatedEmail();
+    const userStub = this.ctx.exports.UserDurableObject.get(
+        this.ctx.exports.UserDurableObject.idFromName(name));
+    const signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+    const secret = await userStub.loginOrCreateViaGatekeeper(name, signupsEnabled, email);
+    if (secret === null) {
+      loginLogger.info("gatekeeper login finished", {
+        event: "gatekeeper.login.finished", outcome: "signups_disabled",
+      });
+      await pending.fail("New sign-ups are currently disabled on this deployment.");
+      return;
+    }
+    await pending.deliver(`${name}:${secret}`, ticketHash);
+    loginLogger.info("gatekeeper login finished", {
+      event: "gatekeeper.login.finished", outcome: "ok",
+    });
   }
 
   // The user DO and account id a sign-in linked (Cloudflare), or null for a transient sign-in

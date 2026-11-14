@@ -70,6 +70,17 @@ export { GatekeeperHookLoopback } from "../src/server.js";
 export class TestConnectCallback extends GatekeeperConnectCallbackImpl {}
 /** The sign-in callback, reachable the same way. */
 export class TestLoginCallback extends LoginConnectCallbackImpl {}
+
+/**
+ * The login callback with an empty admin config, for a sign-in test: a sign-in reads the config for
+ * `signupsEnabled`, and the shared test config binds no `BLUEPRINTS` (binding one changes other
+ * suites). Only this entrypoint sees the stand-in.
+ */
+export class TestSubjectLoginCallback extends LoginConnectCallbackImpl {
+  constructor(ctx: ExecutionContext, env: Cloudflare.Env) {
+    super(ctx, { ...env, BLUEPRINTS: { get: async () => null } } as unknown as Cloudflare.Env);
+  }
+}
 /**
  * The exchange a management app's account redeems picker tickets through, reachable through
  * `ctx.exports` by the name startAccountAppUi mints it under.
@@ -301,5 +312,22 @@ export class ReplicaGitSource extends DurableObject<Cloudflare.Env> {
       }
       return new Response(new Blob([...shallow, encodePktLine("packfile"), band, FLUSH_PKT]));
     }, oids, hints);
+  }
+}
+
+/**
+ * A sign-in account as a `providesSubject` vendor hands it over: only what a sign-in reads, the
+ * vouched email and the stable subject, each optional so a test can withhold or corrupt one.
+ */
+export class FakeSignInAccount extends WorkerEntrypoint<Cloudflare.Env, {
+  email?: string; issuer?: string; subject?: string;
+}> {
+  async getAuthenticatedEmail(): Promise<string | null> {
+    return this.ctx.props.email ?? null;
+  }
+
+  async getAuthenticatedSubject(): Promise<{ issuer: string; subject: string } | null> {
+    const { issuer, subject } = this.ctx.props;
+    return issuer !== undefined && subject !== undefined ? { issuer, subject } : null;
   }
 }

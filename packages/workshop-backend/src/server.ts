@@ -800,7 +800,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
     // while it is still running instead of reporting it expired.
     await pending.begin();
     const callback = this.ctx.exports.LoginConnectCallbackImpl(
-        { props: { pendingId: pendingId.toString(), vendorId } });
+        { props: { pendingId: pendingId.toString(), vendorId, subject: desc.providesSubject === true } });
     // For most providers, sign-in needs only minimal scopes to verify the user's email (the grant is
     // transient); capability scopes are requested later via an explicit connectAccount. Cloudflare is
     // the exception: signing in with Cloudflare also links AI Gateway billing, so it requests and
