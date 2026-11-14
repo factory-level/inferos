@@ -35,12 +35,21 @@ export function getAuthGatekeeperIssuer(env: Cloudflare.Env, vendorId: string)
   const parsed = parseAuthGatekeeperIssuers(
       (env as { AUTH_GATEKEEPER_ISSUERS?: string }).AUTH_GATEKEEPER_ISSUERS);
   if ("error" in parsed) return parsed;
+  // The same order as the parser: an id that isn't ASCII names no vendor, whatever it folds to.
+  if (!VENDOR_ID.test(vendorId)) {
+    return { error: "AUTH_GATEKEEPER_ISSUERS can't be looked up for a vendor id that isn't ASCII." };
+  }
   const issuer = parsed.issuers.get(vendorId.toLowerCase());
   return issuer !== undefined ? { issuer }
     : { error: `AUTH_GATEKEEPER_ISSUERS has no entry for "${vendorId}", so it can't sign anyone in.` };
 }
 
-const VENDOR_ID = /^[a-z0-9][a-z0-9_-]*$/;
+/**
+ * A vendor id as written: ASCII only, checked BEFORE any case folding. `toLowerCase()` maps some
+ * non-ASCII letters onto ASCII ones (the Kelvin sign U+212A to `k`, the dotted capital I U+0130 to
+ * `i` plus a combining dot), so folding first would let a look-alike name a real vendor.
+ */
+const VENDOR_ID = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 /**
  * Parses AUTH_GATEKEEPER_ISSUERS strictly (see getAuthGatekeeperIssuer). Unset or blank is an empty
@@ -56,9 +65,11 @@ export function parseAuthGatekeeperIssuers(raw: string | undefined)
     const at = item.indexOf("=");
     if (item.trim() === "") return { error: `${entry} is empty.` };
     if (at < 0) return { error: `${entry} has no "=" (expected <vendor id>=<origin>).` };
-    const vendor = item.slice(0, at).trim().toLowerCase();
+    const rawVendor = item.slice(0, at).trim();
     const origin = item.slice(at + 1).trim();
-    if (!VENDOR_ID.test(vendor)) return { error: `${entry} has no valid vendor id.` };
+    if (!VENDOR_ID.test(rawVendor)) return { error: `${entry} has no valid vendor id.` };
+    // ASCII-only by now, so lowercasing can't turn one vendor id into another.
+    const vendor = rawVendor.toLowerCase();
     const named = `${entry} ("${vendor}")`;
     if (/\s/.test(origin)) return { error: `${named} has whitespace in its origin.` };
     if (!isIssuerOrigin(origin)) {

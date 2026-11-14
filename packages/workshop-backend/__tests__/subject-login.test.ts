@@ -216,6 +216,36 @@ describe("AUTH_GATEKEEPER_ISSUERS", () => {
       .toEqual({ error });
   });
 
+  it.each([
+    ["the Kelvin sign", "\u212Aey"],
+    ["a Turkish dotted capital I", "\u0130nferlab"],
+    ["a Turkish dotless i", "\u0131nferlab"],
+    ["fullwidth letters", "\uFF49\uFF4E\uFF46\uFF45\uFF52\uFF4C\uFF41\uFF42"],
+    ["a combining character", "infe\u0301rlab"],
+    ["a non-breaking space inside", "infer\u00A0lab"],
+  ])("refuses a vendor id with %s, before any case folding", (_why, vendor) => {
+    expect(parseAuthGatekeeperIssuers(`${vendor}=https://a.test`))
+      .toEqual({ error: "AUTH_GATEKEEPER_ISSUERS entry 1 has no valid vendor id." });
+    // ...and a lookup by such an id finds nothing, even for the vendor it folds to.
+    expect(getAuthGatekeeperIssuer(
+      { AUTH_GATEKEEPER_ISSUERS: "key=https://a.test,inferlab=https://a.test" } as unknown as Cloudflare.Env,
+      vendor,
+    )).toEqual({ error: "AUTH_GATEKEEPER_ISSUERS can't be looked up for a vendor id that isn't ASCII." });
+  });
+
+  it("still matches an ASCII vendor id in any case", () => {
+    const mixedCase = { AUTH_GATEKEEPER_ISSUERS: "InferLab=https://auth.inferops.io" } as unknown as Cloudflare.Env;
+    expect(issuersOf("InferLab=https://auth.inferops.io")).toEqual({ inferlab: "https://auth.inferops.io" });
+    expect(getAuthGatekeeperIssuer(mixedCase, "inferlab")).toEqual({ issuer: "https://auth.inferops.io" });
+    expect(getAuthGatekeeperIssuer(mixedCase, "INFERLAB")).toEqual({ issuer: "https://auth.inferops.io" });
+  });
+
+  it("refuses an issuer origin with a non-ASCII look-alike, whatever it would fold to", () => {
+    expect(parseAuthGatekeeperIssuers("inferlab=https://\u212Aey.test")).toEqual({
+      error: 'AUTH_GATEKEEPER_ISSUERS entry 1 ("inferlab") isn\'t an https origin (or an http loopback origin) of at most 255 characters.',
+    });
+  });
+
   it("never echoes an entry's value in its error", () => {
     const parsed = parseAuthGatekeeperIssuers("inferlab=https://secret-host.example/x");
     expect("error" in parsed && parsed.error).not.toContain("secret-host");
